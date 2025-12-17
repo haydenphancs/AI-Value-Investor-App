@@ -5,7 +5,7 @@ Requirements: Section 4.3 - Deep Research Agents
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import asyncio
 

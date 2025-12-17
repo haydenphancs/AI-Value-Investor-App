@@ -11,6 +11,7 @@ import logging
 
 from app.database import get_supabase
 from app.dependencies import get_current_user, get_current_active_user
+from app.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,8 @@ async def update_my_profile(
 
 @router.get("/me/usage")
 async def get_my_usage(
-    user: dict = Depends(get_current_active_user)
+    user: dict = Depends(get_current_active_user),
+    supabase: Client = Depends(get_supabase)
 ):
     """
     Get user's usage statistics and limits.
@@ -92,23 +94,59 @@ async def get_my_usage(
 
     Args:
         user: Current user data
+        supabase: Supabase client
 
     Returns:
         dict: Usage statistics
     """
+    user_service = UserService(supabase)
+
+    # Check if user has credits
+    has_credits = await user_service.check_user_credits(user["id"])
+
     return {
         "tier": user["tier"],
+        "has_credits": has_credits,
         "deep_research": {
-            "used": user["monthly_deep_research_used"],
-            "limit": user["monthly_deep_research_limit"],
+            "used": user.get("monthly_deep_research_used", 0),
+            "limit": user.get("monthly_deep_research_limit", 1),
             "remaining": (
-                user["monthly_deep_research_limit"] - user["monthly_deep_research_used"]
-                if user["monthly_deep_research_limit"] != -1
+                user.get("monthly_deep_research_limit", 1) - user.get("monthly_deep_research_used", 0)
+                if user.get("monthly_deep_research_limit", 1) != -1
                 else "unlimited"
             ),
-            "reset_at": user["monthly_research_reset_at"]
+            "reset_at": user.get("last_credit_reset_at")
         }
     }
+
+
+@router.get("/me/stats")
+async def get_my_stats(
+    user: dict = Depends(get_current_active_user),
+    supabase: Client = Depends(get_supabase)
+):
+    """
+    Get comprehensive user statistics.
+    Uses UserService for detailed stats including activity tracking.
+
+    Args:
+        user: Current user data
+        supabase: Supabase client
+
+    Returns:
+        dict: Comprehensive user statistics
+    """
+    user_service = UserService(supabase)
+
+    stats = await user_service.get_user_stats(user["id"])
+
+    if not stats:
+        raise HTTPException(
+            status_code=404,
+            detail="User statistics not found"
+        )
+
+    return stats
 
 
 @router.delete("/me")

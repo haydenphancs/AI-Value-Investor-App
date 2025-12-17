@@ -13,9 +13,9 @@ import logging
 from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
-    check_deep_research_limit,
     StandardRateLimit
 )
+from app.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class ResearchResponse(BaseModel):
 async def generate_research_report(
     request: ResearchRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(check_deep_research_limit),
+    user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
     _rate_limit=StandardRateLimit
 ):
@@ -57,16 +57,30 @@ async def generate_research_report(
     Section 4.3.3 - REQ-6: Use large context window model (Gemini)
     Section 4.3.3 - REQ-7: Ignore short-term price volatility
     Section 5.1 - Must complete within 30 seconds
+    Section 5.5 - Check credits BEFORE expensive Gemini analysis
 
     Args:
         request: Research request parameters
         background_tasks: FastAPI background tasks
-        user: Current user data (with quota check)
+        user: Current user data
         supabase: Supabase client
 
     Returns:
         ResearchResponse: Report metadata (processing in background)
     """
+    # Initialize user service
+    user_service = UserService(supabase)
+
+    # Check credits BEFORE creating report (Section 5.5 - prevent wasted API calls)
+    has_credits = await user_service.check_user_credits(user["id"], required_credits=1)
+
+    if not has_credits:
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient credits. You have reached your monthly deep research limit. "
+                   "Upgrade your tier or wait for monthly reset."
+        )
+
     # Validate investor persona
     valid_personas = ["buffett", "ackman", "munger", "lynch", "graham"]
     if request.investor_persona not in valid_personas:
@@ -91,17 +105,14 @@ async def generate_research_report(
 
     report = result.data[0]
 
-    # Increment user's usage counter
-    supabase.table("users").update({
-        "monthly_deep_research_used": user["monthly_deep_research_used"] + 1
-    }).eq("id", user["id"]).execute()
-
     # Schedule background task to generate report
+    # Credits will be decremented AFTER successful generation (user-friendly)
     background_tasks.add_task(
         generate_report_task,
         report["id"],
         request.stock_id,
-        request.investor_persona
+        request.investor_persona,
+        user["id"]  # Pass user_id for credit decrement
     )
 
     return ResearchResponse(**report)
@@ -237,25 +248,31 @@ async def delete_report(
 async def generate_report_task(
     report_id: str,
     stock_id: str,
-    investor_persona: str
+    investor_persona: str,
+    user_id: str
 ):
     """
     Background task to generate research report.
     This will call the research service to generate the actual report.
+    Credits are decremented AFTER successful generation (user-friendly).
 
     Args:
         report_id: Report ID
         stock_id: Stock ID
         investor_persona: Investor persona to use
+        user_id: User ID (for credit decrement)
     """
     try:
         # Import here to avoid circular dependencies
         from app.services.research_service import ResearchService
-        from app.integrations.gemini import GeminiClient
+        from app.agents.research_agent import ResearchAgent
+        from app.database import get_supabase
+
+        supabase = get_supabase()
 
         # Initialize services
-        gemini_client = GeminiClient()
-        research_service = ResearchService(gemini_client)
+        research_agent = ResearchAgent()
+        research_service = ResearchService(supabase=supabase, research_agent=research_agent)
 
         # Generate report
         await research_service.generate_report(
@@ -263,6 +280,21 @@ async def generate_report_task(
             stock_id=stock_id,
             investor_persona=investor_persona
         )
+
+        # Decrement credits AFTER successful generation (Section 5.5)
+        user_service = UserService(supabase)
+        await user_service.decrement_credits(
+            user_id=user_id,
+            credits=1,
+            activity_type="deep_research_generated",
+            activity_metadata={
+                "report_id": report_id,
+                "stock_id": stock_id,
+                "investor_persona": investor_persona
+            }
+        )
+
+        logger.info(f"Report {report_id} generated successfully, credits decremented for user {user_id}")
 
     except Exception as e:
         logger.error(f"Research report generation failed: {e}", exc_info=True)
@@ -274,3 +306,5 @@ async def generate_report_task(
             "status": "failed",
             "error_message": str(e)
         }).eq("id", report_id).execute()
+
+        # NOTE: Credits are NOT decremented on failure (user-friendly approach)

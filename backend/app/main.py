@@ -19,6 +19,8 @@ from typing import Any
 from app.config import settings
 from app.database import db_manager
 from app.api.v1.api import api_router
+from app.jobs.scheduler import init_scheduler, shutdown_scheduler
+from app.cache import cache_manager
 
 # Configure logging
 logging.basicConfig(
@@ -46,15 +48,47 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("✗ Database connection failed - check configuration")
 
-    # Initialize background tasks scheduler here if needed
-    # scheduler.start()
+    # Initialize Redis cache
+    try:
+        await cache_manager.connect()
+        if cache_manager.is_connected:
+            logger.info("✓ Redis cache connected")
+        else:
+            logger.warning("⚠ Running without Redis cache")
+    except Exception as e:
+        logger.error(f"✗ Failed to connect to Redis: {e}")
+
+    # Initialize background tasks scheduler
+    if settings.ENABLE_BACKGROUND_JOBS:
+        try:
+            init_scheduler()
+            logger.info("✓ Background job scheduler started")
+        except Exception as e:
+            logger.error(f"✗ Failed to start scheduler: {e}")
+    else:
+        logger.info("Background jobs disabled (ENABLE_BACKGROUND_JOBS=False)")
 
     yield
 
     # Shutdown
     logger.info("Shutting down AI Value Investor API")
+
+    # Shutdown scheduler
+    if settings.ENABLE_BACKGROUND_JOBS:
+        try:
+            shutdown_scheduler()
+            logger.info("✓ Background job scheduler stopped")
+        except Exception as e:
+            logger.error(f"Error shutting down scheduler: {e}")
+
+    # Disconnect cache
+    try:
+        await cache_manager.disconnect()
+        logger.info("✓ Redis cache disconnected")
+    except Exception as e:
+        logger.error(f"Error disconnecting cache: {e}")
+
     await db_manager.close()
-    # scheduler.shutdown()
 
 
 # Create FastAPI application

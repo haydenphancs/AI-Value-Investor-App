@@ -62,9 +62,14 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Backend API for AI Value Investor - Democratizing Financial Literacy",
-    docs_url="/api/docs" if settings.DEBUG else None,  # Disable in production
-    redoc_url="/api/redoc" if settings.DEBUG else None,
-    openapi_url="/api/openapi.json" if settings.DEBUG else None,
+    # docs_url="/api/docs" if settings.DEBUG else None,  # Disable in production
+    # redoc_url="/api/redoc" if settings.DEBUG else None,
+    # openapi_url="/api/openapi.json" if settings.DEBUG else None,
+
+    docs_url="/docs" if settings.DEBUG else None,  # Disable in production
+    redoc_url="/redoc" if settings.DEBUG else None,
+    openapi_url="/openapi.json" if settings.DEBUG else None,
+
     lifespan=lifespan
 )
 

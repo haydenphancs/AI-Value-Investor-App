@@ -209,7 +209,7 @@ def test_schemas():
     try:
         from app.schemas.common import UserTier, InvestorPersona, SentimentType
         from app.schemas.user import UserCreate, UserResponse
-        from app.schemas.stock import StockCreate, StockResponse
+        from app.schemas.stock import StockSearch, StockDetail
         from app.schemas.news import NewsArticleResponse
         from app.schemas.research import ResearchReportDetail
         from app.schemas.chat import ChatMessage, ChatResponse
@@ -221,7 +221,8 @@ def test_schemas():
             'SentimentType',
             'UserCreate',
             'UserResponse',
-            'StockCreate',
+            'StockSearch',
+            'StockDetail',
             'NewsArticleResponse',
             'ResearchReportDetail',
             'ChatResponse',

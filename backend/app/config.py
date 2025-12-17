@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     CACHE_TTL_SECONDS: int = 3600  # 1 hour default cache
 
     # Background Job Settings (Section 4.1)
+    ENABLE_BACKGROUND_JOBS: bool = True  # Disable for local development if needed
     NEWS_SCRAPING_SCHEDULE: str = "0 7,16 * * *"  # 7:30 AM & 4:00 PM MT
     WIDGET_UPDATE_SCHEDULE: str = "0 7,16 * * *"  # Twice daily (Section 4.2)
 

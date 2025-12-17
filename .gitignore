@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Add more:
+
+#__pycache__/
+.DS_Store
+
+
+# --- Xcode Ignored Files ---
+DerivedData/
+*.xcuserstate
+*.xcworkspace
+!default.xcworkspace

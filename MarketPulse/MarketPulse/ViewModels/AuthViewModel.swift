@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 class AuthViewModel: ObservableObject {
@@ -42,7 +43,7 @@ class AuthViewModel: ObservableObject {
             let supabaseToken = "supabase_token_placeholder"
 
             // Step 2: Exchange Supabase token for backend token
-            let authToken = try await apiService.login(supabaseToken: supabaseToken)
+            _ = try await apiService.login(supabaseToken: supabaseToken)
 
             // Step 3: Load user profile
             await loadCurrentUser()

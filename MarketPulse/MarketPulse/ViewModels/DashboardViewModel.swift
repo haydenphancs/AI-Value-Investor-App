@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 class DashboardViewModel: ObservableObject {
@@ -15,10 +16,10 @@ class DashboardViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        async let widget = loadWidget()
-        async let news = loadBreakingNews()
-        async let watchlist = loadWatchlistPreview()
-        async let reports = loadReportsPreview()
+        async let widget: () = loadWidget()
+        async let news: () = loadBreakingNews()
+        async let watchlist: () = loadWatchlistPreview()
+        async let reports: () = loadReportsPreview()
 
         await widget
         await news

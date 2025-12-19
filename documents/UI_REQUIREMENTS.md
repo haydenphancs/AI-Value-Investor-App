@@ -5,7 +5,7 @@
 
 ---
 
-## 📱 SCREEN-BY-SCREEN BREAKDOWN
+## SCREEN-BY-SCREEN BREAKDOWN
 
 ### 1. **Authentication Screens**
 

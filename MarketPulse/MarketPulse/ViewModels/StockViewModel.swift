@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 class StockSearchViewModel: ObservableObject {
@@ -58,10 +59,10 @@ class StockDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        async let stockData = loadStockDetail()
-        async let fundamentalsData = loadFundamentals()
-        async let earningsData = loadEarnings()
-        async let newsData = loadNews()
+        async let stockData: () = loadStockDetail()
+        async let fundamentalsData: () = loadFundamentals()
+        async let earningsData: () = loadEarnings()
+        async let newsData: () = loadNews()
 
         await stockData
         await fundamentalsData

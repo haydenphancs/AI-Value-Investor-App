@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 class ProfileViewModel: ObservableObject {
@@ -14,9 +15,9 @@ class ProfileViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        async let userData = loadUser()
-        async let usageData = loadUsage()
-        async let statsData = loadStats()
+        async let userData: () = loadUser()
+        async let usageData: () = loadUsage()
+        async let statsData: () = loadStats()
 
         await userData
         await usageData

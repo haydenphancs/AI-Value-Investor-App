@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct ResearchGenerationView: View {
     @StateObject private var viewModel: ResearchGenerationViewModel

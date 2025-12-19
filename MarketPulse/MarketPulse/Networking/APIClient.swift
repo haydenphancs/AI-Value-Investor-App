@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 class APIClient: ObservableObject {
@@ -51,7 +52,7 @@ class APIClient: ObservableObject {
         return encoder
     }()
 
-    init(baseURL: String = Config.baseURL) {
+    nonisolated init(baseURL: String = Config.baseURL) {
         self.baseURL = baseURL
 
         let configuration = URLSessionConfiguration.default
@@ -59,7 +60,9 @@ class APIClient: ObservableObject {
         configuration.timeoutIntervalForResource = Config.requestTimeout * 2
         self.session = URLSession(configuration: configuration)
 
-        loadTokens()
+        Task { @MainActor in
+            self.loadTokens()
+        }
     }
 
     // MARK: - Request Methods

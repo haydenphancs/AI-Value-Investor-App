@@ -1,11 +1,13 @@
 import Foundation
+import Combine
+
 
 @MainActor
 class APIService {
     private let client: APIClient
 
-    init(client: APIClient = .shared) {
-        self.client = client
+    init(client: APIClient? = nil) {
+        self.client = client ?? .shared
     }
 
     // MARK: - Authentication

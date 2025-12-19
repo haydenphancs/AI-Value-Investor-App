@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct StockDetailView: View {
     @StateObject private var viewModel: StockDetailViewModel
@@ -235,7 +236,7 @@ struct FundamentalCard: View {
             }
 
             if let eps = fundamental.eps {
-                MetricRow(label: "EPS", value: "$\(NSDecimalNumber(decimal: eps).doubleValue, specifier: "%.2f")")
+                MetricRow(label: "EPS", value: "$\(NSDecimalNumber(decimal: eps).doubleValue, default: "%.2f")")
             }
         }
         .padding()

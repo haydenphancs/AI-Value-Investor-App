@@ -43,11 +43,23 @@ struct MainTabView: View {
                 }
                 .tag(3)
 
+            ChatSessionListView()
+                .tabItem {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right.fill")
+                }
+                .tag(4)
+
+            EducationLibraryView()
+                .tabItem {
+                    Label("Education", systemImage: "book.fill")
+                }
+                .tag(5)
+
             ProfileView()
                 .tabItem {
                     Label("Profile", systemImage: "person.fill")
                 }
-                .tag(4)
+                .tag(6)
         }
     }
 }

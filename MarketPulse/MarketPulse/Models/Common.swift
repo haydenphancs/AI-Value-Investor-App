@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Enums
 
@@ -170,7 +171,7 @@ struct PaginatedResponse<T: Codable>: Codable {
 // MARK: - Helpers
 
 // Helper to handle Any type in Codable
-struct AnyCodable: Codable {
+struct AnyCodable: Codable, Equatable {
     let value: Any
 
     init(_ value: Any) {
@@ -215,6 +216,32 @@ struct AnyCodable: Codable {
             try container.encode(dictValue.mapValues { AnyCodable($0) })
         default:
             try container.encodeNil()
+        }
+    }
+
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
+        switch (lhs.value, rhs.value) {
+        case let (lInt as Int, rInt as Int):
+            return lInt == rInt
+        case let (lDouble as Double, rDouble as Double):
+            return lDouble == rDouble
+        case let (lString as String, rString as String):
+            return lString == rString
+        case let (lBool as Bool, rBool as Bool):
+            return lBool == rBool
+        case let (lArray as [Any], rArray as [Any]):
+            guard lArray.count == rArray.count else { return false }
+            return zip(lArray, rArray).allSatisfy { AnyCodable($0) == AnyCodable($1) }
+        case let (lDict as [String: Any], rDict as [String: Any]):
+            guard lDict.keys == rDict.keys else { return false }
+            return lDict.keys.allSatisfy { key in
+                guard let lValue = lDict[key], let rValue = rDict[key] else { return false }
+                return AnyCodable(lValue) == AnyCodable(rValue)
+            }
+        case (_ as NSNull, _ as NSNull):
+            return true
+        default:
+            return false
         }
     }
 }

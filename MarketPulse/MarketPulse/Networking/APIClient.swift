@@ -52,17 +52,15 @@ class APIClient: ObservableObject {
         return encoder
     }()
 
-    nonisolated init(baseURL: String = Config.baseURL) {
-        self.baseURL = baseURL
+    init(baseURL: String? = nil) {
+        self.baseURL = baseURL ?? Config.baseURL
 
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = Config.requestTimeout
         configuration.timeoutIntervalForResource = Config.requestTimeout * 2
         self.session = URLSession(configuration: configuration)
 
-        Task { @MainActor in
-            self.loadTokens()
-        }
+        self.loadTokens()
     }
 
     // MARK: - Request Methods

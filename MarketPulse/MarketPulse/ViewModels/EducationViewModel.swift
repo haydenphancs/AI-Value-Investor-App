@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 class EducationLibraryViewModel: ObservableObject {
@@ -31,9 +32,9 @@ class EducationLibraryViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        async let allData = loadAllContent()
-        async let booksData = loadBooks()
-        async let articlesData = loadArticles()
+        async let allData: () = loadAllContent()
+        async let booksData: () = loadBooks()
+        async let articlesData: () = loadArticles()
 
         await allData
         await booksData

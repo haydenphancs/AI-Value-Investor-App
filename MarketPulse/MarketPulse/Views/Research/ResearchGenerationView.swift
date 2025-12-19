@@ -84,8 +84,8 @@ struct ResearchGenerationView: View {
         .padding()
         .navigationTitle("Generate Report")
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: viewModel.generatedReport) { report in
-            if report != nil {
+        .onChange(of: viewModel.generatedReport) { oldValue, newValue in
+            if newValue != nil {
                 dismiss()
             }
         }

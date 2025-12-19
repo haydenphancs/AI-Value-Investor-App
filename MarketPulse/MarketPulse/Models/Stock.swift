@@ -1,8 +1,9 @@
 import Foundation
+import Combine
 
 // MARK: - Stock Models
 
-struct Stock: Codable, Identifiable {
+struct Stock: Codable, Identifiable, Equatable {
     let id: String
     let ticker: String
     let companyName: String

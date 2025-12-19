@@ -1,8 +1,9 @@
 import Foundation
+import Combine
 
 // MARK: - Research Models
 
-struct ResearchReport: Codable, Identifiable {
+struct ResearchReport: Codable, Identifiable, Equatable {
     let id: String
     let userId: String
     let stockId: String
@@ -67,7 +68,7 @@ struct ResearchReport: Codable, Identifiable {
     }
 }
 
-struct InvestmentThesis: Codable {
+struct InvestmentThesis: Codable, Equatable {
     let summary: String
     let keyDrivers: [String]
     let risks: [String]
@@ -82,7 +83,7 @@ struct InvestmentThesis: Codable {
     }
 }
 
-struct MoatAnalysis: Codable {
+struct MoatAnalysis: Codable, Equatable {
     let moatRating: String
     let moatSources: [String]
     let moatSustainability: String?
@@ -98,7 +99,7 @@ struct MoatAnalysis: Codable {
     }
 }
 
-struct ValuationAnalysis: Codable {
+struct ValuationAnalysis: Codable, Equatable {
     let valuationRating: String
     let keyMetrics: [String: AnyCodable]
     let peerComparison: [String: AnyCodable]?
@@ -114,7 +115,7 @@ struct ValuationAnalysis: Codable {
     }
 }
 
-struct RiskAssessment: Codable {
+struct RiskAssessment: Codable, Equatable {
     let overallRisk: String
     let businessRisks: [String]
     let financialRisks: [String]

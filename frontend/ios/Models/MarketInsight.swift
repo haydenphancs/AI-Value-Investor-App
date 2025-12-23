@@ -1,6 +1,6 @@
 //
 //  MarketInsight.swift
-//  frontend
+//  ios
 //
 //  Created by Hai Phan on 12/23/25.
 //

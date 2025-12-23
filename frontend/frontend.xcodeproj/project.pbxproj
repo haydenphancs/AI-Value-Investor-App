@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		930CC3D62EFB1DFC008460FF /* frontend */ = {
+		930CC3D62EFB1DFC008460FF /* ios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = frontend;
+			path = ios;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		930CC3CB2EFB1DFC008460FF = {
 			isa = PBXGroup;
 			children = (
-				930CC3D62EFB1DFC008460FF /* frontend */,
+				930CC3D62EFB1DFC008460FF /* ios */,
 				930CC3D52EFB1DFC008460FF /* Products */,
 			);
 			sourceTree = "<group>";
@@ -61,7 +61,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				930CC3D62EFB1DFC008460FF /* frontend */,
+				930CC3D62EFB1DFC008460FF /* ios */,
 			);
 			name = frontend;
 			packageProductDependencies = (

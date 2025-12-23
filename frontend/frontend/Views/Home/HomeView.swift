@@ -16,39 +16,29 @@ struct HomeView: View {
     @State private var educationItems = EducationItem.mockData
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            // Main Content
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 24) {
-                    // Search Bar
-                    SearchBar()
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 24) {
+                // Search Bar
+                SearchBar()
 
-                    // Market Overview
-                    MarketOverviewSection(marketIndices: marketIndices)
+                // Market Overview
+                MarketOverviewSection(marketIndices: marketIndices)
 
-                    // Market Insights
-                    MarketInsightsSection(insight: marketInsight)
+                // Market Insights
+                MarketInsightsSection(insight: marketInsight)
 
-                    // Portfolio
-                    PortfolioSection(stocks: portfolioStocks)
+                // Portfolio
+                PortfolioSection(stocks: portfolioStocks)
 
-                    // Research
-                    ResearchSection(researchItems: researchItems)
+                // Research
+                ResearchSection(researchItems: researchItems)
 
-                    // Education
-                    EducationSection(educationItems: educationItems)
-
-                    // Bottom padding for tab bar
-                    Color.clear.frame(height: 80)
-                }
-                .padding(.top, 8)
+                // Education
+                EducationSection(educationItems: educationItems)
             }
-            .background(AppColors.background)
-
-            // Tab Bar
-            CustomTabBar(selectedTab: .constant(.home))
+            .padding(.top, 8)
         }
-        .ignoresSafeArea(.all, edges: .bottom)
+        .background(AppColors.background)
     }
 }
 

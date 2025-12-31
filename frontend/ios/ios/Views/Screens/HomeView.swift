@@ -7,12 +7,13 @@
 
 import SwiftUI
 
-struct HomeView: View {
+// MARK: - HomeContentView (Used in TabView)
+struct HomeContentView: View {
     @StateObject private var viewModel = HomeViewModel()
     @State private var searchText = ""
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             // Background
             AppColors.background
                 .ignoresSafeArea()
@@ -26,9 +27,9 @@ struct HomeView: View {
                     onSearchSubmit: handleSearchSubmit
                 )
 
-                // Scrollable Content
+                // Scrollable Content with proper bounce behavior
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: AppSpacing.xl) {
+                    LazyVStack(spacing: AppSpacing.xl) {
                         // Market Tickers Row
                         MarketTickersRow(tickers: viewModel.marketTickers)
                             .padding(.top, AppSpacing.sm)
@@ -59,18 +60,12 @@ struct HomeView: View {
                         NewAnalysisButton {
                             handleNewAnalysis()
                         }
-
-                        // Bottom spacing for tab bar
-                        Spacer()
-                            .frame(height: 100)
+                        .padding(.bottom, AppSpacing.lg)
                     }
                 }
                 .refreshable {
                     await viewModel.refresh()
                 }
-
-                // Tab Bar
-                CustomTabBar(selectedTab: $viewModel.selectedTab)
             }
 
             // Loading overlay
@@ -82,43 +77,42 @@ struct HomeView: View {
 
     // MARK: - Action Handlers
     private func handleProfileTapped() {
-        // Navigate to profile
         print("Profile tapped")
     }
 
     private func handleSearchSubmit() {
-        // Handle search
         print("Search submitted: \(searchText)")
     }
 
     private func handleSeeAllInsights() {
-        // Navigate to Updates tab
-        viewModel.selectedTab = .updates
+        print("See all insights tapped")
     }
 
     private func handleBriefingItemTapped(_ item: DailyBriefingItem) {
-        // Navigate based on item type
         print("Briefing item tapped: \(item.title)")
     }
 
     private func handleSeeAllResearch() {
-        // Navigate to Research tab
-        viewModel.selectedTab = .research
+        print("See all research tapped")
     }
 
     private func handleReportTapped(_ report: ResearchReport) {
-        // Navigate to report detail
         print("Report tapped: \(report.headline)")
     }
 
     private func handleAskOrRead(_ report: ResearchReport) {
-        // Open ask/read modal
         print("Ask or Read tapped for: \(report.stockTicker)")
     }
 
     private func handleNewAnalysis() {
-        // Navigate to new analysis flow
-        viewModel.selectedTab = .research
+        print("New analysis tapped")
+    }
+}
+
+// MARK: - Legacy HomeView (for backward compatibility)
+struct HomeView: View {
+    var body: some View {
+        MainTabView()
     }
 }
 
@@ -138,4 +132,5 @@ struct LoadingOverlay: View {
 
 #Preview {
     HomeView()
+        .preferredColorScheme(.dark)
 }

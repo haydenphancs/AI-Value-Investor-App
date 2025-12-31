@@ -20,13 +20,12 @@ struct MarketTicker: Identifiable {
     }
 
     var formattedPrice: String {
-        if price >= 10000 {
-            return String(format: "$%.2f", price)
-        } else if price >= 1000 {
-            return String(format: "$%.2f", price)
-        } else {
-            return String(format: "$%.2f", price)
-        }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        formatter.groupingSeparator = ","
+        return formatter.string(from: NSNumber(value: price)) ?? String(format: "%.2f", price)
     }
 
     var formattedChange: String {

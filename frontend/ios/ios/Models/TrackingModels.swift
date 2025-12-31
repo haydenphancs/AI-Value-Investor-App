@@ -296,7 +296,8 @@ extension WhaleActivity {
 }
 
 extension TrendingWhale {
-    static let sampleData: [TrendingWhale] = [
+    // Whales the user is following
+    static let trackedWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Warren Buffett",
             category: .hedgeFunds,
@@ -305,11 +306,46 @@ extension TrendingWhale {
             isFollowing: true
         ),
         TrendingWhale(
+            name: "Michael Burry",
+            category: .hedgeFunds,
+            avatarName: "avatar_burry",
+            followersCount: 98000,
+            isFollowing: true
+        ),
+        TrendingWhale(
+            name: "Nancy Pelosi",
+            category: .politicians,
+            avatarName: "avatar_pelosi",
+            followersCount: 156000,
+            isFollowing: true
+        )
+    ]
+
+    // Popular whales to discover
+    static let popularWhalesData: [TrendingWhale] = [
+        TrendingWhale(
             name: "Cathie Wood",
             category: .hedgeFunds,
             avatarName: "avatar_wood",
             followersCount: 89000,
             isFollowing: false
+        ),
+        TrendingWhale(
+            name: "Bill Ackman",
+            category: .hedgeFunds,
+            avatarName: "avatar_ackman",
+            followersCount: 76000,
+            isFollowing: false
+        ),
+        TrendingWhale(
+            name: "Ray Dalio",
+            category: .hedgeFunds,
+            avatarName: "avatar_dalio",
+            followersCount: 112000,
+            isFollowing: false
         )
     ]
+
+    // Combined for backward compatibility
+    static let sampleData: [TrendingWhale] = trackedWhalesData + popularWhalesData
 }

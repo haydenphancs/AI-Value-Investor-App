@@ -11,28 +11,31 @@ struct TickerCard: View {
     let ticker: MarketTicker
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
             // Ticker Name
             Text(ticker.name)
-                .font(AppTypography.caption)
+                .font(AppTypography.tickerName)
                 .foregroundColor(AppColors.textSecondary)
+                .lineLimit(1)
 
             // Price
             Text(ticker.formattedPrice)
                 .font(AppTypography.tickerPrice)
                 .foregroundColor(AppColors.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
 
             // Sparkline
             SparklineView(data: ticker.sparklineData, isPositive: ticker.isPositive)
-                .frame(height: 24)
+                .frame(height: 20)
 
             // Change Percentage
             Text(ticker.formattedChange)
                 .font(AppTypography.tickerChange)
                 .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
         }
-        .padding(AppSpacing.md)
-        .frame(width: 100)
+        .padding(AppSpacing.sm)
+        .frame(width: 80, height: 80)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.medium)
     }

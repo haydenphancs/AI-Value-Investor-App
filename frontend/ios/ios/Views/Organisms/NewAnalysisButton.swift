@@ -33,7 +33,7 @@ struct NewAnalysisButton: View {
                 )
             )
             .cornerRadius(AppCornerRadius.extraLarge)
-            .shadow(color: AppColors.primaryBlue.opacity(0.4), radius: 8, x: 0, y: 4)
+//            .shadow(color: AppColors.primaryBlue.opacity(0.4), radius: 8, x: 0, y: 4)
         }
         .padding(.horizontal, AppSpacing.lg)
     }

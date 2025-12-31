@@ -210,3 +210,146 @@ struct AnalysisCost {
 
     static let standard = AnalysisCost(credits: 5)
 }
+
+// MARK: - Report Status
+enum ReportStatus: String {
+    case processing = "Processing"
+    case failed = "Failed"
+    case ready = "Ready"
+
+    var color: Color {
+        switch self {
+        case .processing: return Color(hex: "3B82F6")  // Blue
+        case .failed: return Color(hex: "EF4444")       // Red
+        case .ready: return Color(hex: "22C55E")        // Green
+        }
+    }
+
+    var backgroundColor: Color {
+        switch self {
+        case .processing: return Color(hex: "3B82F6").opacity(0.2)
+        case .failed: return Color(hex: "EF4444").opacity(0.2)
+        case .ready: return Color(hex: "22C55E").opacity(0.2)
+        }
+    }
+}
+
+// MARK: - Analysis Report
+struct AnalysisReport: Identifiable {
+    let id = UUID()
+    let companyName: String
+    let ticker: String
+    let industry: String
+    let persona: AnalysisPersona
+    let status: ReportStatus
+    let progress: Double? // 0.0 to 1.0, only for processing
+    let rating: Double?   // 0.0 to 5.0, only for ready
+    let date: Date
+    let isRefunded: Bool
+
+    var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: date)
+    }
+
+    var tickerAndIndustry: String {
+        "\(ticker) • \(industry)"
+    }
+
+    var progressPercent: Int {
+        Int((progress ?? 0) * 100)
+    }
+
+    static let mockReports: [AnalysisReport] = [
+        AnalysisReport(
+            companyName: "Tesla Inc.",
+            ticker: "TSLA",
+            industry: "Automotive",
+            persona: .cathieWood,
+            status: .processing,
+            progress: 0.67,
+            rating: nil,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 20)) ?? Date(),
+            isRefunded: false
+        ),
+        AnalysisReport(
+            companyName: "Meta Platforms",
+            ticker: "META",
+            industry: "Social Media",
+            persona: .rayDalio,
+            status: .failed,
+            progress: nil,
+            rating: nil,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 19)) ?? Date(),
+            isRefunded: true
+        ),
+        AnalysisReport(
+            companyName: "Apple Inc.",
+            ticker: "AAPL",
+            industry: "Technology",
+            persona: .warrenBuffett,
+            status: .ready,
+            progress: nil,
+            rating: 4.5,
+            date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 24)) ?? Date(),
+            isRefunded: false
+        ),
+        AnalysisReport(
+            companyName: "NVIDIA Corp.",
+            ticker: "NVDA",
+            industry: "Semiconductors",
+            persona: .peterLynch,
+            status: .ready,
+            progress: nil,
+            rating: 5.0,
+            date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 23)) ?? Date(),
+            isRefunded: false
+        )
+    ]
+}
+
+// MARK: - Community Insight
+struct CommunityInsight: Identifiable {
+    let id = UUID()
+    let userName: String
+    let userAvatarName: String
+    let postedAt: Date
+    let comment: String
+    let likesCount: Int
+    let commentsCount: Int
+
+    var timeAgo: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: postedAt, relativeTo: Date())
+    }
+
+    static let mockInsights: [CommunityInsight] = [
+        CommunityInsight(
+            userName: "David Martinez",
+            userAvatarName: "avatar_david",
+            postedAt: Date().addingTimeInterval(-7200), // 2h ago
+            comment: "Just completed a Buffett-style analysis on $AAPL. The moat is stronger than ever with the services ecosystem. Highly recommend!",
+            likesCount: 24,
+            commentsCount: 8
+        ),
+        CommunityInsight(
+            userName: "Sarah Johnson",
+            userAvatarName: "avatar_sarah",
+            postedAt: Date().addingTimeInterval(-18000), // 5h ago
+            comment: "The Cathie Wood persona nailed the $NVDA analysis. AI infrastructure thesis is spot on. Worth every credit!",
+            likesCount: 41,
+            commentsCount: 15
+        )
+    ]
+}
+
+// MARK: - Report Sort Option
+enum ReportSortOption: String, CaseIterable {
+    case dateNewest = "Newest First"
+    case dateOldest = "Oldest First"
+    case ratingHigh = "Highest Rated"
+    case ratingLow = "Lowest Rated"
+    case status = "By Status"
+}

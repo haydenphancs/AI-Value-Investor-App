@@ -28,6 +28,7 @@ struct GenerateAnalysisSection: View {
             CreditsBadge(credits: remainingCredits, style: .compact)
         }
         .padding(.horizontal, AppSpacing.lg)
+        
     }
 }
 

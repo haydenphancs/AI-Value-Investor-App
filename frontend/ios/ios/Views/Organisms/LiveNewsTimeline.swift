@@ -2,7 +2,7 @@
 //  LiveNewsTimeline.swift
 //  ios
 //
-//  Organism: Live news timeline with grouped sections
+//  Organism: Live news timeline content with sticky section headers
 //
 
 import SwiftUI
@@ -10,72 +10,39 @@ import SwiftUI
 struct LiveNewsTimeline: View {
     let groupedNews: [GroupedNews]
     var onArticleTapped: ((NewsArticle) -> Void)?
-    var onFilterTapped: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Section Header
-            HStack {
-                HStack(spacing: AppSpacing.sm) {
-                    LiveIndicator()
-
-                    Text("Live News")
-                        .font(AppTypography.title3)
-                        .foregroundColor(AppColors.textPrimary)
-                }
-
-                Spacer()
-
-                Button(action: { onFilterTapped?() }) {
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "line.3.horizontal.decrease")
-                            .font(.system(size: 12, weight: .medium))
-
-                        Text("All")
-                            .font(AppTypography.callout)
-                    }
-                    .foregroundColor(AppColors.textSecondary)
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            .padding(.horizontal, AppSpacing.lg)
-
-            // News Groups
+        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
             ForEach(groupedNews) { group in
-                NewsGroupSection(
-                    group: group,
-                    onArticleTapped: onArticleTapped
-                )
+                Section {
+                    NewsGroupContent(
+                        articles: group.articles,
+                        onArticleTapped: onArticleTapped
+                    )
+                } header: {
+                    NewsSectionHeader(title: group.sectionTitle)
+                }
             }
         }
     }
 }
 
-// MARK: - News Group Section
-struct NewsGroupSection: View {
-    let group: GroupedNews
+// MARK: - News Group Content (without header)
+struct NewsGroupContent: View {
+    let articles: [NewsArticle]
     var onArticleTapped: ((NewsArticle) -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section Title
-            Text(group.sectionTitle)
-                .font(AppTypography.footnoteBold)
-                .foregroundColor(AppColors.primaryBlue)
-                .padding(.horizontal, AppSpacing.lg)
-
-            // Timeline Items
-            VStack(spacing: 0) {
-                ForEach(Array(group.articles.enumerated()), id: \.element.id) { index, article in
-                    TimelineRow(
-                        article: article,
-                        isFirst: index == 0,
-                        isLast: index == group.articles.count - 1
-                    ) {
-                        onArticleTapped?(article)
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
+        VStack(spacing: 0) {
+            ForEach(Array(articles.enumerated()), id: \.element.id) { index, article in
+                TimelineRow(
+                    article: article,
+                    isFirst: index == 0,
+                    isLast: index == articles.count - 1
+                ) {
+                    onArticleTapped?(article)
                 }
+                .padding(.horizontal, AppSpacing.lg)
             }
         }
     }
@@ -105,13 +72,18 @@ struct NewsGroupSection: View {
                             publishedAt: Date(),
                             thumbnailName: nil,
                             relatedTickers: []
-                        ),
+                        )
+                    ]
+                ),
+                GroupedNews(
+                    sectionTitle: "YESTERDAY",
+                    articles: [
                         NewsArticle(
                             headline: "Apple Unveils Revolutionary AI Features in iOS 18 Beta",
                             summary: nil,
                             source: NewsSource(name: "Zacks", iconName: nil),
                             sentiment: .positive,
-                            publishedAt: Date(),
+                            publishedAt: Calendar.current.date(byAdding: .day, value: -1, to: Date())!,
                             thumbnailName: nil,
                             relatedTickers: []
                         )

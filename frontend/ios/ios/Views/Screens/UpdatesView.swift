@@ -28,32 +28,29 @@ struct UpdatesView: View {
                 UpdatesTabBar(
                     tabs: viewModel.filterTabs,
                     selectedTab: $viewModel.selectedTab,
-                    onAddTicker: handleAddTicker,
-                    onFilterTapped: handleFilterTapped,
-                    hasActiveFilters: viewModel.filterOptions.hasActiveFilters
+                    onManageAssets: handleManageAssets
                 )
 
-                // Scrollable Content
+                // Insights Summary Card (non-scrolling)
+                if let summary = viewModel.insightSummary {
+                    InsightsSummaryCard(summary: summary)
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
+                }
+
+                // Static "Live News" Header (non-scrolling)
+                LiveNewsHeader(onFilterTapped: handleFilterTapped)
+
+                // Scrollable Content with sticky section headers
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: AppSpacing.xl) {
-                        // Insights Summary Card
-                        if let summary = viewModel.insightSummary {
-                            InsightsSummaryCard(summary: summary)
-                                .padding(.horizontal, AppSpacing.lg)
-                                .padding(.top, AppSpacing.sm)
-                        }
+                    LiveNewsTimeline(
+                        groupedNews: viewModel.groupedNews,
+                        onArticleTapped: handleArticleTapped
+                    )
 
-                        // Live News Timeline
-                        LiveNewsTimeline(
-                            groupedNews: viewModel.groupedNews,
-                            onArticleTapped: handleArticleTapped,
-                            onFilterTapped: handleFilterTapped
-                        )
-
-                        // Bottom spacing for tab bar
-                        Spacer()
-                            .frame(height: 100)
-                    }
+                    // Bottom spacing for tab bar
+                    Spacer()
+                        .frame(height: 100)
                 }
                 .refreshable {
                     await viewModel.refresh()
@@ -83,8 +80,8 @@ struct UpdatesView: View {
         print("Profile tapped")
     }
 
-    private func handleAddTicker() {
-        print("Add ticker tapped")
+    private func handleManageAssets() {
+        print("Manage Assets tapped")
     }
 
     private func handleFilterTapped() {

@@ -107,7 +107,17 @@ class UpdatesViewModel: ObservableObject {
         let today2 = calendar.date(bySettingHour: 14, minute: 1, second: 0, of: now)!
         let today3 = calendar.date(bySettingHour: 9, minute: 45, second: 0, of: now)!
 
+        // Yesterday's articles
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now)!
+        let yesterday1 = calendar.date(bySettingHour: 16, minute: 30, second: 0, of: yesterday)!
+        let yesterday2 = calendar.date(bySettingHour: 11, minute: 15, second: 0, of: yesterday)!
+
+        // Older articles (2 days ago)
+        let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: now)!
+        let older1 = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: twoDaysAgo)!
+
         newsArticles = [
+            // Today
             NewsArticle(
                 headline: "Oil prices stabilize as OPEC + members agreed to maintain current production levels.",
                 summary: nil,
@@ -134,6 +144,35 @@ class UpdatesViewModel: ObservableObject {
                 publishedAt: today3,
                 thumbnailName: "news_apple",
                 relatedTickers: ["AAPL"]
+            ),
+            // Yesterday
+            NewsArticle(
+                headline: "Tesla reports strong Q4 deliveries beating Wall Street estimates by 15%.",
+                summary: nil,
+                source: NewsSource(name: "Bloomberg", iconName: "icon_bloomberg"),
+                sentiment: .positive,
+                publishedAt: yesterday1,
+                thumbnailName: "news_tesla",
+                relatedTickers: ["TSLA"]
+            ),
+            NewsArticle(
+                headline: "Fed signals potential rate cuts in early 2025 amid cooling inflation data.",
+                summary: nil,
+                source: NewsSource(name: "WSJ", iconName: "icon_wsj"),
+                sentiment: .positive,
+                publishedAt: yesterday2,
+                thumbnailName: "news_fed",
+                relatedTickers: ["SPY", "QQQ"]
+            ),
+            // Older
+            NewsArticle(
+                headline: "Microsoft Azure revenue grows 29% YoY driven by AI workloads and enterprise adoption.",
+                summary: nil,
+                source: NewsSource(name: "MarketWatch", iconName: "icon_marketwatch"),
+                sentiment: .positive,
+                publishedAt: older1,
+                thumbnailName: "news_microsoft",
+                relatedTickers: ["MSFT"]
             )
         ]
 

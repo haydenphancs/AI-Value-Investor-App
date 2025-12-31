@@ -132,10 +132,19 @@ struct WhalesTabContent: View {
                     onActivityTapped: { activity in viewModel.viewWhaleDetail(activity) }
                 )
 
-                // Trending Whales
-                TrendingWhalesSection(
-                    whales: viewModel.trendingWhales,
-                    onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) }
+                // Tracked Whales (whales the user is following)
+                if !viewModel.trackedWhales.isEmpty {
+                    TrackedWhalesSection(
+                        whales: viewModel.trackedWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) }
+                    )
+                }
+
+                // Most Popular Whales
+                MostPopularWhalesSection(
+                    whales: viewModel.popularWhales,
+                    onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                    onMoreTapped: { viewModel.viewMorePopularWhales() }
                 )
 
                 // Bottom spacing
@@ -271,21 +280,21 @@ struct WhaleActivityCard: View {
     }
 }
 
-// MARK: - Trending Whales Section
-struct TrendingWhalesSection: View {
+// MARK: - Tracked Whales Section
+struct TrackedWhalesSection: View {
     let whales: [TrendingWhale]
     var onFollowToggle: ((TrendingWhale) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Trending to Follow")
+            Text("Tracked Whales")
                 .font(AppTypography.title3)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 
             VStack(spacing: AppSpacing.md) {
                 ForEach(whales) { whale in
-                    TrendingWhaleCard(whale: whale) {
+                    WhaleCard(whale: whale) {
                         onFollowToggle?(whale)
                     }
                 }
@@ -295,8 +304,47 @@ struct TrendingWhalesSection: View {
     }
 }
 
-// MARK: - Trending Whale Card
-struct TrendingWhaleCard: View {
+// MARK: - Most Popular Whales Section
+struct MostPopularWhalesSection: View {
+    let whales: [TrendingWhale]
+    var onFollowToggle: ((TrendingWhale) -> Void)?
+    var onMoreTapped: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Header with "more" button
+            HStack {
+                Text("Most Popular")
+                    .font(AppTypography.title3)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Button {
+                    onMoreTapped?()
+                } label: {
+                    Text("more")
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+
+            VStack(spacing: AppSpacing.md) {
+                ForEach(whales) { whale in
+                    WhaleCard(whale: whale) {
+                        onFollowToggle?(whale)
+                    }
+                }
+            }
+            .padding(.horizontal, AppSpacing.lg)
+        }
+    }
+}
+
+// MARK: - Whale Card
+struct WhaleCard: View {
     let whale: TrendingWhale
     var onFollowToggle: (() -> Void)?
 

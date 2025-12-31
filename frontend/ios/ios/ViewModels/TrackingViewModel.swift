@@ -31,7 +31,8 @@ class TrackingViewModel: ObservableObject {
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .following
     @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
-    @Published var trendingWhales: [TrendingWhale] = TrendingWhale.sampleData
+    @Published var trackedWhales: [TrendingWhale] = TrendingWhale.trackedWhalesData
+    @Published var popularWhales: [TrendingWhale] = TrendingWhale.popularWhalesData
 
     // Loading States
     @Published var isLoading: Bool = false
@@ -123,16 +124,28 @@ class TrackingViewModel: ObservableObject {
     }
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
-        if let index = trendingWhales.firstIndex(where: { $0.id == whale.id }) {
-            let updatedWhale = TrendingWhale(
-                name: whale.name,
-                category: whale.category,
-                avatarName: whale.avatarName,
-                followersCount: whale.followersCount,
-                isFollowing: !whale.isFollowing
-            )
-            trendingWhales[index] = updatedWhale
+        let updatedWhale = TrendingWhale(
+            name: whale.name,
+            category: whale.category,
+            avatarName: whale.avatarName,
+            followersCount: whale.followersCount,
+            isFollowing: !whale.isFollowing
+        )
+
+        // If unfollowing from tracked whales, move to popular
+        if let index = trackedWhales.firstIndex(where: { $0.id == whale.id }) {
+            trackedWhales.remove(at: index)
+            popularWhales.insert(updatedWhale, at: 0)
         }
+        // If following from popular whales, move to tracked
+        else if let index = popularWhales.firstIndex(where: { $0.id == whale.id }) {
+            popularWhales.remove(at: index)
+            trackedWhales.append(updatedWhale)
+        }
+    }
+
+    func viewMorePopularWhales() {
+        print("View more popular whales")
     }
 
     func viewAssetDetail(_ asset: TrackedAsset) {

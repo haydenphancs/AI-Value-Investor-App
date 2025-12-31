@@ -22,11 +22,11 @@ struct ContentView: View {
                 case .updates:
                     UpdatesView(selectedTab: $selectedTab)
                 case .research:
-                    PlaceholderView(title: "Research", selectedTab: $selectedTab)
+                    TabPlaceholderView(title: "Research", selectedTab: $selectedTab)
                 case .tracking:
-                    PlaceholderView(title: "Tracking", selectedTab: $selectedTab)
+                    TabPlaceholderView(title: "Tracking", selectedTab: $selectedTab)
                 case .wiser:
-                    PlaceholderView(title: "Wiser", selectedTab: $selectedTab)
+                    TabPlaceholderView(title: "Wiser", selectedTab: $selectedTab)
                 }
             }
         }
@@ -99,7 +99,7 @@ struct HomeViewWithBinding: View {
 }
 
 // MARK: - Placeholder View for Other Tabs
-struct PlaceholderView: View {
+struct TabPlaceholderView: View {
     let title: String
     @Binding var selectedTab: HomeTab
 

@@ -24,6 +24,11 @@ class ResearchViewModel: ObservableObject {
     @Published var isGeneratingAnalysis: Bool = false
     @Published var error: String?
 
+    // Reports Tab Properties
+    @Published var reports: [AnalysisReport] = AnalysisReport.mockReports
+    @Published var reportSortOption: ReportSortOption = .dateNewest
+    @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
+
     // MARK: - Initialization
     init() {
         loadMockData()
@@ -93,6 +98,33 @@ class ResearchViewModel: ObservableObject {
 
     func viewAllPersonas() {
         print("View all personas tapped")
+    }
+
+    // MARK: - Reports Tab Actions
+    func openReport(_ report: AnalysisReport) {
+        guard report.status == .ready else { return }
+        print("Opening report: \(report.companyName)")
+    }
+
+    func retryReport(_ report: AnalysisReport) {
+        guard report.status == .failed else { return }
+        print("Retrying report: \(report.companyName)")
+    }
+
+    func joinDiscussion() {
+        print("Join discussion tapped")
+    }
+
+    func likeInsight(_ insight: CommunityInsight) {
+        print("Liked insight from: \(insight.userName)")
+    }
+
+    func commentOnInsight(_ insight: CommunityInsight) {
+        print("Comment on insight from: \(insight.userName)")
+    }
+
+    func shareInsight(_ insight: CommunityInsight) {
+        print("Share insight from: \(insight.userName)")
     }
 
     // MARK: - Computed Properties

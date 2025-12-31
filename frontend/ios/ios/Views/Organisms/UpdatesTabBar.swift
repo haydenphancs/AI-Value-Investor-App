@@ -10,6 +10,7 @@ import SwiftUI
 struct UpdatesTabBar: View {
     let tabs: [NewsFilterTab]
     @Binding var selectedTab: NewsFilterTab?
+    var onAddTicker: (() -> Void)?
     var onManageAssets: (() -> Void)?
 
     var body: some View {
@@ -26,6 +27,11 @@ struct UpdatesTabBar: View {
                                 selectedTab = tab
                             }
                         }
+                    }
+
+                    // Add Ticker Button (after tickers)
+                    AddTickerButton {
+                        onAddTicker?()
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)
@@ -50,6 +56,7 @@ struct UpdatesTabBar: View {
                 NewsFilterTab(title: "TSLA", ticker: "TSLA", changePercent: -1.2, isMarketTab: false)
             ],
             selectedTab: .constant(NewsFilterTab(title: "Market", ticker: nil, changePercent: nil, isMarketTab: true)),
+            onAddTicker: {},
             onManageAssets: {}
         )
         Spacer()

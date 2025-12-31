@@ -48,7 +48,7 @@ struct MainTabView: View {
                 }
                 .tag(HomeTab.updates)
 
-            PlaceholderView(title: "Research")
+            ResearchContentView()
                 .tabItem {
                     Image(systemName: "magnifyingglass")
                     Text("Research")

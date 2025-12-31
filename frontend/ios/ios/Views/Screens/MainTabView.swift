@@ -55,7 +55,7 @@ struct MainTabView: View {
                 }
                 .tag(HomeTab.research)
 
-            PlaceholderView(title: "Tracking")
+            TrackingContentView()
                 .tabItem {
                     Image(systemName: "star.fill")
                     Text("Tracking")

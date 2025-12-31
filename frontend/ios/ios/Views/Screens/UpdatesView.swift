@@ -30,27 +30,26 @@ struct UpdatesView: View {
                     tabs: viewModel.filterTabs,
                     selectedTab: $viewModel.selectedTab,
                     onAddTicker: handleAddTicker,
-                    onManageAssets: handleManageAssets
+                    onFilterTapped: handleFilterTapped,
+                    hasActiveFilters: viewModel.filterOptions.hasActiveFilters
                 )
 
-                // Static "Live News" Header (sticks to top when scrolling)
-                LiveNewsHeader(onFilterTapped: handleFilterTapped)
-
-                // Scrollable Content with sticky section headers
+                // Scrollable Content
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: AppSpacing.lg) {
-                        // Insights Summary Card (scrollable)
+                    VStack(spacing: AppSpacing.xl) {
+                        // Insights Summary Card
                         if let summary = viewModel.insightSummary {
                             InsightsSummaryCard(summary: summary)
                                 .padding(.horizontal, AppSpacing.lg)
+                                .padding(.top, AppSpacing.sm)
                         }
 
-                        // Live News Timeline with sticky date headers
+                        // Live News Timeline
                         LiveNewsTimeline(
                             groupedNews: viewModel.groupedNews,
-                            onArticleTapped: handleArticleTapped
+                            onArticleTapped: handleArticleTapped,
+                            onFilterTapped: handleFilterTapped
                         )
-                    }
 
                     // Bottom spacing for tab bar
                     Spacer()
@@ -90,8 +89,8 @@ struct UpdatesView: View {
         print("Profile tapped")
     }
 
-    private func handleAddTicker() {
-        print("Add ticker tapped")
+    private func handleManageAssets() {
+        print("Manage Assets tapped")
     }
 
     private func handleManageAssets() {

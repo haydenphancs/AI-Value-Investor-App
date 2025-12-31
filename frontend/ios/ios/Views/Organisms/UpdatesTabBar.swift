@@ -10,9 +10,7 @@ import SwiftUI
 struct UpdatesTabBar: View {
     let tabs: [NewsFilterTab]
     @Binding var selectedTab: NewsFilterTab?
-    var onAddTicker: (() -> Void)?
-    var onFilterTapped: (() -> Void)?
-    var hasActiveFilters: Bool = false
+    var onManageAssets: (() -> Void)?
 
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
@@ -29,18 +27,13 @@ struct UpdatesTabBar: View {
                             }
                         }
                     }
-
-                    // Add Ticker Button
-                    AddTickerButton {
-                        onAddTicker?()
-                    }
                 }
                 .padding(.horizontal, AppSpacing.lg)
             }
 
-            // Filter Button
-            FilterButton(hasActiveFilters: hasActiveFilters) {
-                onFilterTapped?()
+            // Manage Assets Button
+            ManageAssetsButton {
+                onManageAssets?()
             }
             .padding(.trailing, AppSpacing.lg)
         }
@@ -56,7 +49,8 @@ struct UpdatesTabBar: View {
                 NewsFilterTab(title: "AAPL", ticker: "AAPL", changePercent: 2.4, isMarketTab: false),
                 NewsFilterTab(title: "TSLA", ticker: "TSLA", changePercent: -1.2, isMarketTab: false)
             ],
-            selectedTab: .constant(NewsFilterTab(title: "Market", ticker: nil, changePercent: nil, isMarketTab: true))
+            selectedTab: .constant(NewsFilterTab(title: "Market", ticker: nil, changePercent: nil, isMarketTab: true)),
+            onManageAssets: {}
         )
         Spacer()
     }

@@ -94,8 +94,9 @@ struct AppTypography {
     static let captionBold = Font.system(size: 11, weight: .medium)
 
     // Ticker Numbers
-    static let tickerPrice = Font.system(size: 18, weight: .bold, design: .rounded)
-    static let tickerChange = Font.system(size: 12, weight: .semibold, design: .rounded)
+    static let tickerPrice = Font.system(size: 14, weight: .bold, design: .rounded)
+    static let tickerChange = Font.system(size: 10, weight: .semibold, design: .rounded)
+    static let tickerName = Font.system(size: 9, weight: .regular)
 }
 
 // MARK: - App Spacing

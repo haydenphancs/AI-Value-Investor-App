@@ -13,11 +13,6 @@ struct GenerateAnalysisButton: View {
     var isLoading: Bool = false
     var onTap: (() -> Void)?
 
-    private let gradientColors = [
-        Color(hex: "F97316"),
-        Color(hex: "EA580C")
-    ]
-
     var body: some View {
         Button(action: {
             onTap?()
@@ -45,13 +40,7 @@ struct GenerateAnalysisButton: View {
             .padding(.vertical, AppSpacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(
-                        LinearGradient(
-                            colors: isEnabled ? gradientColors : [AppColors.textMuted, AppColors.textMuted],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
+                    .fill(isEnabled ? AppColors.primaryBlue : AppColors.textMuted)
             )
         }
         .buttonStyle(PlainButtonStyle())

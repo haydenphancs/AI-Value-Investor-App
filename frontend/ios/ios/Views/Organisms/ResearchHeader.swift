@@ -13,19 +13,9 @@ struct ResearchHeader: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
-            // Top bar
-            HStack(spacing: AppSpacing.md) {
-                // Logo placeholder
-                Circle()
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 32, height: 32)
-                    .overlay(
-                        Text("L")
-                            .font(AppTypography.footnoteBold)
-                            .foregroundColor(AppColors.textSecondary)
-                    )
-
-                // Title with icon
+            // Top bar with centered title using ZStack
+            ZStack {
+                // Centered title (ignores side elements)
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 14, weight: .medium))
@@ -42,43 +32,68 @@ struct ResearchHeader: View {
                         .fill(AppColors.cardBackground)
                 )
 
-                Spacer()
-
-                // Profile button
-                Button(action: {
-                    onProfileTapped?()
-                }) {
+                // Side elements
+                HStack {
+                    // Logo placeholder
                     Circle()
                         .fill(AppColors.cardBackgroundLight)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 32, height: 32)
                         .overlay(
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 14))
+                            Text("L")
+                                .font(AppTypography.footnoteBold)
                                 .foregroundColor(AppColors.textSecondary)
                         )
+
+                    Spacer()
+
+                    // Profile button
+                    Button(action: {
+                        onProfileTapped?()
+                    }) {
+                        Circle()
+                            .fill(AppColors.cardBackgroundLight)
+                            .frame(width: 36, height: 36)
+                            .overlay(
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(AppColors.textSecondary)
+                            )
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .buttonStyle(PlainButtonStyle())
             }
 
-            // Tab selector
+            // Tab selector - stretched to full width
             HStack(spacing: 0) {
                 ForEach(ResearchTab.allCases, id: \.rawValue) { tab in
-                    TabPill(
-                        title: tab.rawValue,
-                        isSelected: selectedTab == tab
-                    ) {
+                    Button(action: {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             selectedTab = tab
                         }
+                    }) {
+                        Text(tab.rawValue)
+                            .font(AppTypography.callout)
+                            .fontWeight(selectedTab == tab ? .semibold : .regular)
+                            .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, AppSpacing.sm)
+                            .background(
+                                Group {
+                                    if selectedTab == tab {
+                                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                            .fill(AppColors.cardBackgroundLight)
+                                    }
+                                }
+                            )
                     }
+                    .buttonStyle(PlainButtonStyle())
                 }
             }
             .padding(AppSpacing.xs)
             .background(
-                Capsule()
+                RoundedRectangle(cornerRadius: AppCornerRadius.large)
                     .fill(AppColors.cardBackground)
             )
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)

@@ -10,6 +10,7 @@ import SwiftUI
 struct UpdatesView: View {
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
+    @State private var showManageAssetsSheet = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -24,29 +25,32 @@ struct UpdatesView: View {
                     onProfileTapped: handleProfileTapped
                 )
 
-                // Tab Bar
+                // Tab Bar with tickers
                 UpdatesTabBar(
                     tabs: viewModel.filterTabs,
                     selectedTab: $viewModel.selectedTab,
+                    onAddTicker: handleAddTicker,
                     onManageAssets: handleManageAssets
                 )
 
-                // Insights Summary Card (non-scrolling)
-                if let summary = viewModel.insightSummary {
-                    InsightsSummaryCard(summary: summary)
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.sm)
-                }
-
-                // Static "Live News" Header (non-scrolling)
+                // Static "Live News" Header (sticks to top when scrolling)
                 LiveNewsHeader(onFilterTapped: handleFilterTapped)
 
                 // Scrollable Content with sticky section headers
                 ScrollView(showsIndicators: false) {
-                    LiveNewsTimeline(
-                        groupedNews: viewModel.groupedNews,
-                        onArticleTapped: handleArticleTapped
-                    )
+                    VStack(spacing: AppSpacing.lg) {
+                        // Insights Summary Card (scrollable)
+                        if let summary = viewModel.insightSummary {
+                            InsightsSummaryCard(summary: summary)
+                                .padding(.horizontal, AppSpacing.lg)
+                        }
+
+                        // Live News Timeline with sticky date headers
+                        LiveNewsTimeline(
+                            groupedNews: viewModel.groupedNews,
+                            onArticleTapped: handleArticleTapped
+                        )
+                    }
 
                     // Bottom spacing for tab bar
                     Spacer()
@@ -73,6 +77,12 @@ struct UpdatesView: View {
                 }
             )
         }
+        .sheet(isPresented: $showManageAssetsSheet) {
+            ManageAssetsSheet(
+                tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
+                onDismiss: { showManageAssetsSheet = false }
+            )
+        }
     }
 
     // MARK: - Action Handlers
@@ -80,8 +90,12 @@ struct UpdatesView: View {
         print("Profile tapped")
     }
 
+    private func handleAddTicker() {
+        print("Add ticker tapped")
+    }
+
     private func handleManageAssets() {
-        print("Manage Assets tapped")
+        showManageAssetsSheet = true
     }
 
     private func handleFilterTapped() {
@@ -90,6 +104,58 @@ struct UpdatesView: View {
 
     private func handleArticleTapped(_ article: NewsArticle) {
         print("Article tapped: \(article.headline)")
+    }
+}
+
+// MARK: - Manage Assets Sheet
+struct ManageAssetsSheet: View {
+    let tickers: [NewsFilterTab]
+    var onDismiss: (() -> Void)?
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section("Your Tickers") {
+                    ForEach(tickers) { ticker in
+                        HStack {
+                            Text(ticker.title)
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textPrimary)
+
+                            Spacer()
+
+                            if let change = ticker.formattedChange {
+                                Text(change)
+                                    .font(AppTypography.callout)
+                                    .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
+                            }
+                        }
+                    }
+                    .onDelete { _ in
+                        // Handle delete
+                        print("Delete ticker")
+                    }
+                }
+
+                Section {
+                    Text("Swipe left to remove a ticker from your watchlist.")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
+            .listStyle(InsetGroupedListStyle())
+            .navigationTitle("Manage Assets")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        onDismiss?()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 

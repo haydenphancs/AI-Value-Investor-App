@@ -95,10 +95,6 @@ struct UpdatesView: View {
         showManageAssetsSheet = true
     }
 
-    private func handleManageAssets() {
-        showManageAssetsSheet = true
-    }
-
     private func handleFilterTapped() {
         viewModel.openFilterOptions()
     }

@@ -84,8 +84,8 @@ struct NewsArticle: Identifiable {
             return "YESTERDAY"
         } else {
             let formatter = DateFormatter()
-            formatter.dateFormat = "EEEE, MMM d"
-            return formatter.string(from: publishedAt).uppercased()
+            formatter.dateFormat = "MMM d, yyyy"
+            return formatter.string(from: publishedAt)
         }
     }
 }

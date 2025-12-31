@@ -11,19 +11,8 @@ struct UpdatesHeader: View {
     var onProfileTapped: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // Logo placeholder
-            ZStack {
-                Circle()
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 36, height: 36)
-
-                Text("logo")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            // Title with icon
+        ZStack {
+            // Centered Title (ignores surrounding elements)
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 14, weight: .medium))
@@ -38,21 +27,35 @@ struct UpdatesHeader: View {
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.pill)
 
-            Spacer()
-
-            // Profile Button
-            Button(action: { onProfileTapped?() }) {
+            // Left and Right buttons
+            HStack {
+                // Logo placeholder
                 ZStack {
                     Circle()
-                        .stroke(AppColors.textMuted.opacity(0.5), lineWidth: 1)
+                        .fill(AppColors.cardBackgroundLight)
                         .frame(width: 36, height: 36)
 
-                    Image(systemName: "person.circle")
-                        .font(.system(size: 24, weight: .light))
-                        .foregroundColor(AppColors.textSecondary)
+                    Text("logo")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(AppColors.textMuted)
                 }
+
+                Spacer()
+
+                // Profile Button
+                Button(action: { onProfileTapped?() }) {
+                    ZStack {
+                        Circle()
+                            .stroke(AppColors.textMuted.opacity(0.5), lineWidth: 1)
+                            .frame(width: 36, height: 36)
+
+                        Image(systemName: "person.circle")
+                            .font(.system(size: 24, weight: .light))
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                }
+                .buttonStyle(PlainButtonStyle())
             }
-            .buttonStyle(PlainButtonStyle())
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)

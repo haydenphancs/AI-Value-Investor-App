@@ -111,6 +111,72 @@ enum ChatAttachmentType: String, CaseIterable {
     }
 }
 
+// MARK: - Chat History Item Type
+enum ChatHistoryItemType: String, CaseIterable {
+    case book = "BOOK"
+    case concept = "CONCEPT"
+    case stock = "STOCK"
+    case normal = "NORMAL"
+    case journey = "JOURNEY"
+    case report = "REPORT"
+
+    var displayName: String {
+        rawValue
+    }
+
+    var textColor: Color {
+        switch self {
+        case .book: return Color(hex: "22C55E") // Green
+        case .concept: return Color(hex: "3B82F6") // Blue
+        case .stock: return Color(hex: "22C55E") // Green
+        case .normal: return AppColors.textSecondary
+        case .journey: return Color(hex: "F59E0B") // Amber
+        case .report: return Color(hex: "EF4444") // Red
+        }
+    }
+}
+
+// MARK: - Chat History Item
+struct ChatHistoryItem: Identifiable {
+    let id = UUID()
+    let type: ChatHistoryItemType
+    let title: String
+    let preview: String
+    let timestamp: Date
+    let isSaved: Bool
+
+    var timeAgo: String {
+        let calendar = Calendar.current
+        let now = Date()
+
+        if calendar.isDateInToday(timestamp) {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .abbreviated
+            return formatter.localizedString(for: timestamp, relativeTo: now)
+        } else if calendar.isDateInYesterday(timestamp) {
+            return "1d ago"
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM/dd/yyyy"
+            return formatter.string(from: timestamp)
+        }
+    }
+}
+
+// MARK: - Chat History Section
+enum ChatHistorySection: String, CaseIterable {
+    case today = "TODAY"
+    case yesterday = "YESTERDAY"
+    case older = "OLDER"
+}
+
+// MARK: - Chat History Grouped
+struct ChatHistoryGroup: Identifiable {
+    let id = UUID()
+    let section: ChatHistorySection
+    let items: [ChatHistoryItem]
+}
+
 // MARK: - Sample Data
 extension SuggestionChip {
     static let sampleData: [SuggestionChip] = [
@@ -142,5 +208,109 @@ extension ChatSession {
             lastMessageAt: Calendar.current.date(byAdding: .day, value: -3, to: Date())!,
             messageCount: 12
         )
+    ]
+}
+
+extension ChatHistoryItem {
+    // Today items
+    static let todayItems: [ChatHistoryItem] = [
+        ChatHistoryItem(
+            type: .book,
+            title: "The Psychology of Money",
+            preview: "Discussing key insights from Morgan Housel's book about wealth, greed, and...",
+            timestamp: Calendar.current.date(byAdding: .hour, value: -2, to: Date())!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .concept,
+            title: "Compound Interest Explained",
+            preview: "Understanding the power of compound interest and how it can exponentially gro...",
+            timestamp: Calendar.current.date(byAdding: .hour, value: -4, to: Date())!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .stock,
+            title: "AAPL Stock Analysis",
+            preview: "Current price: $182.45 (+2.3%) • Market cap: $2.85T • P/E ratio: 29.4 • Analyzin...",
+            timestamp: Calendar.current.date(byAdding: .hour, value: -5, to: Date())!,
+            isSaved: false
+        )
+    ]
+
+    // Yesterday items
+    static let yesterdayItems: [ChatHistoryItem] = [
+        ChatHistoryItem(
+            type: .normal,
+            title: "What is a report?",
+            preview: "Comprehensive analysis of market trends, sector performance, and economic...",
+            timestamp: Calendar.current.date(byAdding: .day, value: -1, to: Date())!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .journey,
+            title: "My Investment Journey",
+            preview: "Planning a 10-year investment strategy from beginner to advanced portfolio...",
+            timestamp: Calendar.current.date(byAdding: .day, value: -1, to: Date())!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .normal,
+            title: "What is Rich Dad Poor Dad book?",
+            preview: "Exploring Robert Kiyosaki's principles on financial education and building wealth...",
+            timestamp: Calendar.current.date(byAdding: .day, value: -1, to: Date())!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .normal,
+            title: "TSLA Review",
+            preview: "Current price: $248.92 (-1.2%) • Market cap: $789B • Analyzing Tesla's recent...",
+            timestamp: Calendar.current.date(byAdding: .day, value: -1, to: Date())!,
+            isSaved: false
+        )
+    ]
+
+    // Older items
+    static let olderItems: [ChatHistoryItem] = [
+        ChatHistoryItem(
+            type: .stock,
+            title: "AMZN E-commerce Dominance",
+            preview: "Current price: $151.23 (+0.9%) • AWS cloud services and retail expansion...",
+            timestamp: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 20))!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .report,
+            title: "Global Economic Outlook",
+            preview: "Comprehensive analysis of GDP growth, inflation trends, and monetary policy...",
+            timestamp: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 18))!,
+            isSaved: true
+        ),
+        ChatHistoryItem(
+            type: .book,
+            title: "The Millionaire Next Door",
+            preview: "Research-based insights on wealth accumulation habits and the frugal...",
+            timestamp: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 18))!,
+            isSaved: false
+        ),
+        ChatHistoryItem(
+            type: .journey,
+            title: "Debt Elimination Strategy",
+            preview: "Systematic approach to becoming debt-free using snowball and avalanche...",
+            timestamp: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 25))!,
+            isSaved: true
+        ),
+        ChatHistoryItem(
+            type: .normal,
+            title: "Risk-Adjusted Returns",
+            preview: "Understanding Sharpe ratio, beta, and alpha for evaluating investment...",
+            timestamp: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 23))!,
+            isSaved: false
+        )
+    ]
+
+    static let sampleGroups: [ChatHistoryGroup] = [
+        ChatHistoryGroup(section: .today, items: todayItems),
+        ChatHistoryGroup(section: .yesterday, items: yesterdayItems),
+        ChatHistoryGroup(section: .older, items: olderItems)
     ]
 }

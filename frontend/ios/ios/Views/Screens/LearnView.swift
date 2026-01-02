@@ -26,18 +26,18 @@ struct LearnContentView: View {
                     onSearchSubmit: handleSearchSubmit
                 )
 
-                // Tab content
-                TabView(selection: $viewModel.selectedTab) {
-                    learnTabContent
-                        .tag(LearnTab.learn)
-
-                    chatTabContent
-                        .tag(LearnTab.chat)
-
-                    savedTabContent
-                        .tag(LearnTab.saved)
+                // Tab content - no swipe gesture between tabs
+                Group {
+                    switch viewModel.selectedTab {
+                    case .learn:
+                        learnTabContent
+                    case .chat:
+                        chatTabContent
+                    case .saved:
+                        savedTabContent
+                    }
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
             }
 
             // Loading overlay

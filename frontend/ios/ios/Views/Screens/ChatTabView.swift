@@ -10,6 +10,7 @@ import SwiftUI
 struct ChatTabView: View {
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
+    @State private var showingHistory: Bool = true // Default to showing history
 
     var onHistoryTap: (() -> Void)?
 
@@ -20,6 +21,22 @@ struct ChatTabView: View {
                 handleHistoryTap()
             }
 
+            if showingHistory {
+                // History view
+                ChatHistoryView(
+                    onItemTap: handleHistoryItemTap,
+                    onDismiss: { showingHistory = false }
+                )
+            } else {
+                // Main chat content area
+                chatContentView
+            }
+        }
+    }
+
+    // MARK: - Chat Content View
+    private var chatContentView: some View {
+        VStack(spacing: 0) {
             // Main content area (empty state for now)
             Spacer()
 
@@ -42,8 +59,18 @@ struct ChatTabView: View {
 
     // MARK: - Action Handlers
     private func handleHistoryTap() {
-        print("History tapped")
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showingHistory.toggle()
+        }
         onHistoryTap?()
+    }
+
+    private func handleHistoryItemTap(_ item: ChatHistoryItem) {
+        print("Opening chat: \(item.title)")
+        // In the future, this would navigate to the specific chat
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showingHistory = false
+        }
     }
 
     private func handleSuggestionTap(_ chip: SuggestionChip) {
@@ -70,12 +97,25 @@ struct ChatTabView: View {
     }
 }
 
-#Preview {
+#Preview("History View") {
     ZStack {
         AppColors.background
             .ignoresSafeArea()
 
         ChatTabView()
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Chat View") {
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        ChatTabView()
+            .onAppear {
+                // This preview shows history by default
+            }
     }
     .preferredColorScheme(.dark)
 }

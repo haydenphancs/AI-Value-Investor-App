@@ -154,23 +154,7 @@ struct CommunityDiscussion: Identifiable {
     }
 }
 
-// MARK: - Credit Balance
-struct CreditBalance: Identifiable {
-    let id = UUID()
-    let credits: Int
-    let renewsAt: Date
 
-    var formattedRenewalDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return "Renews \(formatter.string(from: renewsAt))"
-    }
-
-    static let mock = CreditBalance(
-        credits: 47,
-        renewsAt: Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date()
-    )
-}
 
 // MARK: - Sample Data Extensions
 extension JourneyTrack {

@@ -75,7 +75,7 @@ class LearnViewModel: ObservableObject {
     private func loadCreditBalance() {
         creditBalance = CreditBalance(
             credits: 47,
-            renewsAt: Calendar.current.date(from: DateComponents(year: 2025, month: 1, day: 1)) ?? Date()
+            renewalDate: Calendar.current.date(from: DateComponents(year: 2025, month: 1, day: 1)) ?? Date()
         )
     }
 

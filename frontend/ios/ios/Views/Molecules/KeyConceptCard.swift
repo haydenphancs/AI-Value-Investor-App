@@ -55,7 +55,7 @@ struct KeyConceptCard: View {
                 Spacer(minLength: 0)
 
                 // Meta info
-                HStack(spacing: AppSpacing.lg) {
+                HStack(spacing: 30) {
                     ReadTimeLabel(minutes: concept.estimatedMinutes)
                     LearnerCountBadge(count: concept.learnerCount)
                 }

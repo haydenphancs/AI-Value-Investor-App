@@ -33,7 +33,7 @@ struct ReadTimeLabel: View {
     private var formattedTime: String {
         switch style {
         case .compact:
-            return "\(minutes) min read"
+            return "\(minutes) min"
         case .expanded:
             return "\(minutes) minutes"
         }

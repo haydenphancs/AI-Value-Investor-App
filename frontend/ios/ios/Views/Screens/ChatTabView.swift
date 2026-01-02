@@ -10,16 +10,18 @@ import SwiftUI
 struct ChatTabView: View {
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
-    @State private var showingHistory: Bool = true // Default to showing history
+    @State private var showingHistory: Bool = false // Default to showing main chat
 
     var onHistoryTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
             // History button header
-            ChatHistoryHeader {
-                handleHistoryTap()
-            }
+            ChatHistoryHeader(
+                showingHistory: showingHistory,
+                onHistoryTap: handleHistoryTap,
+                onChevronTap: handleHistoryTap // Chevron also toggles history
+            )
 
             if showingHistory {
                 // History view

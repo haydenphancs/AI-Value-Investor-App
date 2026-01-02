@@ -62,7 +62,7 @@ struct MainTabView: View {
                 }
                 .tag(HomeTab.tracking)
 
-            PlaceholderView(title: "Wiser")
+            LearnContentView()
                 .tabItem {
                     Image(systemName: "lightbulb.fill")
                     Text("Wiser")

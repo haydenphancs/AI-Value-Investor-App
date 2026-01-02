@@ -122,25 +122,13 @@ struct LearnContentView: View {
 
     // MARK: - Chat Tab Content
     private var chatTabContent: some View {
-        VStack {
-            Spacer()
-            VStack(spacing: AppSpacing.lg) {
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(.system(size: 48))
-                    .foregroundColor(AppColors.textMuted)
-
-                Text("Chat Coming Soon")
-                    .font(AppTypography.headline)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text("AI-powered chat with educational content")
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding()
-            Spacer()
+        ChatTabView {
+            handleHistoryTap()
         }
+    }
+
+    private func handleHistoryTap() {
+        print("Chat history tapped")
     }
 
     // MARK: - Saved Tab Content

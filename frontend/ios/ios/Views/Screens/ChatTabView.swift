@@ -10,6 +10,9 @@ import SwiftUI
 struct ChatTabView: View {
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
+    @State private var conversationMessages: [RichChatMessage] = []
+    @State private var showingHistory: Bool = false
+    @State private var isInConversation: Bool = false
 
     var onHistoryTap: (() -> Void)?
 
@@ -91,6 +94,16 @@ struct ChatTabView: View {
 
     private func handleImageTap() {
         print("Image input tapped")
+    }
+    
+    // MARK: - Helper Methods
+    private func generateMockResponse(for query: String) -> RichChatMessage {
+        let responseText = "This is a mock response to: \"\(query)\". In a real implementation, this would connect to your AI service."
+        return RichChatMessage(
+            role: .assistant,
+            content: [.text(responseText)],
+            timestamp: Date()
+        )
     }
 }
 

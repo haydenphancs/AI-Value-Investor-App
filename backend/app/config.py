@@ -34,8 +34,10 @@ class Settings(BaseSettings):
 
     # Supabase Configuration (Section 2.4, 2.5)
     SUPABASE_URL: str  # Required
-    SUPABASE_KEY: str  # Required - Service role key (server-side only)
+    #SUPABASE_KEY: str  # Required - Service role key (server-side only)
     SUPABASE_JWT_SECRET: Optional[str] = None  # For validating Supabase Auth tokens
+    SUPABASE_SERVICE_ROLE_KEY: str  # server-only
+    SUPABASE_ANON_KEY: Optional[str] = None  # only if needed server-side
 
     # Database Configuration
     DATABASE_URL: Optional[str] = None  # Direct PostgreSQL connection if needed

@@ -10,6 +10,8 @@ import SwiftUI
 struct SearchView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = SearchViewModel()
+    @State private var selectedArticle: NewsArticle?
+    @State private var showNewsDetail = false
 
     var body: some View {
         ZStack {
@@ -79,6 +81,12 @@ struct SearchView: View {
                     }
                 }
         )
+        .fullScreenCover(isPresented: $showNewsDetail) {
+            if let article = selectedArticle {
+                NewsDetailView(article: article)
+                    .preferredColorScheme(.dark)
+            }
+        }
     }
 
     // MARK: - Action Handlers
@@ -107,11 +115,22 @@ struct SearchView: View {
     }
 
     private func handleNewsItemTapped(_ item: SearchNewsItem) {
-        viewModel.openNewsItem(item)
+        // Convert SearchNewsItem to NewsArticle and show detail
+        let article = NewsArticle(
+            headline: item.headline,
+            summary: item.summary,
+            source: NewsSource(name: item.source, iconName: nil),
+            sentiment: .neutral,
+            publishedAt: Date(),
+            thumbnailName: item.imageName,
+            relatedTickers: []
+        )
+        selectedArticle = article
+        showNewsDetail = true
     }
 
     private func handleNewsReadMore(_ item: SearchNewsItem) {
-        viewModel.openNewsItem(item)
+        handleNewsItemTapped(item)
     }
 
     private func handleChatWithBook(_ book: SearchBookItem) {
@@ -126,6 +145,8 @@ struct SearchView: View {
 // MARK: - SearchContentView (For use in NavigationStack)
 struct SearchContentView: View {
     @StateObject private var viewModel = SearchViewModel()
+    @State private var selectedArticle: NewsArticle?
+    @State private var showNewsDetail = false
     var onDismiss: (() -> Void)?
 
     var body: some View {
@@ -159,8 +180,32 @@ struct SearchContentView: View {
                         // Latest News Section
                         SearchLatestNewsSection(
                             items: viewModel.latestNews,
-                            onItemTapped: { viewModel.openNewsItem($0) },
-                            onReadMore: { viewModel.openNewsItem($0) }
+                            onItemTapped: { item in
+                                let article = NewsArticle(
+                                    headline: item.headline,
+                                    summary: item.summary,
+                                    source: NewsSource(name: item.source, iconName: nil),
+                                    sentiment: .neutral,
+                                    publishedAt: Date(),
+                                    thumbnailName: item.imageName,
+                                    relatedTickers: []
+                                )
+                                selectedArticle = article
+                                showNewsDetail = true
+                            },
+                            onReadMore: { item in
+                                let article = NewsArticle(
+                                    headline: item.headline,
+                                    summary: item.summary,
+                                    source: NewsSource(name: item.source, iconName: nil),
+                                    sentiment: .neutral,
+                                    publishedAt: Date(),
+                                    thumbnailName: item.imageName,
+                                    relatedTickers: []
+                                )
+                                selectedArticle = article
+                                showNewsDetail = true
+                            }
                         )
 
                         // AI-Enabled Books Section
@@ -194,6 +239,12 @@ struct SearchContentView: View {
                     }
                 }
         )
+        .fullScreenCover(isPresented: $showNewsDetail) {
+            if let article = selectedArticle {
+                NewsDetailView(article: article)
+                    .preferredColorScheme(.dark)
+            }
+        }
     }
 }
 

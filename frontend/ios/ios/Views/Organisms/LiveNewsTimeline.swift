@@ -38,10 +38,11 @@ struct NewsGroupContent: View {
                 TimelineRow(
                     article: article,
                     isFirst: index == 0,
-                    isLast: index == articles.count - 1
-                ) {
-                    onArticleTapped?(article)
-                }
+                    isLast: index == articles.count - 1,
+                    onTapped: {
+                        onArticleTapped?(article)
+                    }
+                )
                 .padding(.horizontal, AppSpacing.lg)
             }
         }

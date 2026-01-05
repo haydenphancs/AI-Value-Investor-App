@@ -24,9 +24,9 @@ struct ContentView: View {
                 case .research:
                     ResearchViewWithBinding(selectedTab: $selectedTab)
                 case .tracking:
-                    TabPlaceholderView(title: "Tracking", selectedTab: $selectedTab)
+                    TrackingViewWithBinding(selectedTab: $selectedTab)
                 case .wiser:
-                    TabPlaceholderView(title: "Wiser", selectedTab: $selectedTab)
+                    WiserViewWithBinding(selectedTab: $selectedTab)
                 }
             }
         }
@@ -280,6 +280,42 @@ struct ResearchViewWithBinding: View {
 
     private func handleShareInsight(_ insight: CommunityInsight) {
         viewModel.shareInsight(insight)
+    }
+}
+
+// MARK: - TrackingView with Binding Support
+struct TrackingViewWithBinding: View {
+    @Binding var selectedTab: HomeTab
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            AppColors.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                TrackingContentView()
+
+                CustomTabBar(selectedTab: $selectedTab)
+            }
+        }
+    }
+}
+
+// MARK: - WiserView with Binding Support (Learn)
+struct WiserViewWithBinding: View {
+    @Binding var selectedTab: HomeTab
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            AppColors.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                LearnContentView()
+
+                CustomTabBar(selectedTab: $selectedTab)
+            }
+        }
     }
 }
 

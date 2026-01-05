@@ -42,7 +42,7 @@ struct NewsFilterTab: Identifiable, Equatable {
 }
 
 // MARK: - News Source
-struct NewsSource: Identifiable {
+struct NewsSource: Identifiable, Hashable {
     let id = UUID()
     let name: String
     let iconName: String?
@@ -50,10 +50,19 @@ struct NewsSource: Identifiable {
     var systemIconName: String {
         "newspaper.fill"
     }
+    
+    // Hashable conformance based on id
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    static func == (lhs: NewsSource, rhs: NewsSource) -> Bool {
+        lhs.id == rhs.id
+    }
 }
 
 // MARK: - News Article
-struct NewsArticle: Identifiable {
+struct NewsArticle: Identifiable, Hashable {
     let id = UUID()
     let headline: String
     let summary: String?
@@ -87,6 +96,15 @@ struct NewsArticle: Identifiable {
             formatter.dateFormat = "MMM d, yyyy"
             return formatter.string(from: publishedAt)
         }
+    }
+    
+    // Hashable conformance based on id
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    static func == (lhs: NewsArticle, rhs: NewsArticle) -> Bool {
+        lhs.id == rhs.id
     }
 }
 

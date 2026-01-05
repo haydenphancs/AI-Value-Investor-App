@@ -22,7 +22,7 @@ struct ChatMessagesList: View {
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.md)
             }
-            .onChange(of: messages.count) { _ in
+            .onChange(of: messages.count) { oldValue, newValue in
                 // Scroll to bottom when new message is added
                 if let lastMessage = messages.last {
                     withAnimation {

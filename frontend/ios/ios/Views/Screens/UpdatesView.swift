@@ -14,76 +14,78 @@ struct UpdatesView: View {
     @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
 
-            // Main Content
-            VStack(spacing: 0) {
-                // Header
-                UpdatesHeader(
-                    onProfileTapped: handleProfileTapped
-                )
-
-                // Tab Bar with tickers
-                UpdatesTabBar(
-                    tabs: viewModel.filterTabs,
-                    selectedTab: $viewModel.selectedTab,
-                    onManageAssets: handleManageAssets
-                )
-
-                // Static "Live News" Header (non-scrolling, stays at top)
-                LiveNewsHeader(onFilterTapped: handleFilterTapped)
-
-                // Scrollable Content with sticky section headers
-                ScrollView(showsIndicators: false) {
-                    // Insights Summary Card (scrollable)
-                    if let summary = viewModel.insightSummary {
-                        InsightsSummaryCard(summary: summary)
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.sm)
-                    }
-
-                    LiveNewsTimeline(
-                        groupedNews: viewModel.groupedNews,
-                        onArticleTapped: handleArticleTapped
+                // Main Content
+                VStack(spacing: 0) {
+                    // Header
+                    UpdatesHeader(
+                        onProfileTapped: handleProfileTapped
                     )
 
-                    // Bottom spacing for tab bar
-                    Spacer()
-                        .frame(height: 100)
-                }
-                .refreshable {
-                    await viewModel.refresh()
+                    // Tab Bar with tickers
+                    UpdatesTabBar(
+                        tabs: viewModel.filterTabs,
+                        selectedTab: $viewModel.selectedTab,
+                        onManageAssets: handleManageAssets
+                    )
+
+                    // Static "Live News" Header (non-scrolling, stays at top)
+                    LiveNewsHeader(onFilterTapped: handleFilterTapped)
+
+                    // Scrollable Content with sticky section headers
+                    ScrollView(showsIndicators: false) {
+                        // Insights Summary Card (scrollable)
+                        if let summary = viewModel.insightSummary {
+                            InsightsSummaryCard(summary: summary)
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.sm)
+                        }
+
+                        LiveNewsTimeline(
+                            groupedNews: viewModel.groupedNews,
+                            onArticleTapped: handleArticleTapped
+                        )
+
+                        // Bottom spacing for tab bar
+                        Spacer()
+                            .frame(height: 100)
+                    }
+                    .refreshable {
+                        await viewModel.refresh()
+                    }
+
+                    // Tab Bar
+                    CustomTabBar(selectedTab: $selectedTab)
                 }
 
-                // Tab Bar
-                CustomTabBar(selectedTab: $selectedTab)
-            }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
-        }
-        .sheet(isPresented: $viewModel.showFilterSheet) {
-            NewsFilterSheet(
-                filterOptions: $viewModel.filterOptions,
-                onApply: {
-                    viewModel.showFilterSheet = false
+                // Loading overlay
+                if viewModel.isLoading {
+                    LoadingOverlay()
                 }
-            )
-        }
-        .sheet(isPresented: $showManageAssetsSheet) {
-            ManageAssetsSheet(
-                tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
-                onDismiss: { showManageAssetsSheet = false }
-            )
-        }
-        .fullScreenCover(item: $selectedNewsArticle) { article in
-            NewsDetailView(article: article)
-                .preferredColorScheme(.dark)
+            }
+            .navigationBarHidden(true)
+            .navigationDestination(item: $selectedNewsArticle) { article in
+                NewsDetailView(article: article)
+            }
+            .sheet(isPresented: $viewModel.showFilterSheet) {
+                NewsFilterSheet(
+                    filterOptions: $viewModel.filterOptions,
+                    onApply: {
+                        viewModel.showFilterSheet = false
+                    }
+                )
+            }
+            .sheet(isPresented: $showManageAssetsSheet) {
+                ManageAssetsSheet(
+                    tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
+                    onDismiss: { showManageAssetsSheet = false }
+                )
+            }
         }
     }
 

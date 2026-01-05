@@ -38,7 +38,7 @@ struct ContentView: View {
 struct HomeViewWithBinding: View {
     @StateObject private var viewModel = HomeViewModel()
     @Binding var selectedTab: HomeTab
-    @State private var searchText = ""
+    @State private var showSearch = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -47,9 +47,10 @@ struct HomeViewWithBinding: View {
 
             VStack(spacing: 0) {
                 HomeHeader(
-                    searchText: $searchText,
                     onProfileTapped: {},
-                    onSearchSubmit: {}
+                    onSearchTapped: {
+                        showSearch = true
+                    }
                 )
 
                 ScrollView(showsIndicators: false) {
@@ -94,6 +95,9 @@ struct HomeViewWithBinding: View {
             if viewModel.isLoading {
                 LoadingOverlay()
             }
+        }
+        .sheet(isPresented: $showSearch) {
+            SearchView()
         }
     }
 }

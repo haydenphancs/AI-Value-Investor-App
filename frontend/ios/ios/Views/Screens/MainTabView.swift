@@ -41,7 +41,7 @@ struct MainTabView: View {
                 }
                 .tag(HomeTab.home)
 
-            PlaceholderView(title: "Updates")
+            UpdatesViewForTabView(selectedTab: $selectedTab)
                 .tabItem {
                     Image(systemName: "chart.bar.doc.horizontal")
                     Text("Updates")
@@ -70,6 +70,80 @@ struct MainTabView: View {
                 .tag(HomeTab.wiser)
         }
         .tint(AppColors.tabBarSelected)
+    }
+}
+
+// MARK: - UpdatesView wrapper for TabView (hides custom tab bar)
+struct UpdatesViewForTabView: View {
+    @StateObject private var viewModel = UpdatesViewModel()
+    @Binding var selectedTab: HomeTab
+    @State private var showManageAssetsSheet = false
+    @State private var selectedArticle: NewsArticle?
+    @State private var showNewsDetail = false
+
+    var body: some View {
+        ZStack {
+            AppColors.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                UpdatesHeader(
+                    onProfileTapped: {}
+                )
+
+                UpdatesTabBar(
+                    tabs: viewModel.filterTabs,
+                    selectedTab: $viewModel.selectedTab,
+                    onManageAssets: { showManageAssetsSheet = true }
+                )
+
+                LiveNewsHeader(onFilterTapped: { viewModel.openFilterOptions() })
+
+                ScrollView(showsIndicators: false) {
+                    if let summary = viewModel.insightSummary {
+                        InsightsSummaryCard(summary: summary)
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.vertical, AppSpacing.sm)
+                    }
+
+                    LiveNewsTimeline(
+                        groupedNews: viewModel.groupedNews,
+                        onArticleTapped: { article in
+                            selectedArticle = article
+                            showNewsDetail = true
+                        }
+                    )
+
+                    Spacer()
+                        .frame(height: 100)
+                }
+                .refreshable {
+                    await viewModel.refresh()
+                }
+            }
+
+            if viewModel.isLoading {
+                LoadingOverlay()
+            }
+        }
+        .sheet(isPresented: $viewModel.showFilterSheet) {
+            NewsFilterSheet(
+                filterOptions: $viewModel.filterOptions,
+                onApply: { viewModel.showFilterSheet = false }
+            )
+        }
+        .sheet(isPresented: $showManageAssetsSheet) {
+            ManageAssetsSheet(
+                tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
+                onDismiss: { showManageAssetsSheet = false }
+            )
+        }
+        .fullScreenCover(isPresented: $showNewsDetail) {
+            if let article = selectedArticle {
+                NewsDetailView(article: article)
+                    .preferredColorScheme(.dark)
+            }
+        }
     }
 }
 

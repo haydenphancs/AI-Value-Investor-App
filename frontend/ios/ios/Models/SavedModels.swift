@@ -52,14 +52,14 @@ enum SavedFilterType: String, CaseIterable {
     case all = "All"
     case books = "Books"
     case concepts = "Concepts"
-    case reports = "Reports"
+    case chats = "Chats"
 
     var associatedItemType: SavedItemType? {
         switch self {
         case .all: return nil
         case .books: return .book
         case .concepts: return .concept
-        case .reports: return .report
+        case .chats: return .chat
         }
     }
 }

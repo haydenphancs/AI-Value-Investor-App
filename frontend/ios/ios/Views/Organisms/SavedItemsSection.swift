@@ -22,8 +22,8 @@ struct SavedItemsSection: View {
             return items.filter { $0.type == .book }
         case .concepts:
             return items.filter { $0.type == .concept }
-        case .reports:
-            return items.filter { $0.type == .report }
+        case .chats:
+            return items.filter { $0.type == .chat }
         }
     }
 

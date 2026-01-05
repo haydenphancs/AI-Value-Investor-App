@@ -10,8 +10,7 @@ import SwiftUI
 struct SearchView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = SearchViewModel()
-    @State private var selectedArticle: NewsArticle?
-    @State private var showNewsDetail = false
+    @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
         ZStack {
@@ -81,11 +80,9 @@ struct SearchView: View {
                     }
                 }
         )
-        .fullScreenCover(isPresented: $showNewsDetail) {
-            if let article = selectedArticle {
-                NewsDetailView(article: article)
-                    .preferredColorScheme(.dark)
-            }
+        .fullScreenCover(item: $selectedNewsArticle) { article in
+            NewsDetailView(article: article)
+                .preferredColorScheme(.dark)
         }
     }
 
@@ -116,7 +113,7 @@ struct SearchView: View {
 
     private func handleNewsItemTapped(_ item: SearchNewsItem) {
         // Convert SearchNewsItem to NewsArticle and show detail
-        let article = NewsArticle(
+        selectedNewsArticle = NewsArticle(
             headline: item.headline,
             summary: item.summary,
             source: NewsSource(name: item.source, iconName: nil),
@@ -125,8 +122,6 @@ struct SearchView: View {
             thumbnailName: item.imageName,
             relatedTickers: []
         )
-        selectedArticle = article
-        showNewsDetail = true
     }
 
     private func handleNewsReadMore(_ item: SearchNewsItem) {
@@ -145,8 +140,7 @@ struct SearchView: View {
 // MARK: - SearchContentView (For use in NavigationStack)
 struct SearchContentView: View {
     @StateObject private var viewModel = SearchViewModel()
-    @State private var selectedArticle: NewsArticle?
-    @State private var showNewsDetail = false
+    @State private var selectedNewsArticle: NewsArticle?
     var onDismiss: (() -> Void)?
 
     var body: some View {
@@ -181,7 +175,7 @@ struct SearchContentView: View {
                         SearchLatestNewsSection(
                             items: viewModel.latestNews,
                             onItemTapped: { item in
-                                let article = NewsArticle(
+                                selectedNewsArticle = NewsArticle(
                                     headline: item.headline,
                                     summary: item.summary,
                                     source: NewsSource(name: item.source, iconName: nil),
@@ -190,11 +184,9 @@ struct SearchContentView: View {
                                     thumbnailName: item.imageName,
                                     relatedTickers: []
                                 )
-                                selectedArticle = article
-                                showNewsDetail = true
                             },
                             onReadMore: { item in
-                                let article = NewsArticle(
+                                selectedNewsArticle = NewsArticle(
                                     headline: item.headline,
                                     summary: item.summary,
                                     source: NewsSource(name: item.source, iconName: nil),
@@ -203,8 +195,6 @@ struct SearchContentView: View {
                                     thumbnailName: item.imageName,
                                     relatedTickers: []
                                 )
-                                selectedArticle = article
-                                showNewsDetail = true
                             }
                         )
 
@@ -239,11 +229,9 @@ struct SearchContentView: View {
                     }
                 }
         )
-        .fullScreenCover(isPresented: $showNewsDetail) {
-            if let article = selectedArticle {
-                NewsDetailView(article: article)
-                    .preferredColorScheme(.dark)
-            }
+        .fullScreenCover(item: $selectedNewsArticle) { article in
+            NewsDetailView(article: article)
+                .preferredColorScheme(.dark)
         }
     }
 }

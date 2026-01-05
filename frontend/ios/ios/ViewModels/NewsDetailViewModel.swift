@@ -32,19 +32,16 @@ class NewsDetailViewModel: ObservableObject {
         // In production, this would fetch from an API
         let mockTakeaways = generateMockTakeaways(for: article)
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            
-            self.articleDetail = NewsArticleDetail(
-                from: self.article,
-                keyTakeaways: mockTakeaways,
-                heroImageName: self.article.thumbnailName ?? "news_hero_placeholder",
-                readTimeMinutes: 4,
-                articleURL: URL(string: "https://example.com/article")
-            )
-            
-            self.isLoading = false
-        }
+        // Create article detail immediately (we're already on MainActor)
+        self.articleDetail = NewsArticleDetail(
+            from: self.article,
+            keyTakeaways: mockTakeaways,
+            heroImageName: self.article.thumbnailName ?? "news_hero_placeholder",
+            readTimeMinutes: 4,
+            articleURL: URL(string: "https://example.com/article")
+        )
+
+        self.isLoading = false
     }
 
     func refresh() async {

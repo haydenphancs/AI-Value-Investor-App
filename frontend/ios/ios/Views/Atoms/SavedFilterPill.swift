@@ -35,7 +35,7 @@ struct SavedFilterPill: View {
         SavedFilterPill(filter: .all, isSelected: true)
         SavedFilterPill(filter: .books, isSelected: false)
         SavedFilterPill(filter: .concepts, isSelected: false)
-        SavedFilterPill(filter: .reports, isSelected: false)
+        SavedFilterPill(filter: .chats, isSelected: false)
     }
     .padding()
     .background(AppColors.background)

@@ -11,6 +11,8 @@ import SwiftUI
 struct HomeContentView: View {
     @StateObject private var viewModel = HomeViewModel()
     @State private var showingSearch = false
+    @State private var selectedArticle: NewsArticle?
+    @State private var showNewsDetail = false
 
     var body: some View {
         NavigationStack {
@@ -77,6 +79,12 @@ struct HomeContentView: View {
             .fullScreenCover(isPresented: $showingSearch) {
                 SearchView()
             }
+            .fullScreenCover(isPresented: $showNewsDetail) {
+                if let article = selectedArticle {
+                    NewsDetailView(article: article)
+                        .preferredColorScheme(.dark)
+                }
+            }
         }
     }
 
@@ -94,7 +102,18 @@ struct HomeContentView: View {
     }
 
     private func handleBriefingItemTapped(_ item: DailyBriefingItem) {
-        print("Briefing item tapped: \(item.title)")
+        // Convert DailyBriefingItem to NewsArticle and show detail
+        let article = NewsArticle(
+            headline: item.title,
+            summary: item.subtitle,
+            source: NewsSource(name: "Market Alert", iconName: nil),
+            sentiment: .neutral,
+            publishedAt: item.date ?? Date(),
+            thumbnailName: nil,
+            relatedTickers: []
+        )
+        selectedArticle = article
+        showNewsDetail = true
     }
 
     private func handleSeeAllResearch() {

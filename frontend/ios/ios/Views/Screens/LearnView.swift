@@ -133,25 +133,7 @@ struct LearnContentView: View {
 
     // MARK: - Saved Tab Content
     private var savedTabContent: some View {
-        VStack {
-            Spacer()
-            VStack(spacing: AppSpacing.lg) {
-                Image(systemName: "bookmark.fill")
-                    .font(.system(size: 48))
-                    .foregroundColor(AppColors.textMuted)
-
-                Text("No Saved Content")
-                    .font(AppTypography.headline)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text("Bookmark concepts and books to find them here")
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding()
-            Spacer()
-        }
+        SavedTabView()
     }
 
     // MARK: - Action Handlers

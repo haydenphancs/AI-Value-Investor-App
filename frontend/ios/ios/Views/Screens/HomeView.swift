@@ -10,67 +10,72 @@ import SwiftUI
 // MARK: - HomeContentView (Used in TabView)
 struct HomeContentView: View {
     @StateObject private var viewModel = HomeViewModel()
-    @State private var searchText = ""
+    @State private var showingSearch = false
 
     var body: some View {
-        ZStack {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
+        NavigationStack {
+            ZStack {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
 
-            // Main Content
-            VStack(spacing: 0) {
-                // Header
-                HomeHeader(
-                    searchText: $searchText,
-                    onProfileTapped: handleProfileTapped,
-                    onSearchSubmit: handleSearchSubmit
-                )
+                // Main Content
+                VStack(spacing: 0) {
+                    // Header
+                    HomeHeader(
+                        onProfileTapped: handleProfileTapped,
+                        onSearchTapped: handleSearchTapped
+                    )
 
-                // Scrollable Content with proper bounce behavior
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xl) {
-                        // Market Tickers Row
-                        MarketTickersRow(tickers: viewModel.marketTickers)
-                            .padding(.top, AppSpacing.sm)
+                    // Scrollable Content with proper bounce behavior
+                    ScrollView(showsIndicators: false) {
+                        LazyVStack(spacing: AppSpacing.xl) {
+                            // Market Tickers Row
+                            MarketTickersRow(tickers: viewModel.marketTickers)
+                                .padding(.top, AppSpacing.sm)
 
-                        // Market Insights Card
-                        if let insight = viewModel.marketInsight {
-                            MarketInsightsCard(insight: insight) {
-                                handleSeeAllInsights()
+                            // Market Insights Card
+                            if let insight = viewModel.marketInsight {
+                                MarketInsightsCard(insight: insight) {
+                                    handleSeeAllInsights()
+                                }
+                                .padding(.horizontal, AppSpacing.lg)
                             }
-                            .padding(.horizontal, AppSpacing.lg)
+
+                            // Daily Briefing Section
+                            DailyBriefingSection(
+                                items: viewModel.dailyBriefings,
+                                onItemTapped: handleBriefingItemTapped
+                            )
+
+                            // Recent Research Section
+                            RecentResearchSection(
+                                reports: viewModel.recentResearch,
+                                onSeeAllTapped: handleSeeAllResearch,
+                                onReportTapped: handleReportTapped,
+                                onAskOrReadTapped: handleAskOrRead
+                            )
+
+                            // New Analysis Button
+                            NewAnalysisButton {
+                                handleNewAnalysis()
+                            }
+                            .padding(.bottom, AppSpacing.lg)
                         }
-
-                        // Daily Briefing Section
-                        DailyBriefingSection(
-                            items: viewModel.dailyBriefings,
-                            onItemTapped: handleBriefingItemTapped
-                        )
-
-                        // Recent Research Section
-                        RecentResearchSection(
-                            reports: viewModel.recentResearch,
-                            onSeeAllTapped: handleSeeAllResearch,
-                            onReportTapped: handleReportTapped,
-                            onAskOrReadTapped: handleAskOrRead
-                        )
-
-                        // New Analysis Button
-                        NewAnalysisButton {
-                            handleNewAnalysis()
-                        }
-                        .padding(.bottom, AppSpacing.lg)
+                    }
+                    .refreshable {
+                        await viewModel.refresh()
                     }
                 }
-                .refreshable {
-                    await viewModel.refresh()
+
+                // Loading overlay
+                if viewModel.isLoading {
+                    LoadingOverlay()
                 }
             }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
+            .navigationBarHidden(true)
+            .fullScreenCover(isPresented: $showingSearch) {
+                SearchView()
             }
         }
     }
@@ -80,8 +85,8 @@ struct HomeContentView: View {
         print("Profile tapped")
     }
 
-    private func handleSearchSubmit() {
-        print("Search submitted: \(searchText)")
+    private func handleSearchTapped() {
+        showingSearch = true
     }
 
     private func handleSeeAllInsights() {

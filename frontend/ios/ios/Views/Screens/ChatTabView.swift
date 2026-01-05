@@ -41,6 +41,15 @@ struct ChatTabView: View {
                 onImageTap: handleImageTap
             )
         }
+        .sheet(isPresented: $showingHistory) {
+            ChatHistorySheet(onDismiss: {
+                showingHistory = false
+            }, onItemTap: { item in
+                showingHistory = false
+                // Could load the selected conversation here
+                print("Selected conversation: \(item.title)")
+            })
+        }
     }
 
     // MARK: - Action Handlers
@@ -104,6 +113,38 @@ struct ChatTabView: View {
             content: [.text(responseText)],
             timestamp: Date()
         )
+    }
+}
+
+// MARK: - Chat History Sheet
+struct ChatHistorySheet: View {
+    var onDismiss: (() -> Void)?
+    var onItemTap: ((ChatHistoryItem) -> Void)?
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
+
+                ChatHistoryView(
+                    onItemTap: { item in
+                        onItemTap?(item)
+                    },
+                    onDismiss: onDismiss
+                )
+            }
+            .navigationTitle("Chat History")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        onDismiss?()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.large])
     }
 }
 

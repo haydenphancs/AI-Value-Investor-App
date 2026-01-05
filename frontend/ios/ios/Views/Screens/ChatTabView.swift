@@ -17,45 +17,45 @@ struct ChatTabView: View {
 
     var onHistoryTap: (() -> Void)?
 
-    private let panelWidth: CGFloat = UIScreen.main.bounds.width * 0.75
-
     var body: some View {
-        ZStack {
-            // Chat content (slides right when history is shown)
-            chatContent
-                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.75 : 0)
+        GeometryReader { geometry in
+            ZStack {
+                // Chat content (slides right when history is shown)
+                chatContent
+                    .offset(x: showingHistory ? geometry.size.width * 0.85 : 0)
 
-            // History panel (slides in from left)
-            if showingHistory {
-                historyPanel
-                    .offset(x: dragOffset)
-                    .transition(.move(edge: .leading))
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                // Only allow dragging left (negative)
-                                if value.translation.width < 0 {
-                                    dragOffset = value.translation.width
-                                }
-                            }
-                            .onEnded { value in
-                                // If dragged more than 100 points left, close the panel
-                                if value.translation.width < -100 {
-                                    withAnimation(.easeInOut(duration: 0.25)) {
-                                        showingHistory = false
-                                        dragOffset = 0
-                                    }
-                                } else {
-                                    // Snap back
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        dragOffset = 0
+                // History panel (slides in from left)
+                if showingHistory {
+                    historyPanel(width: geometry.size.width)
+                        .offset(x: dragOffset)
+                        .transition(.move(edge: .leading))
+                        .gesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    // Only allow dragging left (negative)
+                                    if value.translation.width < 0 {
+                                        dragOffset = value.translation.width
                                     }
                                 }
-                            }
-                    )
+                                .onEnded { value in
+                                    // If dragged more than 100 points left, close the panel
+                                    if value.translation.width < -100 {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            showingHistory = false
+                                            dragOffset = 0
+                                        }
+                                    } else {
+                                        // Snap back
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            dragOffset = 0
+                                        }
+                                    }
+                                }
+                        )
+                }
             }
+            .animation(.easeInOut(duration: 0.15), value: showingHistory)
         }
-        .animation(.easeInOut(duration: 0.15), value: showingHistory)
     }
 
     // MARK: - Chat Content
@@ -93,7 +93,7 @@ struct ChatTabView: View {
     }
 
     // MARK: - History Panel
-    private var historyPanel: some View {
+    private func historyPanel(width: CGFloat) -> some View {
         HStack(spacing: 0) {
             // History content
             VStack(spacing: 0) {
@@ -128,7 +128,7 @@ struct ChatTabView: View {
                     }
                 )
             }
-            .frame(width: UIScreen.main.bounds.width * 0.75)
+            .frame(width: width * 0.85)
             .background(AppColors.background)
 
             Spacer()

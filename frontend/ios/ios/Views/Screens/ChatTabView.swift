@@ -17,11 +17,33 @@ struct ChatTabView: View {
     var onHistoryTap: (() -> Void)?
 
     var body: some View {
+        ZStack {
+            // Chat content (slides right when history is shown)
+            chatContent
+                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.75 : 0)
+
+            // History panel (slides in from left)
+            if showingHistory {
+                historyPanel
+                    .transition(.move(edge: .leading))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: showingHistory)
+    }
+
+    // MARK: - Chat Content
+    private var chatContent: some View {
         VStack(spacing: 0) {
             // History button header
-            ChatHistoryHeader(onHistoryTap: {
-                handleHistoryTap()
-            })
+            ChatHistoryHeader(
+                showingHistory: showingHistory,
+                onHistoryTap: {
+                    handleHistoryTap()
+                },
+                onChevronTap: {
+                    handleHistoryTap()
+                }
+            )
 
             // Main content area (empty state for now)
             Spacer()
@@ -41,20 +63,54 @@ struct ChatTabView: View {
                 onImageTap: handleImageTap
             )
         }
-        .sheet(isPresented: $showingHistory) {
-            ChatHistorySheet(onDismiss: {
-                showingHistory = false
-            }, onItemTap: { item in
-                showingHistory = false
-                // Could load the selected conversation here
-                print("Selected conversation: \(item.title)")
-            })
+    }
+
+    // MARK: - History Panel
+    private var historyPanel: some View {
+        HStack(spacing: 0) {
+            // History content
+            VStack(spacing: 0) {
+                // Header with chevron to close
+                HStack {
+                    Text("History")
+                        .font(AppTypography.headline)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    Spacer()
+
+                    Button {
+                        handleHistoryTap()
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+
+                // History list
+                ChatHistoryView(
+                    onItemTap: { item in
+                        showingHistory = false
+                        print("Selected conversation: \(item.title)")
+                    },
+                    onDismiss: {
+                        showingHistory = false
+                    }
+                )
+            }
+            .frame(width: UIScreen.main.bounds.width * 0.75)
+            .background(AppColors.background)
+
+            Spacer()
         }
     }
 
     // MARK: - Action Handlers
     private func handleHistoryTap() {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(.easeInOut(duration: 0.25)) {
             showingHistory.toggle()
         }
         onHistoryTap?()
@@ -104,7 +160,7 @@ struct ChatTabView: View {
     private func handleImageTap() {
         print("Image input tapped")
     }
-    
+
     // MARK: - Helper Methods
     private func generateMockResponse(for query: String) -> RichChatMessage {
         let responseText = "This is a mock response to: \"\(query)\". In a real implementation, this would connect to your AI service."
@@ -113,38 +169,6 @@ struct ChatTabView: View {
             content: [.text(responseText)],
             timestamp: Date()
         )
-    }
-}
-
-// MARK: - Chat History Sheet
-struct ChatHistorySheet: View {
-    var onDismiss: (() -> Void)?
-    var onItemTap: ((ChatHistoryItem) -> Void)?
-
-    var body: some View {
-        NavigationView {
-            ZStack {
-                AppColors.background
-                    .ignoresSafeArea()
-
-                ChatHistoryView(
-                    onItemTap: { item in
-                        onItemTap?(item)
-                    },
-                    onDismiss: onDismiss
-                )
-            }
-            .navigationTitle("Chat History")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        onDismiss?()
-                    }
-                }
-            }
-        }
-        .presentationDetents([.large])
     }
 }
 

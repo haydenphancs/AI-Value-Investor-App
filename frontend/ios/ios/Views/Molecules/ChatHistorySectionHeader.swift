@@ -23,11 +23,11 @@ struct ChatHistorySectionHeader: View {
 
                 Spacer()
 
-                if showChevron {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(AppColors.textMuted)
-                }
+//                if showChevron {
+//                    Image(systemName: "chevron.right")
+//                        .font(.system(size: 12, weight: .semibold))
+//                        .foregroundColor(AppColors.textMuted)
+//                }
             }
         }
         .buttonStyle(PlainButtonStyle())
@@ -45,4 +45,5 @@ struct ChatHistorySectionHeader: View {
     .background(AppColors.background)
     .preferredColorScheme(.dark)
 }
+
 

@@ -22,7 +22,7 @@ struct SearchHeader: View {
                 Button(action: {
                     onBackTapped?()
                 }) {
-                    Image(systemName: "chevron.left")
+                    Image(systemName: "chevron.down")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 32, height: 32)

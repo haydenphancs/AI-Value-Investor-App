@@ -39,8 +39,7 @@ struct HomeViewWithBinding: View {
     @StateObject private var viewModel = HomeViewModel()
     @Binding var selectedTab: HomeTab
     @State private var showSearch = false
-    @State private var selectedArticle: NewsArticle?
-    @State private var showNewsDetail = false
+    @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -101,18 +100,16 @@ struct HomeViewWithBinding: View {
         .sheet(isPresented: $showSearch) {
             SearchView()
         }
-        .fullScreenCover(isPresented: $showNewsDetail) {
-            if let article = selectedArticle {
-                NewsDetailView(article: article)
-                    .preferredColorScheme(.dark)
-            }
+        .fullScreenCover(item: $selectedNewsArticle) { article in
+            NewsDetailView(article: article)
+                .preferredColorScheme(.dark)
         }
     }
-    
+
     // MARK: - Action Handlers
     private func handleBriefingItemTapped(_ item: DailyBriefingItem) {
         // Convert DailyBriefingItem to NewsArticle for navigation
-        let article = NewsArticle(
+        selectedNewsArticle = NewsArticle(
             headline: item.title,
             summary: item.subtitle,
             source: NewsSource(name: "Market Alert", iconName: nil),
@@ -121,8 +118,6 @@ struct HomeViewWithBinding: View {
             thumbnailName: nil,
             relatedTickers: []
         )
-        selectedArticle = article
-        showNewsDetail = true
     }
 }
 

@@ -64,16 +64,22 @@ struct NewsDetailView: View {
             }
 
             // Read Full Story Button (Fixed at bottom)
-            readFullStoryButton
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.bottom, AppSpacing.xxl)
+            if viewModel.articleDetail != nil {
+                readFullStoryButton
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.xxl)
+            }
 
             // Loading overlay
             if viewModel.isLoading {
                 LoadingOverlay()
             }
         }
+        .preferredColorScheme(.dark)
         .navigationBarHidden(true)
+        .task {
+            viewModel.loadArticleDetail()
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in

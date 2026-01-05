@@ -85,6 +85,7 @@ struct UpdatesView: View {
         .fullScreenCover(isPresented: $showNewsDetail) {
             if let article = selectedArticle {
                 NewsDetailView(article: article)
+                    .preferredColorScheme(.dark)
             }
         }
     }

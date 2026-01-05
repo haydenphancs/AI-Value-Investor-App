@@ -21,7 +21,7 @@ class NewsDetailViewModel: ObservableObject {
     // MARK: - Initialization
     init(article: NewsArticle) {
         self.article = article
-        loadArticleDetail()
+        // Don't load immediately in init
     }
 
     // MARK: - Public Methods
@@ -32,15 +32,19 @@ class NewsDetailViewModel: ObservableObject {
         // In production, this would fetch from an API
         let mockTakeaways = generateMockTakeaways(for: article)
 
-        articleDetail = NewsArticleDetail(
-            from: article,
-            keyTakeaways: mockTakeaways,
-            heroImageName: article.thumbnailName ?? "news_hero_placeholder",
-            readTimeMinutes: 4,
-            articleURL: URL(string: "https://example.com/article")
-        )
-
-        isLoading = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.articleDetail = NewsArticleDetail(
+                from: self.article,
+                keyTakeaways: mockTakeaways,
+                heroImageName: self.article.thumbnailName ?? "news_hero_placeholder",
+                readTimeMinutes: 4,
+                articleURL: URL(string: "https://example.com/article")
+            )
+            
+            self.isLoading = false
+        }
     }
 
     func refresh() async {

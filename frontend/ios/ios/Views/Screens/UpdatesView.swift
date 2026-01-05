@@ -32,18 +32,18 @@ struct UpdatesView: View {
                     onManageAssets: handleManageAssets
                 )
 
-                // Insights Summary Card (non-scrolling)
-                if let summary = viewModel.insightSummary {
-                    InsightsSummaryCard(summary: summary)
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.sm)
-                }
-
-                // Static "Live News" Header (non-scrolling)
+                // Static "Live News" Header (non-scrolling, stays at top)
                 LiveNewsHeader(onFilterTapped: handleFilterTapped)
 
                 // Scrollable Content with sticky section headers
                 ScrollView(showsIndicators: false) {
+                    // Insights Summary Card (scrollable)
+                    if let summary = viewModel.insightSummary {
+                        InsightsSummaryCard(summary: summary)
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.vertical, AppSpacing.sm)
+                    }
+
                     LiveNewsTimeline(
                         groupedNews: viewModel.groupedNews,
                         onArticleTapped: handleArticleTapped

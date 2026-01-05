@@ -13,19 +13,46 @@ struct ChatTabView: View {
     @State private var conversationMessages: [RichChatMessage] = []
     @State private var showingHistory: Bool = false
     @State private var isInConversation: Bool = false
+    @State private var dragOffset: CGFloat = 0
 
     var onHistoryTap: (() -> Void)?
+
+    private let panelWidth: CGFloat = UIScreen.main.bounds.width * 0.75
 
     var body: some View {
         ZStack {
             // Chat content (slides right when history is shown)
             chatContent
-                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.85 : 0)
+                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.75 : 0)
 
             // History panel (slides in from left)
             if showingHistory {
                 historyPanel
+                    .offset(x: dragOffset)
                     .transition(.move(edge: .leading))
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                // Only allow dragging left (negative)
+                                if value.translation.width < 0 {
+                                    dragOffset = value.translation.width
+                                }
+                            }
+                            .onEnded { value in
+                                // If dragged more than 100 points left, close the panel
+                                if value.translation.width < -100 {
+                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                        showingHistory = false
+                                        dragOffset = 0
+                                    }
+                                } else {
+                                    // Snap back
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        dragOffset = 0
+                                    }
+                                }
+                            }
+                    )
             }
         }
         .animation(.easeInOut(duration: 0.15), value: showingHistory)
@@ -101,7 +128,7 @@ struct ChatTabView: View {
                     }
                 )
             }
-            .frame(width: UIScreen.main.bounds.width * 0.85)
+            .frame(width: UIScreen.main.bounds.width * 0.75)
             .background(AppColors.background)
 
             Spacer()

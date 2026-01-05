@@ -14,7 +14,7 @@ struct PersonaCard: View {
 
     // Fixed card dimensions for consistent sizing
     private let cardWidth: CGFloat = 100
-    private let cardHeight: CGFloat = 170
+    private let cardHeight: CGFloat = 150
 
     var body: some View {
         Button(action: {

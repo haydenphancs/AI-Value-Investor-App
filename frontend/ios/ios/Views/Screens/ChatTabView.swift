@@ -20,7 +20,7 @@ struct ChatTabView: View {
         ZStack {
             // Chat content (slides right when history is shown)
             chatContent
-                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.75 : 0)
+                .offset(x: showingHistory ? UIScreen.main.bounds.width * 0.85 : 0)
 
             // History panel (slides in from left)
             if showingHistory {
@@ -28,7 +28,7 @@ struct ChatTabView: View {
                     .transition(.move(edge: .leading))
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showingHistory)
+        .animation(.easeInOut(duration: 0.15), value: showingHistory)
     }
 
     // MARK: - Chat Content
@@ -101,7 +101,7 @@ struct ChatTabView: View {
                     }
                 )
             }
-            .frame(width: UIScreen.main.bounds.width * 0.75)
+            .frame(width: UIScreen.main.bounds.width * 0.85)
             .background(AppColors.background)
 
             Spacer()
@@ -110,7 +110,7 @@ struct ChatTabView: View {
 
     // MARK: - Action Handlers
     private func handleHistoryTap() {
-        withAnimation(.easeInOut(duration: 0.25)) {
+        withAnimation(.easeInOut(duration: 0.15)) {
             showingHistory.toggle()
         }
         onHistoryTap?()

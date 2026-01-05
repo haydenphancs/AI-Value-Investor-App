@@ -11,6 +11,8 @@ struct UpdatesView: View {
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
     @State private var showManageAssetsSheet = false
+    @State private var selectedArticle: NewsArticle?
+    @State private var showNewsDetail = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -80,6 +82,11 @@ struct UpdatesView: View {
                 onDismiss: { showManageAssetsSheet = false }
             )
         }
+        .fullScreenCover(isPresented: $showNewsDetail) {
+            if let article = selectedArticle {
+                NewsDetailView(article: article)
+            }
+        }
     }
 
     // MARK: - Action Handlers
@@ -100,7 +107,8 @@ struct UpdatesView: View {
     }
 
     private func handleArticleTapped(_ article: NewsArticle) {
-        print("Article tapped: \(article.headline)")
+        selectedArticle = article
+        showNewsDetail = true
     }
 }
 

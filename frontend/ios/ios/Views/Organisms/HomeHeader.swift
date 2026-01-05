@@ -8,17 +8,19 @@
 import SwiftUI
 
 struct HomeHeader: View {
-    @Binding var searchText: String
     var onProfileTapped: (() -> Void)?
-    var onSearchSubmit: (() -> Void)?
+    var onSearchTapped: (() -> Void)?
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
             // Logo placeholder
             LogoView()
 
-            // Search Bar
-            SearchBar(text: $searchText, onSubmit: onSearchSubmit)
+            // Tappable Search Bar - navigates to SearchView
+            TappableSearchBar(
+                placeholder: "Search ticker or ask AI...",
+                onTap: onSearchTapped
+            )
 
             // Profile Button
             Button(action: {
@@ -51,8 +53,9 @@ struct LogoView: View {
 
 #Preview {
     VStack {
-        HomeHeader(searchText: .constant(""))
+        HomeHeader()
         Spacer()
     }
     .background(AppColors.background)
+    .preferredColorScheme(.dark)
 }

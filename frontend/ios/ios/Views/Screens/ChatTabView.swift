@@ -19,9 +19,9 @@ struct ChatTabView: View {
     var body: some View {
         VStack(spacing: 0) {
             // History button header
-            ChatHistoryHeader {
+            ChatHistoryHeader(onHistoryTap: {
                 handleHistoryTap()
-            }
+            })
 
             // Main content area (empty state for now)
             Spacer()

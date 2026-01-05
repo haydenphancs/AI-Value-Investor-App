@@ -24,10 +24,10 @@ struct ChatInputSection: View {
             )
 
             // Voice and Image options
-            ChatInputOptions(
-                onVoiceTap: onVoiceTap,
-                onImageTap: onImageTap
-            )
+//            ChatInputOptions(
+//                onVoiceTap: onVoiceTap,
+//                onImageTap: onImageTap
+//            )
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.bottom, AppSpacing.md)

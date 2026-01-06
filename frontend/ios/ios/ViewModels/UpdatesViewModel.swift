@@ -52,7 +52,6 @@ class UpdatesViewModel: ObservableObject {
     }
 
     func selectTab(_ tab: NewsFilterTab) {
-        guard selectedTab?.id != tab.id else { return }
         selectedTab = tab
         loadNewsForTab(tab)
     }
@@ -303,6 +302,8 @@ class UpdatesViewModel: ObservableObject {
         // Update AI Summary based on selected tab
         let summaryKey = tab.isMarketTab ? "Market" : (tab.ticker ?? "Market")
         insightSummary = stockSummaries[summaryKey]
+        
+        print("🔄 UpdatesViewModel: Loading content for tab '\(tab.title)' with ticker '\(tab.ticker ?? "nil")'")
 
         // Filter news articles based on selected tab
         if tab.isMarketTab {
@@ -320,6 +321,8 @@ class UpdatesViewModel: ObservableObject {
         } else {
             newsArticles = allNewsArticles
         }
+        
+        print("📰 Found \(newsArticles.count) articles for '\(tab.title)'")
 
         groupNewsArticles()
     }

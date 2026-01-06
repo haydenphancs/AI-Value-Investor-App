@@ -11,9 +11,10 @@ struct LiveNewsHeader: View {
     var onFilterTapped: (() -> Void)?
 
     var body: some View {
-        HStack {
+        HStack(alignment: .center) {
             HStack(spacing: AppSpacing.sm) {
                 LiveIndicator()
+                    .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
 
                 Text("Live News")
                     .font(AppTypography.title3)
@@ -34,8 +35,8 @@ struct LiveNewsHeader: View {
             }
             .buttonStyle(PlainButtonStyle())
         }
+        .frame(height: 44) // Fixed height to prevent layout shifts
         .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
         .background(AppColors.background)
     }
 }

@@ -72,6 +72,11 @@ struct UpdatesView: View {
             .navigationDestination(item: $selectedNewsArticle) { article in
                 NewsDetailView(article: article)
             }
+            .onChange(of: viewModel.selectedTab) { oldValue, newValue in
+                if let newTab = newValue {
+                    viewModel.selectTab(newTab)
+                }
+            }
             .sheet(isPresented: $viewModel.showFilterSheet) {
                 NewsFilterSheet(
                     filterOptions: $viewModel.filterOptions,

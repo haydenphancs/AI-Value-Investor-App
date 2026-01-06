@@ -22,6 +22,10 @@ class UpdatesViewModel: ObservableObject {
     @Published var error: String?
     @Published var showFilterSheet: Bool = false
 
+    // MARK: - Private Properties
+    private var allNewsArticles: [NewsArticle] = []
+    private var stockSummaries: [String: NewsInsightSummary] = [:]
+
     // MARK: - Initialization
     init() {
         loadMockData()
@@ -33,8 +37,9 @@ class UpdatesViewModel: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.loadFilterTabs()
-            self?.loadInsightSummary()
-            self?.loadNewsArticles()
+            self?.loadAllStockSummaries()
+            self?.loadAllNewsArticles()
+            self?.updateContentForSelectedTab()
             self?.isLoading = false
         }
     }
@@ -47,6 +52,7 @@ class UpdatesViewModel: ObservableObject {
     }
 
     func selectTab(_ tab: NewsFilterTab) {
+        guard selectedTab?.id != tab.id else { return }
         selectedTab = tab
         loadNewsForTab(tab)
     }
@@ -85,8 +91,9 @@ class UpdatesViewModel: ObservableObject {
         selectedTab = filterTabs.first
     }
 
-    private func loadInsightSummary() {
-        insightSummary = NewsInsightSummary(
+    private func loadAllStockSummaries() {
+        // Market Summary (default)
+        stockSummaries["Market"] = NewsInsightSummary(
             headline: "Tech Stocks Rally on Strong AI Earnings",
             bulletPoints: [
                 "Major technology companies posted impressive Q4 results driven by AI infrastructure investments.",
@@ -96,28 +103,58 @@ class UpdatesViewModel: ObservableObject {
             updatedAt: Date().addingTimeInterval(-3600),
             summaryType: "24h - AI Summary"
         )
+
+        // AAPL Summary
+        stockSummaries["AAPL"] = NewsInsightSummary(
+            headline: "Apple's AI Strategy Drives Strong Momentum",
+            bulletPoints: [
+                "Apple Intelligence features in iOS 18 are seeing strong adoption with 78% of new iPhone users enabling AI capabilities.",
+                "Services revenue hit $25B quarterly record, with App Store and Apple Music leading growth. Analysts raised price targets citing AI monetization potential."
+            ],
+            sentiment: .bullish,
+            updatedAt: Date().addingTimeInterval(-1800),
+            summaryType: "AAPL - AI Summary"
+        )
+
+        // TSLA Summary
+        stockSummaries["TSLA"] = NewsInsightSummary(
+            headline: "Tesla Delivery Numbers Beat Expectations",
+            bulletPoints: [
+                "Q4 deliveries reached 484,000 units, surpassing analyst estimates of 473,000. Model Y remains the best-selling EV globally.",
+                "FSD v12 rollout accelerating with 2M+ miles driven. Energy storage deployments grew 125% YoY, diversifying revenue streams."
+            ],
+            sentiment: .bullish,
+            updatedAt: Date().addingTimeInterval(-2700),
+            summaryType: "TSLA - AI Summary"
+        )
     }
 
-    private func loadNewsArticles() {
+    private func loadAllNewsArticles() {
         let calendar = Calendar.current
         let now = Date()
 
-        // Today's articles
+        // Today's timestamps
         let today1 = calendar.date(bySettingHour: 14, minute: 45, second: 0, of: now)!
         let today2 = calendar.date(bySettingHour: 14, minute: 1, second: 0, of: now)!
         let today3 = calendar.date(bySettingHour: 9, minute: 45, second: 0, of: now)!
+        let today4 = calendar.date(bySettingHour: 11, minute: 30, second: 0, of: now)!
+        let today5 = calendar.date(bySettingHour: 10, minute: 15, second: 0, of: now)!
 
-        // Yesterday's articles
+        // Yesterday's timestamps
         let yesterday = calendar.date(byAdding: .day, value: -1, to: now)!
         let yesterday1 = calendar.date(bySettingHour: 16, minute: 30, second: 0, of: yesterday)!
         let yesterday2 = calendar.date(bySettingHour: 11, minute: 15, second: 0, of: yesterday)!
+        let yesterday3 = calendar.date(bySettingHour: 14, minute: 20, second: 0, of: yesterday)!
+        let yesterday4 = calendar.date(bySettingHour: 9, minute: 45, second: 0, of: yesterday)!
 
         // Older articles (2 days ago)
         let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: now)!
         let older1 = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: twoDaysAgo)!
+        let older2 = calendar.date(bySettingHour: 15, minute: 30, second: 0, of: twoDaysAgo)!
+        let older3 = calendar.date(bySettingHour: 13, minute: 45, second: 0, of: twoDaysAgo)!
 
-        newsArticles = [
-            // Today
+        allNewsArticles = [
+            // ===== MARKET NEWS =====
             NewsArticle(
                 headline: "Oil prices stabilize as OPEC + members agreed to maintain current production levels.",
                 summary: nil,
@@ -137,6 +174,26 @@ class UpdatesViewModel: ObservableObject {
                 relatedTickers: ["NVDA"]
             ),
             NewsArticle(
+                headline: "Fed signals potential rate cuts in early 2025 amid cooling inflation data.",
+                summary: nil,
+                source: NewsSource(name: "WSJ", iconName: "icon_wsj"),
+                sentiment: .positive,
+                publishedAt: yesterday2,
+                thumbnailName: "news_fed",
+                relatedTickers: ["SPY", "QQQ"]
+            ),
+            NewsArticle(
+                headline: "Microsoft Azure revenue grows 29% YoY driven by AI workloads and enterprise adoption.",
+                summary: nil,
+                source: NewsSource(name: "MarketWatch", iconName: "icon_marketwatch"),
+                sentiment: .positive,
+                publishedAt: older1,
+                thumbnailName: "news_microsoft",
+                relatedTickers: ["MSFT"]
+            ),
+
+            // ===== APPLE (AAPL) NEWS =====
+            NewsArticle(
                 headline: "Apple Unveils Revolutionary AI Features in iOS 18 Beta and increase 20% profit for the next year.",
                 summary: nil,
                 source: NewsSource(name: "Zacks", iconName: "icon_zacks"),
@@ -145,7 +202,44 @@ class UpdatesViewModel: ObservableObject {
                 thumbnailName: "news_apple",
                 relatedTickers: ["AAPL"]
             ),
-            // Yesterday
+            NewsArticle(
+                headline: "Apple's Services Revenue Hits Record $25 Billion in Q4, App Store Growth Accelerates",
+                summary: nil,
+                source: NewsSource(name: "Bloomberg", iconName: "icon_bloomberg"),
+                sentiment: .positive,
+                publishedAt: today4,
+                thumbnailName: "news_apple",
+                relatedTickers: ["AAPL"]
+            ),
+            NewsArticle(
+                headline: "iPhone 16 Pro Max Demand Exceeds Supply, Apple Increases Production Orders by 10%",
+                summary: nil,
+                source: NewsSource(name: "CNBC", iconName: "icon_cnbc"),
+                sentiment: .positive,
+                publishedAt: yesterday3,
+                thumbnailName: "news_apple",
+                relatedTickers: ["AAPL"]
+            ),
+            NewsArticle(
+                headline: "Apple Intelligence Features See 78% Adoption Rate Among New iPhone Users",
+                summary: nil,
+                source: NewsSource(name: "Reuters", iconName: "icon_reuters"),
+                sentiment: .positive,
+                publishedAt: yesterday4,
+                thumbnailName: "news_apple",
+                relatedTickers: ["AAPL"]
+            ),
+            NewsArticle(
+                headline: "Apple Expands Partnership with TSMC for 2nm Chip Production in 2025",
+                summary: nil,
+                source: NewsSource(name: "WSJ", iconName: "icon_wsj"),
+                sentiment: .positive,
+                publishedAt: older2,
+                thumbnailName: "news_apple",
+                relatedTickers: ["AAPL", "TSM"]
+            ),
+
+            // ===== TESLA (TSLA) NEWS =====
             NewsArticle(
                 headline: "Tesla reports strong Q4 deliveries beating Wall Street estimates by 15%.",
                 summary: nil,
@@ -156,36 +250,78 @@ class UpdatesViewModel: ObservableObject {
                 relatedTickers: ["TSLA"]
             ),
             NewsArticle(
-                headline: "Fed signals potential rate cuts in early 2025 amid cooling inflation data.",
+                headline: "Tesla's Full Self-Driving V12 Reaches 2 Million Miles Driven Without Intervention",
                 summary: nil,
-                source: NewsSource(name: "WSJ", iconName: "icon_wsj"),
+                source: NewsSource(name: "CNBC", iconName: "icon_cnbc"),
                 sentiment: .positive,
-                publishedAt: yesterday2,
-                thumbnailName: "news_fed",
-                relatedTickers: ["SPY", "QQQ"]
+                publishedAt: today5,
+                thumbnailName: "news_tesla",
+                relatedTickers: ["TSLA"]
             ),
-            // Older
             NewsArticle(
-                headline: "Microsoft Azure revenue grows 29% YoY driven by AI workloads and enterprise adoption.",
+                headline: "Tesla Energy Storage Deployments Surge 125% YoY, Megapack Demand Exceeds Supply",
+                summary: nil,
+                source: NewsSource(name: "Reuters", iconName: "icon_reuters"),
+                sentiment: .positive,
+                publishedAt: yesterday4,
+                thumbnailName: "news_tesla",
+                relatedTickers: ["TSLA"]
+            ),
+            NewsArticle(
+                headline: "Tesla Cybertruck Production Ramps Up, Deliveries Begin in European Markets",
                 summary: nil,
                 source: NewsSource(name: "MarketWatch", iconName: "icon_marketwatch"),
                 sentiment: .positive,
+                publishedAt: older3,
+                thumbnailName: "news_tesla",
+                relatedTickers: ["TSLA"]
+            ),
+            NewsArticle(
+                headline: "Elon Musk Confirms Tesla Robotaxi Event Scheduled for Q2 2025",
+                summary: nil,
+                source: NewsSource(name: "Bloomberg", iconName: "icon_bloomberg"),
+                sentiment: .positive,
                 publishedAt: older1,
-                thumbnailName: "news_microsoft",
-                relatedTickers: ["MSFT"]
+                thumbnailName: "news_tesla",
+                relatedTickers: ["TSLA"]
             )
         ]
-
-        groupNewsArticles()
     }
 
     private func loadNewsForTab(_ tab: NewsFilterTab) {
-        // In a real app, this would fetch news filtered by the selected tab
-        // For now, we just reload the same data
         isLoading = true
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.updateContentForSelectedTab()
             self?.isLoading = false
         }
+    }
+
+    private func updateContentForSelectedTab() {
+        guard let tab = selectedTab else { return }
+
+        // Update AI Summary based on selected tab
+        let summaryKey = tab.isMarketTab ? "Market" : (tab.ticker ?? "Market")
+        insightSummary = stockSummaries[summaryKey]
+
+        // Filter news articles based on selected tab
+        if tab.isMarketTab {
+            // Market tab shows all general market news (excluding stock-specific)
+            newsArticles = allNewsArticles.filter { article in
+                // Show articles that are general market news
+                let generalMarketTickers = ["XOM", "CVX", "BP", "NVDA", "SPY", "QQQ", "MSFT"]
+                return article.relatedTickers.contains { generalMarketTickers.contains($0) }
+            }
+        } else if let ticker = tab.ticker {
+            // Stock-specific tab shows only news for that ticker
+            newsArticles = allNewsArticles.filter { article in
+                article.relatedTickers.contains(ticker)
+            }
+        } else {
+            newsArticles = allNewsArticles
+        }
+
+        groupNewsArticles()
     }
 
     private func groupNewsArticles() {

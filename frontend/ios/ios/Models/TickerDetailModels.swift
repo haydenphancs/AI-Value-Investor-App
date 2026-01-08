@@ -22,8 +22,10 @@ enum ChartTimeRange: String, CaseIterable {
     case oneDay = "1D"
     case oneWeek = "1W"
     case threeMonths = "3M"
+    case sixMonths = "6M"
     case oneYear = "1Y"
     case fiveYears = "5Y"
+    case all = "ALL"
 
     var displayName: String { rawValue }
 }

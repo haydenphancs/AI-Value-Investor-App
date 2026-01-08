@@ -19,7 +19,7 @@ struct TimeRangeButton: View {
             Text(range.displayName)
                 .font(AppTypography.footnoteBold)
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textMuted)
-                .padding(.horizontal, AppSpacing.md)
+                .padding(.horizontal, 10)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     isSelected

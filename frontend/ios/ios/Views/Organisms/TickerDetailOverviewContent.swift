@@ -16,7 +16,7 @@ struct TickerDetailOverviewContent: View {
     var body: some View {
         VStack(spacing: AppSpacing.xxl) {
             // Key Statistics
-            TickerDetailKeyStatsSection(statistics: tickerData.keyStatistics)
+            TickerDetailKeyStatsSection(statisticsGroups: tickerData.keyStatisticsGroups)
 
             // Performance
             TickerDetailPerformanceSection(periods: tickerData.performancePeriods)

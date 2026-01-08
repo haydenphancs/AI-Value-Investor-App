@@ -21,7 +21,7 @@ struct KeyStatisticItem: View {
             // Value
             Text(statistic.value)
                 .font(AppTypography.calloutBold)
-                .foregroundColor(statistic.isHighlighted ? AppColors.primaryBlue : AppColors.textPrimary)
+                .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -2,16 +2,13 @@
 //  TickerDetailKeyStatsSection.swift
 //  ios
 //
-//  Organism: Key Statistics section for Ticker Detail
+//  Organism: Key Statistics section with horizontally scrollable cards
 //
 
 import SwiftUI
 
 struct TickerDetailKeyStatsSection: View {
-    let statistics: [KeyStatistic]
-
-    // Grid columns - 4 columns layout
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: AppSpacing.md), count: 4)
+    let statisticsGroups: [KeyStatisticsGroup]
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -21,23 +18,22 @@ struct TickerDetailKeyStatsSection: View {
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 
-            // Statistics grid
-            LazyVGrid(columns: columns, spacing: AppSpacing.lg) {
-                ForEach(statistics) { statistic in
-                    KeyStatisticItem(statistic: statistic)
+            // Horizontal scrolling cards
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: AppSpacing.md) {
+                    ForEach(statisticsGroups) { group in
+                        KeyStatisticsCard(statistics: group.statistics)
+                    }
                 }
+                .padding(.horizontal, AppSpacing.lg)
             }
-            .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
-            .padding(.horizontal, AppSpacing.lg)
         }
     }
 }
 
 #Preview {
     ScrollView {
-        TickerDetailKeyStatsSection(statistics: KeyStatistic.sampleData)
+        TickerDetailKeyStatsSection(statisticsGroups: KeyStatisticsGroup.sampleData)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

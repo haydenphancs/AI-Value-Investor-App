@@ -11,19 +11,62 @@ struct LiveIndicator: View {
     @State private var isAnimating = false
 
     var body: some View {
-        Circle()
-            .fill(AppColors.bearish)
-            .frame(width: 8, height: 8)
-            .scaleEffect(isAnimating ? 1.2 : 1.0)
-            .opacity(isAnimating ? 0.7 : 1.0)
-            .animation(
-                Animation.easeInOut(duration: 1.0)
-                    .repeatForever(autoreverses: true),
-                value: isAnimating
-            )
-            .onAppear {
-                isAnimating = true
-            }
+//        Circle()
+//            .fill(AppColors.bearish)
+//            .frame(width: 8, height: 8)
+//            .scaleEffect(isAnimating ? 1.2 : 1.0)
+//            .opacity(isAnimating ? 0.7 : 1.0)
+//            .animation(
+//                Animation.easeInOut(duration: 1.0)
+//                    .repeatForever(autoreverses: true),
+//                value: isAnimating
+//            )
+//            .onAppear {
+//                isAnimating = true
+//            }
+        ZStack {
+
+                    // Outer pulsing ring (fixed position)
+
+                    Circle()
+
+                        .fill(AppColors.bearish.opacity(0.3))
+
+                        .frame(width: 12, height: 12)
+
+                        .scaleEffect(isAnimating ? 1.0 : 0.8)
+
+                        .opacity(isAnimating ? 0.0 : 0.5)
+
+         
+
+                    // Inner solid dot (never moves)
+
+                    Circle()
+
+                        .fill(AppColors.bearish)
+
+                        .frame(width: 8, height: 8)
+
+                }
+
+                .frame(width: 12, height: 12) // Fixed frame prevents layout shifts
+
+                .animation(
+
+                    Animation.easeInOut(duration: 1.0)
+
+                        .repeatForever(autoreverses: true),
+
+                    value: isAnimating
+
+                )
+
+                .onAppear {
+
+                    isAnimating = true
+
+                }
     }
 }
 

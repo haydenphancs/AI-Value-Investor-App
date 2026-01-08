@@ -97,7 +97,7 @@ struct TickerChartView: View {
             .padding(.horizontal, AppSpacing.lg)
 
             // Time range selector
-            HStack(spacing: AppSpacing.xs) {
+            HStack(spacing: 2) {
                 ForEach(ChartTimeRange.allCases, id: \.rawValue) { range in
                     TimeRangeButton(range: range, isSelected: selectedRange == range) {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -115,6 +115,8 @@ struct TickerChartView: View {
                     Image(systemName: "chart.xyaxis.line")
                         .font(.system(size: 16, weight: .regular))
                         .foregroundColor(AppColors.textMuted)
+                        .padding(.leading, 4)
+                        .padding(.trailing, 8)
                 }
                 .buttonStyle(PlainButtonStyle())
 

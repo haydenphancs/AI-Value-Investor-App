@@ -70,16 +70,6 @@ struct SnapshotCard: View {
                         }
                     }
 
-                    // Full report link
-                    if snapshot.fullReportAvailable {
-                        HStack {
-                            Spacer()
-                            Text("Full report")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-                        }
-                        .padding(.top, AppSpacing.xs)
-                    }
                 }
                 .padding(.bottom, AppSpacing.md)
             }

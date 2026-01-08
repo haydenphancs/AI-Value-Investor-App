@@ -17,7 +17,7 @@ struct TickerDetailView: View {
     let tickerSymbol: String
 
     // Threshold for when sticky header appears
-    private let stickyThreshold: CGFloat = 200
+    private let stickyThreshold: CGFloat = 120
 
     init(tickerSymbol: String) {
         self.tickerSymbol = tickerSymbol
@@ -41,21 +41,24 @@ struct TickerDetailView: View {
                     isFavorite: viewModel.isFavorite
                 )
 
-                // Sticky Header (appears when scrolling past threshold)
+                // Sticky Price Header + Tab Bar (appears when scrolling past threshold)
                 if showStickyHeader, let tickerData = viewModel.tickerData {
                     VStack(spacing: 0) {
-                        // Compact ticker info
-                        TickerStickyHeader(
+                        // Price Header
+                        TickerPriceHeader(
                             companyName: tickerData.companyName,
                             symbol: tickerData.symbol,
                             price: tickerData.formattedPrice,
                             priceChange: tickerData.formattedChange,
                             priceChangePercent: tickerData.formattedChangePercent,
-                            isPositive: tickerData.isPositive
+                            isPositive: tickerData.isPositive,
+                            marketStatus: tickerData.marketStatus
                         )
+                        .padding(.top, AppSpacing.sm)
 
                         // Tab Bar
                         TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
+                            .padding(.top, AppSpacing.sm)
 
                         // Divider
                         Rectangle()
@@ -110,10 +113,6 @@ struct TickerDetailView: View {
                             Rectangle()
                                 .fill(AppColors.cardBackgroundLight)
                                 .frame(height: 1)
-                        } else {
-                            // Spacer to account for sticky header
-                            Spacer()
-                                .frame(height: AppSpacing.lg)
                         }
 
                         // Tab Content

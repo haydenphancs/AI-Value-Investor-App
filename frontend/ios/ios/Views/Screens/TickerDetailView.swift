@@ -11,8 +11,13 @@ struct TickerDetailView: View {
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
+    @State private var scrollOffset: CGFloat = 0
+    @State private var showStickyHeader: Bool = false
 
     let tickerSymbol: String
+
+    // Threshold for when sticky header appears
+    private let stickyThreshold: CGFloat = 200
 
     init(tickerSymbol: String) {
         self.tickerSymbol = tickerSymbol
@@ -27,7 +32,7 @@ struct TickerDetailView: View {
 
             // Main Content
             VStack(spacing: 0) {
-                // Navigation Header
+                // Navigation Header (always visible)
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
@@ -36,10 +41,45 @@ struct TickerDetailView: View {
                     isFavorite: viewModel.isFavorite
                 )
 
-                // Scrollable Content with sticky header
+                // Sticky Header (appears when scrolling past threshold)
+                if showStickyHeader, let tickerData = viewModel.tickerData {
+                    VStack(spacing: 0) {
+                        // Compact ticker info
+                        TickerStickyHeader(
+                            companyName: tickerData.companyName,
+                            symbol: tickerData.symbol,
+                            price: tickerData.formattedPrice,
+                            priceChange: tickerData.formattedChange,
+                            priceChangePercent: tickerData.formattedChangePercent,
+                            isPositive: tickerData.isPositive
+                        )
+
+                        // Tab Bar
+                        TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
+
+                        // Divider
+                        Rectangle()
+                            .fill(AppColors.cardBackgroundLight)
+                            .frame(height: 1)
+                    }
+                    .background(AppColors.background)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                // Scrollable Content
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 0) {
-                        // Ticker Price Header
+                        // Scroll offset tracker
+                        GeometryReader { geometry in
+                            Color.clear
+                                .preference(
+                                    key: ScrollOffsetPreferenceKey.self,
+                                    value: geometry.frame(in: .named("scroll")).minY
+                                )
+                        }
+                        .frame(height: 0)
+
+                        // Ticker Price Header (scrolls away)
                         if let tickerData = viewModel.tickerData {
                             TickerPriceHeader(
                                 companyName: tickerData.companyName,
@@ -61,17 +101,29 @@ struct TickerDetailView: View {
                             .padding(.top, AppSpacing.lg)
                         }
 
-                        // Tab Bar
-                        TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
-                            .padding(.top, AppSpacing.lg)
+                        // Tab Bar (scrolls away, replaced by sticky version)
+                        if !showStickyHeader {
+                            TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
+                                .padding(.top, AppSpacing.lg)
 
-                        // Divider
-                        Rectangle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(height: 1)
+                            // Divider
+                            Rectangle()
+                                .fill(AppColors.cardBackgroundLight)
+                                .frame(height: 1)
+                        } else {
+                            // Spacer to account for sticky header
+                            Spacer()
+                                .frame(height: AppSpacing.lg)
+                        }
 
                         // Tab Content
                         tabContent
+                    }
+                }
+                .coordinateSpace(name: "scroll")
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showStickyHeader = value < -stickyThreshold
                     }
                 }
                 .refreshable {
@@ -205,6 +257,14 @@ struct TickerDetailView: View {
     private func handleCompare() {
         // TODO: Implement compare feature
         print("Compare \(tickerSymbol)")
+    }
+}
+
+// MARK: - Scroll Offset Preference Key
+struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 

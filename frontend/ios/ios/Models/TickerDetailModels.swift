@@ -65,6 +65,12 @@ struct KeyStatistic: Identifiable {
     }
 }
 
+// MARK: - Key Statistics Group (for card grouping)
+struct KeyStatisticsGroup: Identifiable {
+    let id = UUID()
+    let statistics: [KeyStatistic]
+}
+
 // MARK: - Performance Period
 struct PerformancePeriod: Identifiable {
     let id = UUID()
@@ -223,6 +229,7 @@ struct TickerDetailData: Identifiable {
     let marketStatus: MarketStatus
     let chartData: [Double]
     let keyStatistics: [KeyStatistic]
+    let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let snapshots: [SnapshotItem]
     let sectorIndustry: SectorIndustryInfo
@@ -276,6 +283,7 @@ extension TickerDetailData {
         ),
         chartData: [165, 168, 170, 172, 169, 174, 171, 175, 173, 178, 176, 180, 177, 182, 178],
         keyStatistics: KeyStatistic.sampleData,
+        keyStatisticsGroups: KeyStatisticsGroup.sampleData,
         performancePeriods: PerformancePeriod.sampleData,
         snapshots: SnapshotItem.sampleData,
         sectorIndustry: SectorIndustryInfo(
@@ -318,6 +326,43 @@ extension KeyStatistic {
         KeyStatistic(label: "Ex-Dividend Date", value: "11/10/2025"),
         KeyStatistic(label: "Next Earnings", value: "1/29"),
         KeyStatistic(label: "% Held Inst.", value: "64.28%")
+    ]
+}
+
+extension KeyStatisticsGroup {
+    static let sampleData: [KeyStatisticsGroup] = [
+        // Column 1: Price & Volume
+        KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "Open", value: "262.36"),
+            KeyStatistic(label: "Previous Close", value: "267.26"),
+            KeyStatistic(label: "Volume", value: "39.43M"),
+            KeyStatistic(label: "Avg. Volume (3M)", value: "45.23M"),
+            KeyStatistic(label: "Market Cap", value: "3.89T")
+        ]),
+        // Column 2: Valuation Ratios
+        KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "P/E (TTM)", value: "35.15"),
+            KeyStatistic(label: "P/E (FWD)", value: "31.84"),
+            KeyStatistic(label: "EPS (TTM)", value: "7.47"),
+            KeyStatistic(label: "Dividend & Yield", value: "1.04 (0.39%)"),
+            KeyStatistic(label: "Ex-Dividend Date", value: "11/10/2025")
+        ]),
+        // Column 3: Per Share Data
+        KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "P/B", value: "52.57"),
+            KeyStatistic(label: "P/S", value: "9.31"),
+            KeyStatistic(label: "BVPS", value: "4.991"),
+            KeyStatistic(label: "Beta", value: "1.09"),
+            KeyStatistic(label: "Next Earnings", value: "1/29")
+        ]),
+        // Column 4: Ownership & Float
+        KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "Short % of Float", value: "0.83%", isHighlighted: true),
+            KeyStatistic(label: "Shares Outstanding", value: "15.63B"),
+            KeyStatistic(label: "Float", value: "15.61B"),
+            KeyStatistic(label: "% Held by Insiders", value: "1.69%"),
+            KeyStatistic(label: "% Held Inst.", value: "64.28%")
+        ])
     ]
 }
 

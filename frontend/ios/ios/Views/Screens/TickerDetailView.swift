@@ -203,7 +203,18 @@ struct TickerDetailView: View {
                 onRelatedTickerTap: viewModel.handleNewsTickerTap
             )
         case .analysis:
-            placeholderContent(title: "Analysis", description: "AI-powered analysis for \(tickerSymbol)")
+            if let analysisData = viewModel.analysisData {
+                TickerAnalysisContent(
+                    analysisData: analysisData,
+                    selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
+                    selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
+                    onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
+                    onSentimentMoreTap: viewModel.handleSentimentMore,
+                    onTechnicalDetailTap: viewModel.handleTechnicalDetail
+                )
+            } else {
+                placeholderContent(title: "Analysis", description: "Loading analysis data...")
+            }
         case .financials:
             placeholderContent(title: "Financials", description: "Financial statements for \(tickerSymbol)")
         case .insiders:

@@ -13,6 +13,7 @@ struct AnalysisMomentumSection: View {
     let netNegative: Int
     let actionsSummary: AnalystActionsSummary
     @Binding var selectedPeriod: AnalystMomentumPeriod
+    var onActionsTapped: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -24,14 +25,18 @@ struct AnalysisMomentumSection: View {
 
                 Spacer()
 
-                HStack(spacing: AppSpacing.sm) {
-                    Text("Actions")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.primaryBlue)
+                Button(action: {
+                    onActionsTapped?()
+                }) {
+                    HStack(spacing: AppSpacing.sm) {
+                        Text("Actions")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.primaryBlue)
 
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(AppColors.primaryBlue)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
                 }
             }
 

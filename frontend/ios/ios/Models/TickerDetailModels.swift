@@ -591,6 +591,215 @@ extension AnalystActionsSummary {
     )
 }
 
+// MARK: - Analyst Action Type
+enum AnalystActionType: String, CaseIterable {
+    case upgrade = "UPGRADE"
+    case downgrade = "DOWNGRADE"
+    case maintain = "MAINTAIN"
+    case initiated = "INITIATED"
+    case reiterated = "REITERATED"
+
+    var color: Color {
+        switch self {
+        case .upgrade:
+            return AppColors.bullish
+        case .downgrade:
+            return AppColors.bearish
+        case .maintain, .initiated, .reiterated:
+            return AppColors.textSecondary
+        }
+    }
+
+    var borderColor: Color {
+        switch self {
+        case .upgrade:
+            return AppColors.bullish
+        case .downgrade:
+            return AppColors.bearish
+        case .maintain, .initiated, .reiterated:
+            return AppColors.textMuted
+        }
+    }
+
+    var hasColoredBadge: Bool {
+        switch self {
+        case .upgrade, .downgrade:
+            return true
+        case .maintain, .initiated, .reiterated:
+            return false
+        }
+    }
+}
+
+// MARK: - Analyst Rating Type
+enum AnalystRatingType: String, CaseIterable {
+    case strongBuy = "Strong buy"
+    case buy = "Buy"
+    case overweight = "Overweight"
+    case equalWeight = "Equal-Weight"
+    case neutral = "Neutral"
+    case underperform = "Underpeform"
+    case sell = "Sell"
+    case strongSell = "Strong Sell"
+
+    var isPositive: Bool {
+        switch self {
+        case .strongBuy, .buy, .overweight:
+            return true
+        case .equalWeight, .neutral:
+            return false
+        case .underperform, .sell, .strongSell:
+            return false
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .strongBuy, .buy, .overweight:
+            return AppColors.bullish
+        case .equalWeight, .neutral:
+            return AppColors.textSecondary
+        case .underperform, .sell, .strongSell:
+            return AppColors.bearish
+        }
+    }
+}
+
+// MARK: - Analyst Action (Individual upgrade/downgrade entry)
+struct AnalystAction: Identifiable {
+    let id = UUID()
+    let firmName: String
+    let actionType: AnalystActionType
+    let date: Date
+    let previousRating: AnalystRatingType?
+    let newRating: AnalystRatingType
+    let previousPriceTarget: Double?
+    let newPriceTarget: Double?
+
+    var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.string(from: date)
+    }
+
+    var formattedPreviousPrice: String? {
+        guard let price = previousPriceTarget else { return nil }
+        return String(format: "$%.0f", price)
+    }
+
+    var formattedNewPrice: String? {
+        guard let price = newPriceTarget else { return nil }
+        return String(format: "$%.0f", price)
+    }
+
+    var priceChangeColor: Color {
+        guard let previous = previousPriceTarget, let new = newPriceTarget else {
+            return AppColors.textSecondary
+        }
+        if new > previous {
+            return AppColors.bullish
+        } else if new < previous {
+            return AppColors.bearish
+        }
+        return AppColors.textSecondary
+    }
+}
+
+extension AnalystAction {
+    static let sampleData: [AnalystAction] = [
+        AnalystAction(
+            firmName: "Morgan Stanley",
+            actionType: .upgrade,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 12))!,
+            previousRating: .equalWeight,
+            newRating: .overweight,
+            previousPriceTarget: 325,
+            newPriceTarget: 320
+        ),
+        AnalystAction(
+            firmName: "JP Morgan",
+            actionType: .upgrade,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 11))!,
+            previousRating: .equalWeight,
+            newRating: .overweight,
+            previousPriceTarget: 340,
+            newPriceTarget: 330
+        ),
+        AnalystAction(
+            firmName: "Goldman Sachs",
+            actionType: .maintain,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 11))!,
+            previousRating: .buy,
+            newRating: .buy,
+            previousPriceTarget: 325,
+            newPriceTarget: 325
+        ),
+        AnalystAction(
+            firmName: "BMO Capital Markets",
+            actionType: .maintain,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 8))!,
+            previousRating: .buy,
+            newRating: .buy,
+            previousPriceTarget: 280,
+            newPriceTarget: 290
+        ),
+        AnalystAction(
+            firmName: "Barclays",
+            actionType: .maintain,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 7))!,
+            previousRating: .buy,
+            newRating: .buy,
+            previousPriceTarget: 350,
+            newPriceTarget: 325
+        ),
+        AnalystAction(
+            firmName: "Piper Sandler",
+            actionType: .initiated,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 3))!,
+            previousRating: nil,
+            newRating: .buy,
+            previousPriceTarget: nil,
+            newPriceTarget: 350
+        ),
+        AnalystAction(
+            firmName: "Goldman Sachs",
+            actionType: .reiterated,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 3))!,
+            previousRating: .buy,
+            newRating: .buy,
+            previousPriceTarget: nil,
+            newPriceTarget: 325
+        ),
+        AnalystAction(
+            firmName: "Wedbush Securities",
+            actionType: .upgrade,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 14))!,
+            previousRating: .buy,
+            newRating: .strongBuy,
+            previousPriceTarget: 370,
+            newPriceTarget: 370
+        ),
+        AnalystAction(
+            firmName: "Morgan Stanley",
+            actionType: .downgrade,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 4))!,
+            previousRating: .neutral,
+            newRating: .underperform,
+            previousPriceTarget: 350,
+            newPriceTarget: 325
+        ),
+        AnalystAction(
+            firmName: "Scotiabank",
+            actionType: .downgrade,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 1))!,
+            previousRating: .neutral,
+            newRating: .sell,
+            previousPriceTarget: 190,
+            newPriceTarget: 190
+        )
+    ]
+}
+
 // MARK: - Analyst Ratings Data (Combined)
 struct AnalystRatingsData {
     let totalAnalysts: Int
@@ -604,6 +813,7 @@ struct AnalystRatingsData {
     let netPositive: Int
     let netNegative: Int
     let actionsSummary: AnalystActionsSummary
+    let actions: [AnalystAction]
 
     var formattedTargetPrice: String {
         String(format: "$%.2f", targetPrice)
@@ -633,7 +843,8 @@ extension AnalystRatingsData {
         momentumData: AnalystMomentumMonth.sampleData,
         netPositive: 17,
         netNegative: 7,
-        actionsSummary: AnalystActionsSummary.sampleData
+        actionsSummary: AnalystActionsSummary.sampleData,
+        actions: AnalystAction.sampleData
     )
 }
 

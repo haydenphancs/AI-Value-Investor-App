@@ -12,6 +12,7 @@ struct TickerDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
     @State private var showStickyHeader: Bool = false
+    @State private var showUpgradesDowngrades = false
 
     let tickerSymbol: String
 
@@ -178,6 +179,11 @@ struct TickerDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .sheet(isPresented: $showUpgradesDowngrades) {
+            if let analysisData = viewModel.analysisData {
+                UpgradesDowngradesView(actions: analysisData.analystRatings.actions)
+            }
+        }
     }
 
     // MARK: - Tab Content
@@ -209,6 +215,9 @@ struct TickerDetailView: View {
                     selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
                     selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
                     onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
+                    onAnalystActionsTap: {
+                        showUpgradesDowngrades = true
+                    },
                     onSentimentMoreTap: viewModel.handleSentimentMore,
                     onTechnicalDetailTap: viewModel.handleTechnicalDetail
                 )

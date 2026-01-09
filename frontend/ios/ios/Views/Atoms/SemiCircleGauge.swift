@@ -15,13 +15,13 @@ enum GaugeType {
     var zoneColors: [Color] {
         switch self {
         case .sentiment:
-            // Red (Bearish) -> Grey (Neutral) -> Green (Bullish)
+            // Green (Bearish) -> Grey (Neutral) -> Red (Bullish)
             return [
-                AppColors.bearish,           // 0-30: Red (Bearish)
-                AppColors.bearish,
+                AppColors.bullish,           // 0-30: Green (Bearish)
+                AppColors.bullish,
                 Color(hex: "6B7280"),         // 31-70: Grey (Neutral)
                 Color(hex: "6B7280"),
-                AppColors.bullish            // 71-100: Green (Bullish)
+                AppColors.bearish            // 71-100: Red (Bullish)
             ]
         case .technical:
             // 5 distinct zones
@@ -149,9 +149,9 @@ struct SentimentGaugeArcs: View {
 
     var body: some View {
         ZStack {
-            // Zone 1: Bearish (0-30) - Red - Left side
+            // Zone 1: Bearish (0-30) - Green - Left side
             SemiCircleArcSegment(startAngle: 180, endAngle: 126)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
             // Zone 2: Neutral (31-70) - Grey - Middle
@@ -159,9 +159,9 @@ struct SentimentGaugeArcs: View {
                 .stroke(Color(hex: "6B7280"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
-            // Zone 3: Bullish (71-100) - Green - Right side
+            // Zone 3: Bullish (71-100) - Red - Right side
             SemiCircleArcSegment(startAngle: 54, endAngle: 0)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
         }
     }

@@ -14,6 +14,7 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var tickerData: TickerDetailData?
+    @Published var newsArticles: [TickerNewsArticle] = []
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -44,6 +45,7 @@ class TickerDetailViewModel: ObservableObject {
 
             // For demo, use sample data
             self.tickerData = TickerDetailData.sampleApple
+            self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.tickerSymbol)
             self.isLoading = false
         }
     }
@@ -82,6 +84,21 @@ class TickerDetailViewModel: ObservableObject {
     func handleRelatedTickerTap(_ ticker: RelatedTicker) {
         // TODO: Navigate to related ticker detail
         print("Navigate to \(ticker.symbol)")
+    }
+
+    func handleNewsArticleTap(_ article: TickerNewsArticle) {
+        // TODO: Navigate to full news detail view
+        print("Open news article: \(article.headline)")
+    }
+
+    func handleNewsExternalLink(_ article: TickerNewsArticle) {
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
+    }
+
+    func handleNewsTickerTap(_ ticker: String) {
+        // TODO: Navigate to ticker detail for the related ticker
+        print("Navigate to ticker: \(ticker)")
     }
 
     func handleSuggestionTap(_ suggestion: TickerAISuggestion) {

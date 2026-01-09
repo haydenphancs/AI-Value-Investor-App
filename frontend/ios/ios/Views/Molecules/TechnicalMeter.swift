@@ -59,14 +59,6 @@ struct TechnicalGauge: View {
     let signal: TechnicalSignal
     let gaugeValue: Double
 
-    private let gradientColors: [Color] = [
-        Color(hex: "991B1B"), // Dark red
-        Color(hex: "EF4444"), // Red
-        Color(hex: "F59E0B"), // Yellow
-        Color(hex: "84CC16"), // Lime
-        Color(hex: "22C55E")  // Green
-    ]
-
     private var needleAngle: Double {
         // Convert value (0-1) to angle (-180 to 0 degrees)
         return -180 + (gaugeValue * 180)
@@ -79,18 +71,8 @@ struct TechnicalGauge: View {
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 24)
                 .frame(width: 220, height: 110)
 
-            // Gradient arc
-            TechnicalArc()
-                .stroke(
-                    AngularGradient(
-                        colors: gradientColors,
-                        center: .bottom,
-                        startAngle: .degrees(180),
-                        endAngle: .degrees(0)
-                    ),
-                    style: StrokeStyle(lineWidth: 24, lineCap: .round)
-                )
-                .frame(width: 220, height: 110)
+            // 5 distinct zone arcs
+            TechnicalGaugeZones(size: 220)
 
             // Needle
             TechnicalNeedle(angle: needleAngle)

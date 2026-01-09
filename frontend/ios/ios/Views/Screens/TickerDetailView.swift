@@ -13,6 +13,7 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showStickyHeader: Bool = false
     @State private var showUpgradesDowngrades = false
+    @State private var showTechnicalAnalysisDetail = false
 
     let tickerSymbol: String
 
@@ -184,6 +185,11 @@ struct TickerDetailView: View {
                 UpgradesDowngradesView(actions: analysisData.analystRatings.actions)
             }
         }
+        .sheet(isPresented: $showTechnicalAnalysisDetail) {
+            TechnicalAnalysisDetailView(
+                detailData: TechnicalAnalysisDetailData.sampleData
+            )
+        }
     }
 
     // MARK: - Tab Content
@@ -219,7 +225,9 @@ struct TickerDetailView: View {
                         showUpgradesDowngrades = true
                     },
                     onSentimentMoreTap: viewModel.handleSentimentMore,
-                    onTechnicalDetailTap: viewModel.handleTechnicalDetail
+                    onTechnicalDetailTap: {
+                        showTechnicalAnalysisDetail = true
+                    }
                 )
             } else {
                 placeholderContent(title: "Analysis", description: "Loading analysis data...")

@@ -35,31 +35,15 @@ struct AnalysisMomentumSection: View {
                 }
             }
 
-            // Period toggle
+            // Period toggle - centered
             HStack {
+                Spacer()
                 MomentumPeriodToggle(selectedPeriod: $selectedPeriod)
                 Spacer()
             }
 
             // Bar chart
             MomentumBarChart(data: momentumData)
-
-            // Legend
-            HStack(spacing: AppSpacing.xl) {
-                MomentumLegendItem(
-                    color: AppColors.bullish,
-                    label: "Net Positive",
-                    value: netPositive
-                )
-
-                MomentumLegendItem(
-                    color: AppColors.bearish,
-                    label: "Net Negative",
-                    value: -netNegative
-                )
-
-                Spacer()
-            }
 
             // Actions row
             AnalystActionsRow(actionsSummary: actionsSummary)

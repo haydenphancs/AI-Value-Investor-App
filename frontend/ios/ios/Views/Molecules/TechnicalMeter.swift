@@ -60,11 +60,11 @@ struct TechnicalGauge: View {
     let gaugeValue: Double
 
     private let gradientColors: [Color] = [
-        Color(hex: "991B1B"), // Dark red
-        Color(hex: "EF4444"), // Red
-        Color(hex: "F59E0B"), // Yellow
-        Color(hex: "84CC16"), // Lime
-        Color(hex: "22C55E")  // Green
+        Color(hex: "991B1B"), // Dark red (Strong Sell)
+        Color(hex: "EF4444"), // Red (Sell)
+        Color(hex: "F59E0B"), // Yellow (Hold)
+        Color(hex: "4ADE80"), // Light green (Buy)
+        Color(hex: "22C55E")  // Green (Strong Buy)
     ]
 
     private var needleAngle: Double {
@@ -79,11 +79,11 @@ struct TechnicalGauge: View {
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 24)
                 .frame(width: 220, height: 110)
 
-            // Gradient arc
+            // Gradient arc with 5 distinct zones
             TechnicalArc()
                 .stroke(
                     AngularGradient(
-                        colors: gradientColors,
+                        gradient: Gradient(colors: gradientColors),
                         center: .bottom,
                         startAngle: .degrees(180),
                         endAngle: .degrees(0)

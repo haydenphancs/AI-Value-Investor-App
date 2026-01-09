@@ -30,21 +30,34 @@ struct TickerNewsCard: View {
                 onCardTap?()
             }
         }) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
-                // Header row: Sentiment + Time + Source
-                TickerNewsCardHeader(
-                    sentiment: article.sentiment,
-                    timeAgo: article.timeAgo,
-                    sourceName: article.source.name
-                )
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                // Header row: Sentiment + Time (left) and Source (right)
+                HStack(spacing: AppSpacing.sm) {
+                    // Left side: Sentiment badge + Time
+                    HStack(spacing: AppSpacing.sm) {
+                        NewsSentimentBadge(sentiment: article.sentiment)
+                        
+                        Text(article.timeAgo)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    
+                    Spacer()
+                    
+                    // Right side: Source name (not too far right, leaving space for image)
+                    Text(article.source.name)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                        .padding(.trailing, 80) // Leave space for the thumbnail
+                }
 
                 // Main content: Headline + Thumbnail
-                HStack(alignment: .top, spacing: AppSpacing.md) {
+                HStack(alignment: .top, spacing: AppSpacing.xs) {
                     // Headline
                     Text(article.headline)
                         .font(AppTypography.bodyBold)
                         .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(isExpanded ? nil : 3)
+                        .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -53,8 +66,9 @@ struct TickerNewsCard: View {
                     // Thumbnail
                     NewsThumbnail(
                         imageName: article.thumbnailName,
-                        width: 88,
-                        height: 64
+                        width: 72,
+                        height: 40
+                        
                     )
                 }
 
@@ -70,7 +84,7 @@ struct TickerNewsCard: View {
                 // Expanded content (bullet points)
                 if isExpanded && hasExpandableContent {
                     TickerNewsExpandedContent(bullets: article.summaryBullets)
-                        .padding(.top, AppSpacing.sm)
+                        .padding(.top, AppSpacing.xs)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
@@ -86,7 +100,7 @@ struct TickerNewsCard: View {
                     }
                 )
             }
-            .padding(AppSpacing.lg)
+            .padding(AppSpacing.md)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.large)
         }

@@ -54,17 +54,17 @@ struct TechnicalMeter: View {
     }
 }
 
-// MARK: - Technical Gauge (Semi-circle style)
+// MARK: - Technical Gauge (Semi-circle style with 5 zones)
 struct TechnicalGauge: View {
     let signal: TechnicalSignal
     let gaugeValue: Double
 
     private let gradientColors: [Color] = [
-        Color(hex: "991B1B"), // Dark red (Strong Sell)
-        Color(hex: "EF4444"), // Red (Sell)
-        Color(hex: "F59E0B"), // Yellow (Hold)
-        Color(hex: "4ADE80"), // Light green (Buy)
-        Color(hex: "22C55E")  // Green (Strong Buy)
+        Color(hex: "991B1B"), // Dark red
+        Color(hex: "EF4444"), // Red
+        Color(hex: "F59E0B"), // Yellow
+        Color(hex: "84CC16"), // Lime
+        Color(hex: "22C55E")  // Green
     ]
 
     private var needleAngle: Double {
@@ -79,11 +79,11 @@ struct TechnicalGauge: View {
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 24)
                 .frame(width: 220, height: 110)
 
-            // Gradient arc with 5 distinct zones
+            // Gradient arc
             TechnicalArc()
                 .stroke(
                     AngularGradient(
-                        gradient: Gradient(colors: gradientColors),
+                        colors: gradientColors,
                         center: .bottom,
                         startAngle: .degrees(180),
                         endAngle: .degrees(0)
@@ -106,6 +106,62 @@ struct TechnicalGauge: View {
             .offset(y: 20)
         }
         .frame(width: 220, height: 130)
+    }
+}
+
+// MARK: - Technical Gauge Zones (5 colored segments)
+struct TechnicalGaugeZones: View {
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            // Zone 1: Strong Sell (0-20) - Dark Red
+            TechnicalArcSegment(startAngle: 180, endAngle: 144)
+                .stroke(Color(hex: "991B1B"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                .frame(width: size, height: size / 2)
+
+            // Zone 2: Sell (21-40) - Red
+            TechnicalArcSegment(startAngle: 144, endAngle: 108)
+                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                .frame(width: size, height: size / 2)
+
+            // Zone 3: Hold (41-60) - Yellow
+            TechnicalArcSegment(startAngle: 108, endAngle: 72)
+                .stroke(AppColors.neutral, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                .frame(width: size, height: size / 2)
+
+            // Zone 4: Buy (61-80) - Light Green
+            TechnicalArcSegment(startAngle: 72, endAngle: 36)
+                .stroke(Color(hex: "4ADE80"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                .frame(width: size, height: size / 2)
+
+            // Zone 5: Strong Buy (81-100) - Green
+            TechnicalArcSegment(startAngle: 36, endAngle: 0)
+                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                .frame(width: size, height: size / 2)
+        }
+    }
+}
+
+// MARK: - Technical Arc Segment Shape
+struct TechnicalArcSegment: Shape {
+    let startAngle: Double
+    let endAngle: Double
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.maxY)
+        let radius = min(rect.width, rect.height * 2) / 2 - 12
+
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: .degrees(startAngle + 180),
+            endAngle: .degrees(endAngle + 180),
+            clockwise: true
+        )
+
+        return path
     }
 }
 

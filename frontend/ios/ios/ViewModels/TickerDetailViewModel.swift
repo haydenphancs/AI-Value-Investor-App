@@ -15,12 +15,17 @@ class TickerDetailViewModel: ObservableObject {
 
     @Published var tickerData: TickerDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
+    @Published var analysisData: TickerAnalysisData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+
+    // Analysis tab state
+    @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
+    @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
 
     // MARK: - Private Properties
 
@@ -46,6 +51,7 @@ class TickerDetailViewModel: ObservableObject {
             // For demo, use sample data
             self.tickerData = TickerDetailData.sampleApple
             self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.tickerSymbol)
+            self.analysisData = TickerAnalysisData.sampleData
             self.isLoading = false
         }
     }
@@ -116,6 +122,23 @@ class TickerDetailViewModel: ObservableObject {
     func updateChartRange(_ range: ChartTimeRange) {
         selectedChartRange = range
         // TODO: Fetch new chart data for selected range
+    }
+
+    // MARK: - Analysis Tab Handlers
+
+    func handleAnalystRatingsMore() {
+        // TODO: Show more analyst ratings options
+        print("Analyst ratings more options for \(tickerSymbol)")
+    }
+
+    func handleSentimentMore() {
+        // TODO: Show more sentiment analysis options
+        print("Sentiment analysis more options for \(tickerSymbol)")
+    }
+
+    func handleTechnicalDetail() {
+        // TODO: Navigate to detailed technical analysis view
+        print("Technical analysis detail for \(tickerSymbol)")
     }
 
     // MARK: - Computed Properties

@@ -43,8 +43,7 @@ struct MarketMoodMeter: View {
                 labelColor: currentMood.color,
                 gaugeType: .sentiment,
                 showLabels: true,
-                size: 180,
-                gaugeType: .sentiment
+                size: 180
             )
         }
     }

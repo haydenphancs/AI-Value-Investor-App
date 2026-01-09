@@ -9,19 +9,19 @@ import SwiftUI
 
 // MARK: - Gauge Type
 enum GaugeType {
-    case sentiment   // 3 zones: Bullish (0-30), Neutral (31-70), Bearish (71-100)
+    case sentiment   // 3 zones: Bearish (0-30), Neutral (31-70), Bullish (71-100)
     case technical   // 5 zones: Strong Sell, Sell, Hold, Buy, Strong Buy
 
     var zoneColors: [Color] {
         switch self {
         case .sentiment:
-            // Green (Bullish) -> Grey (Neutral) -> Red (Bearish)
+            // Red (Bearish) -> Grey (Neutral) -> Green (Bullish)
             return [
-                AppColors.bullish,           // 0-30: Green (Bullish)
-                AppColors.bullish,
+                AppColors.bearish,           // 0-30: Red (Bearish)
+                AppColors.bearish,
                 Color(hex: "6B7280"),         // 31-70: Grey (Neutral)
                 Color(hex: "6B7280"),
-                AppColors.bearish            // 71-100: Red (Bearish)
+                AppColors.bullish            // 71-100: Green (Bullish)
             ]
         case .technical:
             // 5 distinct zones
@@ -44,12 +44,6 @@ struct SemiCircleGauge: View {
     let gaugeType: GaugeType
     let showLabels: Bool
     let size: CGFloat
-    let gaugeType: GaugeType
-    
-    enum GaugeType {
-        case sentiment  // 3 zones: Bullish (0-30), Neutral (31-70), Bearish (71-100)
-        case technical  // 5 zones: Strong Sell, Sell, Hold, Buy, Strong Buy
-    }
 
     init(
         value: Double,
@@ -58,8 +52,7 @@ struct SemiCircleGauge: View {
         labelColor: Color,
         gaugeType: GaugeType = .technical,
         showLabels: Bool = true,
-        size: CGFloat = 200,
-        gaugeType: GaugeType = .technical
+        size: CGFloat = 200
     ) {
         self.value = min(max(value, 0), 1) // Clamp between 0 and 1
         self.displayValue = displayValue
@@ -68,7 +61,6 @@ struct SemiCircleGauge: View {
         self.gaugeType = gaugeType
         self.showLabels = showLabels
         self.size = size
-        self.gaugeType = gaugeType
     }
 
     // Gradient colors for the gauge arc
@@ -157,9 +149,9 @@ struct SentimentGaugeArcs: View {
 
     var body: some View {
         ZStack {
-            // Zone 1: Bullish (0-30) - Green - Left side
+            // Zone 1: Bearish (0-30) - Red - Left side
             SemiCircleArcSegment(startAngle: 180, endAngle: 126)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
             // Zone 2: Neutral (31-70) - Grey - Middle
@@ -167,9 +159,9 @@ struct SentimentGaugeArcs: View {
                 .stroke(Color(hex: "6B7280"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
-            // Zone 3: Bearish (71-100) - Red - Right side
+            // Zone 3: Bullish (71-100) - Green - Right side
             SemiCircleArcSegment(startAngle: 54, endAngle: 0)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
         }
     }
@@ -282,9 +274,9 @@ struct GaugeNeedle: View {
             .ignoresSafeArea()
 
         VStack(spacing: AppSpacing.xxxl) {
-            // Sentiment Gauge - Bearish (high value = bearish)
+            // Sentiment Gauge - Bearish (low value = bearish)
             VStack {
-                Text("Sentiment Gauge (Bearish)")
+                Text("Sentiment Gauge (Bearish - Score 24)")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 SemiCircleGauge(

@@ -9,7 +9,7 @@ import SwiftUI
 
 struct TechnicalAnalysisSection: View {
     let technicalData: TechnicalAnalysisData
-    let onDetailTapped: () -> Void
+    var onDetailTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -17,7 +17,7 @@ struct TechnicalAnalysisSection: View {
             AnalysisSectionHeader(
                 title: "Technical Analysis",
                 actionText: "Detail",
-                onAction: onDetailTapped,
+                onAction: { onDetailTapped?() },
                 showMoreButton: false
             )
 

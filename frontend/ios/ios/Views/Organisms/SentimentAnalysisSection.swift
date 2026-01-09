@@ -10,14 +10,14 @@ import SwiftUI
 struct SentimentAnalysisSection: View {
     let sentimentData: SentimentAnalysisData
     @Binding var selectedTimeframe: SentimentTimeframe
-    let onMoreTapped: () -> Void
+    var onMoreTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             AnalysisSectionHeader(
                 title: "Sentiment Analysis",
-                onAction: onMoreTapped
+                onAction: { onMoreTapped?() }
             )
 
             // Market Mood Meter

@@ -874,14 +874,14 @@ enum MarketMoodLevel: String {
     static func fromScore(_ score: Int) -> MarketMoodLevel {
         switch score {
         case 0...30:
-            return .bullish
+            return .bearish  // Low scores (0-30) = Bearish (left side of gauge)
         case 31...70:
-            return .neutral
+            return .neutral  // Middle scores (31-70) = Neutral
         default:  // 71-100
-            return .bearish
+            return .bullish  // High scores (71-100) = Bullish (right side of gauge)
         }
     }
-    }
+}
 
 
 // MARK: - Sentiment Analysis Data
@@ -927,7 +927,7 @@ struct SentimentAnalysisData {
 extension SentimentAnalysisData {
     static let sampleData = SentimentAnalysisData(
         moodScore: 24,
-        last24hMood: .bullish,  // 24 is in 0-30 range (Bullish/Green)
+        last24hMood: .bearish,  // 24 is in 0-30 range (Bearish/Red)
         last7dMood: .neutral,   // Neutral is 31-70 range (Grey)
         socialMentions: 12400,
         socialMentionsChange: 24,

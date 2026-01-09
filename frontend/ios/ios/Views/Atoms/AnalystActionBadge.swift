@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-enum AnalystActionType: String {
+enum AnalystSummaryActionType: String {
     case upgrades = "Upgrades"
     case maintains = "Maintains"
     case downgrades = "Downgrades"
@@ -30,7 +30,7 @@ enum AnalystActionType: String {
 }
 
 struct AnalystActionBadge: View {
-    let actionType: AnalystActionType
+    let actionType: AnalystSummaryActionType
     let count: Int
 
     var body: some View {

@@ -44,19 +44,22 @@ struct MomentumBarChart: View {
                 .frame(width: 24)
                 .frame(height: 140)
 
-                // Bars
-                HStack(alignment: .center, spacing: AppSpacing.md) {
-                    ForEach(data) { month in
-                        MomentumBar(month: month, maxValue: maxValue)
+                // Bars container
+                VStack(spacing: 0) {
+                    HStack(alignment: .center, spacing: 0) {
+                        ForEach(data) { month in
+                            MomentumBar(month: month, maxValue: maxValue)
+                                .frame(maxWidth: .infinity)
+                        }
                     }
+                    .frame(height: 140)
                 }
-                .frame(height: 140)
             }
 
             // X-axis labels (months)
-            HStack(spacing: AppSpacing.md) {
+            HStack(spacing: 0) {
                 Spacer()
-                    .frame(width: 24)
+                    .frame(width: 24 + AppSpacing.sm)
                 ForEach(data) { month in
                     Text(month.month)
                         .font(AppTypography.caption)
@@ -74,12 +77,12 @@ struct MomentumBar: View {
     let maxValue: Int
 
     private let chartHeight: CGFloat = 140
-    private let barWidth: CGFloat = 24
 
     var body: some View {
         GeometryReader { geometry in
             let midY = geometry.size.height / 2
             let scale = (geometry.size.height / 2) / CGFloat(max(maxValue, 1))
+            let barWidth: CGFloat = 24
 
             ZStack {
                 // Zero line (implicit - bars grow from center)
@@ -113,7 +116,7 @@ struct MomentumBar: View {
                 }
             }
         }
-        .frame(width: barWidth, height: chartHeight)
+        .frame(height: chartHeight)
     }
 }
 

@@ -65,19 +65,31 @@ struct PriceTargetRange: View {
                             .offset(y: -2)
                     }
                     .position(x: indicatorX, y: -12)
+                    
+                    // Average price indicator
+                    let averagePosition = priceTarget.averagePricePosition
+                    let averageX = geometry.size.width * averagePosition
+
+                    VStack(spacing: AppSpacing.xxs) {
+                        // Triangle indicator (pointing down)
+                        Triangle()
+                            .fill(AppColors.textMuted)
+                            .frame(width: 10, height: 6)
+                            .rotationEffect(.degrees(180))
+                            .offset(y: 2)
+                        
+                        // Average price label
+                        Text("Average: \(priceTarget.formattedAverage)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .offset(x: clampedOffset(for: averageX, in: geometry.size.width, labelWidth: 90))
+                    }
+                    .position(x: averageX, y: 20)
                 }
             }
             .frame(height: 8)
             .padding(.top, AppSpacing.xxl)
-
-            // Average price label
-            HStack {
-                Spacer()
-                Text("Average: \(priceTarget.formattedAverage)")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                Spacer()
-            }
+            .padding(.bottom, AppSpacing.lg)
         }
     }
 

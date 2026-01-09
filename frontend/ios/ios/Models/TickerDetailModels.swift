@@ -527,6 +527,11 @@ struct AnalystPriceTarget {
         guard highPrice > lowPrice else { return 0.5 }
         return (currentPrice - lowPrice) / (highPrice - lowPrice)
     }
+    
+    var averagePricePosition: Double {
+        guard highPrice > lowPrice else { return 0.5 }
+        return (averagePrice - lowPrice) / (highPrice - lowPrice)
+    }
 }
 
 extension AnalystPriceTarget {
@@ -640,38 +645,33 @@ enum SentimentTimeframe: String, CaseIterable {
 
 // MARK: - Market Mood Level
 enum MarketMoodLevel: String {
-    case extremeBearish = "Extreme Bearish"
-    case bearish = "Bearish"
-    case neutral = "Neutral"
     case bullish = "Bullish"
-    case extremeBullish = "Extreme Bullish"
+    case neutral = "Neutral"
+    case bearish = "Bearish"
 
     var color: Color {
         switch self {
-        case .extremeBearish, .bearish:
+        case .bearish:
             return AppColors.bearish
         case .neutral:
             return AppColors.neutral
-        case .bullish, .extremeBullish:
+        case .bullish:
             return AppColors.bullish
         }
     }
 
     static func fromScore(_ score: Int) -> MarketMoodLevel {
         switch score {
-        case 0..<20:
-            return .extremeBearish
-        case 20..<40:
-            return .bearish
-        case 40..<60:
-            return .neutral
-        case 60..<80:
+        case 0...30:
             return .bullish
-        default:
-            return .extremeBullish
+        case 31...70:
+            return .neutral
+        default:  // 71-100
+            return .bearish
         }
     }
-}
+    }
+
 
 // MARK: - Sentiment Analysis Data
 struct SentimentAnalysisData {
@@ -716,8 +716,8 @@ struct SentimentAnalysisData {
 extension SentimentAnalysisData {
     static let sampleData = SentimentAnalysisData(
         moodScore: 24,
-        last24hMood: .bearish,
-        last7dMood: .neutral,
+        last24hMood: .bullish,  // 24 is in 0-30 range (Bullish/Green)
+        last7dMood: .neutral,   // Neutral is 31-70 range (Grey)
         socialMentions: 12400,
         socialMentionsChange: 24,
         newsArticles: 847,
@@ -736,15 +736,15 @@ enum TechnicalSignal: String, CaseIterable {
     var color: Color {
         switch self {
         case .strongSell:
-            return Color(hex: "991B1B")
+            return Color(hex: "991B1B")  // Dark red
         case .sell:
-            return AppColors.bearish
+            return AppColors.bearish     // Red
         case .hold:
-            return AppColors.neutral
+            return Color(hex: "F59E0B")  // Yellow
         case .buy:
-            return Color(hex: "4ADE80")
+            return Color(hex: "4ADE80")  // Light green
         case .strongBuy:
-            return AppColors.bullish
+            return AppColors.bullish     // Green
         }
     }
 

@@ -14,6 +14,12 @@ struct SemiCircleGauge: View {
     let labelColor: Color
     let showLabels: Bool
     let size: CGFloat
+    let gaugeType: GaugeType
+    
+    enum GaugeType {
+        case sentiment  // 3 zones: Bullish (0-30), Neutral (31-70), Bearish (71-100)
+        case technical  // 5 zones: Strong Sell, Sell, Hold, Buy, Strong Buy
+    }
 
     init(
         value: Double,
@@ -21,7 +27,8 @@ struct SemiCircleGauge: View {
         label: String,
         labelColor: Color,
         showLabels: Bool = true,
-        size: CGFloat = 200
+        size: CGFloat = 200,
+        gaugeType: GaugeType = .technical
     ) {
         self.value = min(max(value, 0), 1) // Clamp between 0 and 1
         self.displayValue = displayValue
@@ -29,16 +36,31 @@ struct SemiCircleGauge: View {
         self.labelColor = labelColor
         self.showLabels = showLabels
         self.size = size
+        self.gaugeType = gaugeType
     }
 
-    // Gradient colors for the gauge arc
-    private let gradientColors: [Color] = [
-        Color(hex: "EF4444"), // Red (bearish)
-        Color(hex: "F97316"), // Orange
-        Color(hex: "F59E0B"), // Yellow (neutral)
-        Color(hex: "84CC16"), // Lime
-        Color(hex: "22C55E")  // Green (bullish)
+    // Gradient colors for sentiment gauge (3 zones)
+    private let sentimentGradientColors: [Color] = [
+        Color(hex: "22C55E"),  // Green (Bullish) - 0-30
+        Color(hex: "22C55E"),  // Green
+        Color(hex: "9CA3AF"),  // Grey (Neutral) - 31-70
+        Color(hex: "9CA3AF"),  // Grey
+        Color(hex: "EF4444"),  // Red (Bearish) - 71-100
+        Color(hex: "EF4444")   // Red
     ]
+    
+    // Gradient colors for technical gauge (5 zones)
+    private let technicalGradientColors: [Color] = [
+        Color(hex: "991B1B"), // Dark red (Strong Sell)
+        Color(hex: "EF4444"), // Red (Sell)
+        Color(hex: "F59E0B"), // Yellow (Hold)
+        Color(hex: "4ADE80"), // Light green (Buy)
+        Color(hex: "22C55E")  // Green (Strong Buy)
+    ]
+    
+    private var gradientColors: [Color] {
+        gaugeType == .sentiment ? sentimentGradientColors : technicalGradientColors
+    }
 
     private var needleAngle: Double {
         // Convert value (0-1) to angle (-180 to 0 degrees)

@@ -11,13 +11,12 @@ struct TickerDetailView: View {
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
-    @State private var scrollOffset: CGFloat = 0
     @State private var showStickyHeader: Bool = false
 
     let tickerSymbol: String
 
     // Threshold for when sticky header appears
-    private let stickyThreshold: CGFloat = 120
+    private let stickyThreshold: CGFloat = 200
 
     init(tickerSymbol: String) {
         self.tickerSymbol = tickerSymbol
@@ -32,7 +31,7 @@ struct TickerDetailView: View {
 
             // Main Content
             VStack(spacing: 0) {
-                // Navigation Header (always visible)
+                // Navigation Header (always visible - back, bell, star, more buttons)
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
@@ -41,7 +40,7 @@ struct TickerDetailView: View {
                     isFavorite: viewModel.isFavorite
                 )
 
-                // Sticky Price Header + Tab Bar (appears when scrolling past threshold)
+                // Sticky Header (appears when scrolling past threshold)
                 if showStickyHeader, let tickerData = viewModel.tickerData {
                     VStack(spacing: 0) {
                         // Price Header
@@ -56,7 +55,7 @@ struct TickerDetailView: View {
                         )
                         .padding(.top, AppSpacing.sm)
 
-                        // Tab Bar
+                        // Tab Bar (sticks with ticker info)
                         TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
                             .padding(.top, AppSpacing.sm)
 
@@ -66,13 +65,14 @@ struct TickerDetailView: View {
                             .frame(height: 1)
                     }
                     .background(AppColors.background)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.opacity)
+                    .zIndex(1)
                 }
 
                 // Scrollable Content
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 0) {
-                        // Scroll offset tracker
+                        // Scroll offset tracker (placed at top of scroll content)
                         GeometryReader { geometry in
                             Color.clear
                                 .preference(
@@ -82,29 +82,31 @@ struct TickerDetailView: View {
                         }
                         .frame(height: 0)
 
-                        // Ticker Price Header (scrolls away)
+                        // Full Ticker Price Header (scrolls away)
                         if let tickerData = viewModel.tickerData {
-                            TickerPriceHeader(
-                                companyName: tickerData.companyName,
-                                symbol: tickerData.symbol,
-                                price: tickerData.formattedPrice,
-                                priceChange: tickerData.formattedChange,
-                                priceChangePercent: tickerData.formattedChangePercent,
-                                isPositive: tickerData.isPositive,
-                                marketStatus: tickerData.marketStatus
-                            )
-                            .padding(.top, AppSpacing.sm)
+                            if !showStickyHeader {
+                                TickerPriceHeader(
+                                    companyName: tickerData.companyName,
+                                    symbol: tickerData.symbol,
+                                    price: tickerData.formattedPrice,
+                                    priceChange: tickerData.formattedChange,
+                                    priceChangePercent: tickerData.formattedChangePercent,
+                                    isPositive: tickerData.isPositive,
+                                    marketStatus: tickerData.marketStatus
+                                )
+                                .padding(.top, AppSpacing.sm)
+                            }
 
-                            // Chart
+                            // Chart (always scrolls away)
                             TickerChartView(
                                 chartData: tickerData.chartData,
                                 isPositive: tickerData.isPositive,
                                 selectedRange: $viewModel.selectedChartRange
                             )
-                            .padding(.top, AppSpacing.lg)
+                            .padding(.top, showStickyHeader ? AppSpacing.sm : AppSpacing.lg)
                         }
 
-                        // Tab Bar (scrolls away, replaced by sticky version)
+                        // Tab Bar in scroll (only visible when NOT sticky)
                         if !showStickyHeader {
                             TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
                                 .padding(.top, AppSpacing.lg)
@@ -121,8 +123,11 @@ struct TickerDetailView: View {
                 }
                 .coordinateSpace(name: "scroll")
                 .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showStickyHeader = value < -stickyThreshold
+                    let shouldShow = value < -stickyThreshold
+                    if shouldShow != showStickyHeader {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showStickyHeader = shouldShow
+                        }
                     }
                 }
                 .refreshable {
@@ -190,16 +195,12 @@ struct TickerDetailView: View {
                 )
             }
         case .news:
-            // Placeholder for News tab
             placeholderContent(title: "News", description: "Latest news about \(tickerSymbol)")
         case .analysis:
-            // Placeholder for Analysis tab
             placeholderContent(title: "Analysis", description: "AI-powered analysis for \(tickerSymbol)")
         case .financials:
-            // Placeholder for Financials tab
             placeholderContent(title: "Financials", description: "Financial statements for \(tickerSymbol)")
         case .insiders:
-            // Placeholder for Insiders tab
             placeholderContent(title: "Insiders", description: "Insider trading activity for \(tickerSymbol)")
         }
     }
@@ -219,7 +220,6 @@ struct TickerDetailView: View {
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
 
-            // Bottom spacing for AI bar
             Spacer()
                 .frame(height: 150)
         }
@@ -239,22 +239,18 @@ struct TickerDetailView: View {
     }
 
     private func handleShare() {
-        // TODO: Implement share functionality
         print("Share \(tickerSymbol)")
     }
 
     private func handleAddToWatchlist() {
-        // TODO: Implement add to watchlist
         print("Add \(tickerSymbol) to watchlist")
     }
 
     private func handleSetPriceAlert() {
-        // TODO: Implement price alert
         print("Set price alert for \(tickerSymbol)")
     }
 
     private func handleCompare() {
-        // TODO: Implement compare feature
         print("Compare \(tickerSymbol)")
     }
 }

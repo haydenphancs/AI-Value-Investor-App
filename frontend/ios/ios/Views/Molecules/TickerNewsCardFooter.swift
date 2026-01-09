@@ -15,16 +15,17 @@ struct TickerNewsCardFooter: View {
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
-            // External link button
-            Button(action: {
-                onExternalLinkTap?()
-            }) {
-                NewsExternalLinkIcon()
-            }
-            .buttonStyle(PlainButtonStyle())
-
-            // Expand/collapse button (only show if has content)
-            if hasExpandableContent {
+            // Show both icons when expanded, on the left side
+            if hasExpandableContent && isExpanded {
+                // External link button (first)
+                Button(action: {
+                    onExternalLinkTap?()
+                }) {
+                    NewsExternalLinkIcon()
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                // Collapse button (second)
                 Button(action: {
                     onExpandToggle?()
                 }) {
@@ -32,7 +33,7 @@ struct TickerNewsCardFooter: View {
                 }
                 .buttonStyle(PlainButtonStyle())
             }
-
+            
             Spacer()
         }
     }
@@ -41,10 +42,10 @@ struct TickerNewsCardFooter: View {
 #Preview {
     VStack(spacing: AppSpacing.xl) {
         // With expandable content - collapsed
-        TickerNewsCardFooter(
-            hasExpandableContent: true,
-            isExpanded: false
-        )
+//        TickerNewsCardFooter(
+//            hasExpandableContent: true,
+//            isExpanded: false
+//        )
 
         // With expandable content - expanded
         TickerNewsCardFooter(
@@ -52,11 +53,11 @@ struct TickerNewsCardFooter: View {
             isExpanded: true
         )
 
-        // Without expandable content
-        TickerNewsCardFooter(
-            hasExpandableContent: false,
-            isExpanded: false
-        )
+//        // Without expandable content
+//        TickerNewsCardFooter(
+//            hasExpandableContent: false,
+//            isExpanded: false
+//        )
     }
     .padding()
     .background(AppColors.cardBackground)

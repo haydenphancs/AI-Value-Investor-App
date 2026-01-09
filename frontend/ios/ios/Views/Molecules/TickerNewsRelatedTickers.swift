@@ -20,7 +20,7 @@ struct TickerNewsRelatedTickers: View {
                 }) {
                     RelatedTickerChip(
                         symbol: ticker,
-                        isHighlighted: ticker == currentTicker
+                        isHighlighted: false
                     )
                 }
                 .buttonStyle(PlainButtonStyle())

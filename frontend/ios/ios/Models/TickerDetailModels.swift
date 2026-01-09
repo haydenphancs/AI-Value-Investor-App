@@ -446,3 +446,376 @@ extension RelatedTicker {
         RelatedTicker(symbol: "NVDA", name: "NVIDIA", price: 489.32, changePercent: 4.7)
     ]
 }
+
+// MARK: - Analysis Tab Models
+
+// MARK: - Analyst Consensus
+enum AnalystConsensus: String, CaseIterable {
+    case strongBuy = "STRONG BUY"
+    case buy = "BUY"
+    case hold = "HOLD"
+    case sell = "SELL"
+    case strongSell = "STRONG SELL"
+
+    var color: Color {
+        switch self {
+        case .strongBuy, .buy:
+            return AppColors.bullish
+        case .hold:
+            return AppColors.neutral
+        case .sell, .strongSell:
+            return AppColors.bearish
+        }
+    }
+}
+
+// MARK: - Analyst Rating Distribution
+struct AnalystRatingDistribution: Identifiable {
+    let id = UUID()
+    let label: String
+    let count: Int
+    let color: Color
+
+    var formattedCount: String {
+        "\(count)"
+    }
+}
+
+extension AnalystRatingDistribution {
+    static let sampleData: [AnalystRatingDistribution] = [
+        AnalystRatingDistribution(label: "Strong Buy", count: 18, color: AppColors.bullish),
+        AnalystRatingDistribution(label: "Buy", count: 14, color: Color(hex: "4ADE80")),
+        AnalystRatingDistribution(label: "Hold", count: 6, color: AppColors.neutral),
+        AnalystRatingDistribution(label: "Sell", count: 2, color: AppColors.bearish),
+        AnalystRatingDistribution(label: "Strong Sell", count: 0, color: Color(hex: "991B1B"))
+    ]
+}
+
+// MARK: - Analyst Price Target
+struct AnalystPriceTarget {
+    let lowPrice: Double
+    let averagePrice: Double
+    let highPrice: Double
+    let currentPrice: Double
+
+    var formattedLow: String {
+        String(format: "$%.2f", lowPrice)
+    }
+
+    var formattedAverage: String {
+        String(format: "%.2f", averagePrice)
+    }
+
+    var formattedHigh: String {
+        String(format: "$%.2f", highPrice)
+    }
+
+    var formattedCurrent: String {
+        String(format: "%.2f", currentPrice)
+    }
+
+    var upsidePercent: Double {
+        ((averagePrice - currentPrice) / currentPrice) * 100
+    }
+
+    var formattedUpside: String {
+        let sign = upsidePercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", upsidePercent))% upside"
+    }
+
+    var currentPricePosition: Double {
+        guard highPrice > lowPrice else { return 0.5 }
+        return (currentPrice - lowPrice) / (highPrice - lowPrice)
+    }
+}
+
+extension AnalystPriceTarget {
+    static let sampleData = AnalystPriceTarget(
+        lowPrice: 165.00,
+        averagePrice: 212.60,
+        highPrice: 250.00,
+        currentPrice: 178.42
+    )
+}
+
+// MARK: - Analyst Momentum Period
+enum AnalystMomentumPeriod: String, CaseIterable {
+    case sixMonths = "6M"
+    case oneYear = "1Y"
+}
+
+// MARK: - Analyst Momentum Month Data
+struct AnalystMomentumMonth: Identifiable {
+    let id = UUID()
+    let month: String
+    let positiveCount: Int
+    let negativeCount: Int
+
+    var netValue: Int {
+        positiveCount - negativeCount
+    }
+
+    var isPositive: Bool {
+        netValue >= 0
+    }
+}
+
+extension AnalystMomentumMonth {
+    static let sampleData: [AnalystMomentumMonth] = [
+        AnalystMomentumMonth(month: "Jul", positiveCount: 5, negativeCount: 2),
+        AnalystMomentumMonth(month: "Aug", positiveCount: 7, negativeCount: 1),
+        AnalystMomentumMonth(month: "Sep", positiveCount: 4, negativeCount: 3),
+        AnalystMomentumMonth(month: "Oct", positiveCount: 2, negativeCount: 5),
+        AnalystMomentumMonth(month: "Nov", positiveCount: 6, negativeCount: 2),
+        AnalystMomentumMonth(month: "Dec", positiveCount: 3, negativeCount: 4)
+    ]
+}
+
+// MARK: - Analyst Actions Summary
+struct AnalystActionsSummary {
+    let upgrades: Int
+    let maintains: Int
+    let downgrades: Int
+}
+
+extension AnalystActionsSummary {
+    static let sampleData = AnalystActionsSummary(
+        upgrades: 9,
+        maintains: 8,
+        downgrades: 2
+    )
+}
+
+// MARK: - Analyst Ratings Data (Combined)
+struct AnalystRatingsData {
+    let totalAnalysts: Int
+    let updatedDate: Date
+    let consensus: AnalystConsensus
+    let targetPrice: Double
+    let targetUpside: Double
+    let distributions: [AnalystRatingDistribution]
+    let priceTarget: AnalystPriceTarget
+    let momentumData: [AnalystMomentumMonth]
+    let netPositive: Int
+    let netNegative: Int
+    let actionsSummary: AnalystActionsSummary
+
+    var formattedTargetPrice: String {
+        String(format: "$%.2f", targetPrice)
+    }
+
+    var formattedUpside: String {
+        let sign = targetUpside >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", targetUpside))% upside"
+    }
+
+    var formattedUpdatedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.string(from: updatedDate)
+    }
+}
+
+extension AnalystRatingsData {
+    static let sampleData = AnalystRatingsData(
+        totalAnalysts: 40,
+        updatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,
+        consensus: .strongBuy,
+        targetPrice: 212.60,
+        targetUpside: 17.2,
+        distributions: AnalystRatingDistribution.sampleData,
+        priceTarget: AnalystPriceTarget.sampleData,
+        momentumData: AnalystMomentumMonth.sampleData,
+        netPositive: 17,
+        netNegative: 7,
+        actionsSummary: AnalystActionsSummary.sampleData
+    )
+}
+
+// MARK: - Sentiment Timeframe
+enum SentimentTimeframe: String, CaseIterable {
+    case last24h = "Last 24H"
+    case last7d = "Last 7D"
+}
+
+// MARK: - Market Mood Level
+enum MarketMoodLevel: String {
+    case extremeBearish = "Extreme Bearish"
+    case bearish = "Bearish"
+    case neutral = "Neutral"
+    case bullish = "Bullish"
+    case extremeBullish = "Extreme Bullish"
+
+    var color: Color {
+        switch self {
+        case .extremeBearish, .bearish:
+            return AppColors.bearish
+        case .neutral:
+            return AppColors.neutral
+        case .bullish, .extremeBullish:
+            return AppColors.bullish
+        }
+    }
+
+    static func fromScore(_ score: Int) -> MarketMoodLevel {
+        switch score {
+        case 0..<20:
+            return .extremeBearish
+        case 20..<40:
+            return .bearish
+        case 40..<60:
+            return .neutral
+        case 60..<80:
+            return .bullish
+        default:
+            return .extremeBullish
+        }
+    }
+}
+
+// MARK: - Sentiment Analysis Data
+struct SentimentAnalysisData {
+    let moodScore: Int // 0-100
+    let last24hMood: MarketMoodLevel
+    let last7dMood: MarketMoodLevel
+    let socialMentions: Double
+    let socialMentionsChange: Double
+    let newsArticles: Int
+    let newsArticlesChange: Double
+
+    var formattedSocialMentions: String {
+        if socialMentions >= 1000 {
+            return String(format: "%.1fK", socialMentions / 1000)
+        }
+        return String(format: "%.0f", socialMentions)
+    }
+
+    var formattedSocialChange: String {
+        let sign = socialMentionsChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", socialMentionsChange))% today"
+    }
+
+    var formattedNewsArticles: String {
+        "\(newsArticles)"
+    }
+
+    var formattedNewsChange: String {
+        let sign = newsArticlesChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", newsArticlesChange))% this week"
+    }
+
+    var socialChangeColor: Color {
+        socialMentionsChange >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+
+    var newsChangeColor: Color {
+        newsArticlesChange >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+}
+
+extension SentimentAnalysisData {
+    static let sampleData = SentimentAnalysisData(
+        moodScore: 24,
+        last24hMood: .bearish,
+        last7dMood: .neutral,
+        socialMentions: 12400,
+        socialMentionsChange: 24,
+        newsArticles: 847,
+        newsArticlesChange: 18
+    )
+}
+
+// MARK: - Technical Signal
+enum TechnicalSignal: String, CaseIterable {
+    case strongSell = "Strong Sell"
+    case sell = "Sell"
+    case hold = "Hold"
+    case buy = "Buy"
+    case strongBuy = "Strong Buy"
+
+    var color: Color {
+        switch self {
+        case .strongSell:
+            return Color(hex: "991B1B")
+        case .sell:
+            return AppColors.bearish
+        case .hold:
+            return AppColors.neutral
+        case .buy:
+            return Color(hex: "4ADE80")
+        case .strongBuy:
+            return AppColors.bullish
+        }
+    }
+
+    var gaugePosition: Double {
+        switch self {
+        case .strongSell: return 0.1
+        case .sell: return 0.3
+        case .hold: return 0.5
+        case .buy: return 0.7
+        case .strongBuy: return 0.9
+        }
+    }
+}
+
+// MARK: - Technical Indicator Result
+struct TechnicalIndicatorResult {
+    let signal: TechnicalSignal
+    let matchingIndicators: Int
+    let totalIndicators: Int
+
+    var formattedCount: String {
+        "\(matchingIndicators) of \(totalIndicators) indicators"
+    }
+}
+
+// MARK: - Technical Analysis Data
+struct TechnicalAnalysisData {
+    let dailySignal: TechnicalIndicatorResult
+    let weeklySignal: TechnicalIndicatorResult
+    let overallSignal: TechnicalSignal
+    let gaugeValue: Double // 0.0 to 1.0
+
+    var gaugeLevel: Int {
+        switch gaugeValue {
+        case 0..<0.2: return 1
+        case 0.2..<0.4: return 2
+        case 0.4..<0.6: return 3
+        case 0.6..<0.8: return 4
+        default: return 5
+        }
+    }
+}
+
+extension TechnicalAnalysisData {
+    static let sampleData = TechnicalAnalysisData(
+        dailySignal: TechnicalIndicatorResult(
+            signal: .buy,
+            matchingIndicators: 12,
+            totalIndicators: 18
+        ),
+        weeklySignal: TechnicalIndicatorResult(
+            signal: .strongBuy,
+            matchingIndicators: 14,
+            totalIndicators: 18
+        ),
+        overallSignal: .buy,
+        gaugeValue: 0.72
+    )
+}
+
+// MARK: - Combined Analysis Data
+struct TickerAnalysisData {
+    let analystRatings: AnalystRatingsData
+    let sentimentAnalysis: SentimentAnalysisData
+    let technicalAnalysis: TechnicalAnalysisData
+}
+
+extension TickerAnalysisData {
+    static let sampleData = TickerAnalysisData(
+        analystRatings: AnalystRatingsData.sampleData,
+        sentimentAnalysis: SentimentAnalysisData.sampleData,
+        technicalAnalysis: TechnicalAnalysisData.sampleData
+    )
+}

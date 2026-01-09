@@ -28,15 +28,9 @@ struct AnalysisMomentumSection: View {
                 Button(action: {
                     onActionsTapped?()
                 }) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Text("Actions")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.primaryBlue)
-
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(AppColors.primaryBlue)
-                    }
+                    Text("Actions")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.primaryBlue)
                 }
             }
 

@@ -13,7 +13,7 @@ struct AnalystConsensusRow: View {
     let targetUpside: String
 
     var body: some View {
-        HStack {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
             // Left side - Consensus
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text("Analyst Consensus")

@@ -12,6 +12,7 @@ struct TickerAnalysisContent: View {
     @Binding var selectedMomentumPeriod: AnalystMomentumPeriod
     @Binding var selectedSentimentTimeframe: SentimentTimeframe
     var onAnalystRatingsMoreTap: (() -> Void)?
+    var onAnalystActionsTap: (() -> Void)?
     var onSentimentMoreTap: (() -> Void)?
     var onTechnicalDetailTap: (() -> Void)?
 
@@ -23,6 +24,9 @@ struct TickerAnalysisContent: View {
                 selectedMomentumPeriod: $selectedMomentumPeriod,
                 onMoreTapped: {
                     onAnalystRatingsMoreTap?()
+                },
+                onActionsTapped: {
+                    onAnalystActionsTap?()
                 }
             )
 

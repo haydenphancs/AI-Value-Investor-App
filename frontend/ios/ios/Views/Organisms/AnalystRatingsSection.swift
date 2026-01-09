@@ -10,7 +10,8 @@ import SwiftUI
 struct AnalystRatingsSection: View {
     let ratingsData: AnalystRatingsData
     @Binding var selectedMomentumPeriod: AnalystMomentumPeriod
-    let onMoreTapped: () -> Void
+    var onMoreTapped: (() -> Void)?
+    var onActionsTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -18,7 +19,7 @@ struct AnalystRatingsSection: View {
             AnalysisSectionHeader(
                 title: "Analyst Ratings",
                 subtitle: "Total Analysts \(ratingsData.totalAnalysts)\nUpdated On \(ratingsData.formattedUpdatedDate) ET",
-                onAction: onMoreTapped
+                onAction: { onMoreTapped?() }
             )
 
             // Consensus and Target
@@ -52,7 +53,8 @@ struct AnalystRatingsSection: View {
                 netPositive: ratingsData.netPositive,
                 netNegative: ratingsData.netNegative,
                 actionsSummary: ratingsData.actionsSummary,
-                selectedPeriod: $selectedMomentumPeriod
+                selectedPeriod: $selectedMomentumPeriod,
+                onActionsTapped: onActionsTapped
             )
 
             // Disclaimer

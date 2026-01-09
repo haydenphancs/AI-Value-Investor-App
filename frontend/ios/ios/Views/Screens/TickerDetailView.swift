@@ -195,7 +195,13 @@ struct TickerDetailView: View {
                 )
             }
         case .news:
-            placeholderContent(title: "News", description: "Latest news about \(tickerSymbol)")
+            TickerNewsContent(
+                articles: viewModel.newsArticles,
+                currentTicker: tickerSymbol,
+                onArticleTap: viewModel.handleNewsArticleTap,
+                onExternalLinkTap: viewModel.handleNewsExternalLink,
+                onRelatedTickerTap: viewModel.handleNewsTickerTap
+            )
         case .analysis:
             placeholderContent(title: "Analysis", description: "AI-powered analysis for \(tickerSymbol)")
         case .financials:

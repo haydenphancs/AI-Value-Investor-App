@@ -863,11 +863,11 @@ enum MarketMoodLevel: String {
     var color: Color {
         switch self {
         case .bearish:
-            return AppColors.bearish
+            return AppColors.bullish  // 0-30: Green zone
         case .neutral:
-            return AppColors.neutral
+            return Color(hex: "6B7280")  // 31-70: Grey zone
         case .bullish:
-            return AppColors.bullish
+            return AppColors.bearish  // 71-100: Red zone
         }
     }
 

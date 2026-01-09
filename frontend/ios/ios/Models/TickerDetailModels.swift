@@ -1030,3 +1030,337 @@ extension TickerAnalysisData {
         technicalAnalysis: TechnicalAnalysisData.sampleData
     )
 }
+
+// MARK: - Technical Analysis Detail Models
+
+// MARK: - Indicator Signal
+enum IndicatorSignal: String {
+    case buy = "Buy"
+    case sell = "Sell"
+    case neutral = "Neutral"
+
+    var color: Color {
+        switch self {
+        case .buy: return AppColors.bullish
+        case .sell: return AppColors.bearish
+        case .neutral: return AppColors.textSecondary
+        }
+    }
+
+    var arrowIcon: String? {
+        switch self {
+        case .buy: return "arrow.up"
+        case .sell: return "arrow.down"
+        case .neutral: return nil
+        }
+    }
+}
+
+// MARK: - Indicator Summary (Buy/Neutral/Sell counts)
+struct IndicatorSummary {
+    let buyCount: Int
+    let neutralCount: Int
+    let sellCount: Int
+
+    var totalCount: Int {
+        buyCount + neutralCount + sellCount
+    }
+}
+
+// MARK: - Moving Average Indicator
+struct MovingAverageIndicator: Identifiable {
+    let id = UUID()
+    let name: String
+    let value: Double
+    let signal: IndicatorSignal
+
+    var formattedValue: String {
+        String(format: "%.2f", value)
+    }
+}
+
+extension MovingAverageIndicator {
+    static let sampleData: [MovingAverageIndicator] = [
+        MovingAverageIndicator(name: "MA(5)", value: 172.34, signal: .buy),
+        MovingAverageIndicator(name: "MA(10)", value: 170.89, signal: .buy),
+        MovingAverageIndicator(name: "MA(20)", value: 168.45, signal: .sell),
+        MovingAverageIndicator(name: "MA(50)", value: 175.23, signal: .buy),
+        MovingAverageIndicator(name: "MA(100)", value: 171.67, signal: .buy),
+        MovingAverageIndicator(name: "MA(200)", value: 169.12, signal: .buy),
+        MovingAverageIndicator(name: "EMA(5)", value: 173.89, signal: .buy),
+        MovingAverageIndicator(name: "EMA(10)", value: 172.34, signal: .buy),
+        MovingAverageIndicator(name: "EMA(20)", value: 179.56, signal: .neutral),
+        MovingAverageIndicator(name: "EMA(50)", value: 180.12, signal: .neutral)
+    ]
+
+    static let sampleSummary = IndicatorSummary(buyCount: 8, neutralCount: 2, sellCount: 1)
+}
+
+// MARK: - Oscillator Indicator
+struct OscillatorIndicator: Identifiable {
+    let id = UUID()
+    let name: String
+    let value: Double
+    let signal: IndicatorSignal
+
+    var formattedValue: String {
+        String(format: "%.2f", value)
+    }
+}
+
+extension OscillatorIndicator {
+    static let sampleData: [OscillatorIndicator] = [
+        OscillatorIndicator(name: "RSI(14)", value: 58.34, signal: .neutral),
+        OscillatorIndicator(name: "Stoch(9,6)", value: 42.67, signal: .buy),
+        OscillatorIndicator(name: "StochRSI", value: 38.92, signal: .buy),
+        OscillatorIndicator(name: "MACD(12,26)", value: 1.23, signal: .buy),
+        OscillatorIndicator(name: "ADX(14)", value: 28.45, signal: .neutral),
+        OscillatorIndicator(name: "Williams %R", value: -35.67, signal: .neutral),
+        OscillatorIndicator(name: "CCI(14)", value: 45.23, signal: .buy),
+        OscillatorIndicator(name: "ATR(14)", value: 3.89, signal: .neutral)
+    ]
+
+    static let sampleSummary = IndicatorSummary(buyCount: 4, neutralCount: 4, sellCount: 0)
+}
+
+// MARK: - Pivot Point Level
+struct PivotPointLevel: Identifiable {
+    let id = UUID()
+    let name: String
+    let value: Double
+    let levelType: PivotLevelType
+
+    var formattedValue: String {
+        String(format: "%.2f", value)
+    }
+
+    var valueColor: Color {
+        levelType.color
+    }
+}
+
+enum PivotLevelType {
+    case resistance
+    case pivot
+    case support
+
+    var color: Color {
+        switch self {
+        case .resistance: return AppColors.bullish
+        case .pivot: return AppColors.textPrimary
+        case .support: return AppColors.bearish
+        }
+    }
+}
+
+// MARK: - Pivot Points Data
+struct PivotPointsData {
+    let method: String
+    let levels: [PivotPointLevel]
+}
+
+extension PivotPointsData {
+    static let sampleData = PivotPointsData(
+        method: "Classic Method",
+        levels: [
+            PivotPointLevel(name: "R3", value: 184.56, levelType: .resistance),
+            PivotPointLevel(name: "R2", value: 182.34, levelType: .resistance),
+            PivotPointLevel(name: "R1", value: 180.67, levelType: .resistance),
+            PivotPointLevel(name: "Pivot", value: 178.42, levelType: .pivot),
+            PivotPointLevel(name: "S1", value: 176.23, levelType: .support),
+            PivotPointLevel(name: "S2", value: 174.89, levelType: .support),
+            PivotPointLevel(name: "S3", value: 172.45, levelType: .support)
+        ]
+    )
+}
+
+// MARK: - Volume Analysis Data
+struct VolumeAnalysisData {
+    let currentVolume: Double
+    let currentVolumeChange: Double
+    let avgVolume30d: Double
+    let volumeTrend: VolumeTrend
+    let obv: Double
+    let moneyFlowIndex: Double
+
+    var formattedCurrentVolume: String {
+        formatVolume(currentVolume)
+    }
+
+    var formattedVolumeChange: String {
+        let sign = currentVolumeChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", currentVolumeChange))%"
+    }
+
+    var volumeChangeColor: Color {
+        currentVolumeChange >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+
+    var formattedAvgVolume: String {
+        formatVolume(avgVolume30d)
+    }
+
+    var formattedOBV: String {
+        let sign = obv >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", obv))"
+    }
+
+    var obvColor: Color {
+        obv >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+
+    var formattedMFI: String {
+        String(format: "%.2f", moneyFlowIndex)
+    }
+
+    private func formatVolume(_ volume: Double) -> String {
+        if volume >= 1_000_000 {
+            return String(format: "%.1fM", volume / 1_000_000)
+        } else if volume >= 1_000 {
+            return String(format: "%.1fK", volume / 1_000)
+        }
+        return String(format: "%.0f", volume)
+    }
+}
+
+enum VolumeTrend: String {
+    case increasing = "Increasing"
+    case decreasing = "Decreasing"
+    case stable = "Stable"
+
+    var color: Color {
+        switch self {
+        case .increasing: return AppColors.bullish
+        case .decreasing: return AppColors.bearish
+        case .stable: return AppColors.textSecondary
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .increasing: return "arrow.up"
+        case .decreasing: return "arrow.down"
+        case .stable: return "minus"
+        }
+    }
+}
+
+extension VolumeAnalysisData {
+    static let sampleData = VolumeAnalysisData(
+        currentVolume: 52_800_000,
+        currentVolumeChange: 23,
+        avgVolume30d: 42_900_000,
+        volumeTrend: .increasing,
+        obv: 2.48,
+        moneyFlowIndex: 64.23
+    )
+}
+
+// MARK: - Fibonacci Level
+struct FibonacciLevel: Identifiable {
+    let id = UUID()
+    let percentage: String
+    let value: Double
+    let isKey: Bool // High, Low markers
+
+    var formattedValue: String {
+        String(format: "%.2f", value)
+    }
+}
+
+// MARK: - Fibonacci Retracement Data
+struct FibonacciRetracementData {
+    let timeframe: String
+    let levels: [FibonacciLevel]
+}
+
+extension FibonacciRetracementData {
+    static let sampleData = FibonacciRetracementData(
+        timeframe: "Weekly Levels",
+        levels: [
+            FibonacciLevel(percentage: "0.0%", value: 182.45, isKey: true),
+            FibonacciLevel(percentage: "23.6%", value: 180.78, isKey: false),
+            FibonacciLevel(percentage: "38.2%", value: 179.34, isKey: false),
+            FibonacciLevel(percentage: "50.0%", value: 178.42, isKey: false),
+            FibonacciLevel(percentage: "61.8%", value: 177.23, isKey: false),
+            FibonacciLevel(percentage: "78.6%", value: 175.89, isKey: false),
+            FibonacciLevel(percentage: "100.0%", value: 174.39, isKey: true)
+        ]
+    )
+}
+
+// MARK: - Support/Resistance Level
+struct SupportResistanceLevel: Identifiable {
+    let id = UUID()
+    let name: String
+    let value: Double
+    let strength: LevelStrength
+}
+
+enum LevelStrength: String {
+    case strong = "Strong"
+    case moderate = "Moderate"
+    case weak = "Weak"
+
+    var color: Color {
+        switch self {
+        case .strong: return AppColors.bullish
+        case .moderate: return AppColors.neutral
+        case .weak: return AppColors.textMuted
+        }
+    }
+}
+
+// MARK: - Key Support & Resistance Data
+struct SupportResistanceData {
+    let currentPrice: Double
+    let resistanceLevels: [SupportResistanceLevel]
+    let supportLevels: [SupportResistanceLevel]
+
+    var formattedCurrentPrice: String {
+        String(format: "$%.2f", currentPrice)
+    }
+}
+
+extension SupportResistanceData {
+    static let sampleData = SupportResistanceData(
+        currentPrice: 178.42,
+        resistanceLevels: [
+            SupportResistanceLevel(name: "R3", value: 184.56, strength: .strong),
+            SupportResistanceLevel(name: "R2", value: 182.34, strength: .moderate),
+            SupportResistanceLevel(name: "R1", value: 180.67, strength: .weak)
+        ],
+        supportLevels: [
+            SupportResistanceLevel(name: "S1", value: 176.23, strength: .weak),
+            SupportResistanceLevel(name: "S2", value: 174.89, strength: .moderate),
+            SupportResistanceLevel(name: "S3", value: 172.45, strength: .strong)
+        ]
+    )
+}
+
+// MARK: - Complete Technical Analysis Detail Data
+struct TechnicalAnalysisDetailData {
+    let symbol: String
+    let movingAverages: [MovingAverageIndicator]
+    let movingAveragesSummary: IndicatorSummary
+    let oscillators: [OscillatorIndicator]
+    let oscillatorsSummary: IndicatorSummary
+    let pivotPoints: PivotPointsData
+    let volumeAnalysis: VolumeAnalysisData
+    let fibonacciRetracement: FibonacciRetracementData
+    let supportResistance: SupportResistanceData
+}
+
+extension TechnicalAnalysisDetailData {
+    static let sampleData = TechnicalAnalysisDetailData(
+        symbol: "AAPL",
+        movingAverages: MovingAverageIndicator.sampleData,
+        movingAveragesSummary: MovingAverageIndicator.sampleSummary,
+        oscillators: OscillatorIndicator.sampleData,
+        oscillatorsSummary: OscillatorIndicator.sampleSummary,
+        pivotPoints: PivotPointsData.sampleData,
+        volumeAnalysis: VolumeAnalysisData.sampleData,
+        fibonacciRetracement: FibonacciRetracementData.sampleData,
+        supportResistance: SupportResistanceData.sampleData
+    )
+}

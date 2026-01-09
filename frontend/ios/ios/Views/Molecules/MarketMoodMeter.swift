@@ -41,6 +41,7 @@ struct MarketMoodMeter: View {
                 displayValue: "\(sentimentData.moodScore)",
                 label: currentMood.rawValue,
                 labelColor: currentMood.color,
+                gaugeType: .sentiment,
                 showLabels: true,
                 size: 180
             )

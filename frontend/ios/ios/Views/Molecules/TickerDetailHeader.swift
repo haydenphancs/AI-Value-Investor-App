@@ -14,18 +14,38 @@ struct TickerDetailHeader: View {
     var onMoreTapped: (() -> Void)?
     var isFavorite: Bool = false
 
+    // Optional ticker info to show when scrolled (pinned state)
+    var tickerSymbol: String? = nil
+    var tickerPrice: String? = nil
+
     var body: some View {
         HStack {
-            // Back button
-            Button(action: {
-                onBackTapped?()
-            }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(AppColors.textPrimary)
-                    .frame(width: 40, height: 40)
+            // Back button and optional ticker info
+            HStack(spacing: AppSpacing.sm) {
+                Button(action: {
+                    onBackTapped?()
+                }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(width: 40, height: 40)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                // Ticker symbol and price (shown when pinned)
+                if let symbol = tickerSymbol, let price = tickerPrice {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text(symbol)
+                            .font(AppTypography.bodyBold)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        Text(price)
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
             }
-            .buttonStyle(PlainButtonStyle())
 
             Spacer()
 
@@ -70,9 +90,14 @@ struct TickerDetailHeader: View {
 }
 
 #Preview {
-    VStack {
+    VStack(spacing: AppSpacing.lg) {
         TickerDetailHeader(isFavorite: false)
         TickerDetailHeader(isFavorite: true)
+        TickerDetailHeader(
+            isFavorite: false,
+            tickerSymbol: "AAPL",
+            tickerPrice: "$178.42"
+        )
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

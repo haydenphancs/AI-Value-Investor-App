@@ -45,21 +45,14 @@ struct TickerDetailView: View {
                 // Sticky Header (appears when scrolling past threshold)
                 if showStickyHeader, let tickerData = viewModel.tickerData {
                     VStack(spacing: 0) {
-                        // Price Header
-                        TickerPriceHeader(
+                        // Compact header with just ticker name and price
+                        StickyTickerHeader(
                             companyName: tickerData.companyName,
-                            symbol: tickerData.symbol,
-                            price: tickerData.formattedPrice,
-                            priceChange: tickerData.formattedChange,
-                            priceChangePercent: tickerData.formattedChangePercent,
-                            isPositive: tickerData.isPositive,
-                            marketStatus: tickerData.marketStatus
+                            price: tickerData.formattedPrice
                         )
-                        .padding(.top, AppSpacing.sm)
 
                         // Tab Bar (sticks with ticker info)
                         TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
-                            .padding(.top, AppSpacing.sm)
 
                         // Divider
                         Rectangle()

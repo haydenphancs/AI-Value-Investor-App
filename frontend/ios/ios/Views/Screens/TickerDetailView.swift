@@ -13,6 +13,8 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
+    @State private var isTabBarPinned = false
+    @State private var showStickyHeader = false
 
     let tickerSymbol: String
 

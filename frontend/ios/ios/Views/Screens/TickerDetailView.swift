@@ -11,10 +11,8 @@ struct TickerDetailView: View {
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
-    @State private var showStickyHeader: Bool = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
-    @State private var tabBarOffset: CGFloat = 0
 
     let tickerSymbol: String
 
@@ -42,38 +40,25 @@ struct TickerDetailView: View {
 
                 // Sticky Header (appears when tab bar scrolls to top)
                 if showStickyHeader, let tickerData = viewModel.tickerData {
-                    VStack(spacing: 0) {
-                        // Price Header
-                        TickerPriceHeader(
-                            companyName: tickerData.companyName,
-                            symbol: tickerData.symbol,
-                            price: tickerData.formattedPrice,
-                            priceChange: tickerData.formattedChange,
-                            priceChangePercent: tickerData.formattedChangePercent,
-                            isPositive: tickerData.isPositive,
-                            marketStatus: tickerData.marketStatus
-                        )
-                        .padding(.top, AppSpacing.sm)
-
-                        // Tab Bar (sticks with ticker info)
-                        TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
-                            .padding(.top, AppSpacing.sm)
-
-                        // Divider
-                        Rectangle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(height: 1)
-                    }
-                    .background(AppColors.background)
-                    .transition(.opacity)
+                    TickerStickyHeader(
+                        companyName: tickerData.companyName,
+                        symbol: tickerData.symbol,
+                        price: tickerData.formattedPrice,
+                        priceChange: tickerData.formattedChange,
+                        priceChangePercent: tickerData.formattedChangePercent,
+                        isPositive: tickerData.isPositive,
+                        selectedTab: $viewModel.selectedTab
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                     .zIndex(1)
                 }
 
                 // Scrollable Content
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        // Full Ticker Price Header (scrolls away)
+                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        // Content above tab bar (scrolls away)
                         if let tickerData = viewModel.tickerData {
+                            // Full Ticker Price Header
                             TickerPriceHeader(
                                 companyName: tickerData.companyName,
                                 symbol: tickerData.symbol,
@@ -84,9 +69,8 @@ struct TickerDetailView: View {
                                 marketStatus: tickerData.marketStatus
                             )
                             .padding(.top, AppSpacing.sm)
-                            .opacity(showStickyHeader ? 0 : 1)
 
-                            // Chart (always scrolls)
+                            // Chart
                             TickerChartView(
                                 chartData: tickerData.chartData,
                                 isPositive: tickerData.isPositive,
@@ -95,37 +79,22 @@ struct TickerDetailView: View {
                             .padding(.top, AppSpacing.lg)
                         }
 
-                        // Tab Bar in scroll - track its position
-                        TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
-                            .padding(.top, AppSpacing.lg)
-                            .opacity(showStickyHeader ? 0 : 1)
-                            .background(
-                                GeometryReader { geometry in
-                                    Color.clear
-                                        .preference(
-                                            key: TabBarOffsetPreferenceKey.self,
-                                            value: geometry.frame(in: .named("scroll")).minY
-                                        )
-                                }
-                            )
+                        // Section with pinned tab bar header
+                        Section {
+                            // Tab Content
+                            tabContent
+                        } header: {
+                            // Tab Bar - this will stick at the top when scrolling
+                            VStack(spacing: 0) {
+                                TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
+                                    .padding(.top, AppSpacing.lg)
 
-                        // Divider
-                        Rectangle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(height: 1)
-                            .opacity(showStickyHeader ? 0 : 1)
-
-                        // Tab Content
-                        tabContent
-                    }
-                }
-                .coordinateSpace(name: "scroll")
-                .onPreferenceChange(TabBarOffsetPreferenceKey.self) { value in
-                    // Show sticky header when tab bar reaches the top of scroll area
-                    let shouldShow = value <= 0
-                    if shouldShow != showStickyHeader {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showStickyHeader = shouldShow
+                                // Divider
+                                Rectangle()
+                                    .fill(AppColors.cardBackgroundLight)
+                                    .frame(height: 1)
+                            }
+                            .background(AppColors.background)
                         }
                     }
                 }
@@ -283,22 +252,6 @@ struct TickerDetailView: View {
 
     private func handleCompare() {
         print("Compare \(tickerSymbol)")
-    }
-}
-
-// MARK: - Tab Bar Offset Preference Key
-struct TabBarOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-// MARK: - Scroll Offset Preference Key (kept for compatibility)
-struct ScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

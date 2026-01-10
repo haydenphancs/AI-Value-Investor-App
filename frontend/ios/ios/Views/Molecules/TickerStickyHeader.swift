@@ -3,6 +3,7 @@
 //  ios
 //
 //  Molecule: Compact sticky header for Ticker Detail when scrolling
+//  Shows ticker name, price, and tab bar - becomes the ceiling when scrolling
 //
 
 import SwiftUI
@@ -14,66 +15,83 @@ struct TickerStickyHeader: View {
     let priceChange: String
     let priceChangePercent: String
     let isPositive: Bool
+    @Binding var selectedTab: TickerDetailTab
 
     private var changeColor: Color {
         isPositive ? AppColors.bullish : AppColors.bearish
     }
 
+    private var arrowIcon: String {
+        isPositive ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill"
+    }
+
     var body: some View {
-        HStack {
-            // Left side - Company info
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(spacing: 0) {
+            // Compact price row
+            HStack {
+                // Left side - Company name only (compact)
                 Text(companyName)
                     .font(AppTypography.bodyBold)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
-                Text(symbol)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-            }
+                Spacer()
 
-            Spacer()
+                // Right side - Price and change inline
+                HStack(spacing: AppSpacing.sm) {
+                    Text(price)
+                        .font(AppTypography.bodyBold)
+                        .foregroundColor(AppColors.textPrimary)
 
-            // Right side - Price info
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(price)
-                    .font(AppTypography.bodyBold)
-                    .foregroundColor(AppColors.textPrimary)
+                    HStack(spacing: 2) {
+                        Image(systemName: arrowIcon)
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(changeColor)
 
-                HStack(spacing: 4) {
-                    Text("\(priceChange) \(priceChangePercent)")
-                        .font(AppTypography.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(changeColor)
+                        Text(priceChangePercent)
+                            .font(AppTypography.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(changeColor)
+                    }
                 }
             }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.sm)
+
+            // Tab Bar
+            TickerDetailTabBar(selectedTab: $selectedTab)
+
+            // Bottom divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
         }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.sm)
+        .background(AppColors.background)
     }
 }
 
 #Preview {
-    VStack {
-        TickerStickyHeader(
-            companyName: "Apple Inc.",
-            symbol: "AAPL",
-            price: "$178.42",
-            priceChange: "+$2.34",
-            priceChangePercent: "(+1.33%)",
-            isPositive: true
-        )
+    struct PreviewWrapper: View {
+        @State private var selectedTab: TickerDetailTab = .overview
 
-        TickerStickyHeader(
-            companyName: "Tesla, Inc.",
-            symbol: "TSLA",
-            price: "$252.18",
-            priceChange: "-$3.45",
-            priceChangePercent: "(-1.35%)",
-            isPositive: false
-        )
+        var body: some View {
+            VStack {
+                TickerStickyHeader(
+                    companyName: "Apple Inc.",
+                    symbol: "AAPL",
+                    price: "$178.42",
+                    priceChange: "+$2.34",
+                    priceChangePercent: "(+1.33%)",
+                    isPositive: true,
+                    selectedTab: $selectedTab
+                )
+
+                Spacer()
+            }
+            .background(AppColors.background)
+        }
     }
-    .background(AppColors.background)
-    .preferredColorScheme(.dark)
+
+    return PreviewWrapper()
+        .preferredColorScheme(.dark)
 }

@@ -13,7 +13,6 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
-    @State private var showStickyHeader = false
 
     let tickerSymbol: String
 
@@ -31,13 +30,17 @@ struct TickerDetailView: View {
             // Main Content
             VStack(spacing: 0) {
                 // Navigation Header (always visible - back, bell, star, more buttons)
+                // Shows ticker symbol and price when tab bar is pinned
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleMoreTapped,
-                    isFavorite: viewModel.isFavorite
+                    isFavorite: viewModel.isFavorite,
+                    tickerSymbol: isTabBarPinned ? viewModel.tickerData?.symbol : nil,
+                    tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
                 )
+                .animation(.easeInOut(duration: 0.2), value: isTabBarPinned)
 
                 // Sticky Header (appears when tab bar scrolls to top)
                 if showStickyHeader, let tickerData = viewModel.tickerData {
@@ -95,7 +98,27 @@ struct TickerDetailView: View {
                                     .fill(AppColors.cardBackgroundLight)
                                     .frame(height: 1)
                             }
+                            .background(
+                                GeometryReader { geometry in
+                                    Color.clear
+                                        .preference(
+                                            key: TabBarPinnedPreferenceKey.self,
+                                            value: geometry.frame(in: .global).minY
+                                        )
+                                }
+                            )
                             .background(AppColors.background)
+                        }
+                    }
+                }
+                .onPreferenceChange(TabBarPinnedPreferenceKey.self) { minY in
+                    // Tab bar is pinned when its top is near the top of the scroll area
+                    // Account for navigation header height (~50-60pt)
+                    let threshold: CGFloat = 100
+                    let shouldPin = minY <= threshold
+                    if shouldPin != isTabBarPinned {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isTabBarPinned = shouldPin
                         }
                     }
                 }
@@ -253,6 +276,14 @@ struct TickerDetailView: View {
 
     private func handleCompare() {
         print("Compare \(tickerSymbol)")
+    }
+}
+
+// MARK: - Tab Bar Pinned Preference Key
+struct TabBarPinnedPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = min(value, nextValue())
     }
 }
 

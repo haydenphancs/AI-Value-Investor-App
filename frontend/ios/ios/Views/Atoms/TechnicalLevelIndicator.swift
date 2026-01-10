@@ -39,27 +39,24 @@ struct TechnicalLevelIndicatorsRow: View {
     ]
 
     var body: some View {
-        VStack(spacing: AppSpacing.sm) {
-            // Level indicators
-            HStack(spacing: AppSpacing.lg) {
-                ForEach(1...5, id: \.self) { level in
+        HStack(spacing: 0) {
+            ForEach(1...5, id: \.self) { level in
+                VStack(spacing: AppSpacing.sm) {
+                    // Level indicator
                     TechnicalLevelIndicator(
                         level: level,
                         isActive: level == activeLevel,
                         activeColor: levelColors[level - 1]
                     )
-                }
-            }
-
-            // Labels
-            HStack(spacing: 0) {
-                ForEach(labels.indices, id: \.self) { index in
-                    Text(labels[index])
+                    
+                    // Label with fixed height to keep circles aligned
+                    Text(labels[level - 1])
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
-                        .frame(maxWidth: .infinity)
                         .multilineTextAlignment(.center)
+                        .frame(height: 32) // Fixed height to accommodate 2 lines
                 }
+                .frame(maxWidth: .infinity)
             }
         }
     }

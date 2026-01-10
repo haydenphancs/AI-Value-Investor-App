@@ -9,6 +9,12 @@ import SwiftUI
 
 struct TechnicalMeter: View {
     let technicalData: TechnicalAnalysisData
+    @State private var selectedPeriod: TechnicalPeriod = .daily
+    
+    enum TechnicalPeriod {
+        case daily
+        case weekly
+    }
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -23,19 +29,27 @@ struct TechnicalMeter: View {
                     .foregroundColor(AppColors.textMuted)
             }
 
-            // Signal badges row
-            HStack(spacing: AppSpacing.xl) {
+            // Signal badges row (now toggleable)
+            HStack(spacing: AppSpacing.md) {
                 TechnicalSignalBadge(
                     title: "Daily Signal",
                     signal: technicalData.dailySignal.signal,
-                    indicatorCount: technicalData.dailySignal.formattedCount
+                    indicatorCount: technicalData.dailySignal.formattedCount,
+                    isSelected: selectedPeriod == .daily
                 )
+                .onTapGesture {
+                    selectedPeriod = .daily
+                }
 
                 TechnicalSignalBadge(
                     title: "Weekly Signal",
                     signal: technicalData.weeklySignal.signal,
-                    indicatorCount: technicalData.weeklySignal.formattedCount
+                    indicatorCount: technicalData.weeklySignal.formattedCount,
+                    isSelected: selectedPeriod == .weekly
                 )
+                .onTapGesture {
+                    selectedPeriod = .weekly
+                }
             }
             .padding(.horizontal, AppSpacing.lg)
 
@@ -48,7 +62,7 @@ struct TechnicalMeter: View {
             // Level indicators
             TechnicalLevelIndicatorsRow(
                 activeLevel: technicalData.gaugeLevel,
-                labels: ["Strong\nSell", "Sell", "Hold", "Buy", "Strong\nBuy"]
+                labels: ["Strong\nSell", "Sell", "Neutral", "Buy", "Strong\nBuy"]
             )
         }
     }
@@ -96,32 +110,36 @@ struct TechnicalGaugeZones: View {
     let size: CGFloat
 
     var body: some View {
-        ZStack {
-            // Zone 1: Strong Sell (0-20) - Dark Red
-            TechnicalArcSegment(startAngle: 180, endAngle: 144)
-                .stroke(Color(hex: "991B1B"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                .frame(width: size, height: size / 2)
 
-            // Zone 2: Sell (21-40) - Red
-            TechnicalArcSegment(startAngle: 144, endAngle: 108)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                .frame(width: size, height: size / 2)
+        
+            ZStack {
+                // Strong sell – red
+                TechnicalArcSegment(startAngle: 36, endAngle: 0)
+                    .stroke(Color(hex: "991B1B"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                    .frame(width: size, height: size / 2)
+                // Sell – light red
+                TechnicalArcSegment(startAngle: 72, endAngle: 36)
+                    .stroke(Color.red.opacity(0.8), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                    .frame(width: size, height: size / 2)
 
-            // Zone 3: Hold (41-60) - Yellow
-            TechnicalArcSegment(startAngle: 108, endAngle: 72)
-                .stroke(AppColors.neutral, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                .frame(width: size, height: size / 2)
+                // Neutral – Yellow
+                TechnicalArcSegment(startAngle: 108, endAngle: 72)
+                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                    .frame(width: size, height: size / 2)
+                
+                // Buy – Light Green
+                TechnicalArcSegment(startAngle: 144, endAngle: 108)
+                    .stroke(Color.green.opacity(0.8), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                    .frame(width: size, height: size / 2)
+                
+                // Strong Buy – Green
+                TechnicalArcSegment(startAngle: 180, endAngle: 144)
+                
+                    .stroke(Color(hex: "15803D"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
+                    .frame(width: size, height: size / 2)
 
-            // Zone 4: Buy (61-80) - Light Green
-            TechnicalArcSegment(startAngle: 72, endAngle: 36)
-                .stroke(Color(hex: "4ADE80"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 5: Strong Buy (81-100) - Green
-            TechnicalArcSegment(startAngle: 36, endAngle: 0)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-        }
+            }
+        
     }
 }
 

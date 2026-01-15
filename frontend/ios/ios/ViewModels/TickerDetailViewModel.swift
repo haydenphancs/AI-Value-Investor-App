@@ -16,6 +16,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var tickerData: TickerDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var analysisData: TickerAnalysisData?
+    @Published var financialData: TickerFinancialData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -52,6 +53,7 @@ class TickerDetailViewModel: ObservableObject {
             self.tickerData = TickerDetailData.sampleApple
             self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.tickerSymbol)
             self.analysisData = TickerAnalysisData.sampleData
+            self.financialData = TickerFinancialData.sampleApple
             self.isLoading = false
         }
     }
@@ -139,6 +141,38 @@ class TickerDetailViewModel: ObservableObject {
     func handleTechnicalDetail() {
         // TODO: Navigate to detailed technical analysis view
         print("Technical analysis detail for \(tickerSymbol)")
+    }
+
+    // MARK: - Financials Tab Handlers
+
+    func handleEarningsDetail() {
+        // TODO: Navigate to detailed earnings view
+        print("Earnings detail for \(tickerSymbol)")
+    }
+
+    func handleGrowthDetail() {
+        // TODO: Navigate to detailed growth view
+        print("Growth detail for \(tickerSymbol)")
+    }
+
+    func handleRevenueDetail() {
+        // TODO: Navigate to detailed revenue breakdown view
+        print("Revenue breakdown detail for \(tickerSymbol)")
+    }
+
+    func handleProfitPowerDetail() {
+        // TODO: Navigate to detailed profit power view
+        print("Profit power detail for \(tickerSymbol)")
+    }
+
+    func handleHealthCheckDetail() {
+        // TODO: Navigate to detailed health check view
+        print("Health check detail for \(tickerSymbol)")
+    }
+
+    func handleSignalOfConfidenceDetail() {
+        // TODO: Navigate to detailed signal of confidence view
+        print("Signal of confidence detail for \(tickerSymbol)")
     }
 
     // MARK: - Computed Properties

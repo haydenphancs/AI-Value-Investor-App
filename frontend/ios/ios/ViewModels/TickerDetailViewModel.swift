@@ -16,6 +16,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var tickerData: TickerDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var analysisData: TickerAnalysisData?
+    @Published var earningsData: EarningsData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -52,6 +53,7 @@ class TickerDetailViewModel: ObservableObject {
             self.tickerData = TickerDetailData.sampleApple
             self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.tickerSymbol)
             self.analysisData = TickerAnalysisData.sampleData
+            self.earningsData = EarningsData.sampleData
             self.isLoading = false
         }
     }
@@ -139,6 +141,18 @@ class TickerDetailViewModel: ObservableObject {
     func handleTechnicalDetail() {
         // TODO: Navigate to detailed technical analysis view
         print("Technical analysis detail for \(tickerSymbol)")
+    }
+
+    // MARK: - Financials Tab Handlers
+
+    func handleEarningsDetail() {
+        // TODO: Navigate to detailed earnings view
+        print("Earnings detail for \(tickerSymbol)")
+    }
+
+    func handleEarningsInfo() {
+        // TODO: Show earnings info tooltip/modal
+        print("Earnings info for \(tickerSymbol)")
     }
 
     // MARK: - Computed Properties

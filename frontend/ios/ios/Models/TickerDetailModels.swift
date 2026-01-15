@@ -1364,3 +1364,176 @@ extension TechnicalAnalysisDetailData {
         supportResistance: SupportResistanceData.sampleData
     )
 }
+
+// MARK: - Earnings Section Models
+
+// MARK: - Earnings Data Type (EPS vs Revenue)
+enum EarningsDataType: String, CaseIterable {
+    case eps = "EPS"
+    case revenue = "Revenue"
+}
+
+// MARK: - Earnings Time Range
+enum EarningsTimeRange: String, CaseIterable {
+    case oneYear = "1Y"
+    case threeYears = "3Y"
+}
+
+// MARK: - Earnings Quarter Result
+enum EarningsQuarterResult {
+    case beat       // Green - actual > estimate
+    case missed     // Red - actual < estimate
+    case matched    // Green with dashed border - actual == estimate (0% surprise)
+    case pending    // Gray - future quarter, only estimate available
+
+    var dotColor: Color {
+        switch self {
+        case .beat, .matched:
+            return AppColors.bullish
+        case .missed:
+            return AppColors.bearish
+        case .pending:
+            return AppColors.textSecondary
+        }
+    }
+
+    var hasDashedBorder: Bool {
+        self == .matched
+    }
+}
+
+// MARK: - Earnings Quarter Data
+struct EarningsQuarterData: Identifiable {
+    let id = UUID()
+    let quarter: String          // e.g., "Q1 '24"
+    let actualValue: Double?     // nil for future quarters
+    let estimateValue: Double
+    let surprisePercent: Double? // nil for future quarters
+
+    var result: EarningsQuarterResult {
+        guard let actual = actualValue, let surprise = surprisePercent else {
+            return .pending
+        }
+
+        if surprise == 0 {
+            return .matched
+        } else if actual > estimateValue {
+            return .beat
+        } else {
+            return .missed
+        }
+    }
+
+    var formattedSurprise: String? {
+        guard let surprise = surprisePercent else { return nil }
+        if surprise == 0 {
+            return "0%"
+        }
+        let sign = surprise > 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", surprise))%"
+    }
+
+    var surpriseColor: Color {
+        guard let surprise = surprisePercent else { return AppColors.textSecondary }
+        if surprise > 0 {
+            return AppColors.bullish
+        } else if surprise < 0 {
+            return AppColors.bearish
+        }
+        return AppColors.accentCyan
+    }
+}
+
+// MARK: - Earnings Price Data Point (for price overlay)
+struct EarningsPricePoint: Identifiable {
+    let id = UUID()
+    let quarter: String
+    let price: Double
+}
+
+// MARK: - Earnings Data (Combined)
+struct EarningsData {
+    let epsQuarters: [EarningsQuarterData]
+    let revenueQuarters: [EarningsQuarterData]
+    let priceHistory: [EarningsPricePoint]
+
+    func quarters(for dataType: EarningsDataType) -> [EarningsQuarterData] {
+        switch dataType {
+        case .eps:
+            return epsQuarters
+        case .revenue:
+            return revenueQuarters
+        }
+    }
+}
+
+extension EarningsData {
+    static let sampleData = EarningsData(
+        epsQuarters: [
+            EarningsQuarterData(quarter: "Q1 '24", actualValue: 0.65, estimateValue: 0.58, surprisePercent: 4.2),
+            EarningsQuarterData(quarter: "Q2 '24", actualValue: 1.20, estimateValue: 1.10, surprisePercent: 5.8),
+            EarningsQuarterData(quarter: "Q3 '24", actualValue: 0.52, estimateValue: 0.55, surprisePercent: -1.2),
+            EarningsQuarterData(quarter: "Q4 '24", actualValue: 0.25, estimateValue: 0.25, surprisePercent: 0),
+            EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 0.72, surprisePercent: nil),
+            EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 1.35, surprisePercent: nil)
+        ],
+        revenueQuarters: [
+            EarningsQuarterData(quarter: "Q1 '24", actualValue: 94.8, estimateValue: 92.5, surprisePercent: 2.5),
+            EarningsQuarterData(quarter: "Q2 '24", actualValue: 98.2, estimateValue: 95.0, surprisePercent: 3.4),
+            EarningsQuarterData(quarter: "Q3 '24", actualValue: 89.5, estimateValue: 91.0, surprisePercent: -1.6),
+            EarningsQuarterData(quarter: "Q4 '24", actualValue: 102.3, estimateValue: 102.3, surprisePercent: 0),
+            EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 96.0, surprisePercent: nil),
+            EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 105.0, surprisePercent: nil)
+        ],
+        priceHistory: [
+            EarningsPricePoint(quarter: "Q1 '24", price: 0.60),
+            EarningsPricePoint(quarter: "Q2 '24", price: 0.95),
+            EarningsPricePoint(quarter: "Q3 '24", price: 0.98),
+            EarningsPricePoint(quarter: "Q4 '24", price: 1.05),
+            EarningsPricePoint(quarter: "Q1 '25", price: 0.95),
+            EarningsPricePoint(quarter: "Q2 '25", price: nil)
+        ]
+    )
+
+    // Extended 3-year sample data
+    static let sampleData3Year = EarningsData(
+        epsQuarters: [
+            EarningsQuarterData(quarter: "Q1 '22", actualValue: 0.45, estimateValue: 0.42, surprisePercent: 7.1),
+            EarningsQuarterData(quarter: "Q2 '22", actualValue: 0.52, estimateValue: 0.50, surprisePercent: 4.0),
+            EarningsQuarterData(quarter: "Q3 '22", actualValue: 0.48, estimateValue: 0.52, surprisePercent: -7.7),
+            EarningsQuarterData(quarter: "Q4 '22", actualValue: 0.55, estimateValue: 0.55, surprisePercent: 0),
+            EarningsQuarterData(quarter: "Q1 '23", actualValue: 0.58, estimateValue: 0.55, surprisePercent: 5.5),
+            EarningsQuarterData(quarter: "Q2 '23", actualValue: 0.62, estimateValue: 0.60, surprisePercent: 3.3),
+            EarningsQuarterData(quarter: "Q3 '23", actualValue: 0.55, estimateValue: 0.58, surprisePercent: -5.2),
+            EarningsQuarterData(quarter: "Q4 '23", actualValue: 0.68, estimateValue: 0.65, surprisePercent: 4.6),
+            EarningsQuarterData(quarter: "Q1 '24", actualValue: 0.65, estimateValue: 0.58, surprisePercent: 4.2),
+            EarningsQuarterData(quarter: "Q2 '24", actualValue: 1.20, estimateValue: 1.10, surprisePercent: 5.8),
+            EarningsQuarterData(quarter: "Q3 '24", actualValue: 0.52, estimateValue: 0.55, surprisePercent: -1.2),
+            EarningsQuarterData(quarter: "Q4 '24", actualValue: 0.25, estimateValue: 0.25, surprisePercent: 0)
+        ],
+        revenueQuarters: [
+            EarningsQuarterData(quarter: "Q1 '22", actualValue: 78.5, estimateValue: 76.0, surprisePercent: 3.3),
+            EarningsQuarterData(quarter: "Q2 '22", actualValue: 82.3, estimateValue: 80.0, surprisePercent: 2.9),
+            EarningsQuarterData(quarter: "Q3 '22", actualValue: 79.8, estimateValue: 82.0, surprisePercent: -2.7),
+            EarningsQuarterData(quarter: "Q4 '22", actualValue: 88.2, estimateValue: 88.2, surprisePercent: 0),
+            EarningsQuarterData(quarter: "Q1 '23", actualValue: 85.5, estimateValue: 83.0, surprisePercent: 3.0),
+            EarningsQuarterData(quarter: "Q2 '23", actualValue: 90.2, estimateValue: 88.5, surprisePercent: 1.9),
+            EarningsQuarterData(quarter: "Q3 '23", actualValue: 86.8, estimateValue: 89.0, surprisePercent: -2.5),
+            EarningsQuarterData(quarter: "Q4 '23", actualValue: 95.5, estimateValue: 93.0, surprisePercent: 2.7),
+            EarningsQuarterData(quarter: "Q1 '24", actualValue: 94.8, estimateValue: 92.5, surprisePercent: 2.5),
+            EarningsQuarterData(quarter: "Q2 '24", actualValue: 98.2, estimateValue: 95.0, surprisePercent: 3.4),
+            EarningsQuarterData(quarter: "Q3 '24", actualValue: 89.5, estimateValue: 91.0, surprisePercent: -1.6),
+            EarningsQuarterData(quarter: "Q4 '24", actualValue: 102.3, estimateValue: 102.3, surprisePercent: 0)
+        ],
+        priceHistory: []
+    )
+}
+
+// Fix for nil price in sample data
+extension EarningsPricePoint {
+    init(quarter: String, price: Double?) {
+        self.id = UUID()
+        self.quarter = quarter
+        self.price = price ?? 0
+    }
+}

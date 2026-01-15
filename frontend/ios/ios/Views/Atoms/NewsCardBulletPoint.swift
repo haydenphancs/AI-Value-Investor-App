@@ -45,7 +45,7 @@ struct NewsCardBulletPoint: View {
     VStack(alignment: .leading, spacing: AppSpacing.md) {
         NewsCardBulletPoint(text: "High Pre-Orders Abroad: Apple is seeing unusually strong pre-order numbers in Europe and Asia.")
         NewsCardBulletPoint(text: "Supply Chain Scaling: Apple is ramping up production and logistics overseas.")
-        NewsCardBulletPoint(text: "This is a simple bullet point without a title prefix.")
+        NewsCardBulletPoint(text: "An example: This is an explain.")
     }
     .padding()
     .background(AppColors.cardBackground)

@@ -13,8 +13,8 @@ struct EarningsChartView: View {
     let priceHistory: [EarningsPricePoint]
     let showPriceLine: Bool
 
-    // Calculate chart bounds
-    private var allValues: [Double] {
+    // Calculate chart bounds based ONLY on EPS/Revenue data (NOT price)
+    private var earningsValues: [Double] {
         var values: [Double] = []
         for quarter in quarters {
             if let actual = quarter.actualValue {
@@ -22,84 +22,105 @@ struct EarningsChartView: View {
             }
             values.append(quarter.estimateValue)
         }
-        if showPriceLine {
-            values.append(contentsOf: priceHistory.map { $0.price })
-        }
         return values
     }
 
     private var minValue: Double {
-        (allValues.min() ?? 0) * 0.9
+        (earningsValues.min() ?? 0) * 0.9
     }
 
     private var maxValue: Double {
-        (allValues.max() ?? 1) * 1.1
+        (earningsValues.max() ?? 1) * 1.1
+    }
+
+    // Price bounds for independent normalization
+    private var priceValues: [Double] {
+        // Only include prices for quarters that have actual data (not future/pending)
+        var values: [Double] = []
+        for (index, quarter) in quarters.enumerated() {
+            if quarter.actualValue != nil, index < priceHistory.count, priceHistory[index].price > 0 {
+                values.append(priceHistory[index].price)
+            }
+        }
+        return values
+    }
+
+    private var minPrice: Double {
+        priceValues.min() ?? 0
+    }
+
+    private var maxPrice: Double {
+        priceValues.max() ?? 1
     }
 
     private var chartHeight: CGFloat { 200 }
+    private var yAxisWidth: CGFloat { 40 }
 
     var body: some View {
         VStack(spacing: 0) {
-            GeometryReader { geometry in
-                let width = geometry.size.width
-                let height = geometry.size.height
-                let quarterCount = quarters.count
-                let stepX = width / CGFloat(quarterCount)
-                let range = max(maxValue - minValue, 0.01)
+            HStack(alignment: .top, spacing: 0) {
+                // Y-axis labels (separate from chart area)
+                yAxisLabels()
+                    .frame(width: yAxisWidth)
 
-                ZStack {
-                    // Horizontal grid lines
-                    gridLines(height: height, range: range)
+                // Chart area
+                GeometryReader { geometry in
+                    let width = geometry.size.width
+                    let height = geometry.size.height
+                    let quarterCount = quarters.count
+                    let stepX = width / CGFloat(quarterCount)
+                    let range = max(maxValue - minValue, 0.01)
 
-                    // Y-axis labels
-                    yAxisLabels(height: height, range: range)
-                        .offset(x: -width/2 + 15)
+                    ZStack {
+                        // Horizontal grid lines
+                        gridLines(height: height)
 
-                    // Price line (optional, rendered first so it's behind)
-                    if showPriceLine && !priceHistory.isEmpty {
-                        priceLine(width: width, height: height, stepX: stepX, range: range)
-                    }
+                        // Price line (optional, rendered first so it's behind)
+                        // Only show for quarters with actual data
+                        if showPriceLine && !priceValues.isEmpty {
+                            priceLine(width: width, height: height, stepX: stepX)
+                        }
 
-                    // Estimate dots (gray)
-                    ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
-                        let x = CGFloat(index) * stepX + stepX / 2
-                        let y = height - normalizedY(quarter.estimateValue, height: height, range: range)
-
-                        Circle()
-                            .fill(AppColors.textSecondary)
-                            .frame(width: 14, height: 14)
-                            .position(x: x, y: y)
-                    }
-
-                    // Actual result dots (colored based on result)
-                    ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
-                        if let actual = quarter.actualValue {
+                        // Estimate dots (gray)
+                        ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
                             let x = CGFloat(index) * stepX + stepX / 2
-                            let y = height - normalizedY(actual, height: height, range: range)
+                            let y = height - normalizedY(quarter.estimateValue, height: height, range: range)
 
-                            // Dot with appropriate styling
-                            ZStack {
-                                Circle()
-                                    .fill(quarter.result.dotColor)
-                                    .frame(width: 14, height: 14)
+                            Circle()
+                                .fill(AppColors.textSecondary)
+                                .frame(width: 14, height: 14)
+                                .position(x: x, y: y)
+                        }
 
-                                // Dashed border for matched results
-                                if quarter.result.hasDashedBorder {
+                        // Actual result dots (colored based on result)
+                        ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
+                            if let actual = quarter.actualValue {
+                                let x = CGFloat(index) * stepX + stepX / 2
+                                let y = height - normalizedY(actual, height: height, range: range)
+
+                                // Dot with appropriate styling
+                                ZStack {
                                     Circle()
-                                        .stroke(
-                                            AppColors.textPrimary,
-                                            style: StrokeStyle(lineWidth: 2, dash: [3, 2])
-                                        )
-                                        .frame(width: 18, height: 18)
+                                        .fill(quarter.result.dotColor)
+                                        .frame(width: 14, height: 14)
+
+                                    // Dashed border for matched results
+                                    if quarter.result.hasDashedBorder {
+                                        Circle()
+                                            .stroke(
+                                                AppColors.textPrimary,
+                                                style: StrokeStyle(lineWidth: 2, dash: [3, 2])
+                                            )
+                                            .frame(width: 18, height: 18)
+                                    }
                                 }
+                                .position(x: x, y: y)
                             }
-                            .position(x: x, y: y)
                         }
                     }
                 }
+                .frame(height: chartHeight)
             }
-            .frame(height: chartHeight)
-            .padding(.leading, 30) // Space for Y-axis labels
 
             // X-axis labels (quarters)
             xAxisLabels()
@@ -108,7 +129,7 @@ struct EarningsChartView: View {
 
     // MARK: - Helper Views
 
-    private func gridLines(height: CGFloat, range: Double) -> some View {
+    private func gridLines(height: CGFloat) -> some View {
         VStack(spacing: 0) {
             ForEach(0..<4) { index in
                 Rectangle()
@@ -121,7 +142,7 @@ struct EarningsChartView: View {
         }
     }
 
-    private func yAxisLabels(height: CGFloat, range: Double) -> some View {
+    private func yAxisLabels() -> some View {
         VStack {
             Text(formatYValue(maxValue))
                 .font(AppTypography.caption)
@@ -135,11 +156,16 @@ struct EarningsChartView: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
-        .frame(width: 30)
+        .frame(height: chartHeight)
+        .padding(.trailing, AppSpacing.sm)
     }
 
     private func xAxisLabels() -> some View {
         HStack(spacing: 0) {
+            // Spacer for y-axis width alignment
+            Spacer()
+                .frame(width: yAxisWidth)
+
             ForEach(quarters) { quarter in
                 Text(quarter.quarter)
                     .font(AppTypography.caption)
@@ -147,19 +173,33 @@ struct EarningsChartView: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        .padding(.leading, 30)
         .padding(.top, AppSpacing.sm)
     }
 
-    private func priceLine(width: CGFloat, height: CGFloat, stepX: CGFloat, range: Double) -> some View {
-        Path { path in
-            for (index, pricePoint) in priceHistory.enumerated() {
-                guard pricePoint.price > 0 else { continue }
-                let x = CGFloat(index) * stepX + stepX / 2
-                let y = height - normalizedY(pricePoint.price, height: height, range: range)
+    private func priceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {
+        let priceRange = max(maxPrice - minPrice, 0.01)
 
-                if index == 0 || (index > 0 && priceHistory[index - 1].price == 0) {
+        return Path { path in
+            var isFirstPoint = true
+
+            for (index, quarter) in quarters.enumerated() {
+                // Only draw price for quarters with actual data (not pending/future)
+                guard quarter.actualValue != nil,
+                      index < priceHistory.count,
+                      priceHistory[index].price > 0 else {
+                    continue
+                }
+
+                let pricePoint = priceHistory[index]
+                let x = CGFloat(index) * stepX + stepX / 2
+
+                // Normalize price independently to fit within the chart area
+                let normalizedPrice = (pricePoint.price - minPrice) / priceRange
+                let y = height - (CGFloat(normalizedPrice) * height * 0.85 + height * 0.075)
+
+                if isFirstPoint {
                     path.move(to: CGPoint(x: x, y: y))
+                    isFirstPoint = false
                 } else {
                     path.addLine(to: CGPoint(x: x, y: y))
                 }

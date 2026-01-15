@@ -220,7 +220,20 @@ struct TickerDetailView: View {
                 placeholderContent(title: "Analysis", description: "Loading analysis data...")
             }
         case .financials:
-            placeholderContent(title: "Financials", description: "Financial statements for \(tickerSymbol)")
+            if let financialData = viewModel.financialData {
+                TickerFinancialsContent(
+                    financialData: financialData,
+                    tickerSymbol: tickerSymbol,
+                    onEarningsDetailTap: viewModel.handleEarningsDetail,
+                    onGrowthDetailTap: viewModel.handleGrowthDetail,
+                    onRevenueDetailTap: viewModel.handleRevenueDetail,
+                    onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
+                    onHealthCheckDetailTap: viewModel.handleHealthCheckDetail,
+                    onSignalDetailTap: viewModel.handleSignalOfConfidenceDetail
+                )
+            } else {
+                placeholderContent(title: "Financials", description: "Loading financial data...")
+            }
         case .insiders:
             placeholderContent(title: "Insiders", description: "Insider trading activity for \(tickerSymbol)")
         }

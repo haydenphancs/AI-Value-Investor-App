@@ -175,7 +175,7 @@ struct EarningsInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(item.title)
-                    .font(AppTypography.subheadlineBold)
+                    .font(AppTypography.calloutBold)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(item.description)

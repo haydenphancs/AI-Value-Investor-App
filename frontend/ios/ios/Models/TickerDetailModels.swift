@@ -1446,7 +1446,7 @@ struct EarningsQuarterData: Identifiable {
 
 // MARK: - Earnings Price Data Point (for price overlay)
 struct EarningsPricePoint: Identifiable {
-    let id = UUID()
+    var id = UUID()
     let quarter: String
     let price: Double
 }

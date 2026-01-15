@@ -10,7 +10,6 @@ import SwiftUI
 struct TickerFinancialsContent: View {
     let earningsData: EarningsData
     var onEarningsDetailTap: (() -> Void)?
-    var onEarningsInfoTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -19,9 +18,6 @@ struct TickerFinancialsContent: View {
                 earningsData: earningsData,
                 onDetailTap: {
                     onEarningsDetailTap?()
-                },
-                onInfoTap: {
-                    onEarningsInfoTap?()
                 }
             )
 

@@ -150,11 +150,6 @@ class TickerDetailViewModel: ObservableObject {
         print("Earnings detail for \(tickerSymbol)")
     }
 
-    func handleEarningsInfo() {
-        // TODO: Show earnings info tooltip/modal
-        print("Earnings info for \(tickerSymbol)")
-    }
-
     // MARK: - Computed Properties
 
     var formattedPrice: String {

@@ -10,11 +10,11 @@ import SwiftUI
 struct EarningsSectionCard: View {
     let earningsData: EarningsData
     let onDetailTap: (() -> Void)?
-    let onInfoTap: (() -> Void)?
 
     @State private var selectedDataType: EarningsDataType = .eps
     @State private var selectedTimeRange: EarningsTimeRange = .oneYear
     @State private var showPriceLine: Bool = false
+    @State private var showInfoSheet: Bool = false
 
     init(
         earningsData: EarningsData,
@@ -23,7 +23,6 @@ struct EarningsSectionCard: View {
     ) {
         self.earningsData = earningsData
         self.onDetailTap = onDetailTap
-        self.onInfoTap = onInfoTap
     }
 
     // Get quarters based on selected time range
@@ -61,6 +60,9 @@ struct EarningsSectionCard: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .sheet(isPresented: $showInfoSheet) {
+            EarningsInfoSheet()
+        }
     }
 
     // MARK: - Header Section
@@ -74,7 +76,7 @@ struct EarningsSectionCard: View {
 
                 // Info button
                 Button {
-                    onInfoTap?()
+                    showInfoSheet = true
                 } label: {
                     ZStack {
                         Circle()
@@ -136,9 +138,6 @@ struct EarningsSectionCard: View {
                 earningsData: EarningsData.sampleData,
                 onDetailTap: {
                     print("Detail tapped")
-                },
-                onInfoTap: {
-                    print("Info tapped")
                 }
             )
             .padding(AppSpacing.lg)

@@ -42,6 +42,15 @@ struct AppColors {
     static let tabBarBackground = Color(hex: "0D1117")
     static let tabBarSelected = Color(hex: "3B82F6")
     static let tabBarUnselected = Color(hex: "6B7280")
+
+    // Growth Chart Colors
+    static let growthBarBlue = Color(hex: "5B9CF6")
+    static let growthYoYYellow = Color(hex: "FACC15")
+    static let growthSectorGray = Color(hex: "9CA3AF")
+    static let chipSelectedBackground = Color(hex: "3B82F6")
+    static let chipUnselectedBackground = Color(hex: "2D3548")
+    static let toggleBackground = Color(hex: "1E2330")
+    static let toggleSelectedBackground = Color(hex: "374151")
 }
 
 // MARK: - Color Extension for Hex

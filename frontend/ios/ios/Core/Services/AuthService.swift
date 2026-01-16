@@ -150,9 +150,10 @@ final class AuthService {
 // MARK: - Keychain Service
 
 /// Simple Keychain wrapper for secure token storage
-final class KeychainService {
+/// @unchecked Sendable because Keychain APIs are thread-safe
+final class KeychainService: @unchecked Sendable {
 
-    static let shared = KeychainService()
+    nonisolated(unsafe) static let shared = KeychainService()
 
     private let service = Bundle.main.bundleIdentifier ?? "com.aivalueinvestor"
 

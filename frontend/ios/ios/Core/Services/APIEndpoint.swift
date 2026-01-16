@@ -76,7 +76,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Path
 
-    var path: String {
+    nonisolated var path: String {
         switch self {
         // Auth
         case .signIn:
@@ -150,7 +150,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Method
 
-    var method: HTTPMethod {
+    nonisolated var method: HTTPMethod {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
@@ -170,7 +170,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Query Parameters
 
-    var queryParameters: [String: String]? {
+    nonisolated var queryParameters: [String: String]? {
         switch self {
         case .searchStocks(let query, let limit):
             return ["q": query, "limit": String(limit)]
@@ -191,7 +191,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Body
 
-    var body: Encodable? {
+    nonisolated var body: (any Encodable & Sendable)? {
         switch self {
         case .signIn(let email, let password):
             return SignInRequest(email: email, password: password)
@@ -230,7 +230,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Auth Required
 
-    var requiresAuth: Bool {
+    nonisolated var requiresAuth: Bool {
         switch self {
         case .signIn, .signUp, .refreshToken, .getPersonas:
             return false
@@ -241,7 +241,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Timeout
 
-    var timeout: TimeInterval {
+    nonisolated var timeout: TimeInterval {
         switch self {
         case .generateResearch:
             return 120 // 2 minutes for AI generation

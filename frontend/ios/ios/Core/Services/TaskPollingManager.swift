@@ -55,9 +55,9 @@ struct ResearchStatusResponse: Decodable, Sendable {
         case estimatedTimeRemaining = "estimated_time_remaining"
     }
 
-    var isCompleted: Bool { status == "completed" }
-    var isFailed: Bool { status == "failed" }
-    var isProcessing: Bool { status == "pending" || status == "processing" }
+    nonisolated var isCompleted: Bool { status == "completed" }
+    nonisolated var isFailed: Bool { status == "failed" }
+    nonisolated var isProcessing: Bool { status == "pending" || status == "processing" }
 }
 
 // MARK: - Research Generation Response

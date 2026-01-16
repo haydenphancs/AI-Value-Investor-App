@@ -30,7 +30,7 @@ import Foundation
 // MARK: - Task Progress
 
 /// Progress updates for long-running tasks
-enum TaskProgress<T> {
+enum TaskProgress<T: Sendable>: Sendable {
     case started(taskId: String)
     case progress(percent: Int, step: String)
     case completed(T)
@@ -39,7 +39,7 @@ enum TaskProgress<T> {
 
 // MARK: - Research Status Response
 
-struct ResearchStatusResponse: Decodable {
+struct ResearchStatusResponse: Decodable, Sendable {
     let reportId: String
     let status: String
     let progress: Int
@@ -62,7 +62,7 @@ struct ResearchStatusResponse: Decodable {
 
 // MARK: - Research Generation Response
 
-struct ResearchGenerationResponse: Decodable {
+struct ResearchGenerationResponse: Decodable, Sendable {
     let reportId: String
     let status: String
     let estimatedSeconds: Int?
@@ -91,7 +91,7 @@ actor TaskPollingManager {
     // MARK: - Initialization
 
     init(
-        apiClient: APIClient = .shared,
+        apiClient: APIClient,
         pollInterval: TimeInterval = APIConfig.researchPollInterval,
         maxPollDuration: TimeInterval = APIConfig.researchPollTimeout
     ) {
@@ -246,7 +246,7 @@ actor TaskPollingManager {
 // MARK: - Research Report Detail
 
 /// Full research report from backend
-struct ResearchReportDetail: Decodable, Identifiable {
+struct ResearchReportDetail: Decodable, Identifiable, Sendable {
     let id: String
     let userId: String
     let stockId: String
@@ -306,7 +306,7 @@ struct ResearchReportDetail: Decodable, Identifiable {
 
 // MARK: - Report Sub-Models
 
-struct InvestmentThesis: Decodable {
+struct InvestmentThesis: Decodable, Sendable {
     let summary: String
     let keyDrivers: [String]
     let risks: [String]
@@ -322,7 +322,7 @@ struct InvestmentThesis: Decodable {
     }
 }
 
-struct MoatAnalysis: Decodable {
+struct MoatAnalysis: Decodable, Sendable {
     let moatRating: String
     let moatSources: [String]
     let moatSustainability: String
@@ -338,7 +338,7 @@ struct MoatAnalysis: Decodable {
     }
 }
 
-struct ValuationAnalysis: Decodable {
+struct ValuationAnalysis: Decodable, Sendable {
     let valuationRating: String
     let keyMetrics: [String: AnyCodable]
     let historicalContext: String?
@@ -352,7 +352,7 @@ struct ValuationAnalysis: Decodable {
     }
 }
 
-struct RiskAssessment: Decodable {
+struct RiskAssessment: Decodable, Sendable {
     let overallRisk: String
     let businessRisks: [String]
     let financialRisks: [String]

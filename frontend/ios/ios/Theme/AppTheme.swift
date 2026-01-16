@@ -58,6 +58,11 @@ struct AppColors {
     static let profitFCFMargin = Color(hex: "A855F7")         // Purple
     static let profitNetMargin = Color(hex: "22C55E")         // Green - matches bullish
     static let profitSectorAverage = Color(hex: "9CA3AF")     // Gray - matches textSecondary
+
+    // Signal of Confidence Chart Colors
+    static let confidenceDividends = Color(hex: "3B82F6")     // Blue - matches primaryBlue
+    static let confidenceBuybacks = Color(hex: "22C55E")      // Green - matches bullish
+    static let confidenceSharesOutstanding = Color(hex: "FACC15") // Yellow - matches growthYoYYellow
 }
 
 // MARK: - Color Extension for Hex

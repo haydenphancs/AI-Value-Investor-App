@@ -19,11 +19,6 @@ Adding a New Persona:
 4. Add to __all__ and imports in this file
 5. The registry will auto-discover it on startup
 
-Example (adding Pelosi Trader):
-    class PelosiTraderAgent(PersonaAgent):
-        PERSONA_ID = "pelosi"
-        PERSONA_NAME = "Nancy Pelosi"
-        # ... etc
 """
 
 from app.agents.personas.buffett import BuffettAgent

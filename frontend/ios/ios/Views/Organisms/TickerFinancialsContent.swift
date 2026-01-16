@@ -37,22 +37,22 @@ struct TickerFinancialsContent: View {
                 )
             }
 
-            // Profit Power Section
-            if let profitPowerData = profitPowerData {
-                ProfitPowerSectionCard(
-                    profitPowerData: profitPowerData,
-                    onDetailTapped: {
-                        onProfitPowerDetailTap?()
-                    }
-                )
-            }
-
             // Revenue Breakdown Section ("How TICKER Makes Money")
             if let revenueBreakdownData = revenueBreakdownData {
                 RevenueBreakdownSectionCard(
                     data: revenueBreakdownData,
                     onDetailTapped: {
                         onRevenueBreakdownDetailTap?()
+                    }
+                )
+            }
+
+            // Profit Power Section
+            if let profitPowerData = profitPowerData {
+                ProfitPowerSectionCard(
+                    profitPowerData: profitPowerData,
+                    onDetailTapped: {
+                        onProfitPowerDetailTap?()
                     }
                 )
             }

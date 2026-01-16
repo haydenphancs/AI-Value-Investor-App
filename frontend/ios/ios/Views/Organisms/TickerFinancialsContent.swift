@@ -10,8 +10,10 @@ import SwiftUI
 struct TickerFinancialsContent: View {
     let earningsData: EarningsData
     let growthData: GrowthSectionData?
+    let revenueBreakdownData: RevenueBreakdownData?
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
+    var onRevenueBreakdownDetailTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -33,6 +35,16 @@ struct TickerFinancialsContent: View {
                 )
             }
 
+            // Revenue Breakdown Section ("How TICKER Makes Money")
+            if let revenueBreakdownData = revenueBreakdownData {
+                RevenueBreakdownSectionCard(
+                    data: revenueBreakdownData,
+                    onDetailTapped: {
+                        onRevenueBreakdownDetailTap?()
+                    }
+                )
+            }
+
             // Bottom spacing for AI bar
             Spacer()
                 .frame(height: 120)
@@ -46,7 +58,8 @@ struct TickerFinancialsContent: View {
     ScrollView {
         TickerFinancialsContent(
             earningsData: EarningsData.sampleData,
-            growthData: GrowthSectionData.sampleData
+            growthData: GrowthSectionData.sampleData,
+            revenueBreakdownData: RevenueBreakdownData.sampleApple
         )
     }
     .background(AppColors.background)

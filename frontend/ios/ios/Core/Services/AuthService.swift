@@ -37,7 +37,7 @@ struct AuthResponse: Decodable {
 /// Handles authentication and token management
 @MainActor
 final class AuthService: ObservableObject {
-
+    
     // MARK: - Properties
 
     private let apiClient: APIClient

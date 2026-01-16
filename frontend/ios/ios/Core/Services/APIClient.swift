@@ -94,10 +94,10 @@ actor APIClient {
             // Retry on server errors
             if retryCount > 0, case .serverError = error {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                return try await request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1)
+                return try await self.request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1)
             }
             throw error
-        } catch is DecodingError {
+        } catch let error as DecodingError {
             throw APIError.decodingError(error)
         } catch {
             throw APIError.networkError(error)

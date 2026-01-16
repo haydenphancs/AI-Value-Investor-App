@@ -102,7 +102,7 @@ final class AppState {
     // MARK: - Auth Actions
 
     private func restoreAuthState() async {
-        guard let token = authService.getStoredToken() else {
+        guard authService.getStoredToken() != nil else {
             auth.status = .unauthenticated
             return
         }

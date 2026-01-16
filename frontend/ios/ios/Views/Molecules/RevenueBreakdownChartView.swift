@@ -160,9 +160,9 @@ struct RevenueBreakdownChartView: View {
         let taxHeight = CGFloat(data.tax / totalRevenue) * height
 
         // Positions from top
-        let costOfSalesY = costOfSalesHeight / 2
-        let opExpenseY = costOfSalesHeight + opExpenseHeight / 2
-        let taxY = costOfSalesHeight + opExpenseHeight + taxHeight / 2
+        _ = costOfSalesHeight / 2
+        _ = costOfSalesHeight + opExpenseHeight / 2
+        _ = costOfSalesHeight + opExpenseHeight + taxHeight / 2
 
         return ZStack(alignment: .top) {
             // Cost of Sales (starts at top)

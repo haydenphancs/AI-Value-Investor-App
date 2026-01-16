@@ -19,6 +19,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var earningsData: EarningsData?
     @Published var growthData: GrowthSectionData?
     @Published var profitPowerData: ProfitPowerSectionData?
+    @Published var signalOfConfidenceData: SignalOfConfidenceSectionData?
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
@@ -59,6 +60,7 @@ class TickerDetailViewModel: ObservableObject {
             self.earningsData = EarningsData.sampleData
             self.growthData = GrowthSectionData.sampleData
             self.profitPowerData = ProfitPowerSectionData.sampleData
+            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
             self.revenueBreakdownData = RevenueBreakdownData.sampleApple
             self.isLoading = false
         }
@@ -164,6 +166,11 @@ class TickerDetailViewModel: ObservableObject {
     func handleProfitPowerDetail() {
         // TODO: Navigate to detailed profit power view
         print("Profit power detail for \(tickerSymbol)")
+    }
+
+    func handleSignalOfConfidenceDetail() {
+        // TODO: Navigate to detailed signal of confidence view
+        print("Signal of confidence detail for \(tickerSymbol)")
     }
 
     func handleRevenueBreakdownDetail() {

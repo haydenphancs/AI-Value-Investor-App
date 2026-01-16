@@ -23,13 +23,8 @@ struct iosApp: App {
     /// Injected into all views via .environment()
     @State private var appState = AppState()
 
-    // MARK: - Services
-
-    /// API client for network requests
-    private let apiClient = APIClient.shared
-
-    /// Authentication service
-    private let authService = AuthService()
+    /// Tracks if services have been configured
+    @State private var isConfigured = false
 
     // MARK: - Initialization
 
@@ -46,6 +41,13 @@ struct iosApp: App {
                 .environment(appState)
                 .preferredColorScheme(.dark)
                 .task {
+                    guard !isConfigured else { return }
+                    isConfigured = true
+
+                    // Get services (APIClient.shared is safe to access in async context)
+                    let apiClient = APIClient.shared
+                    let authService = AuthService(apiClient: apiClient)
+
                     // Configure AppState with services
                     appState.configure(
                         apiClient: apiClient,

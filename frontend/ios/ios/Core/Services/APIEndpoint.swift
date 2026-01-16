@@ -17,7 +17,7 @@ import Foundation
 
 // MARK: - HTTP Method
 
-enum HTTPMethod: String {
+enum HTTPMethod: String, Sendable {
     case GET
     case POST
     case PUT
@@ -29,7 +29,7 @@ enum HTTPMethod: String {
 
 /// Type-safe endpoint definitions.
 /// Add new endpoints here as the app grows.
-enum APIEndpoint {
+enum APIEndpoint: Sendable {
 
     // MARK: - Auth
     case signIn(email: String, password: String)
@@ -255,48 +255,48 @@ enum APIEndpoint {
 
 // MARK: - Request Bodies
 
-struct SignInRequest: Encodable {
+struct SignInRequest: Encodable, Sendable {
     let email: String
     let password: String
 }
 
-struct SignUpRequest: Encodable {
+struct SignUpRequest: Encodable, Sendable {
     let email: String
     let password: String
     let displayName: String
 }
 
-struct RefreshTokenRequest: Encodable {
+struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
 }
 
-struct UpdateProfileRequest: Encodable {
+struct UpdateProfileRequest: Encodable, Sendable {
     let displayName: String?
     let avatarUrl: String?
 }
 
-struct AddToWatchlistRequest: Encodable {
+struct AddToWatchlistRequest: Encodable, Sendable {
     let stockId: String
 }
 
-struct RemoveFromWatchlistRequest: Encodable {
+struct RemoveFromWatchlistRequest: Encodable, Sendable {
     let stockId: String
 }
 
-struct GenerateResearchRequest: Encodable {
+struct GenerateResearchRequest: Encodable, Sendable {
     let stockId: String
     let investorPersona: String
 }
 
-struct RateReportRequest: Encodable {
+struct RateReportRequest: Encodable, Sendable {
     let rating: Int
     let feedback: String?
 }
 
-struct CreateChatSessionRequest: Encodable {
+struct CreateChatSessionRequest: Encodable, Sendable {
     let stockId: String?
 }
 
-struct SendChatMessageRequest: Encodable {
+struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
 }

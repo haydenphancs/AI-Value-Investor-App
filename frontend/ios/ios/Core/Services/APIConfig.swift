@@ -14,7 +14,7 @@ import Foundation
 
 // MARK: - App Environment
 
-enum AppEnvironment {
+enum AppEnvironment: Sendable {
     case development
     case staging
     case production
@@ -34,7 +34,7 @@ enum AppEnvironment {
 
 // MARK: - API Configuration
 
-struct APIConfig {
+enum APIConfig {
 
     // MARK: - Base URLs
 
@@ -104,7 +104,7 @@ struct APIConfig {
 
 // MARK: - Feature Flags
 
-struct FeatureFlags {
+enum FeatureFlags {
     /// Enable offline mode with cached data
     static var offlineModeEnabled: Bool {
         #if DEBUG

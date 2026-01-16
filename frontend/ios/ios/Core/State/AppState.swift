@@ -206,7 +206,7 @@ final class UserState {
     }
 }
 
-struct UserProfile: Codable, Identifiable {
+struct UserProfile: Codable, Identifiable, Sendable {
     let id: String
     let email: String
     let displayName: String?
@@ -222,7 +222,7 @@ struct UserProfile: Codable, Identifiable {
     }
 }
 
-struct CreditInfo: Codable {
+struct CreditInfo: Codable, Sendable {
     let total: Int
     let used: Int
     let remaining: Int
@@ -234,7 +234,7 @@ struct CreditInfo: Codable {
     }
 }
 
-enum UserTier: String, Codable {
+enum UserTier: String, Codable, Sendable {
     case free
     case pro
     case premium
@@ -260,7 +260,7 @@ final class WatchlistState {
     }
 }
 
-struct WatchlistStock: Codable, Identifiable, Equatable {
+struct WatchlistStock: Codable, Identifiable, Equatable, Sendable {
     var id: String { ticker }
     let ticker: String
     let companyName: String
@@ -294,7 +294,7 @@ final class ResearchState {
     }
 }
 
-struct ResearchReportSummary: Codable, Identifiable {
+struct ResearchReportSummary: Codable, Identifiable, Sendable {
     let id: String
     let stockId: String
     let ticker: String
@@ -325,12 +325,12 @@ struct ResearchReportSummary: Codable, Identifiable {
 
 // MARK: - Toast Message
 
-struct ToastMessage: Equatable {
+struct ToastMessage: Equatable, Sendable {
     let message: String
     let type: ToastType
 }
 
-enum ToastType {
+enum ToastType: Sendable {
     case success
     case error
     case info

@@ -18,6 +18,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var analysisData: TickerAnalysisData?
     @Published var earningsData: EarningsData?
     @Published var growthData: GrowthSectionData?
+    @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -56,6 +57,7 @@ class TickerDetailViewModel: ObservableObject {
             self.analysisData = TickerAnalysisData.sampleData
             self.earningsData = EarningsData.sampleData
             self.growthData = GrowthSectionData.sampleData
+            self.revenueBreakdownData = RevenueBreakdownData.sampleApple
             self.isLoading = false
         }
     }
@@ -155,6 +157,11 @@ class TickerDetailViewModel: ObservableObject {
     func handleGrowthDetail() {
         // TODO: Navigate to detailed growth view
         print("Growth detail for \(tickerSymbol)")
+    }
+
+    func handleRevenueBreakdownDetail() {
+        // TODO: Navigate to detailed revenue breakdown view
+        print("Revenue breakdown detail for \(tickerSymbol)")
     }
 
     // MARK: - Computed Properties

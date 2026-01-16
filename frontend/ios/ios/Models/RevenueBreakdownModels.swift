@@ -151,9 +151,20 @@ struct RevenueBreakdownData {
 
     // MARK: - Chart Calculations
 
-    /// Maximum value for chart scaling (total revenue)
+    /// Maximum value for chart scaling - uses larger of revenue or total costs
     var chartMaxValue: Double {
-        totalRevenue * 1.1
+        max(totalRevenue, totalCosts) * 1.1
+    }
+
+    /// Whether costs exceed revenue (company is loss-making)
+    var costsExceedRevenue: Bool {
+        totalCosts > totalRevenue
+    }
+
+    /// Revenue as percentage of chart max (for break-even line positioning)
+    var revenuePercentageOfMax: Double {
+        guard chartMaxValue > 0 else { return 0 }
+        return totalRevenue / chartMaxValue
     }
 
     /// Calculate cumulative position for waterfall chart

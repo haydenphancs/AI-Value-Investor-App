@@ -44,6 +44,12 @@ struct GrowthChartView: View {
         min((allPercentValues.min() ?? -10) * 1.2, -20)
     }
 
+    // Grid line values (4 horizontal lines)
+    private var gridValues: [Double] {
+        let step = maxBarValue / 4
+        return [step, step * 2, step * 3]
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Chart with bars and lines
@@ -67,50 +73,66 @@ struct GrowthChartView: View {
 
             // Main chart area
             Chart {
+                // Horizontal grid lines (behind everything)
+                ForEach(gridValues, id: \.self) { value in
+                    RuleMark(y: .value("Grid", value))
+                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
+                        .lineStyle(StrokeStyle(lineWidth: 0.5))
+                }
+
                 // Bar marks for absolute values
                 ForEach(dataPoints) { dataPoint in
                     BarMark(
                         x: .value("Period", dataPoint.period),
-                        y: .value("Value", dataPoint.value)
+                        y: .value("Value", dataPoint.value),
+                        width: dataPoints.count > 6 ? .fixed(20) : .automatic
                     )
                     .foregroundStyle(AppColors.growthBarBlue)
                     .cornerRadius(4)
                 }
 
-                // YoY line with points
+                // YoY line - single continuous line
                 ForEach(dataPoints) { dataPoint in
                     LineMark(
                         x: .value("Period", dataPoint.period),
-                        y: .value("YoY", normalizeYoY(dataPoint.yoyChangePercent))
+                        y: .value("YoY", normalizeYoY(dataPoint.yoyChangePercent)),
+                        series: .value("Series", "YoY")
                     )
                     .foregroundStyle(AppColors.growthYoYYellow)
                     .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                     .interpolationMethod(.catmullRom)
+                }
 
+                // YoY points
+                ForEach(dataPoints) { dataPoint in
                     PointMark(
                         x: .value("Period", dataPoint.period),
                         y: .value("YoY", normalizeYoY(dataPoint.yoyChangePercent))
                     )
                     .foregroundStyle(AppColors.growthYoYYellow)
-                    .symbolSize(60)
+                    .symbolSize(50)
                 }
 
-                // Sector average line with points (dashed)
+                // Sector average line - single continuous dashed line
                 ForEach(dataPoints) { dataPoint in
                     LineMark(
                         x: .value("Period", dataPoint.period),
-                        y: .value("Sector", normalizeYoY(dataPoint.sectorAverageYoY))
+                        y: .value("Sector", normalizeYoY(dataPoint.sectorAverageYoY)),
+                        series: .value("Series", "Sector")
                     )
                     .foregroundStyle(AppColors.growthSectorGray)
                     .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
                     .interpolationMethod(.catmullRom)
+                }
 
+                // Sector average points
+                ForEach(dataPoints) { dataPoint in
                     PointMark(
                         x: .value("Period", dataPoint.period),
                         y: .value("Sector", normalizeYoY(dataPoint.sectorAverageYoY))
                     )
                     .foregroundStyle(AppColors.growthSectorGray)
-                    .symbolSize(40)
+                    .symbolSize(35)
                 }
             }
             .chartXAxis(.hidden)
@@ -163,9 +185,11 @@ struct GrowthChartView: View {
 
             ForEach(dataPoints) { dataPoint in
                 Text(dataPoint.period)
-                    .font(AppTypography.caption)
+                    .font(.system(size: dataPoints.count > 6 ? 9 : 11))
                     .foregroundColor(AppColors.textMuted)
                     .frame(maxWidth: .infinity)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
         }
         .padding(.top, AppSpacing.sm)
@@ -180,8 +204,12 @@ struct GrowthChartView: View {
                 .frame(width: yAxisWidth)
 
             ForEach(dataPoints) { dataPoint in
-                GrowthYoYLabel(yoyPercent: dataPoint.yoyChangePercent)
+                Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
+                    .font(.system(size: dataPoints.count > 6 ? 8 : 10))
+                    .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
                     .frame(maxWidth: .infinity)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
         }
         .padding(.top, AppSpacing.sm)

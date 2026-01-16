@@ -29,7 +29,7 @@ struct iosApp: App {
     private let apiClient = APIClient.shared
 
     /// Authentication service
-    @StateObject private var authService = AuthService()
+    private let authService = AuthService()
 
     // MARK: - Initialization
 
@@ -44,7 +44,6 @@ struct iosApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
-                .environmentObject(authService)
                 .preferredColorScheme(.dark)
                 .task {
                     // Configure AppState with services

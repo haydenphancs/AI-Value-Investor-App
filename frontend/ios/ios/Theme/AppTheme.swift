@@ -51,6 +51,13 @@ struct AppColors {
     static let chipUnselectedBackground = Color(hex: "2D3548")
     static let toggleBackground = Color(hex: "1E2330")
     static let toggleSelectedBackground = Color(hex: "374151")
+
+    // Profit Power Chart Colors
+    static let profitGrossMargin = Color(hex: "3B82F6")       // Blue - matches primaryBlue
+    static let profitOperatingMargin = Color(hex: "F97316")   // Orange
+    static let profitFCFMargin = Color(hex: "A855F7")         // Purple
+    static let profitNetMargin = Color(hex: "22C55E")         // Green - matches bullish
+    static let profitSectorAverage = Color(hex: "9CA3AF")     // Gray - matches textSecondary
 }
 
 // MARK: - Color Extension for Hex

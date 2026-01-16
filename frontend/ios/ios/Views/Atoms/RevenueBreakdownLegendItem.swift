@@ -14,24 +14,30 @@ struct RevenueBreakdownLegendItem: View {
     let percentage: String
 
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
+        HStack(alignment: .top, spacing: AppSpacing.sm) {
             // Color dot
             Circle()
                 .fill(color)
                 .frame(width: 10, height: 10)
+                .padding(.top, 4)
 
             // Name
             Text(name)
                 .font(AppTypography.subheadline)
                 .foregroundColor(AppColors.textPrimary)
-                .frame(width: 70, alignment: .leading)
+                .frame(minWidth: 60, alignment: .leading)
 
             Spacer()
 
-            // Value with percentage
-            Text("\(value) (\(percentage))")
-                .font(AppTypography.subheadline)
-                .foregroundColor(AppColors.textSecondary)
+            // Value and percentage stacked
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(value)
+                    .font(AppTypography.subheadline)
+                    .foregroundColor(AppColors.textPrimary)
+                Text("(\(percentage))")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+            }
         }
     }
 }

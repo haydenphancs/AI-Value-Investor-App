@@ -272,7 +272,7 @@ struct AnyCodable: Decodable, @unchecked Sendable {
 // MARK: - Bundle Extension
 
 extension Bundle {
-    var appVersion: String {
+    nonisolated var appVersion: String {
         infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
     }
 }

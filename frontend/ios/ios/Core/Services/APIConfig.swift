@@ -12,14 +12,14 @@
 
 import Foundation
 
-// MARK: - Environment
+// MARK: - App Environment
 
-enum Environment {
+enum AppEnvironment {
     case development
     case staging
     case production
 
-    static var current: Environment {
+    static var current: AppEnvironment {
         #if DEBUG
         return .development
         #else
@@ -39,7 +39,7 @@ struct APIConfig {
     // MARK: - Base URLs
 
     static var baseURL: URL {
-        switch Environment.current {
+        switch AppEnvironment.current {
         case .development:
             // Local development server
             return URL(string: "http://localhost:8000")!

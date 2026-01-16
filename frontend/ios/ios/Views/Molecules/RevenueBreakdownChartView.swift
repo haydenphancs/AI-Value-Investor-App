@@ -81,7 +81,7 @@ struct RevenueBreakdownChartView: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = geometry.size.height
-            let barWidth: CGFloat = 70
+            let barWidth: CGFloat = 55
             let totalRevenue = data.totalRevenue
             let scale = height / totalRevenue
 
@@ -91,15 +91,15 @@ struct RevenueBreakdownChartView: View {
 
                 // Revenue stacked bar (left side)
                 revenueStackedBar(height: height, barWidth: barWidth, scale: scale)
-                    .position(x: width * 0.25, y: height / 2)
+                    .position(x: width * 0.23, y: height / 2)
 
-                // Cost waterfall bars (right side)
+                // Cost waterfall bars (middle)
                 costWaterfallBar(height: height, barWidth: barWidth, scale: scale)
-                    .position(x: width * 0.6, y: height / 2)
+                    .position(x: width * 0.53, y: height / 2)
 
-                // Net profit bar (far right)
+                // Net profit bar (right side)
                 netProfitBar(height: height, barWidth: barWidth, scale: scale)
-                    .position(x: width * 0.82, y: height / 2)
+                    .position(x: width * 0.83, y: height / 2)
             }
         }
     }

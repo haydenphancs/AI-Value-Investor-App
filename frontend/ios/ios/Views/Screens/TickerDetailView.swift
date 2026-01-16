@@ -224,9 +224,11 @@ struct TickerDetailView: View {
                 TickerFinancialsContent(
                     earningsData: earningsData,
                     growthData: viewModel.growthData,
+                    profitPowerData: viewModel.profitPowerData,
                     revenueBreakdownData: viewModel.revenueBreakdownData,
                     onEarningsDetailTap: viewModel.handleEarningsDetail,
                     onGrowthDetailTap: viewModel.handleGrowthDetail,
+                    onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
                     onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail
                 )
             } else {

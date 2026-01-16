@@ -31,10 +31,7 @@ struct NewsCardBulletPoint: View {
         if let colonIndex = text.firstIndex(of: ":") {
             let boldPart = String(text[..<colonIndex])
             let normalPart = String(text[text.index(after: colonIndex)...])
-            return Text(boldPart + ":")
-                .fontWeight(.semibold)
-                .foregroundColor(AppColors.textPrimary)
-                + Text(normalPart)
+            return Text("\(Text(boldPart + ":").fontWeight(.semibold).foregroundColor(AppColors.textPrimary))\(Text(normalPart))")
         } else {
             return Text(text)
         }

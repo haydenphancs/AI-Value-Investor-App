@@ -39,7 +39,7 @@ enum TaskProgress<T: Sendable>: Sendable {
 
 // MARK: - Research Status Response
 
-struct ResearchStatusResponse: Decodable, Sendable {
+struct ResearchStatusResponse: Sendable {
     let reportId: String
     let status: String
     let progress: Int
@@ -60,9 +60,21 @@ struct ResearchStatusResponse: Decodable, Sendable {
     nonisolated var isProcessing: Bool { status == "pending" || status == "processing" }
 }
 
+extension ResearchStatusResponse: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.reportId = try container.decode(String.self, forKey: .reportId)
+        self.status = try container.decode(String.self, forKey: .status)
+        self.progress = try container.decode(Int.self, forKey: .progress)
+        self.currentStep = try container.decodeIfPresent(String.self, forKey: .currentStep)
+        self.errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
+        self.estimatedTimeRemaining = try container.decodeIfPresent(Int.self, forKey: .estimatedTimeRemaining)
+    }
+}
+
 // MARK: - Research Generation Response
 
-struct ResearchGenerationResponse: Decodable, Sendable {
+struct ResearchGenerationResponse: Sendable {
     let reportId: String
     let status: String
     let estimatedSeconds: Int?
@@ -73,6 +85,16 @@ struct ResearchGenerationResponse: Decodable, Sendable {
         case status
         case estimatedSeconds = "estimated_seconds"
         case pollUrl = "poll_url"
+    }
+}
+
+extension ResearchGenerationResponse: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.reportId = try container.decode(String.self, forKey: .reportId)
+        self.status = try container.decode(String.self, forKey: .status)
+        self.estimatedSeconds = try container.decodeIfPresent(Int.self, forKey: .estimatedSeconds)
+        self.pollUrl = try container.decodeIfPresent(String.self, forKey: .pollUrl)
     }
 }
 
@@ -246,7 +268,7 @@ actor TaskPollingManager {
 // MARK: - Research Report Detail
 
 /// Full research report from backend
-struct ResearchReportDetail: Decodable, Identifiable, Sendable {
+struct ResearchReportDetail: Identifiable, Sendable {
     let id: String
     let userId: String
     let stockId: String
@@ -304,9 +326,45 @@ struct ResearchReportDetail: Decodable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Nonisolated Decodable Conformance
+
+extension ResearchReportDetail: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        self.id = try container.decode(String.self, forKey: .id)
+        self.userId = try container.decode(String.self, forKey: .userId)
+        self.stockId = try container.decode(String.self, forKey: .stockId)
+        self.ticker = try container.decode(String.self, forKey: .ticker)
+        self.companyName = try container.decode(String.self, forKey: .companyName)
+        self.investorPersona = try container.decode(String.self, forKey: .investorPersona)
+        self.status = try container.decode(String.self, forKey: .status)
+        
+        self.title = try container.decodeIfPresent(String.self, forKey: .title)
+        self.executiveSummary = try container.decodeIfPresent(String.self, forKey: .executiveSummary)
+        self.investmentThesis = try container.decodeIfPresent(InvestmentThesis.self, forKey: .investmentThesis)
+        self.pros = try container.decodeIfPresent([String].self, forKey: .pros)
+        self.cons = try container.decodeIfPresent([String].self, forKey: .cons)
+        self.moatAnalysis = try container.decodeIfPresent(MoatAnalysis.self, forKey: .moatAnalysis)
+        self.valuationAnalysis = try container.decodeIfPresent(ValuationAnalysis.self, forKey: .valuationAnalysis)
+        self.riskAssessment = try container.decodeIfPresent(RiskAssessment.self, forKey: .riskAssessment)
+        self.fullReport = try container.decodeIfPresent(String.self, forKey: .fullReport)
+        self.keyTakeaways = try container.decodeIfPresent([String].self, forKey: .keyTakeaways)
+        self.actionRecommendation = try container.decodeIfPresent(String.self, forKey: .actionRecommendation)
+        
+        self.generationTimeSeconds = try container.decodeIfPresent(Int.self, forKey: .generationTimeSeconds)
+        self.tokensUsed = try container.decodeIfPresent(Int.self, forKey: .tokensUsed)
+        self.createdAt = try container.decode(String.self, forKey: .createdAt)
+        self.completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
+        
+        self.userRating = try container.decodeIfPresent(Int.self, forKey: .userRating)
+        self.userFeedback = try container.decodeIfPresent(String.self, forKey: .userFeedback)
+    }
+}
+
 // MARK: - Report Sub-Models
 
-struct InvestmentThesis: Decodable, Sendable {
+struct InvestmentThesis: Sendable {
     let summary: String
     let keyDrivers: [String]
     let risks: [String]
@@ -322,7 +380,18 @@ struct InvestmentThesis: Decodable, Sendable {
     }
 }
 
-struct MoatAnalysis: Decodable, Sendable {
+extension InvestmentThesis: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.summary = try container.decode(String.self, forKey: .summary)
+        self.keyDrivers = try container.decode([String].self, forKey: .keyDrivers)
+        self.risks = try container.decode([String].self, forKey: .risks)
+        self.timeHorizon = try container.decode(String.self, forKey: .timeHorizon)
+        self.convictionLevel = try container.decode(String.self, forKey: .convictionLevel)
+    }
+}
+
+struct MoatAnalysis: Sendable {
     let moatRating: String
     let moatSources: [String]
     let moatSustainability: String
@@ -338,7 +407,18 @@ struct MoatAnalysis: Decodable, Sendable {
     }
 }
 
-struct ValuationAnalysis: Decodable, Sendable {
+extension MoatAnalysis: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.moatRating = try container.decode(String.self, forKey: .moatRating)
+        self.moatSources = try container.decode([String].self, forKey: .moatSources)
+        self.moatSustainability = try container.decode(String.self, forKey: .moatSustainability)
+        self.competitivePosition = try container.decode(String.self, forKey: .competitivePosition)
+        self.barriersToEntry = try container.decode([String].self, forKey: .barriersToEntry)
+    }
+}
+
+struct ValuationAnalysis: Sendable {
     let valuationRating: String
     let keyMetrics: [String: AnyCodable]
     let historicalContext: String?
@@ -352,7 +432,17 @@ struct ValuationAnalysis: Decodable, Sendable {
     }
 }
 
-struct RiskAssessment: Decodable, Sendable {
+extension ValuationAnalysis: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.valuationRating = try container.decode(String.self, forKey: .valuationRating)
+        self.keyMetrics = try container.decode([String: AnyCodable].self, forKey: .keyMetrics)
+        self.historicalContext = try container.decodeIfPresent(String.self, forKey: .historicalContext)
+        self.marginOfSafety = try container.decodeIfPresent(String.self, forKey: .marginOfSafety)
+    }
+}
+
+struct RiskAssessment: Sendable {
     let overallRisk: String
     let businessRisks: [String]
     let financialRisks: [String]
@@ -363,5 +453,15 @@ struct RiskAssessment: Decodable, Sendable {
         case businessRisks = "business_risks"
         case financialRisks = "financial_risks"
         case marketRisks = "market_risks"
+    }
+}
+
+extension RiskAssessment: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.overallRisk = try container.decode(String.self, forKey: .overallRisk)
+        self.businessRisks = try container.decode([String].self, forKey: .businessRisks)
+        self.financialRisks = try container.decode([String].self, forKey: .financialRisks)
+        self.marketRisks = try container.decode([String].self, forKey: .marketRisks)
     }
 }

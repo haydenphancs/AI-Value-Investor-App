@@ -232,7 +232,7 @@ actor APIClient {
 // MARK: - API Error Response (Backend Format)
 
 /// Matches the backend's APIError schema
-struct APIErrorResponse: Decodable, Sendable {
+struct APIErrorResponse: Sendable {
     let errorCode: String
     let message: String
     let userMessage: String
@@ -245,6 +245,18 @@ struct APIErrorResponse: Decodable, Sendable {
         case userMessage = "user_message"
         case action
         case details
+    }
+}
+
+// Explicitly nonisolated Decodable conformance
+extension APIErrorResponse: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.errorCode = try container.decode(String.self, forKey: .errorCode)
+        self.message = try container.decode(String.self, forKey: .message)
+        self.userMessage = try container.decode(String.self, forKey: .userMessage)
+        self.action = try container.decodeIfPresent(String.self, forKey: .action)
+        self.details = try container.decodeIfPresent([String: AnyCodable].self, forKey: .details)
     }
 }
 

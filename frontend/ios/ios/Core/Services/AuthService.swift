@@ -48,9 +48,9 @@ final class AuthService {
 
     // MARK: - Initialization
 
-    init(apiClient: APIClient, keychain: KeychainService = .shared) {
+    init(apiClient: APIClient, keychain: KeychainService? = nil) {
         self.apiClient = apiClient
-        self.keychain = keychain
+        self.keychain = keychain ?? .shared
     }
 
     // MARK: - Authentication
@@ -153,7 +153,7 @@ final class AuthService {
 /// @unchecked Sendable because Keychain APIs are thread-safe
 final class KeychainService: @unchecked Sendable {
 
-    nonisolated(unsafe) static let shared = KeychainService()
+    static let shared = KeychainService()
 
     private let service = Bundle.main.bundleIdentifier ?? "com.aivalueinvestor"
 

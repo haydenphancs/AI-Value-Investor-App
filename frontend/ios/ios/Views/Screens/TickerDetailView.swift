@@ -223,7 +223,9 @@ struct TickerDetailView: View {
             if let earningsData = viewModel.earningsData {
                 TickerFinancialsContent(
                     earningsData: earningsData,
-                    onEarningsDetailTap: viewModel.handleEarningsDetail
+                    growthData: viewModel.growthData,
+                    onEarningsDetailTap: viewModel.handleEarningsDetail,
+                    onGrowthDetailTap: viewModel.handleGrowthDetail
                 )
             } else {
                 placeholderContent(title: "Financials", description: "Loading financial data...")

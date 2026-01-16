@@ -155,6 +155,10 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 7.35, yoyChangePercent: 8.89, sectorAverageYoY: 6.2)
         ],
         epsQuarterly: [
+            GrowthDataPoint(period: "Q1 '23", value: 1.52, yoyChangePercent: -2.45, sectorAverageYoY: -1.8),
+            GrowthDataPoint(period: "Q2 '23", value: 1.26, yoyChangePercent: -0.79, sectorAverageYoY: 0.5),
+            GrowthDataPoint(period: "Q3 '23", value: 1.46, yoyChangePercent: 13.18, sectorAverageYoY: 10.2),
+            GrowthDataPoint(period: "Q4 '23", value: 2.02, yoyChangePercent: -10.62, sectorAverageYoY: -8.5),
             GrowthDataPoint(period: "Q1 '24", value: 1.53, yoyChangePercent: 4.08, sectorAverageYoY: 3.2),
             GrowthDataPoint(period: "Q2 '24", value: 1.40, yoyChangePercent: 11.11, sectorAverageYoY: 8.5),
             GrowthDataPoint(period: "Q3 '24", value: 1.64, yoyChangePercent: 12.33, sectorAverageYoY: 9.1),
@@ -169,6 +173,10 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 110_000_000_000, yoyChangePercent: -3.32, sectorAverageYoY: -1.5)
         ],
         revenueQuarterly: [
+            GrowthDataPoint(period: "Q1 '23", value: 94_836_000_000, yoyChangePercent: -2.51, sectorAverageYoY: -1.5),
+            GrowthDataPoint(period: "Q2 '23", value: 81_797_000_000, yoyChangePercent: -1.40, sectorAverageYoY: 0.8),
+            GrowthDataPoint(period: "Q3 '23", value: 89_498_000_000, yoyChangePercent: -0.68, sectorAverageYoY: 1.2),
+            GrowthDataPoint(period: "Q4 '23", value: 119_575_000_000, yoyChangePercent: 2.07, sectorAverageYoY: 3.5),
             GrowthDataPoint(period: "Q1 '24", value: 94_800_000_000, yoyChangePercent: 2.50, sectorAverageYoY: 3.2),
             GrowthDataPoint(period: "Q2 '24", value: 98_200_000_000, yoyChangePercent: 3.40, sectorAverageYoY: 4.5),
             GrowthDataPoint(period: "Q3 '24", value: 89_500_000_000, yoyChangePercent: -1.60, sectorAverageYoY: -0.8),
@@ -183,10 +191,14 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 112_000_000_000, yoyChangePercent: 6.67, sectorAverageYoY: 5.2)
         ],
         netIncomeQuarterly: [
+            GrowthDataPoint(period: "Q1 '23", value: 24_160_000_000, yoyChangePercent: -3.36, sectorAverageYoY: -2.5),
+            GrowthDataPoint(period: "Q2 '23", value: 19_881_000_000, yoyChangePercent: -2.26, sectorAverageYoY: -1.2),
+            GrowthDataPoint(period: "Q3 '23", value: 22_956_000_000, yoyChangePercent: 10.78, sectorAverageYoY: 8.5),
+            GrowthDataPoint(period: "Q4 '23", value: 33_916_000_000, yoyChangePercent: -11.25, sectorAverageYoY: -9.8),
             GrowthDataPoint(period: "Q1 '24", value: 23_636_000_000, yoyChangePercent: 4.08, sectorAverageYoY: 3.2),
             GrowthDataPoint(period: "Q2 '24", value: 21_448_000_000, yoyChangePercent: 7.89, sectorAverageYoY: 5.5),
             GrowthDataPoint(period: "Q3 '24", value: 25_012_000_000, yoyChangePercent: 12.45, sectorAverageYoY: 8.9),
-            GrowthDataPoint(period: "Q4 '24", value: 33_916_000_000, yoyChangePercent: 7.12, sectorAverageYoY: 5.8)
+            GrowthDataPoint(period: "Q4 '24", value: 36_330_000_000, yoyChangePercent: 7.12, sectorAverageYoY: 5.8)
         ],
         operatingProfitAnnual: [
             GrowthDataPoint(period: "2020", value: 66_288_000_000, yoyChangePercent: 3.50, sectorAverageYoY: 2.8),
@@ -197,6 +209,10 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 132_000_000_000, yoyChangePercent: 5.60, sectorAverageYoY: 4.5)
         ],
         operatingProfitQuarterly: [
+            GrowthDataPoint(period: "Q1 '23", value: 28_318_000_000, yoyChangePercent: -5.48, sectorAverageYoY: -4.2),
+            GrowthDataPoint(period: "Q2 '23", value: 23_076_000_000, yoyChangePercent: -3.25, sectorAverageYoY: -2.1),
+            GrowthDataPoint(period: "Q3 '23", value: 26_969_000_000, yoyChangePercent: 8.92, sectorAverageYoY: 6.8),
+            GrowthDataPoint(period: "Q4 '23", value: 39_895_000_000, yoyChangePercent: -8.62, sectorAverageYoY: -7.5),
             GrowthDataPoint(period: "Q1 '24", value: 27_900_000_000, yoyChangePercent: 5.12, sectorAverageYoY: 4.2),
             GrowthDataPoint(period: "Q2 '24", value: 25_350_000_000, yoyChangePercent: 8.45, sectorAverageYoY: 6.1),
             GrowthDataPoint(period: "Q3 '24", value: 29_600_000_000, yoyChangePercent: 10.23, sectorAverageYoY: 7.8),
@@ -211,6 +227,10 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 115_000_000_000, yoyChangePercent: 6.48, sectorAverageYoY: 5.2)
         ],
         freeCashFlowQuarterly: [
+            GrowthDataPoint(period: "Q1 '23", value: 22_185_000_000, yoyChangePercent: -4.12, sectorAverageYoY: -3.2),
+            GrowthDataPoint(period: "Q2 '23", value: 21_152_000_000, yoyChangePercent: -6.85, sectorAverageYoY: -5.5),
+            GrowthDataPoint(period: "Q3 '23", value: 23_632_000_000, yoyChangePercent: 5.68, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q4 '23", value: 32_415_000_000, yoyChangePercent: -12.45, sectorAverageYoY: -10.8),
             GrowthDataPoint(period: "Q1 '24", value: 24_160_000_000, yoyChangePercent: 8.92, sectorAverageYoY: 6.5),
             GrowthDataPoint(period: "Q2 '24", value: 22_310_000_000, yoyChangePercent: 5.45, sectorAverageYoY: 4.2),
             GrowthDataPoint(period: "Q3 '24", value: 26_540_000_000, yoyChangePercent: 12.30, sectorAverageYoY: 9.8),

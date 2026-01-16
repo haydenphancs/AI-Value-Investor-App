@@ -3,6 +3,7 @@
 //  ios
 //
 //  Molecule: Waterfall chart showing revenue sources and cost breakdown
+//  Handles both profitable and loss-making companies with proper scaling
 //
 
 import SwiftUI
@@ -14,15 +15,31 @@ struct RevenueBreakdownChartView: View {
     private let leftAxisWidth: CGFloat = 50
     private let rightAxisWidth: CGFloat = 50
 
-    // Grid line values
-    private var gridValues: [Double] {
-        let maxVal = data.totalRevenue
-        return [0, maxVal * 0.25, maxVal * 0.5, maxVal * 0.75, maxVal]
+    // Use the larger of revenue or costs for scaling
+    private var maxValue: Double {
+        max(data.totalRevenue, data.totalCosts) * 1.1
     }
 
-    // Percentage labels for right axis
+    // Grid line values - based on max value
+    private var gridValues: [Double] {
+        return [0, maxValue * 0.25, maxValue * 0.5, maxValue * 0.75, maxValue]
+    }
+
+    // Percentage labels for right axis - adjust for loss companies
     private var percentageLabels: [String] {
-        ["0%", "25%", "50%", "75%", "100%"]
+        if data.costsExceedRevenue {
+            // Show higher percentages when costs exceed revenue
+            let maxPercent = Int((maxValue / data.totalRevenue) * 100)
+            let step = maxPercent / 4
+            return ["0%", "\(step)%", "\(step * 2)%", "\(step * 3)%", "\(maxPercent)%"]
+        } else {
+            return ["0%", "25%", "50%", "75%", "100%"]
+        }
+    }
+
+    // Position of 100% revenue line (for break-even indicator)
+    private var revenueLinePosition: CGFloat {
+        CGFloat(data.totalRevenue / maxValue)
     }
 
     var body: some View {
@@ -81,13 +98,17 @@ struct RevenueBreakdownChartView: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = geometry.size.height
-            let barWidth: CGFloat = 55
-            let totalRevenue = data.totalRevenue
-            let scale = height / totalRevenue
+            let barWidth: CGFloat = 70
+            let scale = height / maxValue
 
             ZStack(alignment: .bottom) {
                 // Grid lines
                 gridLines(height: height)
+
+                // Break-even line (100% revenue) for loss companies
+                if data.costsExceedRevenue {
+                    breakEvenLine(height: height, scale: scale)
+                }
 
                 // Revenue stacked bar (left side)
                 revenueStackedBar(height: height, barWidth: barWidth, scale: scale)
@@ -97,7 +118,7 @@ struct RevenueBreakdownChartView: View {
                 costWaterfallBar(height: height, barWidth: barWidth, scale: scale)
                     .position(x: width * 0.53, y: height / 2)
 
-                // Net profit bar (right side)
+                // Net profit/loss bar (far right)
                 netProfitBar(height: height, barWidth: barWidth, scale: scale)
                     .position(x: width * 0.83, y: height / 2)
             }
@@ -120,55 +141,95 @@ struct RevenueBreakdownChartView: View {
         .frame(height: height)
     }
 
-    // MARK: - Revenue Stacked Bar (with colors)
+    // MARK: - Break-Even Line (for loss companies)
+
+    private func breakEvenLine(height: CGFloat, scale: CGFloat) -> some View {
+        let revenueHeight = CGFloat(data.totalRevenue) * scale
+        let yPosition = height - revenueHeight
+
+        return VStack(spacing: 0) {
+            Spacer()
+                .frame(height: yPosition)
+
+            HStack(spacing: 4) {
+                Rectangle()
+                    .fill(AppColors.neutral.opacity(0.6))
+                    .frame(height: 1.5)
+
+                Text("Revenue")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(AppColors.neutral)
+                    .padding(.horizontal, 4)
+                    .background(AppColors.cardBackground)
+            }
+
+            Spacer()
+        }
+        .frame(height: height)
+    }
+
+    // MARK: - Revenue Stacked Bar
 
     private func revenueStackedBar(height: CGFloat, barWidth: CGFloat, scale: CGFloat) -> some View {
-        let totalRevenue = data.totalRevenue
+        let revenueBarHeight = CGFloat(data.totalRevenue) * scale
 
-        // Calculate segment heights
+        // Calculate segment heights proportionally within the revenue bar
         let segments: [(color: Color, height: CGFloat)] = data.revenueSources.map { source in
-            (source.color, CGFloat(source.value / totalRevenue) * height)
+            (source.color, CGFloat(source.value / data.totalRevenue) * revenueBarHeight)
         }
 
         return VStack(spacing: 0) {
-            // Stack from top to bottom (iPhone at top, Other at bottom)
-            ForEach(0..<segments.count, id: \.self) { index in
-                Rectangle()
-                    .fill(segments[index].color)
-                    .frame(width: barWidth, height: segments[index].height)
+            Spacer()
+
+            VStack(spacing: 0) {
+                // Stack from top to bottom
+                ForEach(0..<segments.count, id: \.self) { index in
+                    Rectangle()
+                        .fill(segments[index].color)
+                        .frame(width: barWidth, height: segments[index].height)
+                }
             }
-        }
-        .clipShape(
-            UnevenRoundedRectangle(
-                topLeadingRadius: 6,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0,
-                topTrailingRadius: 6
+            .clipShape(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 6,
+                    bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0,
+                    topTrailingRadius: 6
+                )
             )
-        )
+        }
         .frame(height: height, alignment: .bottom)
     }
 
     // MARK: - Cost Waterfall Bar
 
     private func costWaterfallBar(height: CGFloat, barWidth: CGFloat, scale: CGFloat) -> some View {
-        let totalRevenue = data.totalRevenue
+        // Calculate heights based on max value (not revenue)
+        let costOfSalesHeight = CGFloat(data.costOfSales) * scale
+        let opExpenseHeight = CGFloat(data.operatingExpense) * scale
+        let taxHeight = CGFloat(data.tax) * scale
+        let totalCostHeight = costOfSalesHeight + opExpenseHeight + taxHeight
 
-        // Calculate heights
-        let costOfSalesHeight = CGFloat(data.costOfSales / totalRevenue) * height
-        let opExpenseHeight = CGFloat(data.operatingExpense / totalRevenue) * height
-        let taxHeight = CGFloat(data.tax / totalRevenue) * height
+        return VStack(spacing: 0) {
+            Spacer()
 
-        // Positions from top
-        _ = costOfSalesHeight / 2
-        _ = costOfSalesHeight + opExpenseHeight / 2
-        _ = costOfSalesHeight + opExpenseHeight + taxHeight / 2
+            ZStack(alignment: .bottom) {
+                VStack(spacing: 0) {
+                    // Cost of Sales (top)
+                    Rectangle()
+                        .fill(Color(hex: "EF4444"))
+                        .frame(width: barWidth, height: costOfSalesHeight)
 
-        return ZStack(alignment: .top) {
-            // Cost of Sales (starts at top)
-            Rectangle()
-                .fill(Color(hex: "EF4444"))
-                .frame(width: barWidth, height: costOfSalesHeight)
+                    // Operating Expense (middle)
+                    Rectangle()
+                        .fill(Color(hex: "F87171"))
+                        .frame(width: barWidth, height: opExpenseHeight)
+
+                    // Tax (bottom)
+                    Rectangle()
+                        .fill(Color(hex: "FCA5A5"))
+                        .frame(width: barWidth, height: taxHeight)
+                }
                 .clipShape(
                     UnevenRoundedRectangle(
                         topLeadingRadius: 6,
@@ -177,38 +238,29 @@ struct RevenueBreakdownChartView: View {
                         topTrailingRadius: 6
                     )
                 )
-                .offset(y: 0)
-
-            // Operating Expense (below cost of sales)
-            Rectangle()
-                .fill(Color(hex: "F87171"))
-                .frame(width: barWidth, height: opExpenseHeight)
-                .offset(y: costOfSalesHeight)
-
-            // Tax (below operating expense)
-            Rectangle()
-                .fill(Color(hex: "FCA5A5"))
-                .frame(width: barWidth, height: taxHeight)
-                .offset(y: costOfSalesHeight + opExpenseHeight)
+            }
+            .frame(height: totalCostHeight)
         }
-        .frame(height: height, alignment: .top)
+        .frame(height: height, alignment: .bottom)
     }
 
     // MARK: - Net Profit/Loss Bar
 
     private func netProfitBar(height: CGFloat, barWidth: CGFloat, scale: CGFloat) -> some View {
-        let totalRevenue = data.totalRevenue
         let netProfit = data.netProfit
-        let netProfitHeight = CGFloat(abs(netProfit) / totalRevenue) * height
+        let netProfitHeight = CGFloat(abs(netProfit)) * scale
 
-        return ZStack(alignment: .bottom) {
-            if data.isProfit {
-                // Profit - green bar from bottom
-                VStack(spacing: 2) {
+        return VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 2) {
+                if data.isProfit {
+                    // Profit label above bar
                     Text("Net Profit")
                         .font(.system(size: 10))
                         .foregroundColor(AppColors.textMuted)
 
+                    // Green bar from bottom
                     Rectangle()
                         .fill(AppColors.bullish)
                         .frame(width: barWidth, height: netProfitHeight)
@@ -220,14 +272,19 @@ struct RevenueBreakdownChartView: View {
                                 topTrailingRadius: 6
                             )
                         )
-                }
-            } else {
-                // Loss - dark red bar below baseline
-                VStack(spacing: 2) {
+                } else {
+                    // Loss - dark red bar with label below
                     Rectangle()
                         .fill(Color(hex: "8B0000"))
-                        .frame(width: barWidth, height: min(netProfitHeight, height * 0.3))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .frame(width: barWidth, height: netProfitHeight)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 6,
+                                bottomLeadingRadius: 0,
+                                bottomTrailingRadius: 0,
+                                topTrailingRadius: 6
+                            )
+                        )
 
                     Text("-Net Loss")
                         .font(.system(size: 10))
@@ -260,14 +317,30 @@ struct RevenueBreakdownChartView: View {
         AppColors.background
             .ignoresSafeArea()
 
-        VStack {
-            RevenueBreakdownChartView(data: RevenueBreakdownData.sampleApple)
-                .padding()
+        ScrollView {
+            VStack(spacing: AppSpacing.xxl) {
+                Text("Profitable Company (Apple)")
+                    .foregroundColor(.white)
+                    .font(AppTypography.headline)
 
-            Divider()
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleApple)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
 
-            RevenueBreakdownChartView(data: RevenueBreakdownData.sampleLossCompany)
-                .padding()
+                Divider()
+                    .background(AppColors.textMuted)
+
+                Text("Loss-Making Company (Rivian)")
+                    .foregroundColor(.white)
+                    .font(AppTypography.headline)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleLossCompany)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+            }
+            .padding()
         }
     }
 }

@@ -11,10 +11,12 @@ struct TickerFinancialsContent: View {
     let earningsData: EarningsData
     let growthData: GrowthSectionData?
     let profitPowerData: ProfitPowerSectionData?
+    let signalOfConfidenceData: SignalOfConfidenceSectionData?
     let revenueBreakdownData: RevenueBreakdownData?
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
     var onProfitPowerDetailTap: (() -> Void)?
+    var onSignalOfConfidenceDetailTap: (() -> Void)?
     var onRevenueBreakdownDetailTap: (() -> Void)?
 
     var body: some View {
@@ -47,12 +49,12 @@ struct TickerFinancialsContent: View {
                 )
             }
 
-            // Profit Power Section
-            if let profitPowerData = profitPowerData {
-                ProfitPowerSectionCard(
-                    profitPowerData: profitPowerData,
+            // Signal of Confidence Section
+            if let signalOfConfidenceData = signalOfConfidenceData {
+                SignalOfConfidenceSectionCard(
+                    signalData: signalOfConfidenceData,
                     onDetailTapped: {
-                        onProfitPowerDetailTap?()
+                        onSignalOfConfidenceDetailTap?()
                     }
                 )
             }
@@ -72,6 +74,7 @@ struct TickerFinancialsContent: View {
             earningsData: EarningsData.sampleData,
             growthData: GrowthSectionData.sampleData,
             profitPowerData: ProfitPowerSectionData.sampleData,
+            signalOfConfidenceData: SignalOfConfidenceSectionData.sampleData,
             revenueBreakdownData: RevenueBreakdownData.sampleApple
         )
     }

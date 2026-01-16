@@ -10,9 +10,11 @@ import SwiftUI
 struct TickerFinancialsContent: View {
     let earningsData: EarningsData
     let growthData: GrowthSectionData?
+    let profitPowerData: ProfitPowerSectionData?
     let revenueBreakdownData: RevenueBreakdownData?
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
+    var onProfitPowerDetailTap: (() -> Void)?
     var onRevenueBreakdownDetailTap: (() -> Void)?
 
     var body: some View {
@@ -31,6 +33,16 @@ struct TickerFinancialsContent: View {
                     growthData: growthData,
                     onDetailTapped: {
                         onGrowthDetailTap?()
+                    }
+                )
+            }
+
+            // Profit Power Section
+            if let profitPowerData = profitPowerData {
+                ProfitPowerSectionCard(
+                    profitPowerData: profitPowerData,
+                    onDetailTapped: {
+                        onProfitPowerDetailTap?()
                     }
                 )
             }
@@ -59,6 +71,7 @@ struct TickerFinancialsContent: View {
         TickerFinancialsContent(
             earningsData: EarningsData.sampleData,
             growthData: GrowthSectionData.sampleData,
+            profitPowerData: ProfitPowerSectionData.sampleData,
             revenueBreakdownData: RevenueBreakdownData.sampleApple
         )
     }

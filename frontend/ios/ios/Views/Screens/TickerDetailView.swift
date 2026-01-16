@@ -225,10 +225,12 @@ struct TickerDetailView: View {
                     earningsData: earningsData,
                     growthData: viewModel.growthData,
                     profitPowerData: viewModel.profitPowerData,
+                    signalOfConfidenceData: viewModel.signalOfConfidenceData,
                     revenueBreakdownData: viewModel.revenueBreakdownData,
                     onEarningsDetailTap: viewModel.handleEarningsDetail,
                     onGrowthDetailTap: viewModel.handleGrowthDetail,
                     onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
+                    onSignalOfConfidenceDetailTap: viewModel.handleSignalOfConfidenceDetail,
                     onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail
                 )
             } else {

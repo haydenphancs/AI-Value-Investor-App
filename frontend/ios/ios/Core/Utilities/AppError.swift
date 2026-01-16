@@ -14,7 +14,7 @@ import Foundation
 
 /// Unified error type for the application.
 /// Maps various error sources to user-actionable messages.
-enum AppError: Error, Identifiable, Equatable {
+enum AppError: Error, Identifiable, Equatable, Sendable {
     // Network errors
     case noConnection
     case timeout
@@ -205,7 +205,7 @@ enum AppError: Error, Identifiable, Equatable {
 
 // MARK: - Error Action
 
-enum ErrorAction {
+enum ErrorAction: Sendable {
     case retry
     case waitAndRetry
     case waitForConnection
@@ -240,7 +240,8 @@ enum ErrorAction {
 // MARK: - API Error (Network Layer)
 
 /// Low-level API errors before mapping to AppError
-enum APIError: Error {
+/// @unchecked Sendable because Error types may not conform but are used safely
+enum APIError: Error, @unchecked Sendable {
     case unauthorized
     case forbidden
     case notFound

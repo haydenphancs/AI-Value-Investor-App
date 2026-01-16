@@ -16,7 +16,7 @@ import Security
 
 // MARK: - Auth Response
 
-struct AuthResponse: Decodable {
+struct AuthResponse: Decodable, Sendable {
     let accessToken: String
     let refreshToken: String
     let expiresIn: Int
@@ -48,7 +48,7 @@ final class AuthService {
 
     // MARK: - Initialization
 
-    init(apiClient: APIClient = .shared, keychain: KeychainService = .shared) {
+    init(apiClient: APIClient, keychain: KeychainService = .shared) {
         self.apiClient = apiClient
         self.keychain = keychain
     }

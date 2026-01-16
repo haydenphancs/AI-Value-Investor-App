@@ -232,7 +232,7 @@ actor APIClient {
 // MARK: - API Error Response (Backend Format)
 
 /// Matches the backend's APIError schema
-struct APIErrorResponse: Decodable {
+struct APIErrorResponse: Decodable, Sendable {
     let errorCode: String
     let message: String
     let userMessage: String
@@ -249,7 +249,8 @@ struct APIErrorResponse: Decodable {
 }
 
 /// Type-erased Codable for flexible JSON
-struct AnyCodable: Decodable {
+/// @unchecked Sendable because it only stores immutable value types (String, Int, Double, Bool)
+struct AnyCodable: Decodable, @unchecked Sendable {
     let value: Any
 
     init(from decoder: Decoder) throws {

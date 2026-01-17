@@ -160,7 +160,7 @@ struct HealthCheckInfoSheet: View {
             // Gauge explanation
             HStack(spacing: AppSpacing.xs) {
                 Circle()
-                    .fill(AppColors.bullish)
+                    .fill(metric == .debtToEquity || metric == .peRatio ? AppColors.bullish : AppColors.bearish)
                     .frame(width: 8, height: 8)
 
                 Text(metric.leftLabel)
@@ -290,11 +290,11 @@ struct HealthCheckInfoSheet: View {
     }
 
     private func ratingRow(rating: HealthCheckRating, description: String) -> some View {
-        HStack(spacing: AppSpacing.md) {
+        HStack(alignment: .firstTextBaseline, spacing: AppSpacing.md) {
             Image(systemName: rating.iconName)
                 .font(.system(size: 16))
                 .foregroundColor(rating.color)
-                .frame(width: 24)
+                .frame(width: 24, alignment: .center)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(rating.rawValue)
@@ -304,7 +304,10 @@ struct HealthCheckInfoSheet: View {
                 Text(description)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            
+            Spacer()
         }
     }
 }

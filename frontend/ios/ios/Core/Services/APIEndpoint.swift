@@ -255,48 +255,48 @@ enum APIEndpoint: Sendable {
 
 // MARK: - Request Bodies
 
-struct SignInRequest: Encodable, Sendable {
+nonisolated struct SignInRequest: Encodable, Sendable {
     let email: String
     let password: String
 }
 
-struct SignUpRequest: Encodable, Sendable {
+nonisolated struct SignUpRequest: Encodable, Sendable {
     let email: String
     let password: String
     let displayName: String
 }
 
-struct RefreshTokenRequest: Encodable, Sendable {
+nonisolated struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
 }
 
-struct UpdateProfileRequest: Encodable, Sendable {
+nonisolated struct UpdateProfileRequest: Encodable, Sendable {
     let displayName: String?
     let avatarUrl: String?
 }
 
-struct AddToWatchlistRequest: Encodable, Sendable {
+nonisolated struct AddToWatchlistRequest: Encodable, Sendable {
     let stockId: String
 }
 
-struct RemoveFromWatchlistRequest: Encodable, Sendable {
+nonisolated struct RemoveFromWatchlistRequest: Encodable, Sendable {
     let stockId: String
 }
 
-struct GenerateResearchRequest: Encodable, Sendable {
+nonisolated struct GenerateResearchRequest: Encodable, Sendable {
     let stockId: String
     let investorPersona: String
 }
 
-struct RateReportRequest: Encodable, Sendable {
+nonisolated struct RateReportRequest: Encodable, Sendable {
     let rating: Int
     let feedback: String?
 }
 
-struct CreateChatSessionRequest: Encodable, Sendable {
+nonisolated struct CreateChatSessionRequest: Encodable, Sendable {
     let stockId: String?
 }
 
-struct SendChatMessageRequest: Encodable, Sendable {
+nonisolated struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
 }

@@ -55,51 +55,51 @@ enum APIConfig: Sendable {
     // MARK: - Timeouts
 
     /// Default request timeout (seconds)
-    nonisolated(unsafe) static let defaultTimeout: TimeInterval = 30
+    static let defaultTimeout: TimeInterval = 30
 
     /// Timeout for AI generation requests (seconds)
-    nonisolated(unsafe) static let aiGenerationTimeout: TimeInterval = 120
+    static let aiGenerationTimeout: TimeInterval = 120
 
     /// Timeout for chat messages (seconds)
-    nonisolated(unsafe) static let chatTimeout: TimeInterval = 60
+    static let chatTimeout: TimeInterval = 60
 
     // MARK: - Retry Policy
 
     /// Maximum retry attempts for failed requests
-    nonisolated(unsafe) static let maxRetryAttempts = 3
+    static let maxRetryAttempts = 3
 
     /// Base delay between retries (seconds)
-    nonisolated(unsafe) static let retryBaseDelay: TimeInterval = 1.0
+    static let retryBaseDelay: TimeInterval = 1.0
 
     /// Maximum delay between retries (seconds)
-    nonisolated(unsafe) static let retryMaxDelay: TimeInterval = 10.0
+    static let retryMaxDelay: TimeInterval = 10.0
 
     // MARK: - Polling Configuration
 
     /// Interval for polling research status (seconds)
-    nonisolated(unsafe) static let researchPollInterval: TimeInterval = 3.0
+    static let researchPollInterval: TimeInterval = 3.0
 
     /// Maximum polling duration before timeout (seconds)
-    nonisolated(unsafe) static let researchPollTimeout: TimeInterval = 180.0 // 3 minutes
+    static let researchPollTimeout: TimeInterval = 180.0 // 3 minutes
 
     // MARK: - Cache Configuration
 
     /// Default cache TTL (seconds)
-    nonisolated(unsafe) static let defaultCacheTTL: TimeInterval = 300 // 5 minutes
+    static let defaultCacheTTL: TimeInterval = 300 // 5 minutes
 
     /// Stock quote cache TTL (seconds)
-    nonisolated(unsafe) static let quoteCacheTTL: TimeInterval = 60 // 1 minute
+    static let quoteCacheTTL: TimeInterval = 60 // 1 minute
 
     /// News feed cache TTL (seconds)
-    nonisolated(unsafe) static let newsCacheTTL: TimeInterval = 300 // 5 minutes
+    static let newsCacheTTL: TimeInterval = 300 // 5 minutes
 
     // MARK: - Pagination
 
     /// Default page size for list endpoints
-    nonisolated(unsafe) static let defaultPageSize = 20
+    static let defaultPageSize = 20
 
     /// Maximum page size allowed
-    nonisolated(unsafe) static let maxPageSize = 100
+    static let maxPageSize = 100
 }
 
 // MARK: - Feature Flags

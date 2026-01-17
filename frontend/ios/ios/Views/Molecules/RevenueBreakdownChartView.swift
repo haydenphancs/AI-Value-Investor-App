@@ -135,7 +135,7 @@ struct RevenueBreakdownChartView: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = geometry.size.height
-            let barWidth: CGFloat = 70
+            let barWidth: CGFloat = 55  // Reduced from 70 to 55
 
             ZStack(alignment: .topLeading) {
                 // Grid lines
@@ -148,15 +148,15 @@ struct RevenueBreakdownChartView: View {
 
                 // Revenue stacked bar (left side) - grows UP from zero/bottom
                 revenueStackedBar(height: height, barWidth: barWidth)
-                    .position(x: width * 0.25, y: height / 2)
+                    .position(x: width * 0.22, y: height / 2)
 
                 // Cost waterfall bar (center) - descends FROM TOP
                 costWaterfallBar(height: height, barWidth: barWidth)
-                    .position(x: width * 0.55, y: height / 2)
+                    .position(x: width * 0.50, y: height / 2)
 
                 // Net profit/loss bar (right side)
                 netProfitBar(height: height, barWidth: barWidth)
-                    .position(x: width * 0.82, y: height / 2)
+                    .position(x: width * 0.78, y: height / 2)
             }
         }
     }

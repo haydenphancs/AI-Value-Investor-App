@@ -227,11 +227,13 @@ struct TickerDetailView: View {
                     profitPowerData: viewModel.profitPowerData,
                     signalOfConfidenceData: viewModel.signalOfConfidenceData,
                     revenueBreakdownData: viewModel.revenueBreakdownData,
+                    healthCheckData: viewModel.healthCheckData,
                     onEarningsDetailTap: viewModel.handleEarningsDetail,
                     onGrowthDetailTap: viewModel.handleGrowthDetail,
                     onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
                     onSignalOfConfidenceDetailTap: viewModel.handleSignalOfConfidenceDetail,
-                    onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail
+                    onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail,
+                    onHealthCheckDetailTap: viewModel.handleHealthCheckDetail
                 )
             } else {
                 placeholderContent(title: "Financials", description: "Loading financial data...")

@@ -51,6 +51,16 @@ struct TickerFinancialsContent: View {
                 )
             }
 
+            // Profit Power Section
+            if let profitPowerData = profitPowerData {
+                ProfitPowerSectionCard(
+                    profitPowerData: profitPowerData,
+                    onDetailTapped: {
+                        onProfitPowerDetailTap?()
+                    }
+                )
+            }
+
             // Health Check Section
             if let healthCheckData = healthCheckData {
                 HealthCheckSectionCard(

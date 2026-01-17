@@ -76,7 +76,7 @@ struct HealthCheckSectionCard: View {
 
     private var metricsSection: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: AppSpacing.md) {
+            HStack(alignment: .top, spacing: AppSpacing.md) {
                 ForEach(healthCheckData.metrics) { metric in
                     HealthCheckMetricCard(metric: metric)
                         .frame(width: 280)

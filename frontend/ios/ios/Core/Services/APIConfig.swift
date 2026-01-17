@@ -77,10 +77,10 @@ enum APIConfig: Sendable {
     // MARK: - Polling Configuration
 
     /// Interval for polling research status (seconds)
-    static let researchPollInterval: TimeInterval = 3.0
+    nonisolated static let researchPollInterval: TimeInterval = 3.0
 
     /// Maximum polling duration before timeout (seconds)
-    static let researchPollTimeout: TimeInterval = 180.0 // 3 minutes
+    nonisolated static let researchPollTimeout: TimeInterval = 180.0 // 3 minutes
 
     // MARK: - Cache Configuration
 

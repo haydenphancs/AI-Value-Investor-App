@@ -13,11 +13,13 @@ struct TickerFinancialsContent: View {
     let profitPowerData: ProfitPowerSectionData?
     let signalOfConfidenceData: SignalOfConfidenceSectionData?
     let revenueBreakdownData: RevenueBreakdownData?
+    let healthCheckData: HealthCheckSectionData?
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
     var onProfitPowerDetailTap: (() -> Void)?
     var onSignalOfConfidenceDetailTap: (() -> Void)?
     var onRevenueBreakdownDetailTap: (() -> Void)?
+    var onHealthCheckDetailTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -49,6 +51,16 @@ struct TickerFinancialsContent: View {
                 )
             }
 
+            // Health Check Section
+            if let healthCheckData = healthCheckData {
+                HealthCheckSectionCard(
+                    healthCheckData: healthCheckData,
+                    onDetailTapped: {
+                        onHealthCheckDetailTap?()
+                    }
+                )
+            }
+
             // Signal of Confidence Section
             if let signalOfConfidenceData = signalOfConfidenceData {
                 SignalOfConfidenceSectionCard(
@@ -75,7 +87,8 @@ struct TickerFinancialsContent: View {
             growthData: GrowthSectionData.sampleData,
             profitPowerData: ProfitPowerSectionData.sampleData,
             signalOfConfidenceData: SignalOfConfidenceSectionData.sampleData,
-            revenueBreakdownData: RevenueBreakdownData.sampleApple
+            revenueBreakdownData: RevenueBreakdownData.sampleApple,
+            healthCheckData: HealthCheckSectionData.sampleData
         )
     }
     .background(AppColors.background)

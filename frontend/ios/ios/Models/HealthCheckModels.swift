@@ -158,11 +158,58 @@ struct HealthCheckMetric: Identifiable {
 
     var formattedComparison: String? {
         guard let comparison = comparisonValue else { return nil }
-        return "vs \(String(format: "%.1f", comparison))"
+        
+        switch type {
+        case .debtToEquity, .currentRatio:
+            return "vs \(String(format: "%.2f", comparison))"
+        case .peRatio, .returnOnEquity:
+            return "vs \(String(format: "%.1f", comparison))"
+        }
     }
 
     var valueColor: Color {
-        status.primaryColor
+        colorAtPosition(gaugePosition, for: type)
+    }
+    
+    /// Calculate the color at a specific position on the gauge gradient
+    private func colorAtPosition(_ position: Double, for metricType: HealthCheckMetricType) -> Color {
+        let clampedPosition = min(max(position, 0.0), 1.0)
+        
+        let gradientColors: [Color]
+        switch metricType {
+        case .debtToEquity, .peRatio:
+            // Lower is better: green -> lime -> yellow -> orange -> red
+            gradientColors = [
+                AppColors.bullish,
+                Color(hex: "84CC16"),
+                AppColors.neutral,
+                AppColors.alertOrange,
+                AppColors.bearish
+            ]
+        case .returnOnEquity, .currentRatio:
+            // Higher is better: red -> orange -> yellow -> lime -> green
+            gradientColors = [
+                AppColors.bearish,
+                AppColors.alertOrange,
+                AppColors.neutral,
+                Color(hex: "84CC16"),
+                AppColors.bullish
+            ]
+        }
+        
+        // Map position to color index (0.0 -> first color, 1.0 -> last color)
+        let colorCount = gradientColors.count
+        let scaledPosition = clampedPosition * Double(colorCount - 1)
+        let lowerIndex = Int(floor(scaledPosition))
+        let upperIndex = min(lowerIndex + 1, colorCount - 1)
+        let fraction = scaledPosition - Double(lowerIndex)
+        
+        // For simplicity, return the closest color (no interpolation)
+        if fraction < 0.5 {
+            return gradientColors[lowerIndex]
+        } else {
+            return gradientColors[upperIndex]
+        }
     }
 }
 
@@ -190,7 +237,7 @@ extension HealthCheckSectionData {
             HealthCheckMetric(
                 type: .debtToEquity,
                 value: 0.68,
-                comparisonValue: nil,
+                comparisonValue: 1.19,
                 percentDifference: -43,
                 gaugePosition: 0.25,
                 status: .positive,
@@ -228,8 +275,8 @@ extension HealthCheckSectionData {
                 gaugePosition: 0.68,
                 status: .positive,
                 insightText: "sector average, normal short-term liquidity position.",
-                highlightedValue: "Above",
-                highlightedLabel: nil
+                highlightedValue: "21%",
+                highlightedLabel: "above"
             )
         ]
     )
@@ -280,8 +327,8 @@ extension HealthCheckSectionData {
                 gaugePosition: 0.35,
                 status: .negative,
                 insightText: "sector average. Tight but manageable liquidity.",
-                highlightedValue: "Below",
-                highlightedLabel: nil
+                highlightedValue: "34%",
+                highlightedLabel: "below"
             )
         ]
     )

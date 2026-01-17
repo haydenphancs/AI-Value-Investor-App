@@ -85,7 +85,7 @@ struct HealthCheckGaugeBar: View {
                     .fill(Color.white)
                     .frame(width: height + 6, height: height + 6)
                     .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
-                    .offset(x: geometry.size.width * clampedPosition - (height + 6) / 2)
+                    .offset(x: geometry.size.width * clampedPosition - (height + 6) / 2.0)
             }
         }
         .frame(height: height + 6)

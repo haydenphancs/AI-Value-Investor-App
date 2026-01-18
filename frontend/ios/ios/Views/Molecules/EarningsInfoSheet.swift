@@ -39,6 +39,25 @@ struct EarningsInfoSheet: View {
                         ]
                     )
 
+                    // Time Range Section
+                    infoSection(
+                        title: "Time Range",
+                        items: [
+                            InfoItem(
+                                icon: "calendar",
+                                iconColor: AppColors.primaryBlue,
+                                title: "1Y (One Year)",
+                                description: "Shows the last 6 quarters for a focused view on recent performance and trends."
+                            ),
+                            InfoItem(
+                                icon: "calendar.badge.clock",
+                                iconColor: AppColors.accentCyan,
+                                title: "3Y (Three Years)",
+                                description: "Displays up to 14 quarters with a surprise bar chart. Use this view to see how price has changed in relation to earnings surprises over a longer period, revealing patterns in market reactions."
+                            )
+                        ]
+                    )
+
                     // Indicators Section
                     infoSection(
                         title: "Chart Indicators",

@@ -25,9 +25,32 @@ struct EarningsSectionCard: View {
         self.onDetailTap = onDetailTap
     }
 
-    // Get quarters based on selected time range
+    // Get quarters based on selected data type and time range
     private var displayQuarters: [EarningsQuarterData] {
-        earningsData.quarters(for: selectedDataType)
+        let allQuarters = earningsData.quarters(for: selectedDataType)
+        
+        switch selectedTimeRange {
+        case .oneYear:
+            // Show last 6 quarters (4 historical + 2 future estimates for 1Y view)
+            return Array(allQuarters.suffix(6))
+        case .threeYears:
+            // Show all quarters (up to 14 for 3 years + future)
+            return allQuarters
+        }
+    }
+    
+    // Get price history filtered to match displayed quarters
+    private var displayPriceHistory: [EarningsPricePoint] {
+        let allPriceHistory = earningsData.priceHistory
+        
+        switch selectedTimeRange {
+        case .oneYear:
+            // Show last 6 price points (1 year + future)
+            return Array(allPriceHistory.suffix(6))
+        case .threeYears:
+            // Show all price history
+            return allPriceHistory
+        }
     }
 
     var body: some View {
@@ -38,16 +61,22 @@ struct EarningsSectionCard: View {
             // Toggle controls row
             controlsRow
 
-            // Chart
+            // Main EPS/Revenue chart
             EarningsChartView(
                 quarters: displayQuarters,
-                priceHistory: earningsData.priceHistory,
+                priceHistory: displayPriceHistory,
                 showPriceLine: showPriceLine
             )
+            
+            // Surprise bar chart (3Y only)
+            if selectedTimeRange == .threeYears {
+                EarningsSurpriseBarChart(quarters: displayQuarters)
+            }
 
-            // Surprise percentages row
-            EarningsSurpriseRow(quarters: displayQuarters)
-                .padding(.horizontal, AppSpacing.sm)
+            // Surprise percentages row (1Y only - replaced by bar chart in 3Y)
+            if selectedTimeRange == .oneYear {
+                EarningsSurpriseRow(quarters: displayQuarters)
+            }
 
             // Spacer before legend
             Spacer()

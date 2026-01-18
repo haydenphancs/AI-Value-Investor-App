@@ -43,12 +43,20 @@ enum GrowthPeriodType: String, CaseIterable, Identifiable {
 }
 
 // MARK: - Growth Data Point
-struct GrowthDataPoint: Identifiable {
+struct GrowthDataPoint: Identifiable, Equatable, Hashable {
     let id = UUID()
     let period: String              // e.g., "2020", "2021" or "Q1 '24"
     let value: Double               // Absolute value (e.g., 100B)
     let yoyChangePercent: Double    // Year-over-Year change percentage
     let sectorAverageYoY: Double    // Sector average YoY for comparison
+    
+    static func == (lhs: GrowthDataPoint, rhs: GrowthDataPoint) -> Bool {
+        lhs.period == rhs.period
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(period)
+    }
 
     var isPositiveYoY: Bool {
         yoyChangePercent >= 0
@@ -147,7 +155,6 @@ struct GrowthSectionData {
 extension GrowthSectionData {
     static let sampleData = GrowthSectionData(
         epsAnnual: [
-            GrowthDataPoint(period: "2020", value: 3.28, yoyChangePercent: 10.78, sectorAverageYoY: 8.5),
             GrowthDataPoint(period: "2021", value: 5.61, yoyChangePercent: 71.04, sectorAverageYoY: 35.2),
             GrowthDataPoint(period: "2022", value: 6.11, yoyChangePercent: 8.91, sectorAverageYoY: 5.8),
             GrowthDataPoint(period: "2023", value: 6.13, yoyChangePercent: 0.33, sectorAverageYoY: -2.1),
@@ -155,86 +162,142 @@ extension GrowthSectionData {
             GrowthDataPoint(period: "2025", value: 7.35, yoyChangePercent: 8.89, sectorAverageYoY: 6.2)
         ],
         epsQuarterly: [
-            GrowthDataPoint(period: "Q1 '23", value: 1.52, yoyChangePercent: -2.45, sectorAverageYoY: -1.8),
-            GrowthDataPoint(period: "Q2 '23", value: 1.26, yoyChangePercent: -0.79, sectorAverageYoY: 0.5),
-            GrowthDataPoint(period: "Q3 '23", value: 1.46, yoyChangePercent: 13.18, sectorAverageYoY: 10.2),
-            GrowthDataPoint(period: "Q4 '23", value: 2.02, yoyChangePercent: -10.62, sectorAverageYoY: -8.5),
-            GrowthDataPoint(period: "Q1 '24", value: 1.53, yoyChangePercent: 4.08, sectorAverageYoY: 3.2),
-            GrowthDataPoint(period: "Q2 '24", value: 1.40, yoyChangePercent: 11.11, sectorAverageYoY: 8.5),
-            GrowthDataPoint(period: "Q3 '24", value: 1.64, yoyChangePercent: 12.33, sectorAverageYoY: 9.1),
-            GrowthDataPoint(period: "Q4 '24", value: 2.18, yoyChangePercent: 7.92, sectorAverageYoY: 5.8)
+            GrowthDataPoint(period: "Q1'21", value: 1.40, yoyChangePercent: 54.29, sectorAverageYoY: 28.5),
+            GrowthDataPoint(period: "Q2'21", value: 1.30, yoyChangePercent: 93.28, sectorAverageYoY: 42.3),
+            GrowthDataPoint(period: "Q3'21", value: 1.24, yoyChangePercent: 70.24, sectorAverageYoY: 35.8),
+            GrowthDataPoint(period: "Q4'21", value: 2.10, yoyChangePercent: 62.03, sectorAverageYoY: 31.5),
+            GrowthDataPoint(period: "Q1'22", value: 1.52, yoyChangePercent: 8.57, sectorAverageYoY: 5.2),
+            GrowthDataPoint(period: "Q2'22", value: 1.20, yoyChangePercent: -7.69, sectorAverageYoY: -3.5),
+            GrowthDataPoint(period: "Q3'22", value: 1.29, yoyChangePercent: 4.03, sectorAverageYoY: 2.1),
+            GrowthDataPoint(period: "Q4'22", value: 1.88, yoyChangePercent: -10.48, sectorAverageYoY: -8.2),
+            GrowthDataPoint(period: "Q1'23", value: 1.52, yoyChangePercent: 0.00, sectorAverageYoY: -1.8),
+            GrowthDataPoint(period: "Q2'23", value: 1.26, yoyChangePercent: 5.00, sectorAverageYoY: 0.5),
+            GrowthDataPoint(period: "Q3'23", value: 1.46, yoyChangePercent: 13.18, sectorAverageYoY: 10.2),
+            GrowthDataPoint(period: "Q4'23", value: 2.02, yoyChangePercent: 7.45, sectorAverageYoY: -8.5),
+            GrowthDataPoint(period: "Q1'24", value: 1.53, yoyChangePercent: 0.66, sectorAverageYoY: 3.2),
+            GrowthDataPoint(period: "Q2'24", value: 1.40, yoyChangePercent: 11.11, sectorAverageYoY: 8.5),
+            GrowthDataPoint(period: "Q3'24", value: 1.64, yoyChangePercent: 12.33, sectorAverageYoY: 9.1),
+            GrowthDataPoint(period: "Q4'24", value: 2.18, yoyChangePercent: 7.92, sectorAverageYoY: 5.8),
+            GrowthDataPoint(period: "Q1'25", value: 1.68, yoyChangePercent: 9.80, sectorAverageYoY: 7.2),
+            GrowthDataPoint(period: "Q2'25", value: 1.52, yoyChangePercent: 8.57, sectorAverageYoY: 6.5),
+            GrowthDataPoint(period: "Q3'25", value: 1.78, yoyChangePercent: 8.54, sectorAverageYoY: 6.8),
+            GrowthDataPoint(period: "Q4'25", value: 2.37, yoyChangePercent: 8.72, sectorAverageYoY: 6.3)
         ],
         revenueAnnual: [
-            GrowthDataPoint(period: "2020", value: 86_000_000_000, yoyChangePercent: -2.30, sectorAverageYoY: -5.8),
-            GrowthDataPoint(period: "2021", value: 80_000_000_000, yoyChangePercent: -7.42, sectorAverageYoY: 2.5),
-            GrowthDataPoint(period: "2022", value: 180_000_000_000, yoyChangePercent: 7.92, sectorAverageYoY: 12.3),
-            GrowthDataPoint(period: "2023", value: 220_000_000_000, yoyChangePercent: 5.22, sectorAverageYoY: 15.8),
-            GrowthDataPoint(period: "2024", value: 145_000_000_000, yoyChangePercent: -10.92, sectorAverageYoY: -8.2),
-            GrowthDataPoint(period: "2025", value: 110_000_000_000, yoyChangePercent: -3.32, sectorAverageYoY: -1.5)
+            GrowthDataPoint(period: "2021", value: 365_817_000_000, yoyChangePercent: 33.26, sectorAverageYoY: 22.5),
+            GrowthDataPoint(period: "2022", value: 394_328_000_000, yoyChangePercent: 7.79, sectorAverageYoY: 12.3),
+            GrowthDataPoint(period: "2023", value: 383_285_000_000, yoyChangePercent: -2.80, sectorAverageYoY: 15.8),
+            GrowthDataPoint(period: "2024", value: 391_035_000_000, yoyChangePercent: 2.02, sectorAverageYoY: -8.2),
+            GrowthDataPoint(period: "2025", value: 412_500_000_000, yoyChangePercent: 5.49, sectorAverageYoY: 4.5)
         ],
         revenueQuarterly: [
-            GrowthDataPoint(period: "Q1 '23", value: 94_836_000_000, yoyChangePercent: -2.51, sectorAverageYoY: -1.5),
-            GrowthDataPoint(period: "Q2 '23", value: 81_797_000_000, yoyChangePercent: -1.40, sectorAverageYoY: 0.8),
-            GrowthDataPoint(period: "Q3 '23", value: 89_498_000_000, yoyChangePercent: -0.68, sectorAverageYoY: 1.2),
-            GrowthDataPoint(period: "Q4 '23", value: 119_575_000_000, yoyChangePercent: 2.07, sectorAverageYoY: 3.5),
-            GrowthDataPoint(period: "Q1 '24", value: 94_800_000_000, yoyChangePercent: 2.50, sectorAverageYoY: 3.2),
-            GrowthDataPoint(period: "Q2 '24", value: 98_200_000_000, yoyChangePercent: 3.40, sectorAverageYoY: 4.5),
-            GrowthDataPoint(period: "Q3 '24", value: 89_500_000_000, yoyChangePercent: -1.60, sectorAverageYoY: -0.8),
-            GrowthDataPoint(period: "Q4 '24", value: 102_300_000_000, yoyChangePercent: 5.80, sectorAverageYoY: 4.2)
+            GrowthDataPoint(period: "Q1'21", value: 89_584_000_000, yoyChangePercent: 53.68, sectorAverageYoY: 35.2),
+            GrowthDataPoint(period: "Q2'21", value: 81_434_000_000, yoyChangePercent: 36.42, sectorAverageYoY: 25.8),
+            GrowthDataPoint(period: "Q3'21", value: 83_360_000_000, yoyChangePercent: 28.85, sectorAverageYoY: 22.5),
+            GrowthDataPoint(period: "Q4'21", value: 123_945_000_000, yoyChangePercent: 11.25, sectorAverageYoY: 15.3),
+            GrowthDataPoint(period: "Q1'22", value: 97_278_000_000, yoyChangePercent: 8.59, sectorAverageYoY: 12.5),
+            GrowthDataPoint(period: "Q2'22", value: 82_959_000_000, yoyChangePercent: 1.87, sectorAverageYoY: 8.8),
+            GrowthDataPoint(period: "Q3'22", value: 90_146_000_000, yoyChangePercent: 8.14, sectorAverageYoY: 10.2),
+            GrowthDataPoint(period: "Q4'22", value: 117_154_000_000, yoyChangePercent: -5.49, sectorAverageYoY: -2.5),
+            GrowthDataPoint(period: "Q1'23", value: 94_836_000_000, yoyChangePercent: -2.51, sectorAverageYoY: -1.5),
+            GrowthDataPoint(period: "Q2'23", value: 81_797_000_000, yoyChangePercent: -1.40, sectorAverageYoY: 0.8),
+            GrowthDataPoint(period: "Q3'23", value: 89_498_000_000, yoyChangePercent: -0.72, sectorAverageYoY: 1.2),
+            GrowthDataPoint(period: "Q4'23", value: 119_575_000_000, yoyChangePercent: 2.07, sectorAverageYoY: 3.5),
+            GrowthDataPoint(period: "Q1'24", value: 90_753_000_000, yoyChangePercent: -4.31, sectorAverageYoY: 3.2),
+            GrowthDataPoint(period: "Q2'24", value: 85_778_000_000, yoyChangePercent: 4.87, sectorAverageYoY: 4.5),
+            GrowthDataPoint(period: "Q3'24", value: 94_930_000_000, yoyChangePercent: 6.07, sectorAverageYoY: -0.8),
+            GrowthDataPoint(period: "Q4'24", value: 124_300_000_000, yoyChangePercent: 3.95, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q1'25", value: 95_900_000_000, yoyChangePercent: 5.67, sectorAverageYoY: 5.2),
+            GrowthDataPoint(period: "Q2'25", value: 89_200_000_000, yoyChangePercent: 3.99, sectorAverageYoY: 4.8),
+            GrowthDataPoint(period: "Q3'25", value: 98_500_000_000, yoyChangePercent: 3.76, sectorAverageYoY: 5.1),
+            GrowthDataPoint(period: "Q4'25", value: 128_900_000_000, yoyChangePercent: 3.70, sectorAverageYoY: 4.5)
         ],
         netIncomeAnnual: [
-            GrowthDataPoint(period: "2020", value: 57_410_000_000, yoyChangePercent: 3.90, sectorAverageYoY: 2.1),
             GrowthDataPoint(period: "2021", value: 94_680_000_000, yoyChangePercent: 64.92, sectorAverageYoY: 45.3),
-            GrowthDataPoint(period: "2022", value: 99_800_000_000, yoyChangePercent: 5.41, sectorAverageYoY: 3.8),
+            GrowthDataPoint(period: "2022", value: 99_803_000_000, yoyChangePercent: 5.41, sectorAverageYoY: 3.8),
             GrowthDataPoint(period: "2023", value: 96_995_000_000, yoyChangePercent: -2.81, sectorAverageYoY: -4.2),
-            GrowthDataPoint(period: "2024", value: 105_000_000_000, yoyChangePercent: 8.25, sectorAverageYoY: 6.5),
-            GrowthDataPoint(period: "2025", value: 112_000_000_000, yoyChangePercent: 6.67, sectorAverageYoY: 5.2)
+            GrowthDataPoint(period: "2024", value: 106_426_000_000, yoyChangePercent: 9.72, sectorAverageYoY: 6.5),
+            GrowthDataPoint(period: "2025", value: 115_000_000_000, yoyChangePercent: 8.06, sectorAverageYoY: 7.2)
         ],
         netIncomeQuarterly: [
-            GrowthDataPoint(period: "Q1 '23", value: 24_160_000_000, yoyChangePercent: -3.36, sectorAverageYoY: -2.5),
-            GrowthDataPoint(period: "Q2 '23", value: 19_881_000_000, yoyChangePercent: -2.26, sectorAverageYoY: -1.2),
-            GrowthDataPoint(period: "Q3 '23", value: 22_956_000_000, yoyChangePercent: 10.78, sectorAverageYoY: 8.5),
-            GrowthDataPoint(period: "Q4 '23", value: 33_916_000_000, yoyChangePercent: -11.25, sectorAverageYoY: -9.8),
-            GrowthDataPoint(period: "Q1 '24", value: 23_636_000_000, yoyChangePercent: 4.08, sectorAverageYoY: 3.2),
-            GrowthDataPoint(period: "Q2 '24", value: 21_448_000_000, yoyChangePercent: 7.89, sectorAverageYoY: 5.5),
-            GrowthDataPoint(period: "Q3 '24", value: 25_012_000_000, yoyChangePercent: 12.45, sectorAverageYoY: 8.9),
-            GrowthDataPoint(period: "Q4 '24", value: 36_330_000_000, yoyChangePercent: 7.12, sectorAverageYoY: 5.8)
+            GrowthDataPoint(period: "Q1'21", value: 23_630_000_000, yoyChangePercent: 110.00, sectorAverageYoY: 65.3),
+            GrowthDataPoint(period: "Q2'21", value: 21_744_000_000, yoyChangePercent: 93.21, sectorAverageYoY: 55.8),
+            GrowthDataPoint(period: "Q3'21", value: 20_551_000_000, yoyChangePercent: 62.35, sectorAverageYoY: 42.5),
+            GrowthDataPoint(period: "Q4'21", value: 34_630_000_000, yoyChangePercent: 20.35, sectorAverageYoY: 18.2),
+            GrowthDataPoint(period: "Q1'22", value: 25_010_000_000, yoyChangePercent: 5.84, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q2'22", value: 19_442_000_000, yoyChangePercent: -10.59, sectorAverageYoY: -8.5),
+            GrowthDataPoint(period: "Q3'22", value: 20_721_000_000, yoyChangePercent: 0.83, sectorAverageYoY: 1.2),
+            GrowthDataPoint(period: "Q4'22", value: 29_998_000_000, yoyChangePercent: -13.38, sectorAverageYoY: -11.2),
+            GrowthDataPoint(period: "Q1'23", value: 24_160_000_000, yoyChangePercent: -3.40, sectorAverageYoY: -2.5),
+            GrowthDataPoint(period: "Q2'23", value: 19_881_000_000, yoyChangePercent: 2.26, sectorAverageYoY: -1.2),
+            GrowthDataPoint(period: "Q3'23", value: 22_956_000_000, yoyChangePercent: 10.79, sectorAverageYoY: 8.5),
+            GrowthDataPoint(period: "Q4'23", value: 33_916_000_000, yoyChangePercent: 13.06, sectorAverageYoY: -9.8),
+            GrowthDataPoint(period: "Q1'24", value: 23_636_000_000, yoyChangePercent: -2.17, sectorAverageYoY: 3.2),
+            GrowthDataPoint(period: "Q2'24", value: 21_448_000_000, yoyChangePercent: 7.88, sectorAverageYoY: 5.5),
+            GrowthDataPoint(period: "Q3'24", value: 25_012_000_000, yoyChangePercent: 8.96, sectorAverageYoY: 8.9),
+            GrowthDataPoint(period: "Q4'24", value: 36_330_000_000, yoyChangePercent: 7.12, sectorAverageYoY: 5.8),
+            GrowthDataPoint(period: "Q1'25", value: 25_850_000_000, yoyChangePercent: 9.36, sectorAverageYoY: 7.5),
+            GrowthDataPoint(period: "Q2'25", value: 23_450_000_000, yoyChangePercent: 9.33, sectorAverageYoY: 7.8),
+            GrowthDataPoint(period: "Q3'25", value: 27_200_000_000, yoyChangePercent: 8.75, sectorAverageYoY: 7.2),
+            GrowthDataPoint(period: "Q4'25", value: 38_500_000_000, yoyChangePercent: 5.97, sectorAverageYoY: 6.5)
         ],
         operatingProfitAnnual: [
-            GrowthDataPoint(period: "2020", value: 66_288_000_000, yoyChangePercent: 3.50, sectorAverageYoY: 2.8),
             GrowthDataPoint(period: "2021", value: 108_949_000_000, yoyChangePercent: 64.35, sectorAverageYoY: 42.1),
             GrowthDataPoint(period: "2022", value: 119_437_000_000, yoyChangePercent: 9.63, sectorAverageYoY: 6.5),
             GrowthDataPoint(period: "2023", value: 114_301_000_000, yoyChangePercent: -4.30, sectorAverageYoY: -5.2),
-            GrowthDataPoint(period: "2024", value: 125_000_000_000, yoyChangePercent: 9.36, sectorAverageYoY: 7.8),
-            GrowthDataPoint(period: "2025", value: 132_000_000_000, yoyChangePercent: 5.60, sectorAverageYoY: 4.5)
+            GrowthDataPoint(period: "2024", value: 124_000_000_000, yoyChangePercent: 8.49, sectorAverageYoY: 7.8),
+            GrowthDataPoint(period: "2025", value: 132_500_000_000, yoyChangePercent: 6.85, sectorAverageYoY: 5.5)
         ],
         operatingProfitQuarterly: [
-            GrowthDataPoint(period: "Q1 '23", value: 28_318_000_000, yoyChangePercent: -5.48, sectorAverageYoY: -4.2),
-            GrowthDataPoint(period: "Q2 '23", value: 23_076_000_000, yoyChangePercent: -3.25, sectorAverageYoY: -2.1),
-            GrowthDataPoint(period: "Q3 '23", value: 26_969_000_000, yoyChangePercent: 8.92, sectorAverageYoY: 6.8),
-            GrowthDataPoint(period: "Q4 '23", value: 39_895_000_000, yoyChangePercent: -8.62, sectorAverageYoY: -7.5),
-            GrowthDataPoint(period: "Q1 '24", value: 27_900_000_000, yoyChangePercent: 5.12, sectorAverageYoY: 4.2),
-            GrowthDataPoint(period: "Q2 '24", value: 25_350_000_000, yoyChangePercent: 8.45, sectorAverageYoY: 6.1),
-            GrowthDataPoint(period: "Q3 '24", value: 29_600_000_000, yoyChangePercent: 10.23, sectorAverageYoY: 7.8),
-            GrowthDataPoint(period: "Q4 '24", value: 41_150_000_000, yoyChangePercent: 6.78, sectorAverageYoY: 5.2)
+            GrowthDataPoint(period: "Q1'21", value: 27_500_000_000, yoyChangePercent: 120.50, sectorAverageYoY: 72.3),
+            GrowthDataPoint(period: "Q2'21", value: 24_126_000_000, yoyChangePercent: 96.35, sectorAverageYoY: 58.5),
+            GrowthDataPoint(period: "Q3'21", value: 24_082_000_000, yoyChangePercent: 62.15, sectorAverageYoY: 45.2),
+            GrowthDataPoint(period: "Q4'21", value: 41_525_000_000, yoyChangePercent: 20.18, sectorAverageYoY: 16.8),
+            GrowthDataPoint(period: "Q1'22", value: 30_288_000_000, yoyChangePercent: 10.13, sectorAverageYoY: 8.2),
+            GrowthDataPoint(period: "Q2'22", value: 23_076_000_000, yoyChangePercent: -4.36, sectorAverageYoY: -2.5),
+            GrowthDataPoint(period: "Q3'22", value: 25_000_000_000, yoyChangePercent: 3.81, sectorAverageYoY: 2.1),
+            GrowthDataPoint(period: "Q4'22", value: 36_016_000_000, yoyChangePercent: -13.27, sectorAverageYoY: -10.8),
+            GrowthDataPoint(period: "Q1'23", value: 28_318_000_000, yoyChangePercent: -6.50, sectorAverageYoY: -4.2),
+            GrowthDataPoint(period: "Q2'23", value: 22_997_000_000, yoyChangePercent: -0.34, sectorAverageYoY: -2.1),
+            GrowthDataPoint(period: "Q3'23", value: 26_969_000_000, yoyChangePercent: 7.88, sectorAverageYoY: 6.8),
+            GrowthDataPoint(period: "Q4'23", value: 39_895_000_000, yoyChangePercent: 10.77, sectorAverageYoY: -7.5),
+            GrowthDataPoint(period: "Q1'24", value: 27_900_000_000, yoyChangePercent: -1.48, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q2'24", value: 25_350_000_000, yoyChangePercent: 10.23, sectorAverageYoY: 6.1),
+            GrowthDataPoint(period: "Q3'24", value: 29_600_000_000, yoyChangePercent: 9.75, sectorAverageYoY: 7.8),
+            GrowthDataPoint(period: "Q4'24", value: 41_150_000_000, yoyChangePercent: 3.15, sectorAverageYoY: 5.2),
+            GrowthDataPoint(period: "Q1'25", value: 30_500_000_000, yoyChangePercent: 9.32, sectorAverageYoY: 7.2),
+            GrowthDataPoint(period: "Q2'25", value: 27_800_000_000, yoyChangePercent: 9.66, sectorAverageYoY: 7.5),
+            GrowthDataPoint(period: "Q3'25", value: 32_100_000_000, yoyChangePercent: 8.45, sectorAverageYoY: 6.8),
+            GrowthDataPoint(period: "Q4'25", value: 42_100_000_000, yoyChangePercent: 2.31, sectorAverageYoY: 5.5)
         ],
         freeCashFlowAnnual: [
-            GrowthDataPoint(period: "2020", value: 73_365_000_000, yoyChangePercent: 25.00, sectorAverageYoY: 18.5),
             GrowthDataPoint(period: "2021", value: 92_953_000_000, yoyChangePercent: 26.70, sectorAverageYoY: 22.3),
             GrowthDataPoint(period: "2022", value: 111_443_000_000, yoyChangePercent: 19.89, sectorAverageYoY: 15.8),
             GrowthDataPoint(period: "2023", value: 99_584_000_000, yoyChangePercent: -10.64, sectorAverageYoY: -8.2),
-            GrowthDataPoint(period: "2024", value: 108_000_000_000, yoyChangePercent: 8.45, sectorAverageYoY: 6.5),
-            GrowthDataPoint(period: "2025", value: 115_000_000_000, yoyChangePercent: 6.48, sectorAverageYoY: 5.2)
+            GrowthDataPoint(period: "2024", value: 107_500_000_000, yoyChangePercent: 7.95, sectorAverageYoY: 6.5),
+            GrowthDataPoint(period: "2025", value: 115_800_000_000, yoyChangePercent: 7.72, sectorAverageYoY: 6.2)
         ],
         freeCashFlowQuarterly: [
-            GrowthDataPoint(period: "Q1 '23", value: 22_185_000_000, yoyChangePercent: -4.12, sectorAverageYoY: -3.2),
-            GrowthDataPoint(period: "Q2 '23", value: 21_152_000_000, yoyChangePercent: -6.85, sectorAverageYoY: -5.5),
-            GrowthDataPoint(period: "Q3 '23", value: 23_632_000_000, yoyChangePercent: 5.68, sectorAverageYoY: 4.2),
-            GrowthDataPoint(period: "Q4 '23", value: 32_415_000_000, yoyChangePercent: -12.45, sectorAverageYoY: -10.8),
-            GrowthDataPoint(period: "Q1 '24", value: 24_160_000_000, yoyChangePercent: 8.92, sectorAverageYoY: 6.5),
-            GrowthDataPoint(period: "Q2 '24", value: 22_310_000_000, yoyChangePercent: 5.45, sectorAverageYoY: 4.2),
-            GrowthDataPoint(period: "Q3 '24", value: 26_540_000_000, yoyChangePercent: 12.30, sectorAverageYoY: 9.8),
-            GrowthDataPoint(period: "Q4 '24", value: 34_990_000_000, yoyChangePercent: 7.89, sectorAverageYoY: 6.1)
+            GrowthDataPoint(period: "Q1'21", value: 21_235_000_000, yoyChangePercent: 68.50, sectorAverageYoY: 45.3),
+            GrowthDataPoint(period: "Q2'21", value: 21_035_000_000, yoyChangePercent: 52.85, sectorAverageYoY: 38.2),
+            GrowthDataPoint(period: "Q3'21", value: 20_841_000_000, yoyChangePercent: 28.90, sectorAverageYoY: 25.5),
+            GrowthDataPoint(period: "Q4'21", value: 28_360_000_000, yoyChangePercent: 9.85, sectorAverageYoY: 12.3),
+            GrowthDataPoint(period: "Q1'22", value: 28_755_000_000, yoyChangePercent: 35.42, sectorAverageYoY: 28.5),
+            GrowthDataPoint(period: "Q2'22", value: 22_839_000_000, yoyChangePercent: 8.58, sectorAverageYoY: 12.2),
+            GrowthDataPoint(period: "Q3'22", value: 24_088_000_000, yoyChangePercent: 15.58, sectorAverageYoY: 18.5),
+            GrowthDataPoint(period: "Q4'22", value: 34_005_000_000, yoyChangePercent: 19.91, sectorAverageYoY: 15.8),
+            GrowthDataPoint(period: "Q1'23", value: 22_185_000_000, yoyChangePercent: -22.84, sectorAverageYoY: -18.2),
+            GrowthDataPoint(period: "Q2'23", value: 21_152_000_000, yoyChangePercent: -7.39, sectorAverageYoY: -5.5),
+            GrowthDataPoint(period: "Q3'23", value: 23_632_000_000, yoyChangePercent: -1.89, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q4'23", value: 32_415_000_000, yoyChangePercent: -4.67, sectorAverageYoY: -10.8),
+            GrowthDataPoint(period: "Q1'24", value: 24_160_000_000, yoyChangePercent: 8.90, sectorAverageYoY: 6.5),
+            GrowthDataPoint(period: "Q2'24", value: 22_310_000_000, yoyChangePercent: 5.47, sectorAverageYoY: 4.2),
+            GrowthDataPoint(period: "Q3'24", value: 26_540_000_000, yoyChangePercent: 12.31, sectorAverageYoY: 9.8),
+            GrowthDataPoint(period: "Q4'24", value: 34_490_000_000, yoyChangePercent: 6.40, sectorAverageYoY: 6.1),
+            GrowthDataPoint(period: "Q1'25", value: 26_200_000_000, yoyChangePercent: 8.44, sectorAverageYoY: 7.2),
+            GrowthDataPoint(period: "Q2'25", value: 24_500_000_000, yoyChangePercent: 9.81, sectorAverageYoY: 7.5),
+            GrowthDataPoint(period: "Q3'25", value: 28_900_000_000, yoyChangePercent: 8.89, sectorAverageYoY: 7.8),
+            GrowthDataPoint(period: "Q4'25", value: 36_200_000_000, yoyChangePercent: 4.96, sectorAverageYoY: 6.3)
         ]
     )
 }

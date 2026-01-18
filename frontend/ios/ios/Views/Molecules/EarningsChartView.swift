@@ -166,14 +166,71 @@ struct EarningsChartView: View {
             Spacer()
                 .frame(width: yAxisWidth)
 
-            ForEach(quarters) { quarter in
-                Text(quarter.quarter)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity)
+            // Display quarter labels based on count
+            if quarters.count > 6 {
+                // For 3Y view (more than 6 quarters), show condensed labels
+                // Group by year and show Q1, Q2, Q3, Q4 with year label
+                xAxisLabelsCondensed()
+            } else {
+                // For 1Y view (6 or fewer quarters), show full quarter labels
+                ForEach(quarters) { quarter in
+                    Text(quarter.quarter)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
         .padding(.top, AppSpacing.sm)
+    }
+    
+    private func xAxisLabelsCondensed() -> some View {
+        VStack(spacing: 2) {
+            // Top row: Q1, Q2, Q3, Q4 labels for each quarter
+            HStack(spacing: 0) {
+                ForEach(quarters) { quarter in
+                    Text(String(quarter.quarter.prefix(2)))
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            
+            // Bottom row: Year labels positioned under their quarter groups
+            GeometryReader { geometry in
+                let totalWidth = geometry.size.width
+                let totalQuarters = quarters.count
+                let stepWidth = totalWidth / CGFloat(totalQuarters)
+                
+                // Group quarters by year, maintaining their original indices
+                let groupedByYear = Dictionary(grouping: Array(quarters.enumerated())) { element in
+                    let components = element.element.quarter.components(separatedBy: " ")
+                    return components.count > 1 ? components[1] : ""
+                }
+                
+                // Sort years
+                let sortedYears = groupedByYear.keys.sorted()
+                
+                ZStack(alignment: .top) {
+                    ForEach(sortedYears, id: \.self) { year in
+                        if let yearData = groupedByYear[year]?.sorted(by: { $0.offset < $1.offset }),
+                           let firstIndex = yearData.first?.offset,
+                           let lastIndex = yearData.last?.offset {
+                            
+                            let centerIndex = CGFloat(firstIndex + lastIndex) / 2.0
+                            let centerX = centerIndex * stepWidth + stepWidth / 2
+                            
+                            Text(year)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .bold()
+                                .position(x: centerX, y: 6)
+                        }
+                    }
+                }
+            }
+            .frame(height: 12)
+        }
     }
 
     private func priceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {

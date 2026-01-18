@@ -45,9 +45,18 @@ struct EarningsLegendItem: View {
 
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
-            Circle()
-                .fill(type.color)
-                .frame(width: 10, height: 10)
+            if type == .surprised {
+                // Show gray "%" symbol for Surprised
+                Text("%")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(AppColors.textSecondary)
+                    .frame(width: 12, height: 12)
+            } else {
+                // Show colored circle for other types
+                Circle()
+                    .fill(type.color)
+                    .frame(width: 10, height: 10)
+            }
 
             Text(type.label)
                 .font(AppTypography.footnote)

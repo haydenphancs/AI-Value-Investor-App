@@ -18,6 +18,7 @@ struct ProfitPowerSectionCard: View {
 
     @State private var selectedPeriod: ProfitPowerPeriodType = .annual
     @State private var showInfoSheet: Bool = false
+    @State private var selectedDataPoint: ProfitPowerDataPoint? = nil
 
     // MARK: - Computed Properties
 
@@ -37,8 +38,11 @@ struct ProfitPowerSectionCard: View {
                 .padding(.leading, AppSpacing.xs)
 
             // Main chart
-            ProfitPowerChartView(dataPoints: currentDataPoints)
-                .padding(.top, AppSpacing.sm)
+            ProfitPowerChartView(
+                dataPoints: currentDataPoints,
+                selectedDataPoint: $selectedDataPoint
+            )
+            .padding(.top, AppSpacing.sm)
 
             // Legend
             ProfitPowerLegendView()

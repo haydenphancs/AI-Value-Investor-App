@@ -11,6 +11,7 @@ import Charts
 
 struct ProfitPowerChartView: View {
     let dataPoints: [ProfitPowerDataPoint]
+    @Binding var selectedDataPoint: ProfitPowerDataPoint?
 
     // Chart configuration
     private let chartHeight: CGFloat = 240
@@ -45,6 +46,16 @@ struct ProfitPowerChartView: View {
             // X-axis labels (periods)
             xAxisLabels
         }
+        // Overlay tooltip when a data point is selected
+        .overlay(alignment: .top) {
+            if let selectedDataPoint {
+                ProfitPowerTooltipView(dataPoint: selectedDataPoint)
+                    .padding(.horizontal, AppSpacing.md)
+                    .padding(.top, AppSpacing.xs)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedDataPoint?.id)
     }
 
     // MARK: - Chart Content
@@ -92,6 +103,19 @@ struct ProfitPowerChartView: View {
                     .background(Color.clear)
             }
             .frame(height: chartHeight)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        updateSelection(at: value.location)
+                    }
+                    .onEnded { _ in
+                        // Keep selection visible for a moment, then hide
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                            selectedDataPoint = nil
+                        }
+                    }
+            )
         }
     }
 
@@ -209,6 +233,100 @@ struct ProfitPowerChartView: View {
         }
         .padding(.top, AppSpacing.sm)
     }
+
+    // MARK: - Selection Helper
+
+    private func updateSelection(at location: CGPoint) {
+        // Calculate which data point is closest to the tap location
+        // Account for the y-axis width offset
+        let adjustedX = location.x - yAxisWidth
+        let chartWidth = UIScreen.main.bounds.width - (yAxisWidth + AppSpacing.lg * 2)
+        let pointWidth = chartWidth / CGFloat(dataPoints.count)
+
+        let index = Int(adjustedX / pointWidth)
+        if index >= 0 && index < dataPoints.count {
+            selectedDataPoint = dataPoints[index]
+        }
+    }
+}
+
+// MARK: - Profit Power Tooltip View
+
+struct ProfitPowerTooltipView: View {
+    let dataPoint: ProfitPowerDataPoint
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            // Period header
+            Text(dataPoint.period)
+                .font(AppTypography.calloutBold)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.bottom, AppSpacing.xxs)
+
+            // All margin values
+            tooltipRow(
+                title: "Gross Margin",
+                value: dataPoint.grossMargin,
+                color: AppColors.profitGrossMargin
+            )
+
+            tooltipRow(
+                title: "Operating Margin",
+                value: dataPoint.operatingMargin,
+                color: AppColors.profitOperatingMargin
+            )
+
+            tooltipRow(
+                title: "FCF Margin",
+                value: dataPoint.fcfMargin,
+                color: AppColors.profitFCFMargin
+            )
+
+            tooltipRow(
+                title: "Net Margin",
+                value: dataPoint.netMargin,
+                color: AppColors.profitNetMargin
+            )
+
+            tooltipRow(
+                title: "Sector Avg",
+                value: dataPoint.sectorAverageNetMargin,
+                color: AppColors.profitSectorAverage
+            )
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.cardBackground)
+                .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .strokeBorder(AppColors.cardBackgroundLight, lineWidth: 1)
+        )
+    }
+
+    private func tooltipRow(title: String, value: Double, color: Color) -> some View {
+        HStack(spacing: AppSpacing.sm) {
+            // Color indicator
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+
+            // Title
+            Text(title)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+
+            Spacer()
+
+            // Value
+            Text(String(format: "%.1f%%", value))
+                .font(AppTypography.captionBold)
+                .foregroundColor(AppColors.textPrimary)
+        }
+    }
 }
 
 #Preview {
@@ -218,7 +336,8 @@ struct ProfitPowerChartView: View {
 
         VStack {
             ProfitPowerChartView(
-                dataPoints: ProfitPowerSectionData.sampleData.annualData
+                dataPoints: ProfitPowerSectionData.sampleData.annualData,
+                selectedDataPoint: .constant(nil)
             )
             .padding()
         }

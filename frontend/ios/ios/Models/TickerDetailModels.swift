@@ -1470,26 +1470,62 @@ struct EarningsData {
 extension EarningsData {
     static let sampleData = EarningsData(
         epsQuarters: [
+            // 2022 data
+            EarningsQuarterData(quarter: "Q1 '22", actualValue: 0.45, estimateValue: 0.42, surprisePercent: 7.1),
+            EarningsQuarterData(quarter: "Q2 '22", actualValue: 0.52, estimateValue: 0.50, surprisePercent: 4.0),
+            EarningsQuarterData(quarter: "Q3 '22", actualValue: 0.48, estimateValue: 0.52, surprisePercent: -7.7),
+            EarningsQuarterData(quarter: "Q4 '22", actualValue: 0.55, estimateValue: 0.55, surprisePercent: 0),
+            // 2023 data
+            EarningsQuarterData(quarter: "Q1 '23", actualValue: 0.58, estimateValue: 0.55, surprisePercent: 5.5),
+            EarningsQuarterData(quarter: "Q2 '23", actualValue: 0.62, estimateValue: 0.60, surprisePercent: 3.3),
+            EarningsQuarterData(quarter: "Q3 '23", actualValue: 0.55, estimateValue: 0.58, surprisePercent: -5.2),
+            EarningsQuarterData(quarter: "Q4 '23", actualValue: 0.68, estimateValue: 0.65, surprisePercent: 4.6),
+            // 2024 data
             EarningsQuarterData(quarter: "Q1 '24", actualValue: 0.65, estimateValue: 0.58, surprisePercent: 4.2),
             EarningsQuarterData(quarter: "Q2 '24", actualValue: 1.20, estimateValue: 1.10, surprisePercent: 5.8),
             EarningsQuarterData(quarter: "Q3 '24", actualValue: 0.52, estimateValue: 0.55, surprisePercent: -1.2),
             EarningsQuarterData(quarter: "Q4 '24", actualValue: 0.25, estimateValue: 0.25, surprisePercent: 0),
+            // 2025 future data
             EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 0.72, surprisePercent: nil),
             EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 1.35, surprisePercent: nil)
         ],
         revenueQuarters: [
+            // 2022 data
+            EarningsQuarterData(quarter: "Q1 '22", actualValue: 78.5, estimateValue: 76.0, surprisePercent: 3.3),
+            EarningsQuarterData(quarter: "Q2 '22", actualValue: 82.3, estimateValue: 80.0, surprisePercent: 2.9),
+            EarningsQuarterData(quarter: "Q3 '22", actualValue: 79.8, estimateValue: 82.0, surprisePercent: -2.7),
+            EarningsQuarterData(quarter: "Q4 '22", actualValue: 88.2, estimateValue: 88.2, surprisePercent: 0),
+            // 2023 data
+            EarningsQuarterData(quarter: "Q1 '23", actualValue: 85.5, estimateValue: 83.0, surprisePercent: 3.0),
+            EarningsQuarterData(quarter: "Q2 '23", actualValue: 90.2, estimateValue: 88.5, surprisePercent: 1.9),
+            EarningsQuarterData(quarter: "Q3 '23", actualValue: 86.8, estimateValue: 89.0, surprisePercent: -2.5),
+            EarningsQuarterData(quarter: "Q4 '23", actualValue: 95.5, estimateValue: 93.0, surprisePercent: 2.7),
+            // 2024 data
             EarningsQuarterData(quarter: "Q1 '24", actualValue: 94.8, estimateValue: 92.5, surprisePercent: 2.5),
             EarningsQuarterData(quarter: "Q2 '24", actualValue: 98.2, estimateValue: 95.0, surprisePercent: 3.4),
             EarningsQuarterData(quarter: "Q3 '24", actualValue: 89.5, estimateValue: 91.0, surprisePercent: -1.6),
             EarningsQuarterData(quarter: "Q4 '24", actualValue: 102.3, estimateValue: 102.3, surprisePercent: 0),
+            // 2025 future data
             EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 96.0, surprisePercent: nil),
             EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 105.0, surprisePercent: nil)
         ],
         priceHistory: [
+            // 2022 data
+            EarningsPricePoint(quarter: "Q1 '22", price: 0.42),
+            EarningsPricePoint(quarter: "Q2 '22", price: 0.48),
+            EarningsPricePoint(quarter: "Q3 '22", price: 0.52),
+            EarningsPricePoint(quarter: "Q4 '22", price: 0.58),
+            // 2023 data
+            EarningsPricePoint(quarter: "Q1 '23", price: 0.55),
+            EarningsPricePoint(quarter: "Q2 '23", price: 0.63),
+            EarningsPricePoint(quarter: "Q3 '23", price: 0.68),
+            EarningsPricePoint(quarter: "Q4 '23", price: 0.75),
+            // 2024 data
             EarningsPricePoint(quarter: "Q1 '24", price: 0.60),
             EarningsPricePoint(quarter: "Q2 '24", price: 0.95),
             EarningsPricePoint(quarter: "Q3 '24", price: 0.98),
             EarningsPricePoint(quarter: "Q4 '24", price: 1.05),
+            // 2025 future data
             EarningsPricePoint(quarter: "Q1 '25", price: 0.95),
             EarningsPricePoint(quarter: "Q2 '25", price: nil)
         ]

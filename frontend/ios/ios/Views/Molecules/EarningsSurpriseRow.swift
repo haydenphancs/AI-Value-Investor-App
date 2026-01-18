@@ -9,31 +9,29 @@ import SwiftUI
 
 struct EarningsSurpriseRow: View {
     let quarters: [EarningsQuarterData]
-
-    // Filter to only quarters with surprise data
-    private var surpriseQuarters: [EarningsQuarterData] {
-        quarters.filter { $0.surprisePercent != nil }
-    }
+    
+    private var yAxisWidth: CGFloat { 40 }
 
     var body: some View {
         HStack(spacing: 0) {
-            // Leading surprise indicator circle
-            Circle()
-                .fill(AppColors.neutral)
-                .frame(width: 10, height: 10)
-                .padding(.trailing, AppSpacing.sm)
+            // Y-axis spacer to align with X-axis labels (NO padding, just width)
+            Spacer()
+                .frame(width: yAxisWidth)
 
             // Surprise percentages for each quarter
-            ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
-                if let surprise = quarter.formattedSurprise {
-                    Text(surprise)
-                        .font(AppTypography.footnote)
-                        .foregroundColor(quarter.surpriseColor)
-                        .frame(maxWidth: .infinity)
-                } else {
-                    // Empty space for future quarters
-                    Text("")
-                        .frame(maxWidth: .infinity)
+            // This HStack matches the xAxisLabels structure exactly
+            HStack(spacing: 0) {
+                ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
+                    if let surprise = quarter.formattedSurprise {
+                        Text(surprise)
+                            .font(AppTypography.footnote)
+                            .foregroundColor(quarter.surpriseColor)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        // Empty space for future quarters
+                        Text("")
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             }
         }

@@ -13,6 +13,7 @@ struct GrowthLegendView: View {
             // YoY Legend
             HStack(spacing: AppSpacing.xs) {
                 GrowthLegendDot(color: AppColors.growthYoYYellow)
+                    .offset(y: 1)
                 Text("YoY")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
@@ -21,6 +22,7 @@ struct GrowthLegendView: View {
             // Value Legend
             HStack(spacing: AppSpacing.xs) {
                 GrowthLegendDot(color: AppColors.growthBarBlue)
+                    .offset(y: 1)
                 Text("Value")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
@@ -29,14 +31,10 @@ struct GrowthLegendView: View {
             // Sector Average Legend
             HStack(spacing: AppSpacing.xs) {
                 GrowthLegendDot(color: AppColors.growthSectorGray, style: .dashed)
-                VStack(spacing: 0) {
-                    Text("Sector Average")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("(YoY)")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                }
+                    .offset(y: 1)
+                Text("Sector Average (YoY)")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
             }
         }
     }

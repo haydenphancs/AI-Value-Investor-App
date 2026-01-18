@@ -16,7 +16,7 @@ struct GrowthSectionCard: View {
 
     // MARK: - State
 
-    @State private var selectedMetric: GrowthMetricType = .revenue
+    @State private var selectedMetric: GrowthMetricType = .eps
     @State private var selectedPeriod: GrowthPeriodType = .annual
     @State private var showInfoSheet: Bool = false
 
@@ -42,7 +42,10 @@ struct GrowthSectionCard: View {
 
             // Main chart
             GrowthChartView(dataPoints: currentDataPoints)
+                .id("\(selectedMetric.rawValue)-\(selectedPeriod.rawValue)")
                 .padding(.top, AppSpacing.sm)
+                .animation(.easeInOut(duration: 0.3), value: selectedMetric)
+                .animation(.easeInOut(duration: 0.3), value: selectedPeriod)
 
             // Legend
             GrowthLegendView()

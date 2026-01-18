@@ -10,10 +10,18 @@ import Charts
 
 struct GrowthChartView: View {
     let dataPoints: [GrowthDataPoint]
+    
+    @State private var selectedPeriod: String?
 
     // Chart configuration
     private let chartHeight: CGFloat = 220
     private let yAxisWidth: CGFloat = 45
+    
+    // Computed property for selected data point
+    private var selectedDataPoint: GrowthDataPoint? {
+        guard let selectedPeriod = selectedPeriod else { return nil }
+        return dataPoints.first { $0.period == selectedPeriod }
+    }
 
     // Computed properties for chart bounds
     private var maxBarValue: Double {
@@ -48,6 +56,18 @@ struct GrowthChartView: View {
     private var gridValues: [Double] {
         let step = maxBarValue / 4
         return [step, step * 2, step * 3]
+    }
+    
+    // Font sizes - Since we only show 5 labels for both annual and quarterly,
+    // use larger sizes that match the original annual view
+    private var labelFontSize: CGFloat {
+        // Use 11pt for both since we're only showing 5 labels
+        return 11
+    }
+    
+    private var yoyFontSize: CGFloat {
+        // Use 11pt (increased from 10pt) to make it more prominent
+        return 11
     }
 
     var body: some View {
@@ -85,7 +105,7 @@ struct GrowthChartView: View {
                     BarMark(
                         x: .value("Period", dataPoint.period),
                         y: .value("Value", dataPoint.value),
-                        width: dataPoints.count > 6 ? .fixed(20) : .automatic
+                        width: dataPoints.count > 10 ? .fixed(12) : (dataPoints.count > 6 ? .fixed(18) : .automatic)
                     )
                     .foregroundStyle(AppColors.growthBarBlue)
                     .cornerRadius(4)
@@ -100,7 +120,7 @@ struct GrowthChartView: View {
                     )
                     .foregroundStyle(AppColors.growthYoYYellow)
                     .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.linear)
                 }
 
                 // YoY points
@@ -122,7 +142,7 @@ struct GrowthChartView: View {
                     )
                     .foregroundStyle(AppColors.growthSectorGray)
                     .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.linear)
                 }
 
                 // Sector average points
@@ -134,10 +154,22 @@ struct GrowthChartView: View {
                     .foregroundStyle(AppColors.growthSectorGray)
                     .symbolSize(35)
                 }
+                
+                // Selection indicator
+                if let selectedDataPoint = selectedDataPoint {
+                    RuleMark(x: .value("Selected", selectedDataPoint.period))
+                        .foregroundStyle(AppColors.textPrimary.opacity(0.3))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        .annotation(position: .top, spacing: 8) {
+                            selectionAnnotation(for: selectedDataPoint)
+                        }
+                }
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartYScale(domain: minBarValue...maxBarValue)
+            .chartXSelection(value: $selectedPeriod)
+            .chartAngleSelection(value: $selectedPeriod)
             .chartPlotStyle { plotArea in
                 plotArea
                     .background(Color.clear)
@@ -179,40 +211,95 @@ struct GrowthChartView: View {
     // MARK: - X-Axis Labels
 
     private var xAxisLabels: some View {
-        HStack(spacing: 0) {
-            Spacer()
-                .frame(width: yAxisWidth)
-
-            ForEach(dataPoints) { dataPoint in
-                Text(dataPoint.period)
-                    .font(.system(size: dataPoints.count > 6 ? 9 : 11))
-                    .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+        GeometryReader { geometry in
+            let availableWidth = geometry.size.width - yAxisWidth
+            let columnWidth = availableWidth / CGFloat(dataPoints.count)
+            
+            ZStack(alignment: .topLeading) {
+                // Spacer for y-axis
+                Color.clear
+                    .frame(width: yAxisWidth, height: 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                // Position labels
+                ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                    if shouldShowLabel(for: dataPoint) {
+                        Text(dataPoint.period)
+                            .font(.system(size: labelFontSize, weight: .regular))
+                            .foregroundColor(AppColors.textMuted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(width: columnWidth * 4, alignment: .leading)
+                            .offset(x: yAxisWidth + (columnWidth * CGFloat(index)))
+                    }
+                }
             }
         }
+        .frame(height: 20)
         .padding(.top, AppSpacing.sm)
     }
 
     // MARK: - YoY Percentage Labels
 
     private var yoyPercentageLabels: some View {
-        HStack(spacing: 0) {
-            // Yellow dot indicator
-            GrowthLegendDot(color: AppColors.growthYoYYellow, size: 8)
-                .frame(width: yAxisWidth)
-
-            ForEach(dataPoints) { dataPoint in
-                Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
-                    .font(.system(size: dataPoints.count > 6 ? 8 : 10))
-                    .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
-                    .frame(maxWidth: .infinity)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+        GeometryReader { geometry in
+            let availableWidth = geometry.size.width - yAxisWidth
+            let columnWidth = availableWidth / CGFloat(dataPoints.count)
+            
+            ZStack(alignment: .topLeading) {
+                // Yellow dot indicator
+                GrowthLegendDot(color: AppColors.growthYoYYellow, size: 8)
+                    .frame(width: yAxisWidth, alignment: .center)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                // Position YoY labels
+                ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                    if shouldShowLabel(for: dataPoint) {
+                        Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
+                            .font(.system(size: yoyFontSize, weight: .semibold))
+                            .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(width: columnWidth * 4, alignment: .leading)
+                            .offset(x: yAxisWidth + (columnWidth * CGFloat(index)))
+                    }
+                }
             }
         }
+        .frame(height: 20)
         .padding(.top, AppSpacing.sm)
+    }
+    
+    // MARK: - Selection Annotation
+    
+    private func selectionAnnotation(for dataPoint: GrowthDataPoint) -> some View {
+        VStack(spacing: 4) {
+            Text(dataPoint.period)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textPrimary)
+            
+            Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
+                .font(AppTypography.calloutBold)
+                .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AppColors.cardBackground)
+                .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
+        )
+    }
+    
+    // MARK: - Helper Functions - Label Display
+    
+    private func shouldShowLabel(for dataPoint: GrowthDataPoint) -> Bool {
+        // For quarterly data (more than 10 points), show only Q1 labels
+        if dataPoints.count > 10 {
+            return dataPoint.period.hasPrefix("Q1'")
+        }
+        // For annual data (5 or fewer points), show all labels
+        return true
     }
 
     // MARK: - Helper Functions
@@ -251,9 +338,10 @@ struct GrowthChartView: View {
         AppColors.background
             .ignoresSafeArea()
 
-        VStack {
-            GrowthChartView(
-                dataPoints: GrowthSectionData.sampleData.revenueAnnual
+        ScrollView {
+            GrowthSectionCard(
+                growthData: GrowthSectionData.sampleData,
+                onDetailTapped: {}
             )
             .padding()
         }

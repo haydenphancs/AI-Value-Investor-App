@@ -238,8 +238,15 @@ struct TickerDetailView: View {
             } else {
                 placeholderContent(title: "Financials", description: "Loading financial data...")
             }
-        case .insiders:
-            placeholderContent(title: "Insiders", description: "Insider trading activity for \(tickerSymbol)")
+        case .holders:
+            if let holdersData = viewModel.holdersData {
+                TickerHoldersContent(
+                    holdersData: holdersData,
+                    onTopHoldersTap: viewModel.handleTopHoldersTap
+                )
+            } else {
+                placeholderContent(title: "Holders", description: "Loading holders data...")
+            }
         }
     }
 

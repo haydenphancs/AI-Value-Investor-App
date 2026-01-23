@@ -22,6 +22,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var signalOfConfidenceData: SignalOfConfidenceSectionData?
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var healthCheckData: HealthCheckSectionData?
+    @Published var holdersData: HoldersData?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -64,6 +65,7 @@ class TickerDetailViewModel: ObservableObject {
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
             self.revenueBreakdownData = RevenueBreakdownData.sampleApple
             self.healthCheckData = HealthCheckSectionData.sampleData
+            self.holdersData = HoldersData.sampleData
             self.isLoading = false
         }
     }
@@ -183,6 +185,13 @@ class TickerDetailViewModel: ObservableObject {
     func handleHealthCheckDetail() {
         // TODO: Navigate to detailed health check view
         print("Health check detail for \(tickerSymbol)")
+    }
+
+    // MARK: - Holders Tab Handlers
+
+    func handleTopHoldersTap() {
+        // TODO: Navigate to top institutional holders detail view
+        print("Top holders detail for \(tickerSymbol)")
     }
 
     // MARK: - Computed Properties

@@ -14,7 +14,7 @@ enum TickerDetailTab: String, CaseIterable {
     case news = "News"
     case analysis = "Analysis"
     case financials = "Financials"
-    case insiders = "Insiders"
+    case holders = "Holders"
 }
 
 // MARK: - Chart Time Range

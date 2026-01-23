@@ -16,12 +16,12 @@ struct SmartMoneyFlowChart: View {
     let flowData: [SmartMoneyFlowDataPoint]
 
     // Chart configuration
-    private let priceChartHeight: CGFloat = 100
-    private let volumeChartHeight: CGFloat = 140
-    private let barWidth: CGFloat = 20
+    private let priceChartHeight: CGFloat = 80
+    private let volumeChartHeight: CGFloat = 120
+    private let barWidth: CGFloat = 16
 
     var body: some View {
-        VStack(spacing: AppSpacing.sm) {
+        VStack(spacing: 0) {
             // Top: Stock Price Line Chart
             priceChart
 
@@ -33,65 +33,64 @@ struct SmartMoneyFlowChart: View {
     // MARK: - Price Chart (Top)
 
     private var priceChart: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            Chart {
-                // Price line
-                ForEach(priceData) { point in
-                    LineMark(
-                        x: .value("Month", point.month),
-                        y: .value("Price", point.price)
+        Chart {
+            // Area under the line (draw first so line is on top)
+            ForEach(priceData) { point in
+                AreaMark(
+                    x: .value("Month", point.month),
+                    yStart: .value("Base", priceRange.min),
+                    yEnd: .value("Price", point.price)
+                )
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            HoldersColors.flowLine.opacity(0.4),
+                            HoldersColors.flowLine.opacity(0.1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
-                    .foregroundStyle(HoldersColors.flowLine)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                    .interpolationMethod(.catmullRom)
-                }
-
-                // Area under the line
-                ForEach(priceData) { point in
-                    AreaMark(
-                        x: .value("Month", point.month),
-                        y: .value("Price", point.price)
-                    )
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                HoldersColors.flowLine.opacity(0.3),
-                                HoldersColors.flowLine.opacity(0.05)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .interpolationMethod(.catmullRom)
-                }
+                )
+                .interpolationMethod(.catmullRom)
             }
-            .chartXAxis(.hidden)
-            .chartYAxis {
-                AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
-                    AxisGridLine()
-                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
-                    AxisValueLabel {
-                        if let doubleValue = value.as(Double.self) {
-                            Text(formatPriceValue(doubleValue))
-                                .font(AppTypography.caption)
-                                .foregroundStyle(AppColors.textMuted)
-                        }
+
+            // Price line
+            ForEach(priceData) { point in
+                LineMark(
+                    x: .value("Month", point.month),
+                    y: .value("Price", point.price)
+                )
+                .foregroundStyle(HoldersColors.flowLine)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
+            }
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine()
+                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                AxisValueLabel {
+                    if let doubleValue = value.as(Double.self) {
+                        Text(formatPriceValue(doubleValue))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textMuted)
                     }
                 }
             }
-            .chartYScale(domain: priceRange.min...priceRange.max)
-            .chartPlotStyle { plotArea in
-                plotArea.background(Color.clear)
-            }
-            .frame(height: priceChartHeight)
         }
+        .chartYScale(domain: priceRange.min...priceRange.max)
+        .chartPlotStyle { plotArea in
+            plotArea.background(Color.clear)
+        }
+        .frame(height: priceChartHeight)
     }
 
     // MARK: - Volume Chart (Bottom)
 
     private var volumeChart: some View {
         Chart {
-            // Buy volume bars (positive, green)
+            // Buy volume bars (positive, green) - above zero line
             ForEach(flowData) { point in
                 BarMark(
                     x: .value("Month", point.month),
@@ -99,11 +98,10 @@ struct SmartMoneyFlowChart: View {
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.buyVolume)
-                .cornerRadius(3)
-                .position(by: .value("Type", "Buy"))
+                .cornerRadius(2)
             }
 
-            // Sell volume bars (negative direction, red)
+            // Sell volume bars (negative, red) - below zero line
             ForEach(flowData) { point in
                 BarMark(
                     x: .value("Month", point.month),
@@ -111,8 +109,7 @@ struct SmartMoneyFlowChart: View {
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.sellVolume)
-                .cornerRadius(3)
-                .position(by: .value("Type", "Sell"))
+                .cornerRadius(2)
             }
 
             // Zero line
@@ -154,7 +151,7 @@ struct SmartMoneyFlowChart: View {
         let minPrice = (prices.min() ?? 0)
         let maxPrice = (prices.max() ?? 1)
         // Add padding for visual breathing room
-        let padding = (maxPrice - minPrice) * 0.15
+        let padding = (maxPrice - minPrice) * 0.1
         return (minPrice - padding, maxPrice + padding)
     }
 

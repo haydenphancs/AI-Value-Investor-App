@@ -37,6 +37,7 @@ struct SmartMoneyNetFlowBadge: View {
                     .foregroundColor(summary.flowColor)
             }
         }
+        .frame(maxWidth: .infinity)
     }
 }
 

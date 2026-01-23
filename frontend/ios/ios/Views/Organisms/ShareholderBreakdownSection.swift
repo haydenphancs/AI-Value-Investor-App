@@ -42,7 +42,7 @@ struct ShareholderBreakdownSection: View {
                 .fill(AppColors.cardBackground)
         )
         .sheet(isPresented: $showInfoSheet) {
-            HoldersInfoSheet()
+            ShareholderBreakdownInfoSheet()
         }
     }
 

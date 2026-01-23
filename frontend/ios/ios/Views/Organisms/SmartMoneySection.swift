@@ -40,10 +40,13 @@ struct SmartMoneySection: View {
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, AppSpacing.xs)
 
-            // Flow chart
-            SmartMoneyFlowChart(dataPoints: currentData.flowData)
-                .id(selectedTab.rawValue)
-                .animation(.easeInOut(duration: 0.3), value: selectedTab)
+            // Flow chart (price on top, buy/sell volume below)
+            SmartMoneyFlowChart(
+                priceData: currentData.priceData,
+                flowData: currentData.flowData
+            )
+            .id(selectedTab.rawValue)
+            .animation(.easeInOut(duration: 0.3), value: selectedTab)
 
             // Legend
             SmartMoneyFlowLegend()

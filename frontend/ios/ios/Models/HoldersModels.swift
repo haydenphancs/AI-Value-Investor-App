@@ -81,6 +81,19 @@ enum SmartMoneyTab: String, CaseIterable {
     case congress = "Congress"
 }
 
+// MARK: - Stock Price Data Point
+
+/// Stock price data for a specific month (for comparison with smart money activity)
+struct StockPriceDataPoint: Identifiable {
+    let id = UUID()
+    let month: String
+    let price: Double  // Closing price for the month
+
+    var formattedPrice: String {
+        String(format: "$%.2f", price)
+    }
+}
+
 // MARK: - Smart Money Flow Data
 
 /// Monthly smart money flow data point
@@ -89,7 +102,6 @@ struct SmartMoneyFlowDataPoint: Identifiable {
     let month: String
     let buyVolume: Double   // In millions
     let sellVolume: Double  // In millions
-    let cumulativeFlow: Double  // For line chart overlay
 
     var netFlow: Double {
         buyVolume - sellVolume
@@ -135,6 +147,7 @@ struct SmartMoneyFlowSummary {
 struct SmartMoneyData: Identifiable {
     let id = UUID()
     let tab: SmartMoneyTab
+    let priceData: [StockPriceDataPoint]  // Stock price for comparison
     let flowData: [SmartMoneyFlowDataPoint]
     let summary: SmartMoneyFlowSummary
 }
@@ -185,38 +198,51 @@ extension InstitutionalHolder {
     ]
 }
 
+extension StockPriceDataPoint {
+    /// Sample stock price data (AAPL-like prices for 6 months)
+    static let sampleData: [StockPriceDataPoint] = [
+        StockPriceDataPoint(month: "Jul", price: 168.50),
+        StockPriceDataPoint(month: "Aug", price: 171.20),
+        StockPriceDataPoint(month: "Sep", price: 165.80),
+        StockPriceDataPoint(month: "Oct", price: 172.40),
+        StockPriceDataPoint(month: "Nov", price: 175.60),
+        StockPriceDataPoint(month: "Dec", price: 178.42)
+    ]
+}
+
 extension SmartMoneyFlowDataPoint {
     static let insiderSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 12.5, sellVolume: 8.2, cumulativeFlow: 4.3),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 8.3, sellVolume: 15.1, cumulativeFlow: -2.5),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 11.2, sellVolume: 9.8, cumulativeFlow: -1.1),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 14.7, sellVolume: 7.5, cumulativeFlow: 6.1),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 9.8, sellVolume: 12.3, cumulativeFlow: 3.6),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 16.2, sellVolume: 7.9, cumulativeFlow: 11.9)
+        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 12.5, sellVolume: 8.2),
+        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 8.3, sellVolume: 15.1),
+        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 11.2, sellVolume: 9.8),
+        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 14.7, sellVolume: 7.5),
+        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 9.8, sellVolume: 12.3),
+        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 16.2, sellVolume: 7.9)
     ]
 
     static let hedgeFundsSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 45.2, sellVolume: 38.5, cumulativeFlow: 6.7),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 52.1, sellVolume: 41.3, cumulativeFlow: 17.5),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 38.9, sellVolume: 55.2, cumulativeFlow: 1.2),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 61.3, sellVolume: 35.8, cumulativeFlow: 26.7),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 48.5, sellVolume: 42.1, cumulativeFlow: 33.1),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 55.8, sellVolume: 31.2, cumulativeFlow: 57.7)
+        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 45.2, sellVolume: 38.5),
+        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 52.1, sellVolume: 41.3),
+        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 38.9, sellVolume: 55.2),
+        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 61.3, sellVolume: 35.8),
+        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 48.5, sellVolume: 42.1),
+        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 55.8, sellVolume: 31.2)
     ]
 
     static let congressSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 2.1, sellVolume: 1.5, cumulativeFlow: 0.6),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 3.2, sellVolume: 0.8, cumulativeFlow: 3.0),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 1.8, sellVolume: 2.9, cumulativeFlow: 1.9),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 4.5, sellVolume: 1.2, cumulativeFlow: 5.2),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 2.8, sellVolume: 3.1, cumulativeFlow: 4.9),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 3.9, sellVolume: 1.4, cumulativeFlow: 7.4)
+        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 2.1, sellVolume: 1.5),
+        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 3.2, sellVolume: 0.8),
+        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 1.8, sellVolume: 2.9),
+        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 4.5, sellVolume: 1.2),
+        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 2.8, sellVolume: 3.1),
+        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 3.9, sellVolume: 1.4)
     ]
 }
 
 extension SmartMoneyData {
     static let insiderSampleData = SmartMoneyData(
         tab: .insider,
+        priceData: StockPriceDataPoint.sampleData,
         flowData: SmartMoneyFlowDataPoint.insiderSampleData,
         summary: SmartMoneyFlowSummary(
             totalNetFlow: 8.27,
@@ -227,6 +253,7 @@ extension SmartMoneyData {
 
     static let hedgeFundsSampleData = SmartMoneyData(
         tab: .hedgeFunds,
+        priceData: StockPriceDataPoint.sampleData,
         flowData: SmartMoneyFlowDataPoint.hedgeFundsSampleData,
         summary: SmartMoneyFlowSummary(
             totalNetFlow: 57.7,
@@ -237,6 +264,7 @@ extension SmartMoneyData {
 
     static let congressSampleData = SmartMoneyData(
         tab: .congress,
+        priceData: StockPriceDataPoint.sampleData,
         flowData: SmartMoneyFlowDataPoint.congressSampleData,
         summary: SmartMoneyFlowSummary(
             totalNetFlow: 7.4,

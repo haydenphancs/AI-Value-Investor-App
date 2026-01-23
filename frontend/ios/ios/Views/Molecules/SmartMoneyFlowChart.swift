@@ -2,136 +2,178 @@
 //  SmartMoneyFlowChart.swift
 //  ios
 //
-//  Molecule: Bar chart with line overlay for Smart Money flow
-//  Shows buy volume (green bars), sell volume (red bars), and cumulative flow (blue line)
-//  Uses native Swift Charts
+//  Molecule: Two-chart view for Smart Money tracking
+//  Top: Stock price line chart to show price movement
+//  Bottom: Buy/Sell volume bar chart to show smart money activity
+//  Users can compare when smart money bought/sold relative to price movements
 //
 
 import SwiftUI
 import Charts
 
 struct SmartMoneyFlowChart: View {
-    let dataPoints: [SmartMoneyFlowDataPoint]
+    let priceData: [StockPriceDataPoint]
+    let flowData: [SmartMoneyFlowDataPoint]
 
     // Chart configuration
-    private let chartHeight: CGFloat = 200
-    private let barWidth: CGFloat = 24
-
-    // MARK: - Computed Properties
-
-    private var maxVolume: Double {
-        let maxBuy = dataPoints.map { $0.buyVolume }.max() ?? 1
-        let maxSell = dataPoints.map { $0.sellVolume }.max() ?? 1
-        return max(maxBuy, maxSell) * 1.15
-    }
-
-    private var flowRange: (min: Double, max: Double) {
-        let flows = dataPoints.map { $0.cumulativeFlow }
-        let minFlow = (flows.min() ?? 0)
-        let maxFlow = (flows.max() ?? 1)
-        // Add some padding
-        let padding = (maxFlow - minFlow) * 0.2
-        return (minFlow - padding, maxFlow + padding)
-    }
+    private let priceChartHeight: CGFloat = 100
+    private let volumeChartHeight: CGFloat = 140
+    private let barWidth: CGFloat = 20
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Main chart
+        VStack(spacing: AppSpacing.sm) {
+            // Top: Stock Price Line Chart
+            priceChart
+
+            // Bottom: Buy/Sell Volume Bar Chart
+            volumeChart
+        }
+    }
+
+    // MARK: - Price Chart (Top)
+
+    private var priceChart: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
             Chart {
-                // Buy volume bars (positive, green)
-                ForEach(dataPoints) { point in
-                    BarMark(
-                        x: .value("Month", point.month),
-                        y: .value("Buy", point.buyVolume),
-                        width: .fixed(barWidth)
-                    )
-                    .foregroundStyle(HoldersColors.buyVolume)
-                    .cornerRadius(3)
-                    .position(by: .value("Type", "Buy"))
-                }
-
-                // Sell volume bars (negative direction visually, red)
-                ForEach(dataPoints) { point in
-                    BarMark(
-                        x: .value("Month", point.month),
-                        y: .value("Sell", -point.sellVolume),
-                        width: .fixed(barWidth)
-                    )
-                    .foregroundStyle(HoldersColors.sellVolume)
-                    .cornerRadius(3)
-                    .position(by: .value("Type", "Sell"))
-                }
-
-                // Zero line
-                RuleMark(y: .value("Zero", 0))
-                    .foregroundStyle(AppColors.cardBackgroundLight)
-                    .lineStyle(StrokeStyle(lineWidth: 0.5))
-
-                // Cumulative flow line (overlaid, uses normalized values)
-                ForEach(dataPoints) { point in
+                // Price line
+                ForEach(priceData) { point in
                     LineMark(
                         x: .value("Month", point.month),
-                        y: .value("Flow", normalizedFlowValue(point.cumulativeFlow))
+                        y: .value("Price", point.price)
                     )
                     .foregroundStyle(HoldersColors.flowLine)
                     .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                     .interpolationMethod(.catmullRom)
                 }
 
-                // Flow line points
-                ForEach(dataPoints) { point in
-                    PointMark(
+                // Area under the line
+                ForEach(priceData) { point in
+                    AreaMark(
                         x: .value("Month", point.month),
-                        y: .value("Flow", normalizedFlowValue(point.cumulativeFlow))
+                        y: .value("Price", point.price)
                     )
-                    .foregroundStyle(HoldersColors.flowLine)
-                    .symbolSize(30)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                HoldersColors.flowLine.opacity(0.3),
+                                HoldersColors.flowLine.opacity(0.05)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
                 }
             }
-            .chartXAxis {
-                AxisMarks(position: .bottom) { _ in
-                    AxisValueLabel()
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.textMuted)
-                }
-            }
+            .chartXAxis(.hidden)
             .chartYAxis {
-                AxisMarks(position: .leading) { value in
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                     AxisGridLine()
-                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
+                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
                     AxisValueLabel {
                         if let doubleValue = value.as(Double.self) {
-                            Text(formatYAxisValue(doubleValue))
+                            Text(formatPriceValue(doubleValue))
                                 .font(AppTypography.caption)
                                 .foregroundStyle(AppColors.textMuted)
                         }
                     }
                 }
             }
-            .chartYScale(domain: -maxVolume...maxVolume)
+            .chartYScale(domain: priceRange.min...priceRange.max)
             .chartPlotStyle { plotArea in
-                plotArea
-                    .background(Color.clear)
+                plotArea.background(Color.clear)
             }
-            .frame(height: chartHeight)
+            .frame(height: priceChartHeight)
         }
     }
 
-    // MARK: - Helper Functions
+    // MARK: - Volume Chart (Bottom)
 
-    /// Normalize cumulative flow to fit within the bar chart's y-axis range
-    private func normalizedFlowValue(_ flow: Double) -> Double {
-        let range = flowRange.max - flowRange.min
-        guard range > 0 else { return 0 }
+    private var volumeChart: some View {
+        Chart {
+            // Buy volume bars (positive, green)
+            ForEach(flowData) { point in
+                BarMark(
+                    x: .value("Month", point.month),
+                    y: .value("Buy", point.buyVolume),
+                    width: .fixed(barWidth)
+                )
+                .foregroundStyle(HoldersColors.buyVolume)
+                .cornerRadius(3)
+                .position(by: .value("Type", "Buy"))
+            }
 
-        // Map flow to the upper half of the chart (0 to maxVolume)
-        let normalized = (flow - flowRange.min) / range // 0 to 1
-        let targetMin = maxVolume * 0.3
-        let targetMax = maxVolume * 0.9
-        return targetMin + normalized * (targetMax - targetMin)
+            // Sell volume bars (negative direction, red)
+            ForEach(flowData) { point in
+                BarMark(
+                    x: .value("Month", point.month),
+                    y: .value("Sell", -point.sellVolume),
+                    width: .fixed(barWidth)
+                )
+                .foregroundStyle(HoldersColors.sellVolume)
+                .cornerRadius(3)
+                .position(by: .value("Type", "Sell"))
+            }
+
+            // Zero line
+            RuleMark(y: .value("Zero", 0))
+                .foregroundStyle(AppColors.cardBackgroundLight)
+                .lineStyle(StrokeStyle(lineWidth: 0.5))
+        }
+        .chartXAxis {
+            AxisMarks(position: .bottom) { _ in
+                AxisValueLabel()
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textMuted)
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine()
+                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                AxisValueLabel {
+                    if let doubleValue = value.as(Double.self) {
+                        Text(formatVolumeValue(doubleValue))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textMuted)
+                    }
+                }
+            }
+        }
+        .chartYScale(domain: -maxVolume...maxVolume)
+        .chartPlotStyle { plotArea in
+            plotArea.background(Color.clear)
+        }
+        .frame(height: volumeChartHeight)
     }
 
-    private func formatYAxisValue(_ value: Double) -> String {
+    // MARK: - Computed Properties
+
+    private var priceRange: (min: Double, max: Double) {
+        let prices = priceData.map { $0.price }
+        let minPrice = (prices.min() ?? 0)
+        let maxPrice = (prices.max() ?? 1)
+        // Add padding for visual breathing room
+        let padding = (maxPrice - minPrice) * 0.15
+        return (minPrice - padding, maxPrice + padding)
+    }
+
+    private var maxVolume: Double {
+        let maxBuy = flowData.map { $0.buyVolume }.max() ?? 1
+        let maxSell = flowData.map { $0.sellVolume }.max() ?? 1
+        return max(maxBuy, maxSell) * 1.15
+    }
+
+    // MARK: - Formatting
+
+    private func formatPriceValue(_ value: Double) -> String {
+        if value >= 1000 {
+            return String(format: "$%.0fK", value / 1000)
+        }
+        return String(format: "$%.0f", value)
+    }
+
+    private func formatVolumeValue(_ value: Double) -> String {
         let absValue = abs(value)
         if absValue >= 1000 {
             return String(format: "%.0fB", value / 1000)
@@ -150,23 +192,13 @@ struct SmartMoneyFlowChart: View {
             .ignoresSafeArea()
 
         VStack(spacing: AppSpacing.xl) {
-            Text("Insider Flow")
+            Text("Smart Money vs Price")
                 .font(AppTypography.headline)
                 .foregroundColor(AppColors.textPrimary)
 
             SmartMoneyFlowChart(
-                dataPoints: SmartMoneyFlowDataPoint.insiderSampleData
-            )
-
-            Divider()
-                .background(AppColors.cardBackgroundLight)
-
-            Text("Hedge Funds Flow")
-                .font(AppTypography.headline)
-                .foregroundColor(AppColors.textPrimary)
-
-            SmartMoneyFlowChart(
-                dataPoints: SmartMoneyFlowDataPoint.hedgeFundsSampleData
+                priceData: StockPriceDataPoint.sampleData,
+                flowData: SmartMoneyFlowDataPoint.insiderSampleData
             )
         }
         .padding()

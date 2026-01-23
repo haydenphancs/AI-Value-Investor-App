@@ -20,9 +20,8 @@ struct SmartMoneyFlowLegend: View {
                 color: HoldersColors.sellVolume,
                 label: "Sell Volume"
             )
-
-            Spacer()
         }
+        .frame(maxWidth: .infinity)
     }
 }
 

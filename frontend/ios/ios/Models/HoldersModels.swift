@@ -201,65 +201,65 @@ extension InstitutionalHolder {
 extension StockPriceDataPoint {
     /// Sample stock price data (AAPL-like prices for 12 months)
     static let sampleData: [StockPriceDataPoint] = [
-        StockPriceDataPoint(month: "Jan", price: 155.30),
-        StockPriceDataPoint(month: "Feb", price: 158.20),
-        StockPriceDataPoint(month: "Mar", price: 162.40),
-        StockPriceDataPoint(month: "Apr", price: 165.10),
-        StockPriceDataPoint(month: "May", price: 168.50),
-        StockPriceDataPoint(month: "Jun", price: 170.80),
-        StockPriceDataPoint(month: "Jul", price: 171.20),
-        StockPriceDataPoint(month: "Aug", price: 168.90),
-        StockPriceDataPoint(month: "Sep", price: 165.80),
-        StockPriceDataPoint(month: "Oct", price: 170.50),
-        StockPriceDataPoint(month: "Nov", price: 175.20),
-        StockPriceDataPoint(month: "Dec", price: 178.42)
+        StockPriceDataPoint(month: "02/2025", price: 155.30),
+        StockPriceDataPoint(month: "03/2025", price: 158.20),
+        StockPriceDataPoint(month: "04/2025", price: 162.40),
+        StockPriceDataPoint(month: "05/2025", price: 165.10),
+        StockPriceDataPoint(month: "06/2025", price: 168.50),
+        StockPriceDataPoint(month: "07/2025", price: 170.80),
+        StockPriceDataPoint(month: "08/2025", price: 171.20),
+        StockPriceDataPoint(month: "09/2025", price: 168.90),
+        StockPriceDataPoint(month: "10/2025", price: 165.80),
+        StockPriceDataPoint(month: "11/2025", price: 170.50),
+        StockPriceDataPoint(month: "12/2025", price: 175.20),
+        StockPriceDataPoint(month: "01/2026", price: 178.42)
     ]
 }
 
 extension SmartMoneyFlowDataPoint {
     static let insiderSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jan", buyVolume: 10.2, sellVolume: 6.5),
-        SmartMoneyFlowDataPoint(month: "Feb", buyVolume: 7.8, sellVolume: 9.2),
-        SmartMoneyFlowDataPoint(month: "Mar", buyVolume: 8.5, sellVolume: 12.3),
-        SmartMoneyFlowDataPoint(month: "Apr", buyVolume: 11.2, sellVolume: 5.8),
-        SmartMoneyFlowDataPoint(month: "May", buyVolume: 12.5, sellVolume: 8.2),
-        SmartMoneyFlowDataPoint(month: "Jun", buyVolume: 6.9, sellVolume: 10.5),
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 8.3, sellVolume: 11.1),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 9.5, sellVolume: 7.2),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 14.7, sellVolume: 7.5),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 10.8, sellVolume: 8.9),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 13.2, sellVolume: 6.1),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 16.2, sellVolume: 7.9)
+        SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 10.2, sellVolume: 6.5),
+        SmartMoneyFlowDataPoint(month: "03/2025", buyVolume: 7.8, sellVolume: 9.2),
+        SmartMoneyFlowDataPoint(month: "04/2025", buyVolume: 8.5, sellVolume: 12.3),
+        SmartMoneyFlowDataPoint(month: "05/2025", buyVolume: 11.2, sellVolume: 5.8),
+        SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 12.5, sellVolume: 8.2),
+        SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 6.9, sellVolume: 10.5),
+        SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 8.3, sellVolume: 11.1),
+        SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 9.5, sellVolume: 7.2),
+        SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 14.7, sellVolume: 7.5),
+        SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 10.8, sellVolume: 8.9),
+        SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 13.2, sellVolume: 6.1),
+        SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 16.2, sellVolume: 7.9)
     ]
 
     static let hedgeFundsSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jan", buyVolume: 42.1, sellVolume: 35.2),
-        SmartMoneyFlowDataPoint(month: "Feb", buyVolume: 38.5, sellVolume: 42.1),
-        SmartMoneyFlowDataPoint(month: "Mar", buyVolume: 35.2, sellVolume: 48.3),
-        SmartMoneyFlowDataPoint(month: "Apr", buyVolume: 48.9, sellVolume: 32.5),
-        SmartMoneyFlowDataPoint(month: "May", buyVolume: 45.2, sellVolume: 38.5),
-        SmartMoneyFlowDataPoint(month: "Jun", buyVolume: 39.8, sellVolume: 45.2),
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 52.1, sellVolume: 41.3),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 44.5, sellVolume: 38.9),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 38.9, sellVolume: 55.2),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 51.2, sellVolume: 36.8),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 48.5, sellVolume: 33.2),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 55.8, sellVolume: 31.2)
+        SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 42.1, sellVolume: 35.2),
+        SmartMoneyFlowDataPoint(month: "03/2025", buyVolume: 38.5, sellVolume: 42.1),
+        SmartMoneyFlowDataPoint(month: "04/2025", buyVolume: 35.2, sellVolume: 48.3),
+        SmartMoneyFlowDataPoint(month: "05/2025", buyVolume: 48.9, sellVolume: 32.5),
+        SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 45.2, sellVolume: 38.5),
+        SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 39.8, sellVolume: 45.2),
+        SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 52.1, sellVolume: 41.3),
+        SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 44.5, sellVolume: 38.9),
+        SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 38.9, sellVolume: 55.2),
+        SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 51.2, sellVolume: 36.8),
+        SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 48.5, sellVolume: 33.2),
+        SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 55.8, sellVolume: 31.2)
     ]
 
     static let congressSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "Jan", buyVolume: 1.8, sellVolume: 1.2),
-        SmartMoneyFlowDataPoint(month: "Feb", buyVolume: 2.1, sellVolume: 1.8),
-        SmartMoneyFlowDataPoint(month: "Mar", buyVolume: 2.5, sellVolume: 3.1),
-        SmartMoneyFlowDataPoint(month: "Apr", buyVolume: 3.2, sellVolume: 1.5),
-        SmartMoneyFlowDataPoint(month: "May", buyVolume: 2.1, sellVolume: 1.5),
-        SmartMoneyFlowDataPoint(month: "Jun", buyVolume: 1.5, sellVolume: 2.8),
-        SmartMoneyFlowDataPoint(month: "Jul", buyVolume: 3.2, sellVolume: 0.8),
-        SmartMoneyFlowDataPoint(month: "Aug", buyVolume: 2.8, sellVolume: 1.9),
-        SmartMoneyFlowDataPoint(month: "Sep", buyVolume: 1.8, sellVolume: 2.9),
-        SmartMoneyFlowDataPoint(month: "Oct", buyVolume: 3.5, sellVolume: 1.2),
-        SmartMoneyFlowDataPoint(month: "Nov", buyVolume: 2.9, sellVolume: 2.1),
-        SmartMoneyFlowDataPoint(month: "Dec", buyVolume: 3.9, sellVolume: 1.4)
+        SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 1.8, sellVolume: 1.2),
+        SmartMoneyFlowDataPoint(month: "03/2025", buyVolume: 2.1, sellVolume: 1.8),
+        SmartMoneyFlowDataPoint(month: "04/2025", buyVolume: 2.5, sellVolume: 3.1),
+        SmartMoneyFlowDataPoint(month: "05/2025", buyVolume: 3.2, sellVolume: 1.5),
+        SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 2.1, sellVolume: 1.5),
+        SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 1.5, sellVolume: 2.8),
+        SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 3.2, sellVolume: 0.8),
+        SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 2.8, sellVolume: 1.9),
+        SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 1.8, sellVolume: 2.9),
+        SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 3.5, sellVolume: 1.2),
+        SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 2.9, sellVolume: 2.1),
+        SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 3.9, sellVolume: 1.4)
     ]
 }
 

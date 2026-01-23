@@ -20,9 +20,14 @@ struct SmartMoneyFlowChart: View {
     private let volumeChartHeight: CGFloat = 120
     private let barWidth: CGFloat = 12
 
+    /// All month labels from the data
+    private var allMonths: [String] {
+        flowData.map { $0.month }
+    }
+
     /// Only show 3 x-axis labels: first, middle, last
     private var xAxisLabels: [String] {
-        guard flowData.count >= 3 else { return flowData.map { $0.month } }
+        guard flowData.count >= 3 else { return allMonths }
         let first = flowData.first?.month ?? ""
         let middle = flowData[flowData.count / 2].month
         let last = flowData.last?.month ?? ""
@@ -75,6 +80,7 @@ struct SmartMoneyFlowChart: View {
             }
         }
         .chartXAxis(.hidden)
+        .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                 AxisGridLine()
@@ -126,6 +132,7 @@ struct SmartMoneyFlowChart: View {
                 .foregroundStyle(AppColors.cardBackgroundLight)
                 .lineStyle(StrokeStyle(lineWidth: 0.5))
         }
+        .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
         .chartXAxis {
             AxisMarks(values: xAxisLabels) { value in
                 AxisValueLabel()

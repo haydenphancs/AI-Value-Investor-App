@@ -24,9 +24,6 @@ struct SmartMoneyInfoSheet: View {
                     // Types of Smart Money
                     smartMoneyTypesSection
 
-                    // Reading the Chart
-                    readingChartSection
-
                     // Key Takeaways
                     keyTakeawaysSection
                 }
@@ -186,73 +183,6 @@ struct SmartMoneyInfoSheet: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackground)
         )
-    }
-
-    // MARK: - Reading the Chart
-
-    private var readingChartSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Text("Reading the Chart")
-                .font(AppTypography.headline)
-                .foregroundColor(AppColors.textPrimary)
-
-            VStack(spacing: AppSpacing.md) {
-                chartLegendRow(
-                    color: HoldersColors.flowLine,
-                    title: "Price Line (Top Chart)",
-                    description: "Stock price over the period. Compare when smart money acted vs price movements."
-                )
-
-                chartLegendRow(
-                    color: HoldersColors.buyVolume,
-                    title: "Green Bars (Buy Volume)",
-                    description: "Dollar amount purchased. Taller bars = more buying activity that month."
-                )
-
-                chartLegendRow(
-                    color: HoldersColors.sellVolume,
-                    title: "Red Bars (Sell Volume)",
-                    description: "Dollar amount sold. Extends below the zero line for visual clarity."
-                )
-
-                chartLegendRow(
-                    color: AppColors.bullish,
-                    title: "Positive Net Flow",
-                    description: "When total buys exceed sells — smart money is accumulating."
-                )
-
-                chartLegendRow(
-                    color: AppColors.bearish,
-                    title: "Negative Net Flow",
-                    description: "When total sells exceed buys — smart money may be reducing exposure."
-                )
-            }
-            .padding(AppSpacing.lg)
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
-            )
-        }
-    }
-
-    private func chartLegendRow(color: Color, title: String, description: String) -> some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            Circle()
-                .fill(color)
-                .frame(width: 12, height: 12)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(title)
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text(description)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
     }
 
     // MARK: - Key Takeaways

@@ -18,7 +18,16 @@ struct SmartMoneyFlowChart: View {
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
     private let volumeChartHeight: CGFloat = 120
-    private let barWidth: CGFloat = 16
+    private let barWidth: CGFloat = 12
+
+    /// Only show 3 x-axis labels: first, middle, last
+    private var xAxisLabels: [String] {
+        guard flowData.count >= 3 else { return flowData.map { $0.month } }
+        let first = flowData.first?.month ?? ""
+        let middle = flowData[flowData.count / 2].month
+        let last = flowData.last?.month ?? ""
+        return [first, middle, last]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -118,7 +127,7 @@ struct SmartMoneyFlowChart: View {
                 .lineStyle(StrokeStyle(lineWidth: 0.5))
         }
         .chartXAxis {
-            AxisMarks(position: .bottom) { _ in
+            AxisMarks(values: xAxisLabels) { value in
                 AxisValueLabel()
                     .font(AppTypography.caption)
                     .foregroundStyle(AppColors.textMuted)

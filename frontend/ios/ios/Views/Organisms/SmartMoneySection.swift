@@ -62,7 +62,7 @@ struct SmartMoneySection: View {
                 .fill(AppColors.cardBackground)
         )
         .sheet(isPresented: $showInfoSheet) {
-            HoldersInfoSheet()
+            SmartMoneyInfoSheet()
         }
     }
 

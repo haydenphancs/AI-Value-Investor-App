@@ -1452,10 +1452,61 @@ struct EarningsPricePoint: Identifiable {
 }
 
 // MARK: - Earnings Data (Combined)
+// MARK: - Next Earnings Date
+enum EarningsReportTiming: String {
+    case beforeMarketOpen = "Before Market Open"
+    case afterMarketClose = "After Market Close"
+    case duringMarketHours = "During Market Hours"
+    case unknown = "Time Not Specified"
+}
+
+struct NextEarningsDate {
+    let date: Date
+    let isConfirmed: Bool
+    let timing: EarningsReportTiming
+
+    var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMMM d, yyyy"
+        return formatter.string(from: date)
+    }
+
+    var statusText: String {
+        isConfirmed ? "Confirmed" : "Expected"
+    }
+}
+
+extension NextEarningsDate {
+    static let sample = NextEarningsDate(
+        date: {
+            var components = DateComponents()
+            components.year = 2024
+            components.month = 1
+            components.day = 25
+            return Calendar.current.date(from: components) ?? Date()
+        }(),
+        isConfirmed: false,
+        timing: .afterMarketClose
+    )
+}
+
 struct EarningsData {
     let epsQuarters: [EarningsQuarterData]
     let revenueQuarters: [EarningsQuarterData]
     let priceHistory: [EarningsPricePoint]
+    let nextEarningsDate: NextEarningsDate?
+
+    init(
+        epsQuarters: [EarningsQuarterData],
+        revenueQuarters: [EarningsQuarterData],
+        priceHistory: [EarningsPricePoint],
+        nextEarningsDate: NextEarningsDate? = nil
+    ) {
+        self.epsQuarters = epsQuarters
+        self.revenueQuarters = revenueQuarters
+        self.priceHistory = priceHistory
+        self.nextEarningsDate = nextEarningsDate
+    }
 
     func quarters(for dataType: EarningsDataType) -> [EarningsQuarterData] {
         switch dataType {
@@ -1528,7 +1579,8 @@ extension EarningsData {
             // 2025 future data
             EarningsPricePoint(quarter: "Q1 '25", price: 0.95),
             EarningsPricePoint(quarter: "Q2 '25", price: nil)
-        ]
+        ],
+        nextEarningsDate: .sample
     )
 
     // Extended 3-year sample data

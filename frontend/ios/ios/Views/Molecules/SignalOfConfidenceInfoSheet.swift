@@ -56,6 +56,16 @@ struct SignalOfConfidenceInfoSheet: View {
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text("Why Buybacks Matter")
+                .font(AppTypography.bodyBold)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.top, AppSpacing.sm)
+
+            Text("Share buybacks are a powerful signal of management's confidence. When a company repurchases its own shares, it reduces the total shares outstanding, which increases earnings per share (EPS) and ownership percentage for remaining shareholders. Buybacks are most effective when executed at attractive valuations, as they represent management's belief that the stock is undervalued. Unlike dividends, buybacks offer tax efficiency and flexibility, making them an increasingly popular method of returning capital to shareholders.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

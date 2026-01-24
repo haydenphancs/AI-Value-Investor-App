@@ -92,7 +92,7 @@ struct SignalOfConfidenceSummary {
     }
 
     var formattedSummary: String {
-        "Total Yield: \(String(format: "%.1f", totalYield))% (\(String(format: "%.1f", dividendYield))% Dividends + \(String(format: "%.1f", buybackYield))% Buyback). \(shareCountDescription)"
+        "Total Yield: \(String(format: "%.1f", totalYield))% (\(String(format: "%.1f", dividendYield))% Dividends + \(String(format: "%.1f", buybackYield))% Buyback)."
     }
 }
 
@@ -122,6 +122,24 @@ enum DividendYieldStatus: String {
     }
 }
 
+// MARK: - Buyback Status
+
+enum BuybackStatus: String {
+    case low = "Low"
+    case moderate = "Moderate"
+    case high = "High"
+    case veryHigh = "Very High"
+
+    var color: Color {
+        switch self {
+        case .low: return AppColors.bearish
+        case .moderate: return AppColors.neutral
+        case .high: return AppColors.bullish
+        case .veryHigh: return AppColors.primaryBlue
+        }
+    }
+}
+
 // MARK: - Dividend Info
 
 struct DividendInfo {
@@ -129,6 +147,7 @@ struct DividendInfo {
     let paymentDate: Date
     let fiveYearAvgYield: Double
     let status: DividendYieldStatus
+    let buybackStatus: BuybackStatus
 
     var formattedExDividendDate: String {
         let formatter = DateFormatter()
@@ -165,7 +184,8 @@ extension DividendInfo {
             exDividendDate: exDate,
             paymentDate: payDate,
             fiveYearAvgYield: 0.68,
-            status: .low
+            status: .low,
+            buybackStatus: .moderate
         )
     }()
 }
@@ -260,7 +280,7 @@ extension SignalOfConfidenceSectionData {
             totalYield: 4.2,
             dividendYield: 1.5,
             buybackYield: 2.7,
-            shareCountChange: 2.4
+            shareCountChange: 0.0
         ),
         dividendInfo: .sample
     )
@@ -308,12 +328,6 @@ extension SignalOfConfidenceInfoItem {
             description: "A declining share count over time indicates effective capital allocation. Rising share counts despite buybacks suggest excessive stock-based compensation diluting existing shareholders.",
             icon: "chart.line.downtrend.xyaxis",
             example: "If a company spends $10B on buybacks but share count increases, the money went to employees, not shareholders."
-        ),
-        SignalOfConfidenceInfoItem(
-            title: "Capital Allocation Priority",
-            description: "The best companies balance growth investment with shareholder returns. Excessive buybacks might mean lack of growth opportunities; no returns might mean poor capital discipline.",
-            icon: "scalemass.fill",
-            example: "Berkshire Hathaway only buys back shares when Buffett believes they're undervalued."
         ),
         SignalOfConfidenceInfoItem(
             title: "Dividend vs Buyback Trade-off",

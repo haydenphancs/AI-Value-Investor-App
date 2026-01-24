@@ -3,7 +3,7 @@
 //  ios
 //
 //  Organism: Complete Recent Activities section card
-//  Displays recent institutional trading activities with flow bar and activity list
+//  Displays recent institutional or insider trading activities with flow bar and activity list
 //
 
 import SwiftUI
@@ -17,12 +17,17 @@ struct RecentActivitiesSection: View {
 
     @State private var selectedTab: RecentActivitiesTab = .institutions
     @State private var selectedSort: RecentActivitiesSortOption = .byValue
+    @State private var selectedFilter: InsiderActivityFilterOption = .all
     @State private var showInfoSheet: Bool = false
 
     // MARK: - Computed Properties
 
-    private var sortedActivities: [InstitutionalActivity] {
-        data.sortedActivities(by: selectedSort)
+    private var sortedInstitutionalActivities: [InstitutionalActivity] {
+        data.sortedInstitutionalActivities(by: selectedSort)
+    }
+
+    private var sortedInsiderActivities: [InsiderActivity] {
+        data.insiderActivities.sortedActivities(by: selectedSort, filter: selectedFilter)
     }
 
     // MARK: - Body
@@ -35,45 +40,15 @@ struct RecentActivitiesSection: View {
             // Tab selector (Institutions / Insiders)
             RecentActivitiesTabSelector(
                 selectedTab: $selectedTab,
-                disabledTabs: [.insiders]  // Insiders tab disabled for now
+                disabledTabs: []  // Both tabs enabled
             )
 
-            // Period label
-            Text("Latest Filings (\(data.flowSummary.periodDescription))")
-                .font(AppTypography.footnote)
-                .foregroundColor(AppColors.textMuted)
-                .padding(.top, AppSpacing.xs)
-
-            // Flow bar
-            RecentActivitiesFlowBar(
-                inFlowPercent: data.flowSummary.inFlowPercent,
-                formattedInFlow: data.flowSummary.formattedInFlow,
-                formattedOutFlow: data.flowSummary.formattedOutFlow
-            )
-
-            // Legend
-            RecentActivitiesFlowLegend()
-
-            // Net flow badge
-            RecentActivitiesNetFlowBadge(summary: data.flowSummary)
-
-            // Sort selector
-            HStack {
-                Text("Sort:")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-
-                RecentActivitiesSortSelector(selectedSort: $selectedSort)
+            // Content based on selected tab
+            if selectedTab == .institutions {
+                institutionsContent
+            } else {
+                insidersContent
             }
-            .padding(.top, AppSpacing.sm)
-
-            // Activity list
-            LazyVStack(spacing: AppSpacing.sm) {
-                ForEach(sortedActivities) { activity in
-                    InstitutionalActivityRow(activity: activity)
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: selectedSort)
         }
         .padding(AppSpacing.lg)
         .background(
@@ -100,6 +75,79 @@ struct RecentActivitiesSection: View {
             }
 
             Spacer()
+        }
+    }
+
+    // MARK: - Institutions Content
+
+    private var institutionsContent: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Period label
+            Text("Latest Filings (\(data.institutionalFlowSummary.periodDescription))")
+                .font(AppTypography.footnote)
+                .foregroundColor(AppColors.textMuted)
+                .padding(.top, AppSpacing.xs)
+
+            // Flow bar
+            RecentActivitiesFlowBar(
+                inFlowPercent: data.institutionalFlowSummary.inFlowPercent,
+                formattedInFlow: data.institutionalFlowSummary.formattedInFlow,
+                formattedOutFlow: data.institutionalFlowSummary.formattedOutFlow
+            )
+
+            // Legend
+            RecentActivitiesFlowLegend()
+
+            // Net flow badge
+            RecentActivitiesNetFlowBadge(summary: data.institutionalFlowSummary)
+
+            // Sort selector
+            HStack {
+                Text("Sort:")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+
+                RecentActivitiesSortSelector(selectedSort: $selectedSort)
+            }
+            .padding(.top, AppSpacing.sm)
+
+            // Activity list
+            LazyVStack(spacing: AppSpacing.sm) {
+                ForEach(sortedInstitutionalActivities) { activity in
+                    InstitutionalActivityRow(activity: activity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: selectedSort)
+        }
+    }
+
+    // MARK: - Insiders Content
+
+    private var insidersContent: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Period label
+            Text(data.insiderActivities.summary.periodDescription)
+                .font(AppTypography.footnote)
+                .foregroundColor(AppColors.textMuted)
+                .padding(.top, AppSpacing.xs)
+
+            // Informative Buys vs Sells summary card
+            InsiderFlowSummaryCard(summary: data.insiderActivities.summary)
+
+            // Net informative flow
+            InsiderNetFlowBadge(summary: data.insiderActivities.summary)
+
+            // Filter selector (All / Informative)
+            InsiderFilterSelector(selectedFilter: $selectedFilter)
+
+            // Activity list
+            LazyVStack(spacing: AppSpacing.sm) {
+                ForEach(sortedInsiderActivities) { activity in
+                    InsiderActivityRow(activity: activity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: selectedFilter)
+            .animation(.easeInOut(duration: 0.2), value: selectedSort)
         }
     }
 }

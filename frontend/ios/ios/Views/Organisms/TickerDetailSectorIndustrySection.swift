@@ -12,11 +12,11 @@ struct TickerDetailSectorIndustrySection: View {
     @State private var showInfoSheet: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header with info button
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Section title with info button inside card styling
             HStack {
                 Text("Sector & Industry")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.title3)
                     .foregroundColor(AppColors.textPrimary)
 
                 Button(action: {
@@ -30,9 +30,8 @@ struct TickerDetailSectorIndustrySection: View {
 
                 Spacer()
             }
-            .padding(.horizontal, AppSpacing.lg)
 
-            // Info card
+            // Info rows
             VStack(spacing: AppSpacing.md) {
                 SectorIndustryRow(label: "Sector", value: info.sector)
                 SectorIndustryRow(label: "Industry", value: info.industry)
@@ -43,11 +42,12 @@ struct TickerDetailSectorIndustrySection: View {
                 )
                 SectorIndustryRow(label: "Industry Rank", value: info.industryRank)
             }
-            .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
-            .padding(.horizontal, AppSpacing.lg)
         }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+        )
         .sheet(isPresented: $showInfoSheet) {
             SectorIndustryInfoSheet()
                 .presentationDetents([.medium])

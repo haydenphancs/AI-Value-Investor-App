@@ -85,6 +85,11 @@ struct EarningsSectionCard: View {
             // Legend
             EarningsLegend()
                 .frame(maxWidth: .infinity)
+
+            // Next Earnings Date
+            if let nextEarnings = earningsData.nextEarningsDate {
+                NextEarningsDateCard(nextEarningsDate: nextEarnings)
+            }
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

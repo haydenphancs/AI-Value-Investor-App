@@ -12,11 +12,11 @@ struct ShareholderBreakdownSection: View {
     // MARK: - Properties
 
     let breakdownData: ShareholderBreakdown
-    var onTopHoldersTapped: (() -> Void)?
 
     // MARK: - State
 
     @State private var showInfoSheet: Bool = false
+    @State private var showTop10Sheet: Bool = false
 
     // MARK: - Body
 
@@ -44,6 +44,9 @@ struct ShareholderBreakdownSection: View {
         .sheet(isPresented: $showInfoSheet) {
             ShareholderBreakdownInfoSheet()
         }
+        .sheet(isPresented: $showTop10Sheet) {
+            Top10OwnersSheet(data: breakdownData.top10Owners)
+        }
     }
 
     // MARK: - Header Section
@@ -62,14 +65,12 @@ struct ShareholderBreakdownSection: View {
 
             Spacer()
 
-            if onTopHoldersTapped != nil {
-                Button(action: { onTopHoldersTapped?() }) {
-                    Text("Top 10")
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
-                .buttonStyle(.plain)
+            Button(action: { showTop10Sheet = true }) {
+                Text("Top 10")
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.primaryBlue)
             }
+            .buttonStyle(.plain)
         }
     }
 
@@ -107,10 +108,7 @@ struct ShareholderBreakdownSection: View {
 
         ScrollView {
             ShareholderBreakdownSection(
-                breakdownData: ShareholderBreakdown.sampleData,
-                onTopHoldersTapped: {
-                    print("Top 10 tapped")
-                }
+                breakdownData: ShareholderBreakdown.sampleData
             )
             .padding()
         }

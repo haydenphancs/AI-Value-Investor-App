@@ -1,13 +1,13 @@
 //
-//  InvestorPathSection.swift
+//  InvestorJourneySection.swift
 //  ios
 //
-//  Organism: Section showing investor level progression path
+//  Organism: Section showing investor journey level progression
 //
 
 import SwiftUI
 
-struct InvestorPathSection: View {
+struct InvestorJourneySection: View {
     let currentLevel: InvestorLevel
     let journeyTrack: JourneyTrack?
     var onSeeAll: (() -> Void)?
@@ -17,7 +17,7 @@ struct InvestorPathSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
-            SectionHeader(title: "Investor Path", showSeeAll: true) {
+            SectionHeader(title: "Investor Journey", showSeeAll: true) {
                 onSeeAll?()
             }
 
@@ -65,7 +65,7 @@ struct InvestorPathSection: View {
 
 #Preview {
     VStack {
-        InvestorPathSection(
+        InvestorJourneySection(
             currentLevel: .foundation,
             journeyTrack: JourneyTrack.sampleBeginner
         )

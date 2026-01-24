@@ -1,14 +1,14 @@
 //
-//  InvestorPathView.swift
+//  InvestorJourneyView.swift
 //  ios
 //
-//  The Investor Path - Full learning journey screen from Novice to Master
+//  The Investor Journey - Full learning journey screen from Novice to Master
 //
 
 import SwiftUI
 
-struct InvestorPathView: View {
-    @StateObject private var viewModel = InvestorPathViewModel()
+struct InvestorJourneyView: View {
+    @StateObject private var viewModel = InvestorJourneyViewModel()
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -20,7 +20,7 @@ struct InvestorPathView: View {
             // Main content
             VStack(spacing: 0) {
                 // Header
-                InvestorPathHeader(
+                InvestorJourneyHeader(
                     completedLessons: viewModel.totalLessonsCompleted,
                     totalLessons: viewModel.totalLessons,
                     onBackTapped: {
@@ -33,7 +33,7 @@ struct InvestorPathView: View {
                     LazyVStack(spacing: AppSpacing.xxl) {
                         // Level 1: Foundation
                         if let foundationLevel = viewModel.getLevelProgress(for: .foundation) {
-                            InvestorPathLevelSection(
+                            InvestorJourneyLevelSection(
                                 levelProgress: foundationLevel,
                                 onLessonTap: { lesson in
                                     viewModel.selectLesson(lesson)
@@ -43,7 +43,7 @@ struct InvestorPathView: View {
 
                         // Level 2: Analysis
                         if let analysisLevel = viewModel.getLevelProgress(for: .analysis) {
-                            InvestorPathLevelSection(
+                            InvestorJourneyLevelSection(
                                 levelProgress: analysisLevel,
                                 onLessonTap: { lesson in
                                     viewModel.selectLesson(lesson)
@@ -59,7 +59,7 @@ struct InvestorPathView: View {
 
                         // Level 3: Strategies
                         if let strategiesLevel = viewModel.getLevelProgress(for: .strategies) {
-                            InvestorPathLevelSection(
+                            InvestorJourneyLevelSection(
                                 levelProgress: strategiesLevel,
                                 onLessonTap: { lesson in
                                     viewModel.selectLesson(lesson)
@@ -69,7 +69,7 @@ struct InvestorPathView: View {
 
                         // Level 4: Mastery
                         if let masteryLevel = viewModel.getLevelProgress(for: .mastery) {
-                            InvestorPathLevelSection(
+                            InvestorJourneyLevelSection(
                                 levelProgress: masteryLevel,
                                 onLessonTap: { lesson in
                                     viewModel.selectLesson(lesson)
@@ -78,7 +78,7 @@ struct InvestorPathView: View {
                         }
 
                         // Study Schedule section
-                        InvestorPathStudyScheduleSection(
+                        InvestorJourneyStudyScheduleSection(
                             schedule: $viewModel.studySchedule,
                             onMorningTimeTap: {
                                 // Show time picker for morning session
@@ -111,21 +111,7 @@ struct InvestorPathView: View {
     }
 }
 
-// MARK: - Loading Overlay
-private struct LoadingOverlay: View {
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.3)
-                .ignoresSafeArea()
-
-            ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                .scaleEffect(1.2)
-        }
-    }
-}
-
 #Preview {
-    InvestorPathView()
+    InvestorJourneyView()
         .preferredColorScheme(.dark)
 }

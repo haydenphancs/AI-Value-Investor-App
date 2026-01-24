@@ -160,13 +160,13 @@ struct CommunityDiscussion: Identifiable {
 extension JourneyTrack {
     static let sampleBeginner = JourneyTrack(
         level: .foundation,
-        completedCount: 3,
-        totalCount: 12,
+        completedCount: 1,
+        totalCount: 7,
         items: [
-            JourneyItem(title: "It's all about mindset", isCompleted: true, isActive: false, stepNumber: 1),
-            JourneyItem(title: "What is a Stock?", isCompleted: true, isActive: false, stepNumber: 2),
-            JourneyItem(title: "Value Investing 101", isCompleted: true, isActive: false, stepNumber: 3),
-            JourneyItem(title: "Understanding the Market", isCompleted: false, isActive: true, stepNumber: 4)
+            JourneyItem(title: "Compound Interest", isCompleted: true, isActive: false, stepNumber: 1),
+            JourneyItem(title: "Stock vs. Business", isCompleted: false, isActive: true, stepNumber: 2),
+            JourneyItem(title: "Mr. Market", isCompleted: false, isActive: false, stepNumber: 3),
+            JourneyItem(title: "Risk and Reward are Linked", isCompleted: false, isActive: false, stepNumber: 4)
         ]
     )
 }

@@ -10,7 +10,7 @@ import SwiftUI
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
     @StateObject private var viewModel = LearnViewModel()
-    @State private var showingInvestorPath = false
+    @State private var showingInvestorJourney = false
 
     var body: some View {
         NavigationStack {
@@ -47,8 +47,8 @@ struct LearnContentView: View {
                 LoadingOverlay()
             }
         }
-        .navigationDestination(isPresented: $showingInvestorPath) {
-            InvestorPathView()
+        .navigationDestination(isPresented: $showingInvestorJourney) {
+            InvestorJourneyView()
         }
         .navigationBarHidden(true)
         }
@@ -58,11 +58,11 @@ struct LearnContentView: View {
     private var learnTabContent: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xxl) {
-                // Investor Path Section (includes journey progress)
-                InvestorPathSection(
+                // Investor Journey Section (includes journey progress)
+                InvestorJourneySection(
                     currentLevel: viewModel.currentLevel,
                     journeyTrack: viewModel.journeyTrack,
-                    onSeeAll: handleSeeAllPath,
+                    onSeeAll: handleSeeAllJourney,
                     onContinue: handleContinueJourney,
                     onItemTap: handleJourneyItemTap
                 )
@@ -142,8 +142,8 @@ struct LearnContentView: View {
         print("Search submitted: \(viewModel.searchText)")
     }
 
-    private func handleSeeAllPath() {
-        showingInvestorPath = true
+    private func handleSeeAllJourney() {
+        showingInvestorJourney = true
     }
 
     private func handleContinueJourney() {

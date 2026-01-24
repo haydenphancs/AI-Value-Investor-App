@@ -1,8 +1,8 @@
 //
-//  InvestorPathModels.swift
+//  InvestorJourneyModels.swift
 //  ios
 //
-//  Data models for The Investor Path screen
+//  Data models for The Investor Journey screen
 //
 
 import Foundation
@@ -76,8 +76,8 @@ struct Lesson: Identifiable {
     }
 }
 
-// MARK: - Path Level
-enum PathLevel: Int, CaseIterable {
+// MARK: - Journey Level
+enum JourneyLevel: Int, CaseIterable {
     case foundation = 1
     case analysis = 2
     case strategies = 3
@@ -114,7 +114,7 @@ enum PathLevel: Int, CaseIterable {
 // MARK: - Level Progress
 struct LevelProgress: Identifiable {
     let id = UUID()
-    let level: PathLevel
+    let level: JourneyLevel
     let lessons: [Lesson]
 
     var completedCount: Int {
@@ -140,8 +140,8 @@ struct LevelProgress: Identifiable {
     }
 }
 
-// MARK: - Investor Path Data
-struct InvestorPathData {
+// MARK: - Investor Journey Data
+struct InvestorJourneyData {
     let levels: [LevelProgress]
     let totalLessonsCompleted: Int
     let totalLessons: Int
@@ -182,8 +182,8 @@ struct InvestorQuote {
 }
 
 // MARK: - Sample Data
-extension InvestorPathData {
-    static let sampleData: InvestorPathData = {
+extension InvestorJourneyData {
+    static let sampleData: InvestorJourneyData = {
         let foundationLessons = [
             Lesson(
                 title: "Compound Interest",
@@ -370,7 +370,7 @@ extension InvestorPathData {
         let totalCompleted = levels.reduce(0) { $0 + $1.completedCount }
         let totalLessons = levels.reduce(0) { $0 + $1.totalCount }
 
-        return InvestorPathData(
+        return InvestorJourneyData(
             levels: levels,
             totalLessonsCompleted: totalCompleted,
             totalLessons: totalLessons

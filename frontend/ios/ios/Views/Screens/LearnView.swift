@@ -10,8 +10,10 @@ import SwiftUI
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
     @StateObject private var viewModel = LearnViewModel()
+    @State private var showingInvestorPath = false
 
     var body: some View {
+        NavigationStack {
         ZStack {
             // Background
             AppColors.background
@@ -44,6 +46,11 @@ struct LearnContentView: View {
             if viewModel.isLoading {
                 LoadingOverlay()
             }
+        }
+        .navigationDestination(isPresented: $showingInvestorPath) {
+            InvestorPathView()
+        }
+        .navigationBarHidden(true)
         }
     }
 
@@ -136,7 +143,7 @@ struct LearnContentView: View {
     }
 
     private func handleSeeAllPath() {
-        print("See all investor path levels")
+        showingInvestorPath = true
     }
 
     private func handleContinueJourney() {

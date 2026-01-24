@@ -30,6 +30,26 @@ class InvestorJourneyViewModel: ObservableObject {
         journeyData?.levels ?? []
     }
 
+    var nextLessonId: UUID? {
+        // Find the first incomplete lesson across all levels
+        for level in levels {
+            if let firstIncomplete = level.firstIncompleteLessonId {
+                return firstIncomplete
+            }
+        }
+        return nil
+    }
+
+    var nextLessonLevelId: UUID? {
+        // Find the level containing the first incomplete lesson
+        for level in levels {
+            if level.firstIncompleteLessonId != nil {
+                return level.id
+            }
+        }
+        return nil
+    }
+
     // MARK: - Initialization
     init() {
         loadData()

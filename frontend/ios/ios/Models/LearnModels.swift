@@ -177,8 +177,8 @@ extension NextLesson {
         journeyTitle: "Analyst",
         lessonTitle: "How the System Works",
         lessonDescription: "Understanding market mechanics, analysis financial report and more.",
-        estimatedMinutes: 4,
-        chapterCount: 5
+        estimatedMinutes: 18,
+        chapterCount: 7
     )
 }
 

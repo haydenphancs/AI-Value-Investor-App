@@ -138,6 +138,10 @@ struct LevelProgress: Identifiable {
         // Level is unlocked if it's Foundation, or previous level has some progress
         level == .foundation || completedCount > 0
     }
+
+    var firstIncompleteLessonId: UUID? {
+        lessons.first(where: { $0.status != .completed })?.id
+    }
 }
 
 // MARK: - Investor Journey Data

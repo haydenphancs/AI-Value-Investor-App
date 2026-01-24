@@ -96,11 +96,96 @@ struct SignalOfConfidenceSummary {
     }
 }
 
+// MARK: - Dividend Yield Status
+
+enum DividendYieldStatus: String {
+    case low = "Low"
+    case fair = "Fair"
+    case high = "High"
+    case veryHigh = "Very High"
+
+    var color: Color {
+        switch self {
+        case .low: return AppColors.bearish
+        case .fair: return AppColors.neutral
+        case .high: return AppColors.bullish
+        case .veryHigh: return AppColors.primaryBlue
+        }
+    }
+
+    static func from(yield: Double, industryAverage: Double) -> DividendYieldStatus {
+        let ratio = yield / industryAverage
+        if ratio < 0.7 { return .low }
+        if ratio < 1.0 { return .fair }
+        if ratio < 1.5 { return .high }
+        return .veryHigh
+    }
+}
+
+// MARK: - Dividend Info
+
+struct DividendInfo {
+    let exDividendDate: Date
+    let paymentDate: Date
+    let fiveYearAvgYield: Double
+    let status: DividendYieldStatus
+
+    var formattedExDividendDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: exDividendDate)
+    }
+
+    var formattedPaymentDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: paymentDate)
+    }
+
+    var formattedYield: String {
+        String(format: "%.2f%%", fiveYearAvgYield)
+    }
+}
+
+extension DividendInfo {
+    static let sample: DividendInfo = {
+        var exComponents = DateComponents()
+        exComponents.year = 2025
+        exComponents.month = 11
+        exComponents.day = 10
+        let exDate = Calendar.current.date(from: exComponents) ?? Date()
+
+        var payComponents = DateComponents()
+        payComponents.year = 2025
+        payComponents.month = 11
+        payComponents.day = 16
+        let payDate = Calendar.current.date(from: payComponents) ?? Date()
+
+        return DividendInfo(
+            exDividendDate: exDate,
+            paymentDate: payDate,
+            fiveYearAvgYield: 0.68,
+            status: .low
+        )
+    }()
+}
+
 // MARK: - Signal of Confidence Section Data
 
 struct SignalOfConfidenceSectionData {
     let dataPoints: [SignalOfConfidenceDataPoint]
     let summary: SignalOfConfidenceSummary
+    let dividendInfo: DividendInfo?
+
+    init(
+        dataPoints: [SignalOfConfidenceDataPoint],
+        summary: SignalOfConfidenceSummary,
+        dividendInfo: DividendInfo? = nil
+    ) {
+        self.dataPoints = dataPoints
+        self.summary = summary
+        self.dividendInfo = dividendInfo
+    }
 
     /// Get max yield for chart scaling
     var maxYield: Double {
@@ -176,7 +261,8 @@ extension SignalOfConfidenceSectionData {
             dividendYield: 1.5,
             buybackYield: 2.7,
             shareCountChange: 2.4
-        )
+        ),
+        dividendInfo: .sample
     )
 }
 

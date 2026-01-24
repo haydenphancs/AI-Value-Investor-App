@@ -162,6 +162,7 @@ struct HoldersData {
     let insiderData: SmartMoneyData
     let hedgeFundsData: SmartMoneyData
     let congressData: SmartMoneyData
+    let recentActivities: RecentActivitiesData
 
     func smartMoneyData(for tab: SmartMoneyTab) -> SmartMoneyData {
         switch tab {
@@ -307,7 +308,8 @@ extension HoldersData {
         shareholderBreakdown: ShareholderBreakdown.sampleData,
         insiderData: SmartMoneyData.insiderSampleData,
         hedgeFundsData: SmartMoneyData.hedgeFundsSampleData,
-        congressData: SmartMoneyData.congressSampleData
+        congressData: SmartMoneyData.congressSampleData,
+        recentActivities: RecentActivitiesData.sampleData
     )
 }
 
@@ -424,5 +426,222 @@ extension Top10OwnersData {
     static let sampleData = Top10OwnersData(
         institutions: TopInstitution.sampleData,
         insiders: TopInsider.sampleData
+    )
+}
+
+// MARK: - Recent Activities Tab
+
+enum RecentActivitiesTab: String, CaseIterable {
+    case institutions = "Institutions"
+    case insiders = "Insiders"
+}
+
+// MARK: - Recent Activities Sort Option
+
+enum RecentActivitiesSortOption: String, CaseIterable {
+    case byValue = "By Value ($)"
+    case byDate = "By Date"
+}
+
+// MARK: - Institutional Activity
+
+/// Represents a recent institutional trading activity
+struct InstitutionalActivity: Identifiable {
+    let id = UUID()
+    let institutionName: String
+    let category: String  // e.g., "Asset Management", "Investment Banking"
+    let date: Date
+    let changeInMillions: Double  // Positive = bought, Negative = sold
+    let changePercent: Double
+    let totalHeldInBillions: Double
+
+    var isPositive: Bool {
+        changeInMillions >= 0
+    }
+
+    var formattedChange: String {
+        let sign = changeInMillions >= 0 ? "+" : ""
+        if abs(changeInMillions) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", changeInMillions / 1000))B"
+        }
+        return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
+    }
+
+    var formattedChangePercent: String {
+        let sign = changePercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", changePercent))%"
+    }
+
+    var formattedTotalHeld: String {
+        if totalHeldInBillions >= 1 {
+            return "Held: $\(String(format: "%.1f", totalHeldInBillions))B"
+        }
+        return "Held: $\(String(format: "%.0f", totalHeldInBillions * 1000))M"
+    }
+
+    var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.string(from: date)
+    }
+
+    var changeColor: Color {
+        isPositive ? AppColors.bullish : AppColors.bearish
+    }
+}
+
+// MARK: - Recent Activities Flow Summary
+
+/// Summary of recent institutional flow
+struct RecentActivitiesFlowSummary {
+    let periodDescription: String  // e.g., "Oct - Dec 2025"
+    let quarterDescription: String  // e.g., "Q4"
+    let inFlowInBillions: Double
+    let outFlowInBillions: Double
+
+    var netFlowInMillions: Double {
+        (inFlowInBillions - outFlowInBillions) * 1000
+    }
+
+    var isNetPositive: Bool {
+        netFlowInMillions >= 0
+    }
+
+    var formattedInFlow: String {
+        String(format: "$%.1fB", inFlowInBillions)
+    }
+
+    var formattedOutFlow: String {
+        String(format: "$%.1fB", outFlowInBillions)
+    }
+
+    var formattedNetFlow: String {
+        let sign = netFlowInMillions >= 0 ? "+ " : "- "
+        if abs(netFlowInMillions) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", abs(netFlowInMillions) / 1000))B"
+        }
+        return "\(sign)$\(String(format: "%.0f", abs(netFlowInMillions)))M"
+    }
+
+    var netFlowColor: Color {
+        isNetPositive ? AppColors.bullish : AppColors.bearish
+    }
+
+    /// Percentage of in flow vs total flow for the bar visualization
+    var inFlowPercent: Double {
+        let total = inFlowInBillions + outFlowInBillions
+        guard total > 0 else { return 0.5 }
+        return inFlowInBillions / total
+    }
+}
+
+// MARK: - Recent Activities Data
+
+struct RecentActivitiesData {
+    let flowSummary: RecentActivitiesFlowSummary
+    let activities: [InstitutionalActivity]
+
+    func sortedActivities(by option: RecentActivitiesSortOption) -> [InstitutionalActivity] {
+        switch option {
+        case .byValue:
+            return activities.sorted { abs($0.changeInMillions) > abs($1.changeInMillions) }
+        case .byDate:
+            return activities.sorted { $0.date > $1.date }
+        }
+    }
+}
+
+// MARK: - Recent Activities Sample Data
+
+extension RecentActivitiesFlowSummary {
+    static let sampleData = RecentActivitiesFlowSummary(
+        periodDescription: "Oct - Dec 2025",
+        quarterDescription: "Q4",
+        inFlowInBillions: 2.1,
+        outFlowInBillions: 1.8
+    )
+}
+
+extension InstitutionalActivity {
+    static func createDate(_ month: Int, _ day: Int, _ year: Int) -> Date {
+        var components = DateComponents()
+        components.month = month
+        components.day = day
+        components.year = year
+        return Calendar.current.date(from: components) ?? Date()
+    }
+
+    static let sampleData: [InstitutionalActivity] = [
+        InstitutionalActivity(
+            institutionName: "Vanguard Group Inc",
+            category: "Asset Management",
+            date: createDate(12, 30, 2025),
+            changeInMillions: 49.43,
+            changePercent: 0.34,
+            totalHeldInBillions: 14.5
+        ),
+        InstitutionalActivity(
+            institutionName: "BlackRock Fund Advisors",
+            category: "Investment Management",
+            date: createDate(11, 14, 2025),
+            changeInMillions: 15.90,
+            changePercent: 0.54,
+            totalHeldInBillions: 11.5
+        ),
+        InstitutionalActivity(
+            institutionName: "State Street Corporation",
+            category: "Financial Services",
+            date: createDate(12, 20, 2025),
+            changeInMillions: -10.40,
+            changePercent: -0.24,
+            totalHeldInBillions: 5.0
+        ),
+        InstitutionalActivity(
+            institutionName: "Fidelity Management",
+            category: "Mutual Funds",
+            date: createDate(12, 10, 2025),
+            changeInMillions: 9.30,
+            changePercent: 0.21,
+            totalHeldInBillions: 4.8
+        ),
+        InstitutionalActivity(
+            institutionName: "Morgan Stanley",
+            category: "Financial Services",
+            date: createDate(12, 20, 2025),
+            changeInMillions: 7.30,
+            changePercent: 0.18,
+            totalHeldInBillions: 4.5
+        ),
+        InstitutionalActivity(
+            institutionName: "JPMorgan Chase & Co",
+            category: "Commercial Banking",
+            date: createDate(10, 25, 2025),
+            changeInMillions: -4.40,
+            changePercent: -0.34,
+            totalHeldInBillions: 3.4
+        ),
+        InstitutionalActivity(
+            institutionName: "Goldman Sachs Group",
+            category: "Investment Banking",
+            date: createDate(11, 28, 2025),
+            changeInMillions: 12.80,
+            changePercent: 0.42,
+            totalHeldInBillions: 3.2
+        ),
+        InstitutionalActivity(
+            institutionName: "Northern Trust Corp",
+            category: "Wealth Management",
+            date: createDate(12, 5, 2025),
+            changeInMillions: -8.50,
+            changePercent: -0.28,
+            totalHeldInBillions: 2.8
+        )
+    ]
+}
+
+extension RecentActivitiesData {
+    static let sampleData = RecentActivitiesData(
+        flowSummary: RecentActivitiesFlowSummary.sampleData,
+        activities: InstitutionalActivity.sampleData
     )
 }

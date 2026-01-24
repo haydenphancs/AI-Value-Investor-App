@@ -111,7 +111,7 @@ struct SignalOfConfidenceChartView: View {
                 )
                 .foregroundStyle(AppColors.confidenceSharesOutstanding)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(.linear)
             }
 
             // Shares outstanding points

@@ -36,11 +36,20 @@ struct DividendInfoCard: View {
 
             divider
 
-            // Status row
+            // Dividend Status row
             DividendInfoRow(
-                label: "Status",
+                label: "Dividend Status",
                 value: dividendInfo.status.rawValue,
                 valueColor: dividendInfo.status.color
+            )
+
+            divider
+
+            // Buyback Status row
+            DividendInfoRow(
+                label: "Buyback Status",
+                value: dividendInfo.buybackStatus.rawValue,
+                valueColor: dividendInfo.buybackStatus.color
             )
         }
         .padding(.vertical, AppSpacing.md)
@@ -97,7 +106,8 @@ private struct DividendInfoRow: View {
                     exDividendDate: Date(),
                     paymentDate: Date().addingTimeInterval(86400 * 7),
                     fiveYearAvgYield: 3.45,
-                    status: .high
+                    status: .high,
+                    buybackStatus: .high
                 )
             )
         }

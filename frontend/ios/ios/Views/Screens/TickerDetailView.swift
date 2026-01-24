@@ -241,8 +241,7 @@ struct TickerDetailView: View {
         case .holders:
             if let holdersData = viewModel.holdersData {
                 TickerHoldersContent(
-                    holdersData: holdersData,
-                    onTopHoldersTap: viewModel.handleTopHoldersTap
+                    holdersData: holdersData
                 )
             } else {
                 placeholderContent(title: "Holders", description: "Loading holders data...")

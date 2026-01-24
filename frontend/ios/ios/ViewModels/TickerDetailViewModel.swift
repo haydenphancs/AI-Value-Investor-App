@@ -187,13 +187,6 @@ class TickerDetailViewModel: ObservableObject {
         print("Health check detail for \(tickerSymbol)")
     }
 
-    // MARK: - Holders Tab Handlers
-
-    func handleTopHoldersTap() {
-        // TODO: Navigate to top institutional holders detail view
-        print("Top holders detail for \(tickerSymbol)")
-    }
-
     // MARK: - Computed Properties
 
     var formattedPrice: String {

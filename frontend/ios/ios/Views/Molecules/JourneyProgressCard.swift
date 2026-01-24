@@ -73,7 +73,7 @@ struct JourneyProgressCard: View {
             Button(action: {
                 onContinue?()
             }) {
-                Text("Continue Learning")
+                Text("Resume Lessons")
                     .font(AppTypography.bodyBold)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)

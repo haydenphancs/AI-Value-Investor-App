@@ -10,16 +10,12 @@ import SwiftUI
 
 struct TickerHoldersContent: View {
     let holdersData: HoldersData
-    var onTopHoldersTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
             // Shareholder Breakdown Section
             ShareholderBreakdownSection(
-                breakdownData: holdersData.shareholderBreakdown,
-                onTopHoldersTapped: {
-                    onTopHoldersTap?()
-                }
+                breakdownData: holdersData.shareholderBreakdown
             )
 
             // Smart Money Section
@@ -37,10 +33,7 @@ struct TickerHoldersContent: View {
 #Preview {
     ScrollView {
         TickerHoldersContent(
-            holdersData: HoldersData.sampleData,
-            onTopHoldersTap: {
-                print("Top holders tapped")
-            }
+            holdersData: HoldersData.sampleData
         )
     }
     .background(AppColors.background)

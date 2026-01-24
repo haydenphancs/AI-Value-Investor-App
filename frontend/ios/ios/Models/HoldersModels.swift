@@ -18,8 +18,11 @@ struct ShareholderBreakdown: Identifiable {
     let institutionsPercent: Double
     let publicOtherPercent: Double
 
-    /// Top 10 institutional holders data
+    /// Top 10 institutional holders data (legacy)
     let topHolders: [InstitutionalHolder]
+
+    /// Top 10 owners data (institutions and insiders)
+    let top10Owners: Top10OwnersData
 
     // Computed property for validation
     var totalPercent: Double {
@@ -179,7 +182,8 @@ extension ShareholderBreakdown {
         insidersPercent: 12,
         institutionsPercent: 55,
         publicOtherPercent: 33,
-        topHolders: InstitutionalHolder.sampleData
+        topHolders: InstitutionalHolder.sampleData,
+        top10Owners: Top10OwnersData.sampleData
     )
 }
 
@@ -320,4 +324,105 @@ struct HoldersColors {
     static let buyVolume = AppColors.bullish         // Green
     static let sellVolume = AppColors.bearish        // Red
     static let flowLine = AppColors.primaryBlue      // Blue for cumulative flow line
+}
+
+// MARK: - Top 10 Owner Tab
+
+enum Top10OwnerTab: String, CaseIterable {
+    case institutions = "Institutions"
+    case insiders = "Insiders"
+}
+
+// MARK: - Top Institution Owner
+
+/// Represents a top institutional owner
+struct TopInstitution: Identifiable {
+    let id = UUID()
+    let rank: Int
+    let name: String
+    let category: String  // e.g., "Asset Management", "Investment Banking"
+    let valueInBillions: Double
+    let percentOwnership: Double
+
+    var formattedValue: String {
+        if valueInBillions >= 1 {
+            return String(format: "$%.1fB", valueInBillions)
+        } else {
+            return String(format: "$%.0fM", valueInBillions * 1000)
+        }
+    }
+
+    var formattedPercent: String {
+        String(format: "%.1f%%", percentOwnership)
+    }
+}
+
+// MARK: - Top Insider Owner
+
+/// Represents a top insider owner
+struct TopInsider: Identifiable {
+    let id = UUID()
+    let rank: Int
+    let name: String
+    let title: String  // e.g., "CEO", "CFO", "Director"
+    let valueInMillions: Double
+    let percentOwnership: Double
+
+    var formattedValue: String {
+        if valueInMillions >= 1000 {
+            return String(format: "$%.1fB", valueInMillions / 1000)
+        } else {
+            return String(format: "$%.1fM", valueInMillions)
+        }
+    }
+
+    var formattedPercent: String {
+        String(format: "%.2f%%", percentOwnership)
+    }
+}
+
+// MARK: - Top 10 Owners Data
+
+struct Top10OwnersData {
+    let institutions: [TopInstitution]
+    let insiders: [TopInsider]
+}
+
+// MARK: - Top 10 Sample Data
+
+extension TopInstitution {
+    static let sampleData: [TopInstitution] = [
+        TopInstitution(rank: 1, name: "Vanguard Group Inc", category: "Asset Management", valueInBillions: 14.5, percentOwnership: 5.2),
+        TopInstitution(rank: 2, name: "BlackRock Fund Advisors", category: "Investment Management", valueInBillions: 12.8, percentOwnership: 4.6),
+        TopInstitution(rank: 3, name: "State Street Corporation", category: "Financial Services", valueInBillions: 9.2, percentOwnership: 3.3),
+        TopInstitution(rank: 4, name: "Fidelity Management", category: "Mutual Funds", valueInBillions: 8.7, percentOwnership: 3.1),
+        TopInstitution(rank: 5, name: "Geode Capital Management", category: "Investment Advisor", valueInBillions: 6.4, percentOwnership: 2.3),
+        TopInstitution(rank: 6, name: "Northern Trust Corporation", category: "Wealth Management", valueInBillions: 5.9, percentOwnership: 2.1),
+        TopInstitution(rank: 7, name: "Morgan Stanley", category: "Investment Banking", valueInBillions: 5.1, percentOwnership: 1.8),
+        TopInstitution(rank: 8, name: "JPMorgan Chase & Co", category: "Commercial Banking", valueInBillions: 4.7, percentOwnership: 1.7),
+        TopInstitution(rank: 9, name: "Bank of America Corporation", category: "Financial Services", valueInBillions: 4.3, percentOwnership: 1.5),
+        TopInstitution(rank: 10, name: "Goldman Sachs Group Inc", category: "Investment Banking", valueInBillions: 3.8, percentOwnership: 1.4)
+    ]
+}
+
+extension TopInsider {
+    static let sampleData: [TopInsider] = [
+        TopInsider(rank: 1, name: "Tim Cook", title: "Chief Executive Officer", valueInMillions: 1850.5, percentOwnership: 0.66),
+        TopInsider(rank: 2, name: "Arthur D. Levinson", title: "Chairman of the Board", valueInMillions: 892.3, percentOwnership: 0.32),
+        TopInsider(rank: 3, name: "Jeff Williams", title: "Chief Operating Officer", valueInMillions: 645.8, percentOwnership: 0.23),
+        TopInsider(rank: 4, name: "Luca Maestri", title: "Chief Financial Officer", valueInMillions: 421.2, percentOwnership: 0.15),
+        TopInsider(rank: 5, name: "Katherine Adams", title: "General Counsel & SVP", valueInMillions: 312.5, percentOwnership: 0.11),
+        TopInsider(rank: 6, name: "Deirdre O'Brien", title: "SVP Retail + People", valueInMillions: 285.4, percentOwnership: 0.10),
+        TopInsider(rank: 7, name: "Craig Federighi", title: "SVP Software Engineering", valueInMillions: 268.9, percentOwnership: 0.10),
+        TopInsider(rank: 8, name: "John Ternus", title: "SVP Hardware Engineering", valueInMillions: 245.1, percentOwnership: 0.09),
+        TopInsider(rank: 9, name: "Greg Joswiak", title: "SVP Worldwide Marketing", valueInMillions: 198.7, percentOwnership: 0.07),
+        TopInsider(rank: 10, name: "James A. Bell", title: "Independent Director", valueInMillions: 156.2, percentOwnership: 0.06)
+    ]
+}
+
+extension Top10OwnersData {
+    static let sampleData = Top10OwnersData(
+        institutions: TopInstitution.sampleData,
+        insiders: TopInsider.sampleData
+    )
 }

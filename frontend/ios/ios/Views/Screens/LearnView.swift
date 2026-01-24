@@ -51,21 +51,15 @@ struct LearnContentView: View {
     private var learnTabContent: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xxl) {
-                // Investor Path Section
+                // Investor Path Section (includes journey progress)
                 InvestorPathSection(
                     currentLevel: viewModel.currentLevel,
-                    onSeeAll: handleSeeAllPath
+                    journeyTrack: viewModel.journeyTrack,
+                    onSeeAll: handleSeeAllPath,
+                    onContinue: handleContinueJourney,
+                    onItemTap: handleJourneyItemTap
                 )
                 .padding(.top, AppSpacing.md)
-
-                // Your Journey Section
-                if let track = viewModel.journeyTrack {
-                    YourJourneySection(
-                        track: track,
-                        onContinue: handleContinueJourney,
-                        onItemTap: handleJourneyItemTap
-                    )
-                }
 
                 // Next Lesson Section
                 if let lesson = viewModel.nextLesson {

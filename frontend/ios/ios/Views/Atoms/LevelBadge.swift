@@ -2,8 +2,7 @@
 //  LevelBadge.swift
 //  ios
 //
-//  Atom: Badge showing investor level (Beginner, Analyst, Modern, Master)
-//
+//  Atom: Badge showing investor level (Foundation, Analyst, Strategist, Master)//
 
 import SwiftUI
 
@@ -56,9 +55,9 @@ struct LevelBadge: View {
 
 #Preview {
     HStack(spacing: AppSpacing.xl) {
-        LevelBadge(level: .beginner, isActive: true, isCompleted: true)
+        LevelBadge(level: .foundation, isActive: true, isCompleted: true)
         LevelBadge(level: .analyst, isActive: false, isCompleted: false)
-        LevelBadge(level: .modern, isActive: false, isCompleted: false)
+        LevelBadge(level: .strategist, isActive: false, isCompleted: false)
         LevelBadge(level: .master, isActive: false, isCompleted: false)
     }
     .padding()

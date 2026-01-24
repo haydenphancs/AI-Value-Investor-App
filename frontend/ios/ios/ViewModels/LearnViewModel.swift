@@ -12,7 +12,7 @@ import Combine
 class LearnViewModel: ObservableObject {
     // MARK: - Published Properties
     @Published var selectedTab: LearnTab = .learn
-    @Published var currentLevel: InvestorLevel = .beginner
+    @Published var currentLevel: InvestorLevel = .foundation
     @Published var journeyTrack: JourneyTrack?
     @Published var nextLesson: NextLesson?
     @Published var keyConcepts: [KeyConcept] = []
@@ -53,7 +53,7 @@ class LearnViewModel: ObservableObject {
     // MARK: - Private Loaders
     private func loadJourneyData() {
         journeyTrack = JourneyTrack.sampleBeginner
-        currentLevel = .beginner
+        currentLevel = .foundation
     }
 
     private func loadNextLesson() {

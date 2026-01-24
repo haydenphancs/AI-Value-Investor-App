@@ -11,6 +11,7 @@ import SwiftUI
 struct LearnContentView: View {
     @StateObject private var viewModel = LearnViewModel()
     @State private var showingInvestorJourney = false
+    @State private var shouldScrollToNextLesson = false
 
     var body: some View {
         NavigationStack {
@@ -48,7 +49,7 @@ struct LearnContentView: View {
             }
         }
         .navigationDestination(isPresented: $showingInvestorJourney) {
-            InvestorJourneyView()
+            InvestorJourneyView(scrollToNextLesson: shouldScrollToNextLesson)
         }
         .navigationBarHidden(true)
         }
@@ -143,11 +144,13 @@ struct LearnContentView: View {
     }
 
     private func handleSeeAllJourney() {
+        shouldScrollToNextLesson = false
         showingInvestorJourney = true
     }
 
     private func handleContinueJourney() {
-        viewModel.continueJourney()
+        shouldScrollToNextLesson = true
+        showingInvestorJourney = true
     }
 
     private func handleJourneyItemTap(_ item: JourneyItem) {

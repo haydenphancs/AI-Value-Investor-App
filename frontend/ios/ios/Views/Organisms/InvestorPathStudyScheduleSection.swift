@@ -1,5 +1,5 @@
 //
-//  InvestorPathStudyScheduleSection.swift
+//  InvestorJourneyStudyScheduleSection.swift
 //  ios
 //
 //  Organism: Study schedule section with reminder toggle and time settings
@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-struct InvestorPathStudyScheduleSection: View {
+struct InvestorJourneyStudyScheduleSection: View {
     @Binding var schedule: StudySchedule
     var onMorningTimeTap: (() -> Void)?
     var onReviewTimeTap: (() -> Void)?
@@ -75,7 +75,7 @@ struct InvestorPathStudyScheduleSection: View {
 
 #Preview {
     VStack {
-        InvestorPathStudyScheduleSection(
+        InvestorJourneyStudyScheduleSection(
             schedule: .constant(.defaultSchedule)
         )
         Spacer()

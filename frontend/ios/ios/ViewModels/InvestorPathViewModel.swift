@@ -1,17 +1,17 @@
 //
-//  InvestorPathViewModel.swift
+//  InvestorJourneyViewModel.swift
 //  ios
 //
-//  ViewModel for The Investor Path screen - MVVM Architecture
+//  ViewModel for The Investor Journey screen - MVVM Architecture
 //
 
 import Foundation
 import Combine
 
 @MainActor
-class InvestorPathViewModel: ObservableObject {
+class InvestorJourneyViewModel: ObservableObject {
     // MARK: - Published Properties
-    @Published var pathData: InvestorPathData?
+    @Published var journeyData: InvestorJourneyData?
     @Published var studySchedule: StudySchedule = .defaultSchedule
     @Published var quote: InvestorQuote = .buffettQuote
     @Published var isLoading: Bool = false
@@ -19,15 +19,15 @@ class InvestorPathViewModel: ObservableObject {
 
     // MARK: - Computed Properties
     var totalLessonsCompleted: Int {
-        pathData?.totalLessonsCompleted ?? 0
+        journeyData?.totalLessonsCompleted ?? 0
     }
 
     var totalLessons: Int {
-        pathData?.totalLessons ?? 0
+        journeyData?.totalLessons ?? 0
     }
 
     var levels: [LevelProgress] {
-        pathData?.levels ?? []
+        journeyData?.levels ?? []
     }
 
     // MARK: - Initialization
@@ -41,7 +41,7 @@ class InvestorPathViewModel: ObservableObject {
 
         // Simulate network delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.pathData = InvestorPathData.sampleData
+            self?.journeyData = InvestorJourneyData.sampleData
             self?.isLoading = false
         }
     }
@@ -87,12 +87,12 @@ class InvestorPathViewModel: ObservableObject {
     }
 
     // MARK: - Level Access
-    func getLevelProgress(for level: PathLevel) -> LevelProgress? {
+    func getLevelProgress(for level: JourneyLevel) -> LevelProgress? {
         levels.first { $0.level == level }
     }
 
     // MARK: - Progress Tracking
-    func markLessonCompleted(_ lesson: Lesson, in level: PathLevel) {
+    func markLessonCompleted(_ lesson: Lesson, in level: JourneyLevel) {
         // In a real app, this would update the backend and local state
         print("Marked lesson '\(lesson.title)' as completed in \(level.title)")
     }

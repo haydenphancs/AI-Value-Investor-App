@@ -1,13 +1,13 @@
 //
-//  InvestorPathHeader.swift
+//  InvestorJourneyHeader.swift
 //  ios
 //
-//  Molecule: Header for The Investor Path screen with title, subtitle, and progress
+//  Molecule: Header for The Investor Journey screen with title, subtitle, and progress
 //
 
 import SwiftUI
 
-struct InvestorPathHeader: View {
+struct InvestorJourneyHeader: View {
     let completedLessons: Int
     let totalLessons: Int
     var onBackTapped: (() -> Void)?
@@ -29,7 +29,7 @@ struct InvestorPathHeader: View {
 
             // Title section
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("The Investor Path")
+                Text("The Investor Journey")
                     .font(AppTypography.largeTitle)
                     .foregroundColor(AppColors.textPrimary)
 
@@ -67,7 +67,7 @@ struct InvestorPathHeader: View {
 
 #Preview {
     VStack {
-        InvestorPathHeader(completedLessons: 1, totalLessons: 27)
+        InvestorJourneyHeader(completedLessons: 1, totalLessons: 27)
         Spacer()
     }
     .background(AppColors.background)

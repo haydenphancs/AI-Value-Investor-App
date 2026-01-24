@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct LevelSectionHeader: View {
-    let level: PathLevel
+    let level: JourneyLevel
     let completed: Int
     let total: Int
 

@@ -1,0 +1,94 @@
+//
+//  InsiderFlowSummaryCard.swift
+//  ios
+//
+//  Molecule: Summary card showing Informative Buys vs Informative Sells
+//  Displays totals and buyer/seller counts
+//
+
+import SwiftUI
+
+struct InsiderFlowSummaryCard: View {
+    let summary: InsiderActivitySummary
+
+    var body: some View {
+        VStack(spacing: AppSpacing.md) {
+            // Two-column layout: Informative Buys | Informative Sells
+            HStack(spacing: 0) {
+                // Informative Buys column
+                VStack(spacing: AppSpacing.xs) {
+                    Text("INFORMATIVE BUYS")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .tracking(0.5)
+
+                    Text(summary.formattedBuys)
+                        .font(AppTypography.title2)
+                        .foregroundColor(AppColors.bullish)
+
+                    Text(summary.buyersLabel)
+                        .font(AppTypography.footnote)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                .frame(maxWidth: .infinity)
+
+                // Vertical divider
+                Rectangle()
+                    .fill(AppColors.border)
+                    .frame(width: 1)
+                    .padding(.vertical, AppSpacing.sm)
+
+                // Informative Sells column
+                VStack(spacing: AppSpacing.xs) {
+                    Text("INFORMATIVE SELLS")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .tracking(0.5)
+
+                    Text(summary.formattedSells)
+                        .font(AppTypography.title2)
+                        .foregroundColor(AppColors.bearish)
+
+                    Text(summary.sellersLabel)
+                        .font(AppTypography.footnote)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .stroke(AppColors.border, lineWidth: 1)
+                )
+        )
+    }
+}
+
+#Preview {
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        VStack(spacing: AppSpacing.lg) {
+            InsiderFlowSummaryCard(
+                summary: InsiderActivitySummary.sampleData
+            )
+
+            // Alternative with different values
+            InsiderFlowSummaryCard(
+                summary: InsiderActivitySummary(
+                    periodDescription: "Last 6 Months",
+                    informativeBuysInMillions: 5.2,
+                    informativeSellsInMillions: 8.7,
+                    numBuyers: 1,
+                    numSellers: 3
+                )
+            )
+        }
+        .padding()
+    }
+}

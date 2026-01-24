@@ -538,15 +538,16 @@ struct RecentActivitiesFlowSummary {
 // MARK: - Recent Activities Data
 
 struct RecentActivitiesData {
-    let flowSummary: RecentActivitiesFlowSummary
-    let activities: [InstitutionalActivity]
+    let institutionalFlowSummary: RecentActivitiesFlowSummary
+    let institutionalActivities: [InstitutionalActivity]
+    let insiderActivities: InsiderActivitiesData
 
-    func sortedActivities(by option: RecentActivitiesSortOption) -> [InstitutionalActivity] {
+    func sortedInstitutionalActivities(by option: RecentActivitiesSortOption) -> [InstitutionalActivity] {
         switch option {
         case .byValue:
-            return activities.sorted { abs($0.changeInMillions) > abs($1.changeInMillions) }
+            return institutionalActivities.sorted { abs($0.changeInMillions) > abs($1.changeInMillions) }
         case .byDate:
-            return activities.sorted { $0.date > $1.date }
+            return institutionalActivities.sorted { $0.date > $1.date }
         }
     }
 }
@@ -641,7 +642,257 @@ extension InstitutionalActivity {
 
 extension RecentActivitiesData {
     static let sampleData = RecentActivitiesData(
-        flowSummary: RecentActivitiesFlowSummary.sampleData,
-        activities: InstitutionalActivity.sampleData
+        institutionalFlowSummary: RecentActivitiesFlowSummary.sampleData,
+        institutionalActivities: InstitutionalActivity.sampleData,
+        insiderActivities: InsiderActivitiesData.sampleData
+    )
+}
+
+// MARK: - Insider Activity Transaction Type
+
+/// Type of insider transaction with informative classification
+enum InsiderTransactionType: String, CaseIterable {
+    case informativeBuy = "Informative Buy"
+    case informativeSell = "Informative Sell"
+    case uninformativeBuy = "Uninformative Buy"
+    case uninformativeSell = "Uninformative Sell"
+
+    var isBuy: Bool {
+        self == .informativeBuy || self == .uninformativeBuy
+    }
+
+    var isInformative: Bool {
+        self == .informativeBuy || self == .informativeSell
+    }
+
+    var color: Color {
+        switch self {
+        case .informativeBuy:
+            return AppColors.bullish
+        case .informativeSell:
+            return AppColors.bearish
+        case .uninformativeBuy, .uninformativeSell:
+            return AppColors.textSecondary
+        }
+    }
+
+    var valueColor: Color {
+        isBuy ? AppColors.bullish : AppColors.bearish
+    }
+}
+
+// MARK: - Insider Activity Filter Option
+
+enum InsiderActivityFilterOption: String, CaseIterable {
+    case all = "All"
+    case informative = "Informative"
+}
+
+// MARK: - Insider Activity
+
+/// Represents a recent insider trading activity
+struct InsiderActivity: Identifiable {
+    let id = UUID()
+    let name: String  // e.g., "Tim Cook"
+    let title: String  // e.g., "CEO"
+    let date: Date
+    let changeInMillions: Double  // Positive = bought, Negative = sold
+    let transactionType: InsiderTransactionType
+    let priceAtTransaction: Double
+
+    var isPositive: Bool {
+        changeInMillions >= 0
+    }
+
+    var formattedChange: String {
+        let sign = changeInMillions >= 0 ? "+" : ""
+        if abs(changeInMillions) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", changeInMillions / 1000))B"
+        }
+        return "\(sign)$\(String(format: "%.2f", changeInMillions))M"
+    }
+
+    var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.string(from: date)
+    }
+
+    var formattedPrice: String {
+        if priceAtTransaction > 0 {
+            return String(format: "$%.2f", priceAtTransaction)
+        }
+        return "$0"
+    }
+
+    var changeColor: Color {
+        isPositive ? AppColors.bullish : AppColors.bearish
+    }
+}
+
+// MARK: - Insider Activity Summary
+
+/// Summary of insider trading activity (Informative Buys vs Sells)
+struct InsiderActivitySummary {
+    let periodDescription: String  // e.g., "Last 12 Months"
+    let informativeBuysInMillions: Double
+    let informativeSellsInMillions: Double
+    let numBuyers: Int
+    let numSellers: Int
+
+    var netInformativeFlowInMillions: Double {
+        informativeBuysInMillions - informativeSellsInMillions
+    }
+
+    var isNetPositive: Bool {
+        netInformativeFlowInMillions >= 0
+    }
+
+    var formattedBuys: String {
+        if informativeBuysInMillions >= 1000 {
+            return String(format: "$%.2fB", informativeBuysInMillions / 1000)
+        }
+        return String(format: "$%.2fM", informativeBuysInMillions)
+    }
+
+    var formattedSells: String {
+        if informativeSellsInMillions >= 1000 {
+            return String(format: "$%.2fB", informativeSellsInMillions / 1000)
+        }
+        return String(format: "$%.2fM", informativeSellsInMillions)
+    }
+
+    var formattedNetFlow: String {
+        let sign = netInformativeFlowInMillions >= 0 ? "▲ " : "▼ "
+        if abs(netInformativeFlowInMillions) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", abs(netInformativeFlowInMillions) / 1000))B"
+        }
+        return "\(sign)$\(String(format: "%.2f", abs(netInformativeFlowInMillions)))M"
+    }
+
+    var netFlowColor: Color {
+        isNetPositive ? AppColors.bullish : AppColors.bearish
+    }
+
+    var buyersLabel: String {
+        "\(numBuyers) Buyer\(numBuyers == 1 ? "" : "s")"
+    }
+
+    var sellersLabel: String {
+        "\(numSellers) Seller\(numSellers == 1 ? "" : "s")"
+    }
+}
+
+// MARK: - Insider Activities Data
+
+struct InsiderActivitiesData {
+    let summary: InsiderActivitySummary
+    let activities: [InsiderActivity]
+
+    func filteredActivities(by filter: InsiderActivityFilterOption) -> [InsiderActivity] {
+        switch filter {
+        case .all:
+            return activities
+        case .informative:
+            return activities.filter { $0.transactionType.isInformative }
+        }
+    }
+
+    func sortedActivities(by option: RecentActivitiesSortOption, filter: InsiderActivityFilterOption) -> [InsiderActivity] {
+        let filtered = filteredActivities(by: filter)
+        switch option {
+        case .byValue:
+            return filtered.sorted { abs($0.changeInMillions) > abs($1.changeInMillions) }
+        case .byDate:
+            return filtered.sorted { $0.date > $1.date }
+        }
+    }
+}
+
+// MARK: - Insider Activities Sample Data
+
+extension InsiderActivitySummary {
+    static let sampleData = InsiderActivitySummary(
+        periodDescription: "Last 12 Months",
+        informativeBuysInMillions: 11.34,
+        informativeSellsInMillions: 2.7,
+        numBuyers: 2,
+        numSellers: 4
+    )
+}
+
+extension InsiderActivity {
+    static let sampleData: [InsiderActivity] = [
+        InsiderActivity(
+            name: "Tim Cook",
+            title: "CEO",
+            date: InstitutionalActivity.createDate(12, 30, 2025),
+            changeInMillions: 3.43,
+            transactionType: .informativeBuy,
+            priceAtTransaction: 160.50
+        ),
+        InsiderActivity(
+            name: "Luca Maestri",
+            title: "President & CFO",
+            date: InstitutionalActivity.createDate(12, 20, 2025),
+            changeInMillions: 1.90,
+            transactionType: .informativeBuy,
+            priceAtTransaction: 161.50
+        ),
+        InsiderActivity(
+            name: "Monica Lozano",
+            title: "Director",
+            date: InstitutionalActivity.createDate(12, 19, 2025),
+            changeInMillions: 5.40,
+            transactionType: .uninformativeBuy,
+            priceAtTransaction: 0
+        ),
+        InsiderActivity(
+            name: "Jeff Williams",
+            title: "COO",
+            date: InstitutionalActivity.createDate(12, 19, 2025),
+            changeInMillions: -1.30,
+            transactionType: .uninformativeSell,
+            priceAtTransaction: 160.90
+        ),
+        InsiderActivity(
+            name: "Oscar Munoz",
+            title: "Director",
+            date: InstitutionalActivity.createDate(12, 19, 2025),
+            changeInMillions: -1.47,
+            transactionType: .informativeSell,
+            priceAtTransaction: 150.54
+        ),
+        InsiderActivity(
+            name: "Craig Federighi",
+            title: "SVP Software Engineering",
+            date: InstitutionalActivity.createDate(12, 15, 2025),
+            changeInMillions: -0.85,
+            transactionType: .uninformativeSell,
+            priceAtTransaction: 158.20
+        ),
+        InsiderActivity(
+            name: "Katherine Adams",
+            title: "General Counsel",
+            date: InstitutionalActivity.createDate(12, 10, 2025),
+            changeInMillions: 2.15,
+            transactionType: .informativeBuy,
+            priceAtTransaction: 155.80
+        ),
+        InsiderActivity(
+            name: "Deirdre O'Brien",
+            title: "SVP Retail + People",
+            date: InstitutionalActivity.createDate(12, 5, 2025),
+            changeInMillions: -0.92,
+            transactionType: .informativeSell,
+            priceAtTransaction: 152.30
+        )
+    ]
+}
+
+extension InsiderActivitiesData {
+    static let sampleData = InsiderActivitiesData(
+        summary: InsiderActivitySummary.sampleData,
+        activities: InsiderActivity.sampleData
     )
 }

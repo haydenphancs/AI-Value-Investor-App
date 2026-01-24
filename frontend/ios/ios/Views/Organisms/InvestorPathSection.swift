@@ -21,7 +21,16 @@ struct InvestorPathSection: View {
                 onSeeAll?()
             }
 
-            // Level badges in a horizontal row
+            // Journey Progress Card (if available) - now on top
+            if let track = journeyTrack {
+                JourneyProgressCard(
+                    track: track,
+                    onContinue: onContinue,
+                    onItemTap: onItemTap
+                )
+            }
+
+            // Level badges in a horizontal row - now below
             HStack(spacing: 0) {
                 ForEach(InvestorLevel.allCases, id: \.rawValue) { level in
                     levelBadgeWithConnector(level: level)
@@ -30,15 +39,6 @@ struct InvestorPathSection: View {
             .padding(AppSpacing.lg)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.extraLarge)
-
-            // Journey Progress Card (if available)
-            if let track = journeyTrack {
-                JourneyProgressCard(
-                    track: track,
-                    onContinue: onContinue,
-                    onItemTap: onItemTap
-                )
-            }
         }
         .padding(.horizontal, AppSpacing.lg)
     }

@@ -34,7 +34,7 @@ struct InsiderFlowSummaryCard: View {
 
                 // Vertical divider
                 Rectangle()
-                    .fill(AppColors.border)
+                    .fill(AppColors.textMuted.opacity(0.3))
                     .frame(width: 1)
                     .padding(.vertical, AppSpacing.sm)
 
@@ -62,7 +62,7 @@ struct InsiderFlowSummaryCard: View {
                 .fill(AppColors.cardBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .stroke(AppColors.border, lineWidth: 1)
+                        .stroke(AppColors.textMuted.opacity(0.3), lineWidth: 1)
                 )
         )
     }

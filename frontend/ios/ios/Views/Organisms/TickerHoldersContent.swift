@@ -3,7 +3,7 @@
 //  ios
 //
 //  Organism: Holders tab content combining all holder-related sections for Ticker Detail
-//  Includes Shareholder Breakdown and Smart Money sections
+//  Includes Shareholder Breakdown, Smart Money, and Recent Activities sections
 //
 
 import SwiftUI
@@ -20,6 +20,11 @@ struct TickerHoldersContent: View {
 
             // Smart Money Section
             SmartMoneySection(holdersData: holdersData)
+
+            // Recent Activities Section
+            RecentActivitiesSection(
+                data: holdersData.recentActivities
+            )
 
             // Bottom spacing for AI bar
             Spacer()

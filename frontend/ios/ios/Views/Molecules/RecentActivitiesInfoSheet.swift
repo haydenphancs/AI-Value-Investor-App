@@ -2,8 +2,8 @@
 //  RecentActivitiesInfoSheet.swift
 //  ios
 //
-//  Molecule: Educational sheet explaining recent institutional activities
-//  Provides guidance for novice investors on interpreting institutional trading
+//  Molecule: Educational sheet explaining recent institutional and insider activities
+//  Provides guidance for novice investors on interpreting trading data
 //
 
 import SwiftUI
@@ -18,14 +18,23 @@ struct RecentActivitiesInfoSheet: View {
                     // Header
                     headerSection
 
+                    // Institutions Section
+                    institutionsSectionHeader
+
                     // What is This Section
                     whatIsThisSection
 
                     // Understanding the Flow Bar
                     flowBarSection
 
-                    // Reading the Activity List
-                    activityListSection
+                    // Insiders Section
+                    insidersSectionHeader
+
+                    // What are Insider Activities
+                    whatAreInsiderActivitiesSection
+
+                    // Informative vs Uninformative
+                    informativeVsUninformativeSection
 
                     // Key Insights
                     keyInsightsSection
@@ -58,12 +67,12 @@ struct RecentActivitiesInfoSheet: View {
                     .font(.system(size: 24))
                     .foregroundColor(AppColors.primaryBlue)
 
-                Text("Understanding Institutional Activity")
+                Text("Understanding Recent Activities")
                     .font(AppTypography.title2)
                     .foregroundColor(AppColors.textPrimary)
             }
 
-            Text("This section shows recent buying and selling activity by large institutional investors, based on their required SEC filings.")
+            Text("This section tracks recent buying and selling activity by institutional investors and company insiders—two key groups whose actions can signal future stock performance.")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
         }
@@ -75,7 +84,35 @@ struct RecentActivitiesInfoSheet: View {
         )
     }
 
-    // MARK: - What is This Section
+    // MARK: - Section Headers
+
+    private var institutionsSectionHeader: some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "building.columns.fill")
+                .font(.system(size: 18))
+                .foregroundColor(AppColors.primaryBlue)
+
+            Text("Institutions Tab")
+                .font(AppTypography.title3)
+                .foregroundColor(AppColors.textPrimary)
+        }
+        .padding(.top, AppSpacing.md)
+    }
+
+    private var insidersSectionHeader: some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "person.fill.checkmark")
+                .font(.system(size: 18))
+                .foregroundColor(AppColors.primaryBlue)
+
+            Text("Insiders Tab")
+                .font(AppTypography.title3)
+                .foregroundColor(AppColors.textPrimary)
+        }
+        .padding(.top, AppSpacing.md)
+    }
+
+    // MARK: - What is This Section (Institutions)
 
     private var whatIsThisSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -150,37 +187,66 @@ struct RecentActivitiesInfoSheet: View {
         }
     }
 
-    // MARK: - Activity List Section
+    // MARK: - What Are Insider Activities Section
 
-    private var activityListSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Text("Reading the Activity List")
+    private var whatAreInsiderActivitiesSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("What Are Insider Activities?")
                 .font(AppTypography.headline)
                 .foregroundColor(AppColors.textPrimary)
 
+            Text("Company insiders—executives, directors, and major shareholders—must report their stock trades to the SEC within 2 business days via Form 4. These filings reveal when people with deep company knowledge are buying or selling.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Unlike institutional filings, insider trades are reported almost immediately, giving you a more timely view of activity.")
+                .font(AppTypography.callout)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Informative vs Uninformative Section
+
+    private var informativeVsUninformativeSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            Text("Informative vs. Uninformative Trades")
+                .font(AppTypography.headline)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Not all insider trades carry the same weight. We classify trades based on their likely motivation:")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             VStack(spacing: AppSpacing.md) {
-                activityExplanation(
-                    icon: "building.columns.fill",
-                    title: "Institution Name & Category",
-                    description: "The name of the investing firm and their type (e.g., Asset Management, Mutual Funds)."
+                tradeTypeCard(
+                    color: AppColors.bullish,
+                    title: "Informative Buy",
+                    description: "An insider voluntarily purchases shares on the open market with their own money. This is one of the strongest bullish signals—they believe the stock will rise.",
+                    example: "CEO uses personal funds to buy $500K in shares"
                 )
 
-                activityExplanation(
-                    icon: "calendar",
-                    title: "Filing Date",
-                    description: "When the SEC filing was submitted. Note: 13F filings are delayed up to 45 days after quarter end."
+                tradeTypeCard(
+                    color: AppColors.bearish,
+                    title: "Informative Sell",
+                    description: "An insider voluntarily sells shares not related to scheduled plans. May indicate concerns about the stock, though could also be diversification.",
+                    example: "CFO sells shares outside of a 10b5-1 plan"
                 )
 
-                activityExplanation(
-                    icon: "plus.forwardslash.minus",
-                    title: "Change Value & Percent",
-                    description: "The dollar amount and percentage change in their position. Green = increased, Red = decreased."
+                tradeTypeCard(
+                    color: AppColors.textSecondary,
+                    title: "Uninformative Buy",
+                    description: "Shares acquired through compensation, stock options, or grants. Not a signal of conviction since they didn't use their own money.",
+                    example: "Director receives annual stock grant"
                 )
 
-                activityExplanation(
-                    icon: "chart.bar.fill",
-                    title: "Total Held",
-                    description: "The total current value of their position in the stock."
+                tradeTypeCard(
+                    color: AppColors.textSecondary,
+                    title: "Uninformative Sell",
+                    description: "Scheduled sales (10b5-1 plans), tax-related sales, or option exercises. These are routine and don't indicate sentiment.",
+                    example: "Automatic quarterly sale per preset plan"
                 )
             }
             .padding(AppSpacing.lg)
@@ -191,24 +257,40 @@ struct RecentActivitiesInfoSheet: View {
         }
     }
 
-    private func activityExplanation(icon: String, title: String, description: String) -> some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            Image(systemName: icon)
-                .font(.system(size: 16))
-                .foregroundColor(AppColors.primaryBlue)
-                .frame(width: 24)
+    private func tradeTypeCard(color: Color, title: String, description: String, example: String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.sm) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 10, height: 10)
 
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
                     .font(AppTypography.calloutBold)
-                    .foregroundColor(AppColors.textPrimary)
+                    .foregroundColor(color == AppColors.textSecondary ? AppColors.textPrimary : color)
+            }
 
-                Text(description)
+            Text(description)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: AppSpacing.xs) {
+                Text("Example:")
                     .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(AppColors.textMuted)
+                    .italic()
+
+                Text(example)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .italic()
             }
         }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                .fill(AppColors.background)
+        )
     }
 
     // MARK: - Key Insights Section
@@ -222,26 +304,26 @@ struct RecentActivitiesInfoSheet: View {
             VStack(spacing: AppSpacing.md) {
                 insightCard(
                     number: "1",
-                    title: "Institutional Buying is Bullish",
-                    description: "When multiple large institutions increase positions, it signals confidence in the stock's prospects."
+                    title: "Informative Buying is the Strongest Signal",
+                    description: "When insiders spend their own money to buy shares, they're putting skin in the game. Multiple insiders buying is especially bullish."
                 )
 
                 insightCard(
                     number: "2",
-                    title: "Watch the Net Flow",
-                    description: "Positive net flow means more money coming in than going out—a bullish signal. Persistent negative flow can indicate trouble."
+                    title: "Focus on the Net Flow",
+                    description: "Positive net informative flow (more buying than selling) suggests insiders are confident. Persistent negative flow may be a warning sign."
                 )
 
                 insightCard(
                     number: "3",
-                    title: "Size Matters",
-                    description: "Large position changes by respected funds (Vanguard, BlackRock, Fidelity) often carry more weight than smaller funds."
+                    title: "Filter to \"Informative\" for Clarity",
+                    description: "Use the filter to see only meaningful trades. Uninformative trades add noise but don't indicate sentiment."
                 )
 
                 insightCard(
                     number: "4",
-                    title: "Look for Patterns",
-                    description: "A single quarter's data can be noisy. Look at trends over multiple quarters for clearer signals."
+                    title: "Consider the Role",
+                    description: "CEO and CFO trades often carry more weight than directors, as they have the deepest knowledge of the company's prospects."
                 )
             }
         }
@@ -292,10 +374,11 @@ struct RecentActivitiesInfoSheet: View {
             }
 
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                considerationRow("13F filings are delayed 45 days after quarter end, so data may be outdated.")
-                considerationRow("Institutions may have already changed positions since filing.")
-                considerationRow("Index funds (like Vanguard Total Market) buy automatically, not based on conviction.")
-                considerationRow("Always combine with other research—institutional activity is just one data point.")
+                considerationRow("Institutional 13F filings are delayed 45 days after quarter end.")
+                considerationRow("Insider Form 4 filings are reported within 2 business days.")
+                considerationRow("Index funds buy automatically, not based on conviction.")
+                considerationRow("Insiders may sell for personal reasons (taxes, diversification, home purchase).")
+                considerationRow("Always combine with other research—activity data is just one signal.")
             }
         }
         .padding(AppSpacing.lg)

@@ -16,14 +16,13 @@ struct TickerDetailCompanyProfileSection: View {
     private let collapsedLineLimit: Int = 3
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Section title inside card styling
             Text("Company Profile")
-                .font(AppTypography.headline)
+                .font(AppTypography.title3)
                 .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
 
-            // Profile card
+            // Profile content
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 // Description with expandable text
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -106,11 +105,12 @@ struct TickerDetailCompanyProfileSection: View {
                     .buttonStyle(PlainButtonStyle())
                 }
             }
-            .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
-            .padding(.horizontal, AppSpacing.lg)
         }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+        )
     }
 
     // Helper to get additional profile info (can be extended based on available data)

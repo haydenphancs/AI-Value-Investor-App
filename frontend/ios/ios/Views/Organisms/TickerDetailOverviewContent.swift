@@ -14,7 +14,7 @@ struct TickerDetailOverviewContent: View {
     var onRelatedTickerTap: ((RelatedTicker) -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.xxl) {
+        VStack(spacing: AppSpacing.lg) {
             // Key Statistics
             TickerDetailKeyStatsSection(statisticsGroups: tickerData.keyStatisticsGroups)
 
@@ -46,6 +46,7 @@ struct TickerDetailOverviewContent: View {
             Spacer()
                 .frame(height: 120)
         }
+        .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)
     }
 }

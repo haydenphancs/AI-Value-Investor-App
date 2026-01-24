@@ -14,12 +14,11 @@ struct TickerDetailPerformanceSection: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: AppSpacing.sm), count: 3)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Section title inside card styling
             Text("Performance")
-                .font(AppTypography.headline)
+                .font(AppTypography.title3)
                 .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
 
             // Performance grid
             LazyVGrid(columns: columns, spacing: AppSpacing.sm) {
@@ -27,8 +26,12 @@ struct TickerDetailPerformanceSection: View {
                     PerformanceItem(period: period)
                 }
             }
-            .padding(.horizontal, AppSpacing.lg)
         }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+        )
     }
 }
 

@@ -17,34 +17,34 @@ enum LearnTab: String, CaseIterable {
 
 // MARK: - Investor Level
 enum InvestorLevel: String, CaseIterable {
-    case beginner = "Beginner"
+    case foundation = "Foundation"
     case analyst = "Analyst"
-    case modern = "Modern"
+    case strategist = "Strategist"
     case master = "Master"
 
     var iconName: String {
         switch self {
-        case .beginner: return "graduationcap.fill"
+        case .foundation: return "graduationcap.fill"
         case .analyst: return "chart.bar.fill"
-        case .modern: return "bolt.fill"
+        case .strategist: return "bolt.fill"
         case .master: return "crown.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .beginner: return Color(hex: "22C55E")
+        case .foundation: return Color(hex: "22C55E")
         case .analyst: return Color(hex: "3B82F6")
-        case .modern: return Color(hex: "A855F7")
+        case .strategist: return Color(hex: "A855F7")
         case .master: return Color(hex: "F59E0B")
         }
     }
 
     var index: Int {
         switch self {
-        case .beginner: return 0
+        case .foundation: return 0
         case .analyst: return 1
-        case .modern: return 2
+        case .strategist: return 2
         case .master: return 3
         }
     }
@@ -159,7 +159,7 @@ struct CommunityDiscussion: Identifiable {
 // MARK: - Sample Data Extensions
 extension JourneyTrack {
     static let sampleBeginner = JourneyTrack(
-        level: .beginner,
+        level: .foundation,
         completedCount: 3,
         totalCount: 12,
         items: [

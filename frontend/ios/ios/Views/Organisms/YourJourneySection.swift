@@ -15,21 +15,9 @@ struct YourJourneySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
-            HStack {
-                Text("Your Journey")
-                    .font(AppTypography.title3)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Button(action: {
-                    onContinue?()
-                }) {
-                    Text("Continue")
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
-            }
+            Text("Your Journey")
+                .font(AppTypography.title3)
+                .foregroundColor(AppColors.textPrimary)
 
             // Progress card
             JourneyProgressCard(

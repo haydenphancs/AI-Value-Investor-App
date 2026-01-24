@@ -55,19 +55,21 @@ struct JourneyProgressCard: View {
             }
             .frame(height: 8)
 
-            // Journey items
+            // Journey items - show only active item
             VStack(spacing: 0) {
                 ForEach(Array(track.items.enumerated()), id: \.element.id) { index, item in
-                    JourneyItemRow(
-                        item: item,
-                        isLast: index == track.items.count - 1
-                    ) {
-                        onItemTap?(item)
+                    if item.isActive {
+                        JourneyItemRow(
+                            item: item,
+                            isLast: true
+                        ) {
+                            onItemTap?(item)
+                        }
                     }
                 }
             }
 
-            // Continue button
+            // Continue Learning button
             Button(action: {
                 onContinue?()
             }) {

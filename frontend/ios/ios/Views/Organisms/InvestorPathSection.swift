@@ -9,7 +9,10 @@ import SwiftUI
 
 struct InvestorPathSection: View {
     let currentLevel: InvestorLevel
+    let journeyTrack: JourneyTrack?
     var onSeeAll: (() -> Void)?
+    var onContinue: (() -> Void)?
+    var onItemTap: ((JourneyItem) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -27,6 +30,15 @@ struct InvestorPathSection: View {
             .padding(AppSpacing.lg)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.extraLarge)
+
+            // Journey Progress Card (if available)
+            if let track = journeyTrack {
+                JourneyProgressCard(
+                    track: track,
+                    onContinue: onContinue,
+                    onItemTap: onItemTap
+                )
+            }
         }
         .padding(.horizontal, AppSpacing.lg)
     }
@@ -53,7 +65,10 @@ struct InvestorPathSection: View {
 
 #Preview {
     VStack {
-        InvestorPathSection(currentLevel: .beginner)
+        InvestorPathSection(
+            currentLevel: .foundation,
+            journeyTrack: JourneyTrack.sampleBeginner
+        )
         Spacer()
     }
     .background(AppColors.background)

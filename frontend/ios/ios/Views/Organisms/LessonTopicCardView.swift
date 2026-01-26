@@ -33,6 +33,7 @@ struct LessonTopicCardView: View {
                     // Header with lesson label and close button
                     headerView
                         .padding(.top, AppSpacing.sm)
+                        .zIndex(100) // Ensure header stays on top
 
                     // Progress bar
                     LessonStoryProgressBar(
@@ -42,10 +43,32 @@ struct LessonTopicCardView: View {
                     )
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.md)
+                    .zIndex(99)
 
-                    // Card content
+                    // Card content with tap zones overlay
                     ZStack {
                         cardContentView
+                        
+                        // Tap zones for navigation (only over content area)
+                        HStack(spacing: 0) {
+                            // Left tap zone - go back
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    goToPrevious()
+                                }
+                                .frame(width: geometry.size.width * 0.3)
+
+                            Spacer()
+
+                            // Right tap zone - go forward
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    goToNext()
+                                }
+                                .frame(width: geometry.size.width * 0.3)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -53,28 +76,8 @@ struct LessonTopicCardView: View {
                     if !isCompletionCard {
                         bottomControlsView
                             .padding(.bottom, AppSpacing.xxxl)
+                            .zIndex(98)
                     }
-                }
-
-                // Tap zones for navigation
-                HStack(spacing: 0) {
-                    // Left tap zone - go back
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            goToPrevious()
-                        }
-                        .frame(width: geometry.size.width * 0.3)
-
-                    Spacer()
-
-                    // Right tap zone - go forward
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            goToNext()
-                        }
-                        .frame(width: geometry.size.width * 0.3)
                 }
             }
             .gesture(
@@ -144,16 +147,18 @@ struct LessonTopicCardView: View {
             Spacer()
 
             Button(action: {
-                voiceManager.stop()
-                onDismiss?()
+                handleClose()
             }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain) // Ensure no interference from default button style
         }
         .padding(.horizontal, AppSpacing.lg)
+        .allowsHitTesting(true)
     }
 
     @ViewBuilder
@@ -221,6 +226,15 @@ struct LessonTopicCardView: View {
     }
 
     // MARK: - Voice Reading
+
+    private func handleClose() {
+        // Stop all ongoing activities
+        voiceManager.stop()
+        stopAutoAdvanceTimer()
+        
+        // Dismiss the view
+        onDismiss?()
+    }
 
     private func startReadingCurrentCard() {
         stopAutoAdvanceTimer()

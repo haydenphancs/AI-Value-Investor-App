@@ -125,6 +125,40 @@ struct InvestorJourneyView: View {
             }
         }
         .navigationBarHidden(true)
+        .fullScreenCover(isPresented: $viewModel.showLessonStory) {
+            if let lesson = viewModel.selectedLesson {
+                LessonTopicCardView(
+                    storyContent: viewModel.getStoryContent(for: lesson),
+                    onDismiss: {
+                        viewModel.dismissLessonStory()
+                    },
+                    onCTATapped: { destination in
+                        viewModel.dismissLessonStory()
+                        // Handle CTA navigation based on destination
+                        handleCTANavigation(destination)
+                    }
+                )
+            }
+        }
+    }
+
+    private func handleCTANavigation(_ destination: LessonCTADestination) {
+        switch destination {
+        case .analyzeStock:
+            // Navigate to stock analysis - implement based on your navigation
+            print("Navigate to stock analysis")
+        case .viewPortfolio:
+            // Navigate to portfolio
+            print("Navigate to portfolio")
+        case .readArticle(let articleId):
+            print("Navigate to article: \(articleId)")
+        case .watchVideo(let videoId):
+            print("Navigate to video: \(videoId)")
+        case .practiceQuiz:
+            print("Navigate to quiz")
+        case .custom(let action):
+            print("Custom action: \(action)")
+        }
     }
 }
 

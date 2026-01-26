@@ -3,6 +3,7 @@
 //  ios
 //
 //  Molecule: Title card for lesson story - displays main title and highlighted subtitle
+//  Supports AI voice reading with word-by-word highlighting
 //
 
 import SwiftUI
@@ -10,6 +11,13 @@ import SwiftUI
 struct LessonTitleCard: View {
     let title: String
     let subtitleSegments: [HighlightedTextSegment]
+    let currentWordRange: NSRange
+    let isReading: Bool
+
+    // Computed full subtitle text for reading
+    var subtitleText: String {
+        subtitleSegments.map { $0.text }.joined()
+    }
 
     var body: some View {
         VStack(spacing: AppSpacing.xl) {
@@ -24,26 +32,19 @@ struct LessonTitleCard: View {
                 .lineSpacing(4)
                 .padding(.horizontal, AppSpacing.xl)
 
-            // Subtitle with highlighted segments
-            highlightedText(subtitleSegments)
-                .font(.system(size: 20, weight: .regular))
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .padding(.horizontal, AppSpacing.xxl)
+            // Subtitle with reading highlight
+            ReadingHighlightSegmentedText(
+                segments: subtitleSegments,
+                currentWordRange: currentWordRange,
+                isReading: isReading,
+                font: .system(size: 20, weight: .regular)
+            )
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, AppSpacing.xxl)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    @ViewBuilder
-    private func highlightedText(_ segments: [HighlightedTextSegment]) -> some View {
-        segments.reduce(Text("")) { result, segment in
-            result + Text(segment.text)
-                .foregroundColor(
-                    segment.isHighlighted ? AppColors.accentCyan : AppColors.textSecondary
-                )
-        }
     }
 }
 
@@ -57,7 +58,9 @@ struct LessonTitleCard: View {
             subtitleSegments: [
                 HighlightedTextSegment("Why", highlighted: true),
                 HighlightedTextSegment(" Warren Buffett never pays retail price.")
-            ]
+            ],
+            currentWordRange: NSRange(location: 4, length: 6), // "Warren"
+            isReading: true
         )
     }
     .preferredColorScheme(.dark)

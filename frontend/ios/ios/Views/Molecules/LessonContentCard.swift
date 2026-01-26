@@ -3,6 +3,7 @@
 //  ios
 //
 //  Molecule: Content card for lesson story - displays optional image and highlighted text content
+//  Supports AI voice reading with word-by-word highlighting
 //
 
 import SwiftUI
@@ -10,6 +11,13 @@ import SwiftUI
 struct LessonContentCard: View {
     let imageName: String?
     let contentSegments: [HighlightedTextSegment]
+    let currentWordRange: NSRange
+    let isReading: Bool
+
+    // Computed full content text for reading
+    var contentText: String {
+        contentSegments.map { $0.text }.joined()
+    }
 
     var body: some View {
         VStack(spacing: AppSpacing.xxxl) {
@@ -22,12 +30,15 @@ struct LessonContentCard: View {
             Spacer()
                 .frame(height: AppSpacing.xl)
 
-            // Content text with highlighted segments
-            highlightedText(contentSegments)
-                .font(.system(size: 20, weight: .regular))
-                .multilineTextAlignment(.leading)
-                .lineSpacing(6)
-                .padding(.horizontal, AppSpacing.xxl)
+            // Content text with reading highlight
+            ReadingHighlightSegmentedText(
+                segments: contentSegments,
+                currentWordRange: currentWordRange,
+                isReading: isReading,
+                font: .system(size: 20, weight: .regular)
+            )
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, AppSpacing.xxl)
 
             Spacer()
         }
@@ -53,16 +64,6 @@ struct LessonContentCard: View {
                 .frame(height: 150)
         }
     }
-
-    @ViewBuilder
-    private func highlightedText(_ segments: [HighlightedTextSegment]) -> some View {
-        segments.reduce(Text("")) { result, segment in
-            result + Text(segment.text)
-                .foregroundColor(
-                    segment.isHighlighted ? AppColors.accentCyan : AppColors.textSecondary
-                )
-        }
-    }
 }
 
 #Preview {
@@ -76,7 +77,9 @@ struct LessonContentCard: View {
                 HighlightedTextSegment("Price is what the "),
                 HighlightedTextSegment("market", highlighted: true),
                 HighlightedTextSegment(" asks. Value is what the business is worth. The gap between them is where investing opportunities are found.")
-            ]
+            ],
+            currentWordRange: NSRange(location: 18, length: 6), // "market"
+            isReading: true
         )
     }
     .preferredColorScheme(.dark)

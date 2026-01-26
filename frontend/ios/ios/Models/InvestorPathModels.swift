@@ -409,3 +409,180 @@ extension InvestorQuote {
         author: "Warren Buffett"
     )
 }
+
+// MARK: - Lesson Topic Card Models
+
+/// Represents a text segment that can be highlighted in a different color
+struct HighlightedTextSegment: Identifiable {
+    let id = UUID()
+    let text: String
+    let isHighlighted: Bool
+
+    init(_ text: String, highlighted: Bool = false) {
+        self.text = text
+        self.isHighlighted = highlighted
+    }
+}
+
+/// Type of content card in a lesson story
+enum LessonCardType {
+    case title       // First card with big title and subtitle
+    case content     // Middle cards with image and text
+    case completion  // Final card with checkmark and CTA
+}
+
+/// Represents a single card/page in a lesson story
+struct LessonTopicCard: Identifiable {
+    let id = UUID()
+    let cardType: LessonCardType
+
+    // Title card properties
+    var title: String?
+    var subtitleSegments: [HighlightedTextSegment]?
+
+    // Content card properties
+    var imageName: String?  // Optional image asset name
+    var contentSegments: [HighlightedTextSegment]?
+
+    // Completion card properties
+    var completionTitle: String?
+    var completionSubtitle: String?
+    var ctaButtonTitle: String?
+    var ctaDestination: LessonCTADestination?
+
+    // Common properties
+    var audioText: String?  // Text for AI voice to read
+}
+
+/// Destination for the CTA button on completion card
+enum LessonCTADestination {
+    case analyzeStock
+    case viewPortfolio
+    case readArticle(String)
+    case watchVideo(String)
+    case practiceQuiz
+    case custom(String)
+
+    var defaultTitle: String {
+        switch self {
+        case .analyzeStock: return "Analyze a Stock"
+        case .viewPortfolio: return "View Portfolio"
+        case .readArticle: return "Read Article"
+        case .watchVideo: return "Watch Video"
+        case .practiceQuiz: return "Take Quiz"
+        case .custom(let title): return title
+        }
+    }
+}
+
+/// Full lesson story content
+struct LessonStoryContent: Identifiable {
+    let id = UUID()
+    let lessonLabel: String      // e.g., "LESSON 1: THE BUFFETT WAY"
+    let lessonNumber: Int
+    let totalLessonsInLevel: Int
+    let estimatedMinutes: Int
+    let cards: [LessonTopicCard]
+
+    var totalCards: Int { cards.count }
+}
+
+// MARK: - Lesson Topic Card Builders
+
+extension LessonTopicCard {
+    /// Create a title card
+    static func titleCard(
+        title: String,
+        subtitle: [HighlightedTextSegment],
+        audioText: String? = nil
+    ) -> LessonTopicCard {
+        LessonTopicCard(
+            cardType: .title,
+            title: title,
+            subtitleSegments: subtitle,
+            audioText: audioText
+        )
+    }
+
+    /// Create a content card with optional image
+    static func contentCard(
+        imageName: String? = nil,
+        content: [HighlightedTextSegment],
+        audioText: String? = nil
+    ) -> LessonTopicCard {
+        LessonTopicCard(
+            cardType: .content,
+            imageName: imageName,
+            contentSegments: content,
+            audioText: audioText
+        )
+    }
+
+    /// Create a completion card
+    static func completionCard(
+        title: String = "You're ready.",
+        subtitle: String = "You've learned the core idea. Practice with a real stock to reinforce it.",
+        ctaTitle: String? = nil,
+        ctaDestination: LessonCTADestination = .analyzeStock
+    ) -> LessonTopicCard {
+        LessonTopicCard(
+            cardType: .completion,
+            completionTitle: title,
+            completionSubtitle: subtitle,
+            ctaButtonTitle: ctaTitle ?? ctaDestination.defaultTitle,
+            ctaDestination: ctaDestination
+        )
+    }
+}
+
+// MARK: - Sample Lesson Story Data
+
+extension LessonStoryContent {
+    /// Sample "The Buffett Way" lesson content
+    static let buffettWaySample = LessonStoryContent(
+        lessonLabel: "LESSON 1: THE BUFFETT WAY",
+        lessonNumber: 1,
+        totalLessonsInLevel: 5,
+        estimatedMinutes: 2,
+        cards: [
+            // Card 1: Title
+            .titleCard(
+                title: "Buying Dollar Bills for 50 Cents",
+                subtitle: [
+                    .init("Why", highlighted: true),
+                    .init(" Warren Buffett never pays retail price.")
+                ],
+                audioText: "Why Warren Buffett never pays retail price."
+            ),
+
+            // Card 2: Content about price vs value
+            .contentCard(
+                imageName: nil, // Placeholder for image
+                content: [
+                    .init("Price is what the "),
+                    .init("market", highlighted: true),
+                    .init(" asks. Value is what the business is worth. The gap between them is where investing opportunities are found.")
+                ],
+                audioText: "Price is what the market asks. Value is what the business is worth. The gap between them is where investing opportunities are found."
+            ),
+
+            // Card 3: Content about emotion vs fundamentals
+            .contentCard(
+                imageName: nil, // Placeholder for image
+                content: [
+                    .init("Price "),
+                    .init("changes", highlighted: true),
+                    .init(" with emotion. Value is anchored in fundamentals. Knowing the difference helps you invest, not speculate.")
+                ],
+                audioText: "Price changes with emotion. Value is anchored in fundamentals. Knowing the difference helps you invest, not speculate."
+            ),
+
+            // Card 4: Completion
+            .completionCard(
+                title: "You're ready.",
+                subtitle: "You've learned the core idea. Practice with a real stock to reinforce it.",
+                ctaDestination: .analyzeStock
+            )
+        ]
+    )
+}

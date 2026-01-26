@@ -4,6 +4,7 @@
 //
 //  Organism: Full-screen lesson story card view with swipeable cards,
 //  AI voice orb, and progress tracking (Instagram Stories style)
+//  Includes text-to-speech with word-by-word highlighting
 //
 
 import SwiftUI
@@ -13,14 +14,13 @@ struct LessonTopicCardView: View {
     var onDismiss: (() -> Void)?
     var onCTATapped: ((LessonCTADestination) -> Void)?
 
+    @StateObject private var voiceManager = AIVoiceManager.shared
     @State private var currentIndex: Int = 0
-    @State private var isPlaying: Bool = true
     @State private var cardProgress: CGFloat = 0
     @State private var dragOffset: CGFloat = 0
 
-    // Timer for auto-advance
-    @State private var timer: Timer?
-    private let cardDuration: TimeInterval = 8.0  // seconds per card
+    // Timer for auto-advance after voice finishes
+    @State private var autoAdvanceTimer: Timer?
 
     var body: some View {
         GeometryReader { geometry in
@@ -88,10 +88,20 @@ struct LessonTopicCardView: View {
             )
         }
         .onAppear {
-            startTimer()
+            startReadingCurrentCard()
         }
         .onDisappear {
-            stopTimer()
+            voiceManager.stop()
+            stopAutoAdvanceTimer()
+        }
+        .onChange(of: currentIndex) { _, _ in
+            startReadingCurrentCard()
+        }
+        .onChange(of: voiceManager.progress) { _, newProgress in
+            // Sync card progress with voice progress
+            if !isCompletionCard {
+                cardProgress = newProgress
+            }
         }
     }
 
@@ -103,6 +113,23 @@ struct LessonTopicCardView: View {
 
     private var isCompletionCard: Bool {
         currentCard.cardType == .completion
+    }
+
+    /// Get the text to read for the current card
+    private var currentAudioText: String {
+        if let audioText = currentCard.audioText {
+            return audioText
+        }
+
+        // Fall back to constructing from segments
+        switch currentCard.cardType {
+        case .title:
+            return currentCard.subtitleSegments?.map { $0.text }.joined() ?? ""
+        case .content:
+            return currentCard.contentSegments?.map { $0.text }.joined() ?? ""
+        case .completion:
+            return ""
+        }
     }
 
     // MARK: - Subviews
@@ -117,6 +144,7 @@ struct LessonTopicCardView: View {
             Spacer()
 
             Button(action: {
+                voiceManager.stop()
                 onDismiss?()
             }) {
                 Image(systemName: "xmark")
@@ -134,14 +162,18 @@ struct LessonTopicCardView: View {
         case .title:
             LessonTitleCard(
                 title: currentCard.title ?? "",
-                subtitleSegments: currentCard.subtitleSegments ?? []
+                subtitleSegments: currentCard.subtitleSegments ?? [],
+                currentWordRange: voiceManager.currentWordRange,
+                isReading: voiceManager.isPlaying
             )
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
 
         case .content:
             LessonContentCard(
                 imageName: currentCard.imageName,
-                contentSegments: currentCard.contentSegments ?? []
+                contentSegments: currentCard.contentSegments ?? [],
+                currentWordRange: voiceManager.currentWordRange,
+                isReading: voiceManager.isPlaying
             )
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
 
@@ -168,8 +200,8 @@ struct LessonTopicCardView: View {
 
     private var bottomControlsView: some View {
         VStack(spacing: AppSpacing.xl) {
-            // AI Voice Orb
-            AIVoiceOrb(isAnimating: isPlaying, size: 100)
+            // AI Voice Orb - animated when speaking
+            AIVoiceOrb(isAnimating: voiceManager.isPlaying, size: 100)
 
             // Play/Pause button
             Button(action: {
@@ -180,7 +212,7 @@ struct LessonTopicCardView: View {
                         .fill(Color.white.opacity(0.1))
                         .frame(width: 44, height: 44)
 
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: voiceManager.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(AppColors.textPrimary)
                 }
@@ -188,27 +220,74 @@ struct LessonTopicCardView: View {
         }
     }
 
+    // MARK: - Voice Reading
+
+    private func startReadingCurrentCard() {
+        stopAutoAdvanceTimer()
+
+        guard !isCompletionCard else {
+            // No voice for completion card
+            cardProgress = 1.0
+            return
+        }
+
+        let textToRead = currentAudioText
+        guard !textToRead.isEmpty else {
+            cardProgress = 1.0
+            scheduleAutoAdvance(delay: 2.0)
+            return
+        }
+
+        cardProgress = 0
+
+        // Start speaking with completion handler
+        voiceManager.speak(textToRead) { [self] in
+            // Voice finished, wait a moment then auto-advance
+            scheduleAutoAdvance(delay: 1.5)
+        }
+    }
+
+    private func scheduleAutoAdvance(delay: TimeInterval) {
+        stopAutoAdvanceTimer()
+
+        autoAdvanceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
+            Task { @MainActor in
+                if currentIndex < storyContent.totalCards - 1 {
+                    goToNext()
+                }
+            }
+        }
+    }
+
+    private func stopAutoAdvanceTimer() {
+        autoAdvanceTimer?.invalidate()
+        autoAdvanceTimer = nil
+    }
+
     // MARK: - Navigation
 
     private func goToNext() {
         guard currentIndex < storyContent.totalCards - 1 else {
-            // Already at last card
             return
         }
+
+        voiceManager.stop()
+        stopAutoAdvanceTimer()
 
         withAnimation(.easeInOut(duration: 0.3)) {
             currentIndex += 1
             cardProgress = 0
         }
-
-        restartTimer()
     }
 
     private func goToPrevious() {
+        voiceManager.stop()
+        stopAutoAdvanceTimer()
+
         guard currentIndex > 0 else {
-            // Reset current card progress
+            // Restart current card
             cardProgress = 0
-            restartTimer()
+            startReadingCurrentCard()
             return
         }
 
@@ -216,59 +295,27 @@ struct LessonTopicCardView: View {
             currentIndex -= 1
             cardProgress = 0
         }
-
-        restartTimer()
     }
 
     private func handleDragEnd(value: DragGesture.Value) {
         let threshold: CGFloat = 50
 
         if value.translation.width < -threshold {
-            // Swipe left - go forward
             goToNext()
         } else if value.translation.width > threshold {
-            // Swipe right - go back
             goToPrevious()
         }
 
         dragOffset = 0
     }
 
-    // MARK: - Timer Management
-
-    private func startTimer() {
-        guard !isCompletionCard else { return }
-
-        stopTimer()
-        cardProgress = 0
-
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-            if isPlaying {
-                let increment = 0.05 / cardDuration
-                cardProgress += increment
-
-                if cardProgress >= 1.0 {
-                    goToNext()
-                }
-            }
-        }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func restartTimer() {
-        if !isCompletionCard {
-            startTimer()
-        } else {
-            stopTimer()
-        }
-    }
-
     private func togglePlayPause() {
-        isPlaying.toggle()
+        if voiceManager.isPlaying {
+            voiceManager.pause()
+            stopAutoAdvanceTimer()
+        } else {
+            voiceManager.resume()
+        }
     }
 }
 

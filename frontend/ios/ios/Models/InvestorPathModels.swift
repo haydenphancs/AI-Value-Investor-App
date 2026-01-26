@@ -542,15 +542,14 @@ extension LessonStoryContent {
     static let buffettWaySample = LessonStoryContent(
         lessonLabel: "LESSON 1: THE BUFFETT WAY",
         lessonNumber: 1,
-        totalLessonsInLevel: 5,
+        totalLessonsInLevel: 7,
         estimatedMinutes: 2,
         cards: [
             // Card 1: Title
             .titleCard(
                 title: "Buying Dollar Bills for 50 Cents",
                 subtitle: [
-                    .init("Why", highlighted: true),
-                    .init(" Warren Buffett never pays retail price.")
+                    .init("Why Warren Buffett never pays retail price.")
                 ],
                 audioText: "Why Warren Buffett never pays retail price."
             ),
@@ -559,9 +558,7 @@ extension LessonStoryContent {
             .contentCard(
                 imageName: nil, // Placeholder for image
                 content: [
-                    .init("Price is what the "),
-                    .init("market", highlighted: true),
-                    .init(" asks. Value is what the business is worth. The gap between them is where investing opportunities are found.")
+                    .init("Price is what the market asks. Value is what the business is worth. The gap between them is where investing opportunities are found.")
                 ],
                 audioText: "Price is what the market asks. Value is what the business is worth. The gap between them is where investing opportunities are found."
             ),
@@ -570,9 +567,7 @@ extension LessonStoryContent {
             .contentCard(
                 imageName: nil, // Placeholder for image
                 content: [
-                    .init("Price "),
-                    .init("changes", highlighted: true),
-                    .init(" with emotion. Value is anchored in fundamentals. Knowing the difference helps you invest, not speculate.")
+                    .init("Price changes with emotion. Value is anchored in fundamentals. Knowing the difference helps you invest, not speculate.")
                 ],
                 audioText: "Price changes with emotion. Value is anchored in fundamentals. Knowing the difference helps you invest, not speculate."
             ),

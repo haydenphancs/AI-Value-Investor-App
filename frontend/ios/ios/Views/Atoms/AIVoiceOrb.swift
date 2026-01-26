@@ -122,7 +122,7 @@ struct AIVoiceOrb: View {
                         ],
                         center: .center,
                         startAngle: .degrees(phase * 50),
-                        endAngle: .degrees(phase * 50 + 360)
+                        endAngle: .degrees(phase * 50 + 360.0)
                     ),
                     lineWidth: 2
                 )

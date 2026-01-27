@@ -15,7 +15,7 @@ class LearnViewModel: ObservableObject {
     @Published var currentLevel: InvestorLevel = .foundation
     @Published var journeyTrack: JourneyTrack?
     @Published var nextLesson: NextLesson?
-    @Published var keyConcepts: [KeyConcept] = []
+    @Published var moneyMoves: [MoneyMove] = []
     @Published var books: [EducationBook] = []
     @Published var discussions: [CommunityDiscussion] = []
     @Published var creditBalance: CreditBalance?
@@ -36,7 +36,7 @@ class LearnViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.loadJourneyData()
             self?.loadNextLesson()
-            self?.loadKeyConcepts()
+            self?.loadMoneyMoves()
             self?.loadBooks()
             self?.loadDiscussions()
             self?.loadCreditBalance()
@@ -60,8 +60,8 @@ class LearnViewModel: ObservableObject {
         nextLesson = NextLesson.sampleData
     }
 
-    private func loadKeyConcepts() {
-        keyConcepts = KeyConcept.sampleData
+    private func loadMoneyMoves() {
+        moneyMoves = MoneyMove.sampleData
     }
 
     private func loadBooks() {
@@ -84,18 +84,18 @@ class LearnViewModel: ObservableObject {
         selectedTab = tab
     }
 
-    func toggleBookmark(for concept: KeyConcept) {
-        if let index = keyConcepts.firstIndex(where: { $0.id == concept.id }) {
-            let updatedConcept = KeyConcept(
-                title: concept.title,
-                subtitle: concept.subtitle,
-                iconName: concept.iconName,
-                iconBackgroundColor: concept.iconBackgroundColor,
-                estimatedMinutes: concept.estimatedMinutes,
-                learnerCount: concept.learnerCount,
-                isBookmarked: !concept.isBookmarked
+    func toggleBookmark(for moneyMove: MoneyMove) {
+        if let index = moneyMoves.firstIndex(where: { $0.id == moneyMove.id }) {
+            let updatedMoneyMove = MoneyMove(
+                title: moneyMove.title,
+                subtitle: moneyMove.subtitle,
+                iconName: moneyMove.iconName,
+                iconBackgroundColor: moneyMove.iconBackgroundColor,
+                estimatedMinutes: moneyMove.estimatedMinutes,
+                learnerCount: moneyMove.learnerCount,
+                isBookmarked: !moneyMove.isBookmarked
             )
-            keyConcepts[index] = updatedConcept
+            moneyMoves[index] = updatedMoneyMove
         }
     }
 
@@ -107,8 +107,8 @@ class LearnViewModel: ObservableObject {
         print("Start lesson: \(lesson.lessonTitle)")
     }
 
-    func openConcept(_ concept: KeyConcept) {
-        print("Open concept: \(concept.title)")
+    func openMoneyMove(_ moneyMove: MoneyMove) {
+        print("Open money move: \(moneyMove.title)")
     }
 
     func openBook(_ book: EducationBook) {

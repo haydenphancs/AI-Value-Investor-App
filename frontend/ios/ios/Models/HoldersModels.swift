@@ -132,9 +132,9 @@ struct SmartMoneyFlowSummary {
     var formattedNetFlow: String {
         let sign = totalNetFlow >= 0 ? "+" : ""
         if abs(totalNetFlow) >= 1000 {
-            return "$\(String(format: "%.2f", abs(totalNetFlow) / 1000))B"
+            return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow) / 1000))B"
         }
-        return "$\(String(format: "%.2f", abs(totalNetFlow)))M"
+        return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow)))M"
     }
 
     var flowColor: Color {

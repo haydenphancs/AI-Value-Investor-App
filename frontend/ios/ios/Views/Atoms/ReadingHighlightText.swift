@@ -44,26 +44,33 @@ struct ReadingHighlightText: View {
             return Text(text).foregroundColor(baseColor)
         }
 
-        var result = Text("")
+        // Build AttributedString with different colors
+        var attributedString = AttributedString()
 
         // Text before current word (already spoken) - keep base color
         if currentWordRange.location > 0 {
             let spokenText = nsText.substring(to: currentWordRange.location)
-            result = result + Text(spokenText).foregroundColor(baseColor)
+            var portion = AttributedString(spokenText)
+            portion.foregroundColor = baseColor
+            attributedString.append(portion)
         }
 
         // Current word being spoken - cyan highlight
         let endOfCurrentWord = min(currentWordRange.location + currentWordRange.length, totalLength)
         let currentWord = nsText.substring(with: NSRange(location: currentWordRange.location, length: endOfCurrentWord - currentWordRange.location))
-        result = result + Text(currentWord).foregroundColor(highlightColor)
+        var currentPortion = AttributedString(currentWord)
+        currentPortion.foregroundColor = highlightColor
+        attributedString.append(currentPortion)
 
         // Remaining text (not yet spoken) - base color
         if endOfCurrentWord < totalLength {
             let remainingText = nsText.substring(from: endOfCurrentWord)
-            result = result + Text(remainingText).foregroundColor(baseColor)
+            var remainingPortion = AttributedString(remainingText)
+            remainingPortion.foregroundColor = baseColor
+            attributedString.append(remainingPortion)
         }
 
-        return result
+        return Text(attributedString)
     }
 }
 
@@ -100,10 +107,15 @@ struct ReadingHighlightSegmentedText: View {
     }
 
     private func buildBaseSegmentedText() -> Text {
-        segments.reduce(Text("")) { result, segment in
-            result + Text(segment.text)
-                .foregroundColor(segment.isHighlighted ? highlightColor : baseColor)
+        var attributedString = AttributedString()
+        
+        for segment in segments {
+            var portion = AttributedString(segment.text)
+            portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+            attributedString.append(portion)
         }
+        
+        return Text(attributedString)
     }
 
     private func buildHighlightedText() -> Text {
@@ -114,7 +126,7 @@ struct ReadingHighlightSegmentedText: View {
             return buildBaseSegmentedText()
         }
 
-        var result = Text("")
+        var attributedString = AttributedString()
         var currentPosition = 0
 
         for segment in segments {
@@ -127,12 +139,14 @@ struct ReadingHighlightSegmentedText: View {
 
             if segmentEnd <= currentWordStart {
                 // Entire segment is before current word - use original coloring
-                result = result + Text(segment.text)
-                    .foregroundColor(segment.isHighlighted ? highlightColor : baseColor)
+                var portion = AttributedString(segment.text)
+                portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                attributedString.append(portion)
             } else if currentPosition >= currentWordEnd {
                 // Segment is after current word - use original coloring
-                result = result + Text(segment.text)
-                    .foregroundColor(segment.isHighlighted ? highlightColor : baseColor)
+                var portion = AttributedString(segment.text)
+                portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                attributedString.append(portion)
             } else {
                 // Segment contains the current word or is being spoken
                 let nsSegment = segment.text as NSString
@@ -144,28 +158,32 @@ struct ReadingHighlightSegmentedText: View {
                 // Part 1: Text before current word
                 if relativeCurrentWordStart > 0 {
                     let beforePortion = nsSegment.substring(to: relativeCurrentWordStart)
-                    result = result + Text(beforePortion)
-                        .foregroundColor(segment.isHighlighted ? highlightColor : baseColor)
+                    var portion = AttributedString(beforePortion)
+                    portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                    attributedString.append(portion)
                 }
 
                 // Part 2: Current word being spoken (highlight color)
                 if relativeCurrentWordEnd > relativeCurrentWordStart {
                     let currentPortion = nsSegment.substring(with: NSRange(location: relativeCurrentWordStart, length: relativeCurrentWordEnd - relativeCurrentWordStart))
-                    result = result + Text(currentPortion).foregroundColor(highlightColor)
+                    var portion = AttributedString(currentPortion)
+                    portion.foregroundColor = highlightColor
+                    attributedString.append(portion)
                 }
 
                 // Part 3: Text after current word
                 if relativeCurrentWordEnd < segmentLength {
                     let afterPortion = nsSegment.substring(from: relativeCurrentWordEnd)
-                    result = result + Text(afterPortion)
-                        .foregroundColor(segment.isHighlighted ? highlightColor : baseColor)
+                    var portion = AttributedString(afterPortion)
+                    portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                    attributedString.append(portion)
                 }
             }
 
             currentPosition = segmentEnd
         }
 
-        return result
+        return Text(attributedString)
     }
 }
 

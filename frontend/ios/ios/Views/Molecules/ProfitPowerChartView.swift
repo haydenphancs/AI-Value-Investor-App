@@ -61,62 +61,65 @@ struct ProfitPowerChartView: View {
     // MARK: - Chart Content
 
     private var chartContent: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Y-axis labels for percentages
-            yAxisLabels
-                .frame(width: yAxisWidth)
+        GeometryReader { geometry in
+            HStack(alignment: .top, spacing: 0) {
+                // Y-axis labels for percentages
+                yAxisLabels
+                    .frame(width: yAxisWidth)
 
-            // Main chart area
-            Chart {
-                // Horizontal grid lines
-                ForEach(gridValues, id: \.self) { value in
-                    RuleMark(y: .value("Grid", value))
-                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.6))
-                        .lineStyle(StrokeStyle(lineWidth: 0.5))
+                // Main chart area
+                Chart {
+                    // Horizontal grid lines
+                    ForEach(gridValues, id: \.self) { value in
+                        RuleMark(y: .value("Grid", value))
+                            .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 0.5))
+                    }
+
+                    // Gross Margin Line (Blue - highest)
+                    marginLineMark(for: .grossMargin)
+                    marginPointMark(for: .grossMargin)
+
+                    // Net Margin Line (Green)
+                    marginLineMark(for: .netMargin)
+                    marginPointMark(for: .netMargin)
+
+                    // Sector Average Line (Gray - dashed)
+                    sectorAverageLineMark
+                    sectorAveragePointMark
+
+                    // Operating Margin Line (Orange)
+                    marginLineMark(for: .operatingMargin)
+                    marginPointMark(for: .operatingMargin)
+
+                    // FCF Margin Line (Purple)
+                    marginLineMark(for: .fcfMargin)
+                    marginPointMark(for: .fcfMargin)
                 }
-
-                // Gross Margin Line (Blue - highest)
-                marginLineMark(for: .grossMargin)
-                marginPointMark(for: .grossMargin)
-
-                // Net Margin Line (Green)
-                marginLineMark(for: .netMargin)
-                marginPointMark(for: .netMargin)
-
-                // Sector Average Line (Gray - dashed)
-                sectorAverageLineMark
-                sectorAveragePointMark
-
-                // Operating Margin Line (Orange)
-                marginLineMark(for: .operatingMargin)
-                marginPointMark(for: .operatingMargin)
-
-                // FCF Margin Line (Purple)
-                marginLineMark(for: .fcfMargin)
-                marginPointMark(for: .fcfMargin)
-            }
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
-            .chartYScale(domain: minMargin...maxMargin)
-            .chartPlotStyle { plotArea in
-                plotArea
-                    .background(Color.clear)
-            }
-            .frame(height: chartHeight)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        updateSelection(at: value.location)
-                    }
-                    .onEnded { _ in
-                        // Keep selection visible for a moment, then hide
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                            selectedDataPoint = nil
+                .chartXAxis(.hidden)
+                .chartYAxis(.hidden)
+                .chartYScale(domain: minMargin...maxMargin)
+                .chartPlotStyle { plotArea in
+                    plotArea
+                        .background(Color.clear)
+                }
+                .frame(height: chartHeight)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            updateSelection(at: value.location, chartWidth: geometry.size.width)
                         }
-                    }
-            )
+                        .onEnded { _ in
+                            // Keep selection visible for a moment, then hide
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                selectedDataPoint = nil
+                            }
+                        }
+                )
+            }
         }
+        .frame(height: chartHeight)
     }
 
     // MARK: - Line Marks
@@ -131,7 +134,6 @@ struct ProfitPowerChartView: View {
             )
             .foregroundStyle(type.color)
             .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-            .interpolationMethod(.catmullRom)
         }
     }
 
@@ -157,7 +159,6 @@ struct ProfitPowerChartView: View {
             )
             .foregroundStyle(AppColors.profitSectorAverage)
             .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
-            .interpolationMethod(.catmullRom)
         }
     }
 
@@ -236,12 +237,12 @@ struct ProfitPowerChartView: View {
 
     // MARK: - Selection Helper
 
-    private func updateSelection(at location: CGPoint) {
+    private func updateSelection(at location: CGPoint, chartWidth: CGFloat) {
         // Calculate which data point is closest to the tap location
         // Account for the y-axis width offset
         let adjustedX = location.x - yAxisWidth
-        let chartWidth = UIScreen.main.bounds.width - (yAxisWidth + AppSpacing.lg * 2)
-        let pointWidth = chartWidth / CGFloat(dataPoints.count)
+        let availableChartWidth = chartWidth - yAxisWidth
+        let pointWidth = availableChartWidth / CGFloat(dataPoints.count)
 
         let index = Int(adjustedX / pointWidth)
         if index >= 0 && index < dataPoints.count {

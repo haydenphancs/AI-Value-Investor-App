@@ -39,13 +39,6 @@ struct JourneyItemRow: View {
                     .strikethrough(item.isCompleted, color: AppColors.textMuted)
 
                 Spacer()
-
-                // Arrow for active item
-                if item.isActive {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(AppColors.textMuted)
-                }
             }
         }
         .buttonStyle(PlainButtonStyle())

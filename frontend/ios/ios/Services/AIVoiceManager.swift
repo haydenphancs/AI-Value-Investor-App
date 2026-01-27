@@ -111,7 +111,6 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     private func calculateWordRanges(for text: String) -> [NSRange] {
         var ranges: [NSRange] = []
-        let nsText = text as NSString
 
         // Use natural language processing to find word boundaries
         var currentIndex = 0

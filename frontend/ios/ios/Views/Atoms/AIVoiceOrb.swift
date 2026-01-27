@@ -15,6 +15,9 @@ struct AIVoiceOrb: View {
     @State private var phase: CGFloat = 0
     @State private var innerPhase: CGFloat = 0
     @State private var glowOpacity: Double = 0.6
+    @State private var pulseScale: CGFloat = 1.0
+    
+    @StateObject private var voiceManager = AIVoiceManager.shared
 
     // Gradient colors for the orb
     private let primaryGradient = LinearGradient(
@@ -56,6 +59,7 @@ struct AIVoiceOrb: View {
                 )
                 .frame(width: size * 1.6, height: size * 1.6)
                 .opacity(glowOpacity)
+                .scaleEffect(pulseScale)
 
             // Main orb background
             Circle()
@@ -71,6 +75,7 @@ struct AIVoiceOrb: View {
                     )
                 )
                 .frame(width: size, height: size)
+                .scaleEffect(pulseScale)
 
             // Wave layers
             ForEach(0..<3, id: \.self) { index in
@@ -92,6 +97,7 @@ struct AIVoiceOrb: View {
                 )
                 .frame(width: size * 0.7, height: size * 0.3)
                 .offset(y: CGFloat(index - 1) * 8)
+                .scaleEffect(pulseScale)
             }
 
             // Inner highlight
@@ -108,6 +114,7 @@ struct AIVoiceOrb: View {
                     )
                 )
                 .frame(width: size * 0.9, height: size * 0.9)
+                .scaleEffect(pulseScale)
 
             // Rim gradient
             Circle()
@@ -127,6 +134,7 @@ struct AIVoiceOrb: View {
                     lineWidth: 2
                 )
                 .frame(width: size, height: size)
+                .scaleEffect(pulseScale)
         }
         .onAppear {
             startAnimations()
@@ -134,6 +142,12 @@ struct AIVoiceOrb: View {
         .onChange(of: isAnimating) { _, newValue in
             if newValue {
                 startAnimations()
+            }
+        }
+        .onChange(of: voiceManager.currentWordRange) { _, _ in
+            // Pulse on each word change
+            if isAnimating {
+                pulseBeat()
             }
         }
     }
@@ -153,6 +167,20 @@ struct AIVoiceOrb: View {
             .repeatForever(autoreverses: true)
         ) {
             glowOpacity = isAnimating ? 0.8 : 0.4
+        }
+    }
+    
+    /// Create a quick pulse/beat effect
+    private func pulseBeat() {
+        // Quick scale up then back to normal
+        withAnimation(.easeOut(duration: 0.1)) {
+            pulseScale = 1.15
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            withAnimation(.easeIn(duration: 0.15)) {
+                pulseScale = 1.0
+            }
         }
     }
 }

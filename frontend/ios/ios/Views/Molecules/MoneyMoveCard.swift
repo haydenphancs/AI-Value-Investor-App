@@ -1,14 +1,14 @@
 //
-//  KeyConceptCard.swift
+//  MoneyMoveCard.swift
 //  ios
 //
-//  Molecule: Card showing a key concept with bookmark functionality
+//  Molecule: Card showing a money move with bookmark functionality
 //
 
 import SwiftUI
 
-struct KeyConceptCard: View {
-    let concept: KeyConcept
+struct MoneyMoveCard: View {
+    let moneyMove: MoneyMove
     var onTap: (() -> Void)?
     var onBookmark: (() -> Void)?
 
@@ -22,10 +22,10 @@ struct KeyConceptCard: View {
                     // Icon
                     ZStack {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(concept.iconBackgroundColor)
+                            .fill(moneyMove.iconBackgroundColor)
                             .frame(width: 40, height: 40)
 
-                        Image(systemName: concept.iconName)
+                        Image(systemName: moneyMove.iconName)
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(.white)
                     }
@@ -33,20 +33,20 @@ struct KeyConceptCard: View {
                     Spacer()
 
                     // Bookmark button
-                    BookmarkButton(isBookmarked: concept.isBookmarked) {
+                    BookmarkButton(isBookmarked: moneyMove.isBookmarked) {
                         onBookmark?()
                     }
                 }
 
                 // Title
-                Text(concept.title)
+                Text(moneyMove.title)
                     .font(AppTypography.headline)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
                 // Subtitle
-                Text(concept.subtitle)
+                Text(moneyMove.subtitle)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
                     .lineLimit(2)
@@ -56,8 +56,8 @@ struct KeyConceptCard: View {
 
                 // Meta info
                 HStack(spacing: 30) {
-                    ReadTimeLabel(minutes: concept.estimatedMinutes)
-                    LearnerCountBadge(count: concept.learnerCount)
+                    ReadTimeLabel(minutes: moneyMove.estimatedMinutes)
+                    LearnerCountBadge(count: moneyMove.learnerCount)
                 }
             }
             .padding(AppSpacing.lg)
@@ -72,8 +72,8 @@ struct KeyConceptCard: View {
 #Preview {
     ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: AppSpacing.lg) {
-            ForEach(KeyConcept.sampleData) { concept in
-                KeyConceptCard(concept: concept)
+            ForEach(MoneyMove.sampleData) { moneyMove in
+                MoneyMoveCard(moneyMove: moneyMove)
             }
         }
         .padding()

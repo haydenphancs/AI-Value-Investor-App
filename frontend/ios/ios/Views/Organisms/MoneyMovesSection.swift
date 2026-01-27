@@ -1,24 +1,24 @@
 //
-//  KeyConceptsSection.swift
+//  MoneyMovesSection.swift
 //  ios
 //
-//  Organism: Horizontal scrolling section of key concepts
+//  Organism: Horizontal scrolling section of money moves
 //
 
 import SwiftUI
 
-struct KeyConceptsSection: View {
-    let concepts: [KeyConcept]
+struct MoneyMovesSection: View {
+    let concepts: [MoneyMove]
     var onSeeAll: (() -> Void)?
-    var onConceptTap: ((KeyConcept) -> Void)?
-    var onBookmark: ((KeyConcept) -> Void)?
+    var onConceptTap: ((MoneyMove) -> Void)?
+    var onBookmark: ((MoneyMove) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             HStack {
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    Text("Key Concepts")
+                    Text("Money Moves")
                         .font(AppTypography.title3)
                         .foregroundColor(AppColors.textPrimary)
 
@@ -39,14 +39,14 @@ struct KeyConceptsSection: View {
             }
             .padding(.horizontal, AppSpacing.lg)
 
-            // Horizontal scroll of concept cards
+            // Horizontal scroll of money move cards
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: AppSpacing.md) {
-                    ForEach(concepts) { concept in
-                        KeyConceptCard(
-                            concept: concept,
-                            onTap: { onConceptTap?(concept) },
-                            onBookmark: { onBookmark?(concept) }
+                    ForEach(concepts) { moneyMove in
+                        MoneyMoveCard(
+                            moneyMove: moneyMove,
+                            onTap: { onConceptTap?(moneyMove) },
+                            onBookmark: { onBookmark?(moneyMove) }
                         )
                     }
                 }
@@ -58,7 +58,7 @@ struct KeyConceptsSection: View {
 
 #Preview {
     VStack {
-        KeyConceptsSection(concepts: KeyConcept.sampleData)
+        MoneyMovesSection(concepts: MoneyMove.sampleData)
         Spacer()
     }
     .background(AppColors.background)

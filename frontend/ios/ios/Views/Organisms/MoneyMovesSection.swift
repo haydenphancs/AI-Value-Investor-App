@@ -22,7 +22,7 @@ struct MoneyMovesSection: View {
                         .font(AppTypography.title3)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text("Must Read")
+                    Text("Most Read")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }

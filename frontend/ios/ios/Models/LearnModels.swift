@@ -92,8 +92,8 @@ struct NextLesson: Identifiable {
     let chapterCount: Int
 }
 
-// MARK: - Key Concept
-struct KeyConcept: Identifiable {
+// MARK: - Money Move
+struct MoneyMove: Identifiable {
     let id = UUID()
     let title: String
     let subtitle: String
@@ -182,9 +182,9 @@ extension NextLesson {
     )
 }
 
-extension KeyConcept {
-    static let sampleData: [KeyConcept] = [
-        KeyConcept(
+extension MoneyMove {
+    static let sampleData: [MoneyMove] = [
+        MoneyMove(
             title: "Understanding Moats",
             subtitle: "Why competitive advantage matters most.",
             iconName: "shield.fill",
@@ -193,7 +193,7 @@ extension KeyConcept {
             learnerCount: "1.4k",
             isBookmarked: false
         ),
-        KeyConcept(
+        MoneyMove(
             title: "What is P/E Ratio?",
             subtitle: "How to tell if a stock is cheap or expensive.",
             iconName: "chart.pie.fill",
@@ -202,7 +202,7 @@ extension KeyConcept {
             learnerCount: "1.4k",
             isBookmarked: false
         ),
-        KeyConcept(
+        MoneyMove(
             title: "The Power of Compounding",
             subtitle: "How time doubles your money exponentially.",
             iconName: "arrow.triangle.2.circlepath",

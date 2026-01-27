@@ -76,13 +76,13 @@ struct LearnContentView: View {
                     }
                 }
 
-                // Key Concepts Section
-                if !viewModel.keyConcepts.isEmpty {
-                    KeyConceptsSection(
-                        concepts: viewModel.keyConcepts,
-                        onSeeAll: handleSeeAllConcepts,
-                        onConceptTap: handleConceptTap,
-                        onBookmark: handleBookmarkConcept
+                // Money Moves Section
+                if !viewModel.moneyMoves.isEmpty {
+                    MoneyMovesSection(
+                        concepts: viewModel.moneyMoves,
+                        onSeeAll: handleSeeAllMoneyMoves,
+                        onConceptTap: handleMoneyMoveTap,
+                        onBookmark: handleBookmarkMoneyMove
                     )
                 }
 
@@ -161,16 +161,16 @@ struct LearnContentView: View {
         viewModel.startLesson(lesson)
     }
 
-    private func handleSeeAllConcepts() {
-        print("See all concepts")
+    private func handleSeeAllMoneyMoves() {
+        print("See all money moves")
     }
 
-    private func handleConceptTap(_ concept: KeyConcept) {
-        viewModel.openConcept(concept)
+    private func handleMoneyMoveTap(_ moneyMove: MoneyMove) {
+        viewModel.openMoneyMove(moneyMove)
     }
 
-    private func handleBookmarkConcept(_ concept: KeyConcept) {
-        viewModel.toggleBookmark(for: concept)
+    private func handleBookmarkMoneyMove(_ moneyMove: MoneyMove) {
+        viewModel.toggleBookmark(for: moneyMove)
     }
 
     private func handleSeeAllBooks() {

@@ -322,6 +322,7 @@ private struct MoneyMovesCategorySection: View {
                     ForEach(moves) { move in
                         MoneyMoveCard(
                             moneyMove: move,
+                            showIcon: false,
                             onTap: { onMoveTap?(move) },
                             onBookmark: { onBookmark?(move) }
                         )

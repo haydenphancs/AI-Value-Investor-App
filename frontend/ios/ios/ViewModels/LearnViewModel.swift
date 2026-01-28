@@ -89,8 +89,7 @@ class LearnViewModel: ObservableObject {
             let updatedMoneyMove = MoneyMove(
                 title: moneyMove.title,
                 subtitle: moneyMove.subtitle,
-                iconName: moneyMove.iconName,
-                iconBackgroundColor: moneyMove.iconBackgroundColor,
+                category: moneyMove.category,
                 estimatedMinutes: moneyMove.estimatedMinutes,
                 learnerCount: moneyMove.learnerCount,
                 isBookmarked: !moneyMove.isBookmarked

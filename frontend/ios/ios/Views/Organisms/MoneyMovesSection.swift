@@ -57,9 +57,12 @@ struct MoneyMovesSection: View {
 }
 
 #Preview {
-    VStack {
-        MoneyMovesSection(concepts: MoneyMove.sampleData)
-        Spacer()
+    ScrollView {
+        VStack(spacing: AppSpacing.xxl) {
+            MoneyMovesSection(concepts: MoneyMove.sampleData)
+            Spacer()
+        }
+        .padding(.top, AppSpacing.md)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

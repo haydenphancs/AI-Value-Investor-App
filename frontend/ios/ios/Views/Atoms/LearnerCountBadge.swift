@@ -12,13 +12,13 @@ struct LearnerCountBadge: View {
     var showIcon: Bool = true
 
     var body: some View {
-        HStack(spacing: AppSpacing.xs) {
+        HStack(spacing: AppSpacing.xxs) {
             if showIcon {
                 Image(systemName: "person.2.fill")
                     .font(.system(size: 10, weight: .medium))
             }
 
-            Text("\(count) learners")
+            Text("\(count) investors")
                 .font(AppTypography.caption)
         }
         .foregroundColor(AppColors.textSecondary)

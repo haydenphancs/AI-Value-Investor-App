@@ -12,6 +12,7 @@ struct LearnContentView: View {
     @StateObject private var viewModel = LearnViewModel()
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
+    @State private var showingMoneyMovesDetail = false
 
     var body: some View {
         NavigationStack {
@@ -50,6 +51,9 @@ struct LearnContentView: View {
         }
         .navigationDestination(isPresented: $showingInvestorJourney) {
             InvestorJourneyView(scrollToNextLesson: shouldScrollToNextLesson)
+        }
+        .navigationDestination(isPresented: $showingMoneyMovesDetail) {
+            MoneyMovesDetailView()
         }
         .navigationBarHidden(true)
         }
@@ -162,7 +166,7 @@ struct LearnContentView: View {
     }
 
     private func handleSeeAllMoneyMoves() {
-        print("See all money moves")
+        showingMoneyMovesDetail = true
     }
 
     private func handleMoneyMoveTap(_ moneyMove: MoneyMove) {

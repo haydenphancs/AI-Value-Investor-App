@@ -9,6 +9,7 @@ import SwiftUI
 
 struct MoneyMoveCard: View {
     let moneyMove: MoneyMove
+    var showIcon: Bool = true
     var onTap: (() -> Void)?
     var onBookmark: (() -> Void)?
 
@@ -17,17 +18,19 @@ struct MoneyMoveCard: View {
             onTap?()
         }) {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
-                // Header with icon and bookmark
+                // Header with optional icon and bookmark
                 HStack(alignment: .top) {
-                    // Icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(moneyMove.iconBackgroundColor)
-                            .frame(width: 40, height: 40)
+                    // Icon (conditional)
+                    if showIcon {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .fill(moneyMove.iconBackgroundColor)
+                                .frame(width: 40, height: 40)
 
-                        Image(systemName: moneyMove.iconName)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.white)
+                            Image(systemName: moneyMove.iconName)
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
                     }
 
                     Spacer()

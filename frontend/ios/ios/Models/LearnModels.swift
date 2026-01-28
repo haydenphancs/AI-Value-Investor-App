@@ -108,7 +108,7 @@ enum MoneyMoveCategory: String, CaseIterable {
     
     var iconName: String {
         switch self {
-        case .blueprints: return "crown.fill"
+        case .blueprints: return "trophy.fill"
         case .valueTraps: return "flame.fill"
         case .battles: return "bolt.horizontal.fill"
         }

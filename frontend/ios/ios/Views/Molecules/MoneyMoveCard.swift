@@ -42,26 +42,26 @@ struct MoneyMoveCard: View {
                 Text(moneyMove.title)
                     .font(AppTypography.headline)
                     .foregroundColor(AppColors.textPrimary)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .multilineTextAlignment(.leading)
 
                 // Subtitle
                 Text(moneyMove.subtitle)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .multilineTextAlignment(.leading)
 
                 Spacer(minLength: 0)
 
                 // Meta info
-                HStack(spacing: 30) {
+                HStack(spacing: AppSpacing.lg) {
                     ReadTimeLabel(minutes: moneyMove.estimatedMinutes)
                     LearnerCountBadge(count: moneyMove.learnerCount)
                 }
             }
             .padding(AppSpacing.lg)
-            .frame(width: 200, height: 200)
+            .frame(width: 200)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.extraLarge)
         }

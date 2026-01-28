@@ -92,16 +92,54 @@ struct NextLesson: Identifiable {
     let chapterCount: Int
 }
 
+// MARK: - Money Move Category
+enum MoneyMoveCategory: String, CaseIterable {
+    case blueprints = "The Blueprints"
+    case valueTraps = "Value Traps"
+    case battles = "Battles"
+    
+    var tagline: String {
+        switch self {
+        case .blueprints: return "How the winners won."
+        case .valueTraps: return "Failures, frauds, and lessons learned."
+        case .battles: return "Comparative analysis of giants."
+        }
+    }
+    
+    var iconName: String {
+        switch self {
+        case .blueprints: return "crown.fill"
+        case .valueTraps: return "flame.fill"
+        case .battles: return "bolt.horizontal.fill"
+        }
+    }
+    
+    var iconBackgroundColor: Color {
+        switch self {
+        case .blueprints: return Color(hex: "22C55E") // Green - success
+        case .valueTraps: return Color(hex: "EF4444") // Red - warning
+        case .battles: return Color(hex: "8B5CF6") // Purple - strategic
+        }
+    }
+}
+
 // MARK: - Money Move
 struct MoneyMove: Identifiable {
     let id = UUID()
     let title: String
     let subtitle: String
-    let iconName: String
-    let iconBackgroundColor: Color
+    let category: MoneyMoveCategory
     let estimatedMinutes: Int
     let learnerCount: String
     let isBookmarked: Bool
+    
+    var iconName: String {
+        category.iconName
+    }
+    
+    var iconBackgroundColor: Color {
+        category.iconBackgroundColor
+    }
 }
 
 // MARK: - Education Book
@@ -184,31 +222,57 @@ extension NextLesson {
 
 extension MoneyMove {
     static let sampleData: [MoneyMove] = [
+        // The Blueprints - Success stories
         MoneyMove(
-            title: "Understanding Moats",
-            subtitle: "Why competitive advantage matters most.",
-            iconName: "shield.fill",
-            iconBackgroundColor: Color(hex: "F59E0B"),
-            estimatedMinutes: 8,
-            learnerCount: "1.4k",
-            isBookmarked: false
-        ),
-        MoneyMove(
-            title: "What is P/E Ratio?",
-            subtitle: "How to tell if a stock is cheap or expensive.",
-            iconName: "chart.pie.fill",
-            iconBackgroundColor: Color(hex: "3B82F6"),
+            title: "How Amazon Built Its Moat",
+            subtitle: "The strategy behind unstoppable dominance.",
+            category: .blueprints,
             estimatedMinutes: 12,
-            learnerCount: "1.4k",
+            learnerCount: "2.1k",
             isBookmarked: false
         ),
         MoneyMove(
-            title: "The Power of Compounding",
-            subtitle: "How time doubles your money exponentially.",
-            iconName: "arrow.triangle.2.circlepath",
-            iconBackgroundColor: Color(hex: "22C55E"),
-            estimatedMinutes: 8,
-            learnerCount: "1.1k",
+            title: "Warren Buffett's Early Days",
+            subtitle: "The moves that built a fortune.",
+            category: .blueprints,
+            estimatedMinutes: 10,
+            learnerCount: "1.8k",
+            isBookmarked: false
+        ),
+        
+        // Value Traps - Failures and lessons
+        MoneyMove(
+            title: "The Fall of Enron",
+            subtitle: "Red flags every investor should know.",
+            category: .valueTraps,
+            estimatedMinutes: 15,
+            learnerCount: "1.5k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "WeWork's Unraveling",
+            subtitle: "When valuations don't match reality.",
+            category: .valueTraps,
+            estimatedMinutes: 11,
+            learnerCount: "1.3k",
+            isBookmarked: false
+        ),
+        
+        // Battles - Comparative analysis
+        MoneyMove(
+            title: "Netflix vs. Disney+",
+            subtitle: "The streaming wars breakdown.",
+            category: .battles,
+            estimatedMinutes: 14,
+            learnerCount: "2.3k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Tesla vs. Traditional Auto",
+            subtitle: "Innovation meets industry giants.",
+            category: .battles,
+            estimatedMinutes: 13,
+            learnerCount: "1.9k",
             isBookmarked: false
         )
     ]

@@ -12,7 +12,6 @@ import SwiftUI
 enum LearnTab: String, CaseIterable {
     case learn = "Learn"
     case chat = "Chat"
-    case saved = "Saved"
 }
 
 // MARK: - Investor Level

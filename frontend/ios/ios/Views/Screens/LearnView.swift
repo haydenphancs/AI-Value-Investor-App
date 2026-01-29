@@ -38,8 +38,6 @@ struct LearnContentView: View {
                         learnTabContent
                     case .chat:
                         chatTabContent
-                    case .saved:
-                        savedTabContent
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
@@ -139,11 +137,6 @@ struct LearnContentView: View {
 
     private func handleHistoryTap() {
         print("Chat history tapped")
-    }
-
-    // MARK: - Saved Tab Content
-    private var savedTabContent: some View {
-        SavedTabView()
     }
 
     // MARK: - Action Handlers

@@ -238,7 +238,7 @@ private struct FeaturedDeepDiveHeroCard: View {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "clock")
                             .font(.system(size: 12, weight: .medium))
-                        Text("18 min read")
+                        Text("18 min")
                             .font(AppTypography.caption)
                     }
                     .foregroundColor(.white.opacity(0.8))
@@ -246,8 +246,11 @@ private struct FeaturedDeepDiveHeroCard: View {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "person.2.fill")
                             .font(.system(size: 12, weight: .medium))
-                        Text("3.2k readers")
+                        Text("3.2k investors")
                             .font(AppTypography.caption)
+                        Image(systemName: "microphone.circle")
+                            .font(.system(size: 16, weight: .medium))
+                            .padding(.leading, AppSpacing.sm)
                     }
                     .foregroundColor(.white.opacity(0.8))
                 }

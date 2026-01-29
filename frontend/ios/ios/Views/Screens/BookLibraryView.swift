@@ -258,7 +258,8 @@ private struct ProgressDashboardCard: View {
                 ProgressRingView(progress: progressPercentage)
                     .frame(width: 90, height: 90)
             }
-            .padding(AppSpacing.xl)
+            .padding(.horizontal, AppSpacing.xl)
+            .padding(.vertical, AppSpacing.xl)
 
             // Trophy badge
             if masteredCount > 0 {

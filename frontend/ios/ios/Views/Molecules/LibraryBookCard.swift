@@ -40,8 +40,9 @@ struct LibraryBookCard: View {
                     if book.isMastered {
                         ZStack {
                             Circle()
-                                .fill(AppColors.bullish)
+                                .fill(Color(hex: "14A349"))
                                 .frame(width: 24, height: 24)
+                                
 
                             Image(systemName: "checkmark")
                                 .font(.system(size: 12, weight: .bold))
@@ -54,22 +55,10 @@ struct LibraryBookCard: View {
                 // Book details
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     // Curriculum order badge
-                    HStack(spacing: AppSpacing.sm) {
-                        Text("BOOK \(book.curriculumOrder)")
-                            .font(AppTypography.captionBold)
-                            .foregroundColor(book.isMastered ? AppColors.bullish : AppColors.primaryBlue)
-                            .tracking(0.5)
-
-                        if book.isMastered {
-                            Text("MASTERED")
-                                .font(AppTypography.captionBold)
-                                .foregroundColor(AppColors.bullish)
-                                .padding(.horizontal, AppSpacing.sm)
-                                .padding(.vertical, AppSpacing.xxs)
-                                .background(AppColors.bullish.opacity(0.15))
-                                .cornerRadius(AppCornerRadius.small)
-                        }
-                    }
+                    Text("BOOK \(book.curriculumOrder)")
+                        .font(AppTypography.captionBold)
+                        .foregroundColor(AppColors.primaryBlue)
+                        .tracking(0.5)
 
                     // Title and rating
                     HStack(alignment: .top) {

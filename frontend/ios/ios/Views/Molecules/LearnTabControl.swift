@@ -2,7 +2,7 @@
 //  LearnTabControl.swift
 //  ios
 //
-//  Molecule: Custom tab control for Learn/Chat/Saved tabs
+//  Molecule: Custom tab control for Learn/Chat tabs
 //
 
 import SwiftUI

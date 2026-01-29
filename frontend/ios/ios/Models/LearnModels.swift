@@ -167,6 +167,38 @@ struct EducationBook: Identifiable {
     }
 }
 
+// MARK: - Library Book (For Book Library/Curriculum View)
+struct LibraryBook: Identifiable {
+    let id = UUID()
+    let title: String
+    let author: String
+    let description: String
+    let pageCount: Int
+    let publishedYear: Int
+    let rating: Double
+    let curriculumOrder: Int
+    let isMastered: Bool
+    let keyIdeasCount: Int
+    let coverGradientStart: String
+    let coverGradientEnd: String
+
+    var formattedRating: String {
+        String(format: "%.1f", rating)
+    }
+
+    var formattedPages: String {
+        "\(pageCount) pages"
+    }
+
+    var formattedPublished: String {
+        "Published \(publishedYear)"
+    }
+
+    var formattedKeyIdeas: String {
+        "\(keyIdeasCount) Key Ideas"
+    }
+}
+
 // MARK: - Community Discussion
 struct CommunityDiscussion: Identifiable {
     let id = UUID()
@@ -330,6 +362,151 @@ extension CommunityDiscussion {
             postedAt: Calendar.current.date(byAdding: .hour, value: -5, to: Date())!,
             replyCount: 89,
             likeCount: 203
+        )
+    ]
+}
+
+extension LibraryBook {
+    static let sampleData: [LibraryBook] = [
+        // Book 1 - MASTERED
+        LibraryBook(
+            title: "Rich Dad Poor Dad",
+            author: "Robert Kiyosaki",
+            description: "What the rich teach their kids about money that the poor and middle class do not.",
+            pageCount: 336,
+            publishedYear: 1997,
+            rating: 4.7,
+            curriculumOrder: 1,
+            isMastered: true,
+            keyIdeasCount: 12,
+            coverGradientStart: "7C3AED",
+            coverGradientEnd: "4C1D95"
+        ),
+        // Book 2 - MASTERED
+        LibraryBook(
+            title: "The Intelligent Investor",
+            author: "Benjamin Graham",
+            description: "The definitive book on value investing. Warren Buffett calls it 'the best book on investing ever written.'",
+            pageCount: 623,
+            publishedYear: 1949,
+            rating: 4.8,
+            curriculumOrder: 2,
+            isMastered: true,
+            keyIdeasCount: 18,
+            coverGradientStart: "1E3A5F",
+            coverGradientEnd: "0F1F35"
+        ),
+        // Book 3
+        LibraryBook(
+            title: "The Psychology of Money",
+            author: "Morgan Housel",
+            description: "Timeless lessons on wealth, greed, and happiness. Understanding how emotions drive financial decisions.",
+            pageCount: 256,
+            publishedYear: 2020,
+            rating: 4.9,
+            curriculumOrder: 3,
+            isMastered: false,
+            keyIdeasCount: 15,
+            coverGradientStart: "059669",
+            coverGradientEnd: "064E3B"
+        ),
+        // Book 4
+        LibraryBook(
+            title: "One Up On Wall Street",
+            author: "Peter Lynch",
+            description: "How to use what you already know to make money in the market from the legendary Fidelity fund manager.",
+            pageCount: 304,
+            publishedYear: 1989,
+            rating: 4.5,
+            curriculumOrder: 4,
+            isMastered: false,
+            keyIdeasCount: 14,
+            coverGradientStart: "2D4A3E",
+            coverGradientEnd: "1A2D25"
+        ),
+        // Book 5
+        LibraryBook(
+            title: "Common Stocks and Uncommon Profits",
+            author: "Philip Fisher",
+            description: "The growth investing masterpiece that influenced Warren Buffett's investment philosophy.",
+            pageCount: 271,
+            publishedYear: 1958,
+            rating: 4.7,
+            curriculumOrder: 5,
+            isMastered: false,
+            keyIdeasCount: 16,
+            coverGradientStart: "4A1E1E",
+            coverGradientEnd: "2D1212"
+        ),
+        // Book 6
+        LibraryBook(
+            title: "The Little Book of Common Sense Investing",
+            author: "John C. Bogle",
+            description: "The only way to guarantee your fair share of stock market returns. The case for index funds.",
+            pageCount: 304,
+            publishedYear: 2007,
+            rating: 4.6,
+            curriculumOrder: 6,
+            isMastered: false,
+            keyIdeasCount: 10,
+            coverGradientStart: "1E40AF",
+            coverGradientEnd: "1E3A8A"
+        ),
+        // Book 7
+        LibraryBook(
+            title: "A Random Walk Down Wall Street",
+            author: "Burton Malkiel",
+            description: "The time-tested strategy for successful investing. Understanding market efficiency.",
+            pageCount: 432,
+            publishedYear: 1973,
+            rating: 4.4,
+            curriculumOrder: 7,
+            isMastered: false,
+            keyIdeasCount: 13,
+            coverGradientStart: "7C2D12",
+            coverGradientEnd: "451A03"
+        ),
+        // Book 8
+        LibraryBook(
+            title: "The Essays of Warren Buffett",
+            author: "Warren Buffett & Lawrence Cunningham",
+            description: "Lessons for corporate America. Wisdom from the Oracle of Omaha's annual letters.",
+            pageCount: 368,
+            publishedYear: 1997,
+            rating: 4.8,
+            curriculumOrder: 8,
+            isMastered: false,
+            keyIdeasCount: 20,
+            coverGradientStart: "B45309",
+            coverGradientEnd: "78350F"
+        ),
+        // Book 9
+        LibraryBook(
+            title: "Security Analysis",
+            author: "Benjamin Graham & David Dodd",
+            description: "The classic 1934 edition. The foundation of modern value investing analysis.",
+            pageCount: 725,
+            publishedYear: 1934,
+            rating: 4.6,
+            curriculumOrder: 9,
+            isMastered: false,
+            keyIdeasCount: 22,
+            coverGradientStart: "374151",
+            coverGradientEnd: "1F2937"
+        ),
+        // Book 10
+        LibraryBook(
+            title: "The Most Important Thing",
+            author: "Howard Marks",
+            description: "Uncommon sense for the thoughtful investor. Legendary Oaktree Capital insights.",
+            pageCount: 200,
+            publishedYear: 2011,
+            rating: 4.7,
+            curriculumOrder: 10,
+            isMastered: false,
+            keyIdeasCount: 17,
+            coverGradientStart: "581C87",
+            coverGradientEnd: "3B0764"
         )
     ]
 }

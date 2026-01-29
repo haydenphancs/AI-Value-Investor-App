@@ -7,6 +7,26 @@
 
 import SwiftUI
 
+// MARK: - StorageInfo Model
+struct StorageInfo {
+    let usedGB: Double
+    let totalGB: Double
+    
+    var progress: Double {
+        guard totalGB > 0 else { return 0 }
+        return min(usedGB / totalGB, 1.0)
+    }
+    
+    var formattedPercentage: String {
+        let percentage = Int(progress * 100)
+        return "\(percentage)%"
+    }
+    
+    var formattedUsed: String {
+        return String(format: "%.1f GB of %.1f GB used", usedGB, totalGB)
+    }
+}
+
 struct StorageCard: View {
     let storageInfo: StorageInfo
     var onUpgrade: (() -> Void)?

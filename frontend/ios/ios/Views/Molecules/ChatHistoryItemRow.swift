@@ -17,17 +17,13 @@ struct ChatHistoryItemRow: View {
             onTap?()
         }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Top row: Type badge, time ago, saved indicator, more button
+                // Top row: Type badge, time ago, more button
                 HStack(alignment: .center) {
                     ChatHistoryTypeBadge(type: item.type)
 
                     TimeAgoLabel(text: item.timeAgo)
 
                     Spacer()
-
-                    if item.isSaved {
-                        SavedIndicator()
-                    }
 
                     MoreOptionsButton {
                         onMoreOptions?()

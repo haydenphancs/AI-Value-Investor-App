@@ -13,6 +13,7 @@ struct LearnContentView: View {
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
+    @State private var showingBookLibrary = false
 
     var body: some View {
         NavigationStack {
@@ -54,6 +55,9 @@ struct LearnContentView: View {
         }
         .navigationDestination(isPresented: $showingMoneyMovesDetail) {
             MoneyMovesDetailView()
+        }
+        .navigationDestination(isPresented: $showingBookLibrary) {
+            BookLibraryView()
         }
         .navigationBarHidden(true)
         }
@@ -178,7 +182,7 @@ struct LearnContentView: View {
     }
 
     private func handleSeeAllBooks() {
-        print("See all books")
+        showingBookLibrary = true
     }
 
     private func handleChatWithBook(_ book: EducationBook) {

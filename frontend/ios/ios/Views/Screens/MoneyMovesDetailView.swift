@@ -248,9 +248,9 @@ private struct FeaturedDeepDiveHeroCard: View {
                             .font(.system(size: 12, weight: .medium))
                         Text("3.2k investors")
                             .font(AppTypography.caption)
-                        Image(systemName: "microphone.circle")
-                            .font(.system(size: 16, weight: .medium))
-                            .padding(.leading, AppSpacing.sm)
+                        Image(systemName: "headphones")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.leading, AppSpacing.md)
                     }
                     .foregroundColor(.white.opacity(0.8))
                 }

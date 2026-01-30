@@ -36,7 +36,8 @@ struct MoneyMovesDetailView: View {
                         FeaturedDeepDiveHeroCard(
                             article: MoneyMoveArticle.sampleDigitalFinance,
                             onTap: {
-                                selectedArticle = MoneyMoveArticle.sampleDigitalFinance
+                                // Create a special version with featured flag for the orange gradient
+                                selectedArticle = MoneyMoveArticle.featuredDigitalFinance
                             }
                         )
                         .padding(.horizontal, AppSpacing.lg)
@@ -191,6 +192,7 @@ struct MoneyMovesDetailView: View {
             hasAudioVersion: true,
             heroGradientColors: gradientColors,
             tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),
+            isFeatured: false,
             keyHighlights: [
                 ArticleHighlight(
                     icon: "lightbulb.fill",
@@ -336,7 +338,12 @@ private struct FeaturedDeepDiveHeroCard: View {
     var onTap: (() -> Void)?
 
     private var gradientColors: [Color] {
-        article.heroGradientColors.map { Color(hex: $0) }
+        // Always use orange gradient based on EA580C
+        [
+            Color(hex: "F97316"),
+            Color(hex: "EA580C"),
+            Color(hex: "C2410C")
+        ]
     }
 
     var body: some View {

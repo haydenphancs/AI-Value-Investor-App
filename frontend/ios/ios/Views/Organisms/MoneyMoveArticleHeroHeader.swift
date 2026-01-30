@@ -42,7 +42,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         .fill(
                             RadialGradient(
                                 colors: [
-                                    Color(hex: "3B82F6").opacity(0.4),
+                                    Color(hex: "3B82F6").opacity(0.15),
                                     Color.clear
                                 ],
                                 center: .center,
@@ -57,7 +57,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         .fill(
                             RadialGradient(
                                 colors: [
-                                    Color(hex: "8B5CF6").opacity(0.3),
+                                    Color(hex: "8B5CF6").opacity(0.12),
                                     Color.clear
                                 ],
                                 center: .center,
@@ -123,8 +123,8 @@ struct MoneyMoveArticleHeroHeader: View {
 
                 // Title and meta
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
-                    // Category
-                    Text(article.category.rawValue.uppercased())
+                    // Category (or "FEATURED DEEP DIVE" for featured articles)
+                    Text(article.isFeatured ? "FEATURED DEEP DIVE" : article.category.rawValue.uppercased())
                         .font(AppTypography.captionBold)
                         .foregroundColor(.white.opacity(0.7))
                         .tracking(1.2)

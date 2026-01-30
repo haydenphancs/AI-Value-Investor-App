@@ -4,18 +4,35 @@
 //
 //  Full article detail screen for Money Move articles
 //  Displays hero header, content sections, statistics, comments, and related articles
+//  Integrates with AudioManager for audio playback
 //
 
 import SwiftUI
 
 struct MoneyMoveArticleDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audioManager: AudioManager
     @State private var isBookmarked: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var showMoreOptions: Bool = false
     @State private var scrollOffset: CGFloat = 0
 
     let article: MoneyMoveArticle
+
+    /// Convert article to AudioEpisode for playback
+    private var audioEpisode: AudioEpisode {
+        AudioEpisode(
+            id: "article-\(article.id)",
+            title: article.title,
+            subtitle: article.subtitle,
+            artworkGradientColors: article.heroGradientColors,
+            artworkIcon: article.category.iconName,
+            duration: TimeInterval(article.readTimeMinutes * 60),
+            category: .moneyMoves,
+            authorName: article.author.name,
+            sourceId: article.id.uuidString
+        )
+    }
 
     // Computed property for header opacity based on scroll
     private var headerOpacity: Double {
@@ -38,13 +55,23 @@ struct MoneyMoveArticleDetailView: View {
                     // Hero header
                     MoneyMoveArticleHeroHeader(
                         article: article,
+                        audioEpisode: audioEpisode,
                         onBackTapped: handleBackTapped,
                         onShareTapped: handleShareTapped
                     )
 
                     // Content
-                    MoneyMoveArticleContent(article: article)
-                        .padding(.top, AppSpacing.lg)
+                    MoneyMoveArticleContent(
+                        article: article,
+                        onAuthorTapped: handleAuthorTapped,
+                        onFollowTapped: handleFollowTapped,
+                        isFollowing: isFollowing
+                    )
+                    .padding(.top, AppSpacing.lg)
+
+                    // Extra padding for action bar
+                    Color.clear
+                        .frame(height: 100)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -71,9 +98,9 @@ struct MoneyMoveArticleDetailView: View {
             VStack {
                 Spacer()
                 ArticleActionBar(
+                    audioEpisode: article.hasAudioVersion ? audioEpisode : nil,
                     hasAudioVersion: article.hasAudioVersion,
                     isBookmarked: isBookmarked,
-                    onListenTapped: handleListenTapped,
                     onShareTapped: handleShareTapped,
                     onBookmarkTapped: handleBookmarkTapped,
                     onMoreTapped: handleMoreTapped
@@ -89,6 +116,11 @@ struct MoneyMoveArticleDetailView: View {
         .confirmationDialog("Options", isPresented: $showMoreOptions) {
             Button("Share Article") { handleShareTapped() }
             Button(isBookmarked ? "Remove Bookmark" : "Save Article") { handleBookmarkTapped() }
+            if article.hasAudioVersion {
+                Button("Add to Queue") {
+                    audioManager.addToQueue(audioEpisode)
+                }
+            }
             Button("Report Issue") { handleReportTapped() }
             Button("Cancel", role: .cancel) {}
         }
@@ -119,6 +151,15 @@ struct MoneyMoveArticleDetailView: View {
 
             // Actions
             HStack(spacing: AppSpacing.lg) {
+                // Mini play button
+                if article.hasAudioVersion {
+                    PlayAudioButton(
+                        episode: audioEpisode,
+                        style: .minimal,
+                        size: .small
+                    )
+                }
+
                 Button(action: handleShareTapped) {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 16, weight: .medium))
@@ -158,8 +199,14 @@ struct MoneyMoveArticleDetailView: View {
         }
     }
 
-    private func handleListenTapped() {
-        print("Start audio playback")
+    private func handleFollowTapped() {
+        withAnimation(.spring(response: 0.3)) {
+            isFollowing.toggle()
+        }
+    }
+
+    private func handleAuthorTapped() {
+        print("Navigate to author profile: \(article.author.name)")
     }
 
     private func handleMoreTapped() {
@@ -185,4 +232,5 @@ private struct ScrollOffsetPreferenceKey: PreferenceKey {
 
 #Preview {
     MoneyMoveArticleDetailView(article: MoneyMoveArticle.sampleDigitalFinance)
+        .environmentObject(AudioManager.shared)
 }

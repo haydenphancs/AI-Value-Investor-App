@@ -223,15 +223,18 @@ private struct FeaturedDeepDiveHeroCard: View {
                     .tracking(1.2)
 
                 // Title
-                Text("The FTX Collapse")
+                Text("The Future of Digital Finance")
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(.white)
+                    .minimumScaleFactor(0.8)
+                    .lineLimit(2)
 
                 // Description
-                Text("How a $32 billion empire crumbled overnight. The red flags, the fraud, and what every investor should learn.")
+                Text("Exploring the intersection of fintech innovation, cryptocurrency adoption, and traditional banking transformation.")
                     .font(AppTypography.callout)
                     .foregroundColor(.white.opacity(0.9))
-                    .lineLimit(3)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 // Meta info
                 HStack(spacing: AppSpacing.lg) {

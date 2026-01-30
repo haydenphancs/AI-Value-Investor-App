@@ -82,6 +82,8 @@ struct MoneyMovesDetailView: View {
         .onAppear {
             loadSampleData()
         }
+        // Prevent accidental navigation gestures
+        .interactiveDismissDisabled(false)
     }
 
     private func loadSampleData() {
@@ -341,7 +343,7 @@ private struct FeaturedDeepDiveHeroCard: View {
     }
 
     var body: some View {
-        Button(action: { onTap?() }) {
+        ZStack(alignment: .topTrailing) {
             ZStack(alignment: .topTrailing) {
                 // Background with gradient and effects
                 ZStack {
@@ -461,7 +463,9 @@ private struct FeaturedDeepDiveHeroCard: View {
             .aspectRatio(16/9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
         }
-        .buttonStyle(PlainButtonStyle())
+        .onTapGesture {
+            onTap?()
+        }
     }
 }
 

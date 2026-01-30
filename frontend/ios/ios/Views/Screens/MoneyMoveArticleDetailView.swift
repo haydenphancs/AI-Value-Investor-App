@@ -13,6 +13,7 @@ struct MoneyMoveArticleDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
     @State private var isBookmarked: Bool = false
+    @State private var isFollowing: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var showMoreOptions: Bool = false
     @State private var scrollOffset: CGFloat = 0
@@ -61,12 +62,7 @@ struct MoneyMoveArticleDetailView: View {
                     )
 
                     // Content
-                    MoneyMoveArticleContent(
-                        article: article,
-                        onAuthorTapped: handleAuthorTapped,
-                        onFollowTapped: handleFollowTapped,
-                        isFollowing: isFollowing
-                    )
+                    MoneyMoveArticleContent(article: article)
                     .padding(.top, AppSpacing.lg)
 
                     // Extra padding for action bar

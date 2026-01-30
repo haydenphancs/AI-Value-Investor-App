@@ -92,6 +92,15 @@ enum JourneyLevel: Int, CaseIterable {
         }
     }
 
+    var tagline: String {
+        switch self {
+        case .foundation: return "Your financial fortress starts here"
+        case .analysis: return "The rules Wall Street plays by"
+        case .strategies: return "The playbooks that built empires"
+        case .mastery: return "Think like legendary investors"
+        }
+    }
+
     var iconName: String {
         switch self {
         case .foundation: return "🌱"

@@ -18,15 +18,21 @@ struct LevelSectionHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
+        HStack(spacing: AppSpacing.md) {
             // Level icon
             Text(level.iconName)
                 .font(.system(size: 18))
 
-            // Level title
-            Text("Level \(level.rawValue): \(level.title)")
-                .font(AppTypography.headline)
-                .foregroundColor(AppColors.textPrimary)
+            // Title and tagline
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text("Level \(level.rawValue): \(level.title)")
+                    .font(AppTypography.headline)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(level.tagline)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+            }
 
             Spacer()
         }

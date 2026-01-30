@@ -3,12 +3,14 @@
 //  ios
 //
 //  Main navigation using native SwiftUI TabView
+//  Works with RootContainerView for global audio player support
 //
 
 import SwiftUI
 
 struct MainTabView: View {
     @State private var selectedTab: HomeTab = .home
+    @Environment(\.miniPlayerVisible) private var miniPlayerVisible
 
     init() {
         // Configure tab bar appearance
@@ -35,6 +37,7 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             HomeContentView()
+                .miniPlayerSafeArea()
                 .tabItem {
                     Image(systemName: "house.fill")
                     Text("Home")
@@ -42,6 +45,7 @@ struct MainTabView: View {
                 .tag(HomeTab.home)
 
             UpdatesViewForTabView(selectedTab: $selectedTab)
+                .miniPlayerSafeArea()
                 .tabItem {
                     Image(systemName: "chart.bar.doc.horizontal")
                     Text("Updates")
@@ -49,6 +53,7 @@ struct MainTabView: View {
                 .tag(HomeTab.updates)
 
             ResearchContentView()
+                .miniPlayerSafeArea()
                 .tabItem {
                     Image(systemName: "magnifyingglass")
                     Text("Research")
@@ -56,6 +61,7 @@ struct MainTabView: View {
                 .tag(HomeTab.research)
 
             TrackingContentView()
+                .miniPlayerSafeArea()
                 .tabItem {
                     Image(systemName: "star.fill")
                     Text("Tracking")
@@ -63,6 +69,7 @@ struct MainTabView: View {
                 .tag(HomeTab.tracking)
 
             LearnContentView()
+                .miniPlayerSafeArea()
                 .tabItem {
                     Image(systemName: "lightbulb.fill")
                     Text("Wiser")

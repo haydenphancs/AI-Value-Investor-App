@@ -3,17 +3,26 @@
 //  ios
 //
 //  Organism: Hero header section for money move article with gradient background
+//  Integrates with AudioManager for audio playback
 //
 
 import SwiftUI
 
 struct MoneyMoveArticleHeroHeader: View {
+    @EnvironmentObject private var audioManager: AudioManager
+
     let article: MoneyMoveArticle
+    var audioEpisode: AudioEpisode?
     var onBackTapped: (() -> Void)?
     var onShareTapped: (() -> Void)?
 
     private var gradientColors: [Color] {
         article.heroGradientColors.map { Color(hex: $0) }
+    }
+
+    private var isCurrentlyPlaying: Bool {
+        guard let episode = audioEpisode else { return false }
+        return audioManager.currentEpisode?.id == episode.id && audioManager.isPlaying
     }
 
     var body: some View {
@@ -133,48 +142,84 @@ struct MoneyMoveArticleHeroHeader: View {
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    // Meta row
+                    // Meta row and Play button
                     HStack(spacing: AppSpacing.lg) {
-                        // Date
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "calendar")
-                                .font(.system(size: 12, weight: .medium))
+                        // Play button (if audio available)
+                        if article.hasAudioVersion, let episode = audioEpisode {
+                            LargePlayButton(episode: episode, showLabel: true)
+                        }
+
+                        Spacer()
+
+                        // Meta info
+                        VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+                            HStack(spacing: AppSpacing.md) {
+                                // Read time
+                                HStack(spacing: AppSpacing.xs) {
+                                    Image(systemName: "clock")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(article.formattedReadTime)
+                                        .font(AppTypography.caption)
+                                }
+
+                                // Views
+                                HStack(spacing: AppSpacing.xs) {
+                                    Image(systemName: "eye")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(article.viewCount)
+                                        .font(AppTypography.caption)
+                                }
+                            }
+                            .foregroundColor(.white.opacity(0.7))
+
+                            // Date
                             Text(article.formattedDate)
                                 .font(AppTypography.caption)
+                                .foregroundColor(.white.opacity(0.6))
                         }
-                        .foregroundColor(.white.opacity(0.7))
+                    }
 
-                        // Read time
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "clock")
-                                .font(.system(size: 12, weight: .medium))
-                            Text(article.formattedReadTime)
-                                .font(AppTypography.caption)
+                    // Now playing indicator
+                    if isCurrentlyPlaying {
+                        HStack(spacing: AppSpacing.sm) {
+                            NowPlayingBars()
+                            Text("Now Playing")
+                                .font(AppTypography.captionBold)
+                                .foregroundColor(.white)
                         }
-                        .foregroundColor(.white.opacity(0.7))
-
-                        // Views
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "eye")
-                                .font(.system(size: 12, weight: .medium))
-                            Text(article.viewCount)
-                                .font(AppTypography.caption)
-                        }
-                        .foregroundColor(.white.opacity(0.7))
-
-                        // Audio
-                        if article.hasAudioVersion {
-                            Image(systemName: "headphones")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.white.opacity(0.7))
-                        }
+                        .padding(.top, AppSpacing.xs)
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.bottom, AppSpacing.xl)
             }
         }
-        .frame(height: 340)
+        .frame(height: article.hasAudioVersion ? 380 : 340)
+    }
+}
+
+// MARK: - Now Playing Animation Bars
+struct NowPlayingBars: View {
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<4) { index in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.white)
+                    .frame(width: 3, height: isAnimating ? CGFloat.random(in: 8...16) : 4)
+                    .animation(
+                        .easeInOut(duration: 0.4)
+                            .repeatForever()
+                            .delay(Double(index) * 0.1),
+                        value: isAnimating
+                    )
+            }
+        }
+        .frame(height: 16)
+        .onAppear {
+            isAnimating = true
+        }
     }
 }
 
@@ -199,7 +244,8 @@ struct GrainyTextureOverlay: View {
 #Preview {
     ScrollView {
         MoneyMoveArticleHeroHeader(
-            article: MoneyMoveArticle.sampleDigitalFinance
+            article: MoneyMoveArticle.sampleDigitalFinance,
+            audioEpisode: .sampleMoneyMoves
         )
 
         Text("Content goes here")
@@ -208,5 +254,6 @@ struct GrainyTextureOverlay: View {
     }
     .background(AppColors.background)
     .ignoresSafeArea()
+    .environmentObject(AudioManager.shared)
     .preferredColorScheme(.dark)
 }

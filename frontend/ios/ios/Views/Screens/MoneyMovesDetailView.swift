@@ -10,6 +10,7 @@ import SwiftUI
 
 struct MoneyMovesDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audioManager: AudioManager
     @State private var blueprints: [MoneyMove] = []
     @State private var valueTraps: [MoneyMove] = []
     @State private var battles: [MoneyMove] = []
@@ -77,6 +78,7 @@ struct MoneyMovesDetailView: View {
         .fullScreenCover(isPresented: $showArticleDetail) {
             if let article = selectedArticle {
                 MoneyMoveArticleDetailView(article: article)
+                    .environmentObject(audioManager)
             }
         }
         .onAppear {
@@ -549,5 +551,6 @@ private struct GrainyTextureOverlay: View {
 
 #Preview {
     MoneyMovesDetailView()
+        .environmentObject(AudioManager.shared)
         .preferredColorScheme(.dark)
 }

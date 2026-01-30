@@ -32,29 +32,7 @@ struct MoneyMoveArticleSectionContent: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-                .overlay(
-                    Group {
-                        if section.hasGlowEffect {
-                            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                                .strokeBorder(
-                                    LinearGradient(
-                                        colors: [
-                                            AppColors.primaryBlue.opacity(0.4),
-                                            AppColors.alertPurple.opacity(0.2),
-                                            Color.clear
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    ),
-                                    lineWidth: 1
-                                )
-                        }
-                    }
-                )
-        )
+        .background(Color(hex: "171B26"))
     }
 
     @ViewBuilder

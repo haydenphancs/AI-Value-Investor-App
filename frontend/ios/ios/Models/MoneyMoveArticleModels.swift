@@ -116,19 +116,19 @@ enum CalloutStyle {
 
     var backgroundColor: Color {
         switch self {
-        case .info: return Color(hex: "3B82F6").opacity(0.15)
-        case .warning: return Color(hex: "F59E0B").opacity(0.15)
-        case .success: return Color(hex: "22C55E").opacity(0.15)
-        case .highlight: return Color(hex: "A855F7").opacity(0.15)
+        case .info: return Color(hex: "3B82F6").opacity(0.05)
+        case .warning: return Color(hex: "F59E0B").opacity(0.05)
+        case .success: return Color(hex: "22C55E").opacity(0.05)
+        case .highlight: return Color(hex: "A855F7").opacity(0.05)
         }
     }
 
     var borderColor: Color {
         switch self {
-        case .info: return Color(hex: "3B82F6")
-        case .warning: return Color(hex: "F59E0B")
-        case .success: return Color(hex: "22C55E")
-        case .highlight: return Color(hex: "A855F7")
+        case .info: return Color(hex: "3B82F6").opacity(0.3)
+        case .warning: return Color(hex: "F59E0B").opacity(0.3)
+        case .success: return Color(hex: "22C55E").opacity(0.3)
+        case .highlight: return Color(hex: "A855F7").opacity(0.3)
         }
     }
 }

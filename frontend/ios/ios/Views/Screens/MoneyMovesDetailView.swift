@@ -529,23 +529,7 @@ private struct MoneyMovesCategorySectionHeader: View {
     }
 }
 
-// MARK: - Grainy Texture (kept for backward compatibility)
-private struct GrainyTextureOverlay: View {
-    var body: some View {
-        Canvas { context, size in
-            for _ in 0..<Int(size.width * size.height / 50) {
-                let x = CGFloat.random(in: 0..<size.width)
-                let y = CGFloat.random(in: 0..<size.height)
-                let opacity = Double.random(in: 0.02...0.08)
 
-                context.fill(
-                    Path(ellipseIn: CGRect(x: x, y: y, width: 1, height: 1)),
-                    with: .color(.white.opacity(opacity))
-                )
-            }
-        }
-    }
-}
 
 #Preview {
     MoneyMovesDetailView()

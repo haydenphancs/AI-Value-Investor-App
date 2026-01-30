@@ -11,7 +11,6 @@ import SwiftUI
 struct MoneyMoveArticleDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isBookmarked: Bool = false
-    @State private var isFollowing: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var showMoreOptions: Bool = false
     @State private var scrollOffset: CGFloat = 0
@@ -44,13 +43,8 @@ struct MoneyMoveArticleDetailView: View {
                     )
 
                     // Content
-                    MoneyMoveArticleContent(
-                        article: article,
-                        onAuthorTapped: handleAuthorTapped,
-                        onFollowTapped: handleFollowTapped,
-                        isFollowing: isFollowing
-                    )
-                    .padding(.top, AppSpacing.lg)
+                    MoneyMoveArticleContent(article: article)
+                        .padding(.top, AppSpacing.lg)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -162,16 +156,6 @@ struct MoneyMoveArticleDetailView: View {
         withAnimation(.spring(response: 0.3)) {
             isBookmarked.toggle()
         }
-    }
-
-    private func handleFollowTapped() {
-        withAnimation(.spring(response: 0.3)) {
-            isFollowing.toggle()
-        }
-    }
-
-    private func handleAuthorTapped() {
-        print("Navigate to author profile: \(article.author.name)")
     }
 
     private func handleListenTapped() {

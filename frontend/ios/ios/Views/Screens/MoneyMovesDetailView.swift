@@ -3,6 +3,7 @@
 //  ios
 //
 //  Money Moves Detail View - Full screen with hero card and categorized case studies
+//  Serves as the main listing view for all Money Move articles
 //
 
 import SwiftUI
@@ -12,6 +13,8 @@ struct MoneyMovesDetailView: View {
     @State private var blueprints: [MoneyMove] = []
     @State private var valueTraps: [MoneyMove] = []
     @State private var battles: [MoneyMove] = []
+    @State private var selectedArticle: MoneyMoveArticle?
+    @State private var showArticleDetail: Bool = false
 
     var body: some View {
         ZStack {
@@ -30,9 +33,15 @@ struct MoneyMovesDetailView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
                         // Hero Card - Featured Deep Dive
-                        FeaturedDeepDiveHeroCard()
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.top, AppSpacing.md)
+                        FeaturedDeepDiveHeroCard(
+                            article: MoneyMoveArticle.sampleDigitalFinance,
+                            onTap: {
+                                selectedArticle = MoneyMoveArticle.sampleDigitalFinance
+                                showArticleDetail = true
+                            }
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.top, AppSpacing.md)
 
                         // Section 1: The Blueprints
                         MoneyMovesCategorySection(
@@ -65,6 +74,11 @@ struct MoneyMovesDetailView: View {
             }
         }
         .navigationBarHidden(true)
+        .fullScreenCover(isPresented: $showArticleDetail) {
+            if let article = selectedArticle {
+                MoneyMoveArticleDetailView(article: article)
+            }
+        }
         .onAppear {
             loadSampleData()
         }
@@ -137,11 +151,147 @@ struct MoneyMovesDetailView: View {
     }
 
     private func handleMoveTap(_ move: MoneyMove) {
-        print("Money move tapped: \(move.title)")
+        // Create article from move and show detail
+        selectedArticle = createArticleFromMove(move)
+        showArticleDetail = true
     }
 
     private func handleBookmark(_ move: MoneyMove) {
         print("Bookmark toggled for: \(move.title)")
+    }
+
+    /// Creates a full MoneyMoveArticle from a MoneyMove card data
+    private func createArticleFromMove(_ move: MoneyMove) -> MoneyMoveArticle {
+        // Generate gradient colors based on category
+        let gradientColors: [String]
+        switch move.category {
+        case .blueprints:
+            gradientColors = ["059669", "047857", "064E3B"]
+        case .valueTraps:
+            gradientColors = ["DC2626", "991B1B", "7F1D1D"]
+        case .battles:
+            gradientColors = ["7C3AED", "5B21B6", "4C1D95"]
+        }
+
+        return MoneyMoveArticle(
+            title: move.title,
+            subtitle: move.subtitle,
+            category: move.category,
+            author: ArticleAuthor(
+                name: "The Alpha",
+                avatarName: nil,
+                title: "Investment Research",
+                isVerified: true,
+                followerCount: "45.2k"
+            ),
+            publishedAt: Date(),
+            readTimeMinutes: move.estimatedMinutes,
+            viewCount: move.learnerCount,
+            commentCount: Int.random(in: 20...200),
+            isBookmarked: move.isBookmarked,
+            hasAudioVersion: true,
+            heroGradientColors: gradientColors,
+            tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),
+            keyHighlights: [
+                ArticleHighlight(
+                    icon: "lightbulb.fill",
+                    title: "Key Insight",
+                    description: "Understanding the core principles behind this investment case study."
+                ),
+                ArticleHighlight(
+                    icon: "chart.line.uptrend.xyaxis",
+                    title: "Market Impact",
+                    description: "How this story influenced market dynamics and investor behavior."
+                ),
+                ArticleHighlight(
+                    icon: "exclamationmark.triangle.fill",
+                    title: "Lessons Learned",
+                    description: "Critical takeaways for modern investors and portfolio managers."
+                )
+            ],
+            sections: [
+                ArticleSection(
+                    title: "Overview",
+                    icon: "doc.text.fill",
+                    content: [
+                        .paragraph("This case study explores the key factors that led to this notable investment story. Understanding these dynamics is crucial for making informed investment decisions in today's complex market environment."),
+                        .paragraph("By analyzing the events, decisions, and market reactions, we can extract valuable lessons applicable to future investment opportunities and risk management strategies.")
+                    ],
+                    hasGlowEffect: true
+                ),
+                ArticleSection(
+                    title: "Background & Context",
+                    icon: "clock.fill",
+                    content: [
+                        .paragraph("To fully appreciate this case study, we must understand the market conditions and competitive landscape that shaped its trajectory."),
+                        .callout(
+                            icon: "info.circle.fill",
+                            text: "The events discussed here occurred during a period of significant market transformation, making them particularly relevant for today's investors.",
+                            style: .info
+                        ),
+                        .bulletList([
+                            "Market conditions at the time",
+                            "Key players and their motivations",
+                            "Regulatory environment",
+                            "Technological factors"
+                        ])
+                    ]
+                ),
+                ArticleSection(
+                    title: "Key Takeaways",
+                    icon: "star.fill",
+                    content: [
+                        .subheading("For Value Investors"),
+                        .bulletList([
+                            "Understanding market dynamics is essential for long-term success",
+                            "Due diligence prevents costly mistakes and protects capital",
+                            "Long-term thinking creates lasting value for shareholders",
+                            "Risk management is non-negotiable in volatile markets"
+                        ]),
+                        .subheading("Practical Applications"),
+                        .paragraph("These lessons can be directly applied to your investment process. Consider how each principle might have changed outcomes in your own portfolio decisions.")
+                    ]
+                ),
+                ArticleSection(
+                    title: "Conclusion",
+                    icon: "checkmark.seal.fill",
+                    content: [
+                        .paragraph("This case study demonstrates the importance of fundamental analysis, proper due diligence, and maintaining a long-term perspective in investing."),
+                        .callout(
+                            icon: "quote.opening",
+                            text: "The best investment you can make is in your own education and understanding of what drives business value.",
+                            style: .highlight
+                        )
+                    ]
+                )
+            ],
+            statistics: [
+                ArticleStatistic(value: move.learnerCount, label: "Investors Learning", trend: .up, trendValue: "12%"),
+                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time"),
+                ArticleStatistic(value: "4.8", label: "Rating", trend: .up, trendValue: "0.3")
+            ],
+            comments: [
+                ArticleComment(
+                    authorName: "Michael Chen",
+                    authorAvatar: nil,
+                    content: "Excellent analysis! This really helped me understand the key factors at play.",
+                    postedAt: Calendar.current.date(byAdding: .hour, value: -3, to: Date())!,
+                    likeCount: 24,
+                    replyCount: 5,
+                    isVerified: false
+                ),
+                ArticleComment(
+                    authorName: "Sarah Williams",
+                    authorAvatar: nil,
+                    content: "The section on risk management was particularly valuable. Would love to see more case studies like this.",
+                    postedAt: Calendar.current.date(byAdding: .hour, value: -8, to: Date())!,
+                    likeCount: 18,
+                    replyCount: 2,
+                    isVerified: true
+                )
+            ],
+            relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
+        )
     }
 }
 
@@ -183,129 +333,135 @@ private struct MoneyMovesDetailHeader: View {
 
 // MARK: - Featured Deep Dive Hero Card
 private struct FeaturedDeepDiveHeroCard: View {
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            // Background with grainy gradient
-            ZStack {
-                // Base gradient (Red/Orange for FTX)
-                LinearGradient(
-                    colors: [
-                        Color(hex: "DC2626"),
-                        Color(hex: "EA580C"),
-                        Color(hex: "F97316")
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+    let article: MoneyMoveArticle
+    var onTap: (() -> Void)?
 
-                // Grainy texture overlay
-                GrainyTextureOverlay()
-
-                // Dark overlay for text readability
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.1),
-                        Color.black.opacity(0.5)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            }
-
-            // Content overlay
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Spacer()
-
-                // Category label
-                Text("FEATURED DEEP DIVE")
-                    .font(AppTypography.captionBold)
-                    .foregroundColor(.white.opacity(0.8))
-                    .tracking(1.2)
-
-                // Title
-                Text("The Future of Digital Finance")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.white)
-                    .minimumScaleFactor(0.8)
-                    .lineLimit(2)
-
-                // Description
-                Text("Exploring the intersection of fintech innovation, cryptocurrency adoption, and traditional banking transformation.")
-                    .font(AppTypography.callout)
-                    .foregroundColor(.white.opacity(0.9))
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // Meta info
-                HStack(spacing: AppSpacing.lg) {
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 12, weight: .medium))
-                        Text("18 min")
-                            .font(AppTypography.caption)
-                    }
-                    .foregroundColor(.white.opacity(0.8))
-
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "person.2.fill")
-                            .font(.system(size: 12, weight: .medium))
-                        Text("3.2k investors")
-                            .font(AppTypography.caption)
-                        Image(systemName: "headphones")
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.leading, AppSpacing.md)
-                    }
-                    .foregroundColor(.white.opacity(0.8))
-                }
-                .padding(.top, AppSpacing.xs)
-            }
-            .padding(AppSpacing.xl)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Must Read pill tag
-            MustReadPill()
-                .padding(AppSpacing.lg)
-        }
-        .aspectRatio(16/9, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
+    private var gradientColors: [Color] {
+        article.heroGradientColors.map { Color(hex: $0) }
     }
-}
 
-// MARK: - Must Read Pill
-private struct MustReadPill: View {
     var body: some View {
-        Text("MUST READ")
-            .font(AppTypography.captionBold)
-            .foregroundColor(.white)
-            .padding(.horizontal, AppSpacing.md)
-            .padding(.vertical, AppSpacing.xs)
-            .background(
-                Capsule()
-                    .fill(Color.black.opacity(0.4))
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
+        Button(action: { onTap?() }) {
+            ZStack(alignment: .topTrailing) {
+                // Background with gradient and effects
+                ZStack {
+                    // Base gradient
+                    LinearGradient(
+                        colors: gradientColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-            )
-    }
-}
 
-// MARK: - Grainy Texture Overlay
-private struct GrainyTextureOverlay: View {
-    var body: some View {
-        Canvas { context, size in
-            // Create noise pattern
-            for _ in 0..<Int(size.width * size.height / 50) {
-                let x = CGFloat.random(in: 0..<size.width)
-                let y = CGFloat.random(in: 0..<size.height)
-                let opacity = Double.random(in: 0.02...0.08)
+                    // Animated glow orbs
+                    GeometryReader { geometry in
+                        Circle()
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color(hex: "3B82F6").opacity(0.3),
+                                        Color.clear
+                                    ],
+                                    center: .center,
+                                    startRadius: 0,
+                                    endRadius: geometry.size.width * 0.35
+                                )
+                            )
+                            .frame(width: geometry.size.width * 0.5)
+                            .offset(x: -geometry.size.width * 0.15, y: geometry.size.height * 0.3)
 
-                context.fill(
-                    Path(ellipseIn: CGRect(x: x, y: y, width: 1, height: 1)),
-                    with: .color(.white.opacity(opacity))
-                )
+                        Circle()
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color(hex: "8B5CF6").opacity(0.25),
+                                        Color.clear
+                                    ],
+                                    center: .center,
+                                    startRadius: 0,
+                                    endRadius: geometry.size.width * 0.3
+                                )
+                            )
+                            .frame(width: geometry.size.width * 0.4)
+                            .offset(x: geometry.size.width * 0.6, y: geometry.size.height * 0.1)
+                    }
+
+                    // Grainy texture overlay
+                    GrainyTextureOverlay()
+
+                    // Dark overlay for text readability
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.1),
+                            Color.black.opacity(0.5)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+
+                // Content overlay
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    Spacer()
+
+                    // Category label
+                    Text("FEATURED DEEP DIVE")
+                        .font(AppTypography.captionBold)
+                        .foregroundColor(.white.opacity(0.8))
+                        .tracking(1.2)
+
+                    // Title
+                    Text(article.title)
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundColor(.white)
+                        .minimumScaleFactor(0.8)
+                        .lineLimit(2)
+
+                    // Description
+                    Text(article.subtitle)
+                        .font(AppTypography.callout)
+                        .foregroundColor(.white.opacity(0.9))
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    // Meta info
+                    HStack(spacing: AppSpacing.lg) {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("\(article.readTimeMinutes) min")
+                                .font(AppTypography.caption)
+                        }
+                        .foregroundColor(.white.opacity(0.8))
+
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("\(article.viewCount) investors")
+                                .font(AppTypography.caption)
+
+                            if article.hasAudioVersion {
+                                Image(systemName: "headphones")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .padding(.leading, AppSpacing.md)
+                            }
+                        }
+                        .foregroundColor(.white.opacity(0.8))
+                    }
+                    .padding(.top, AppSpacing.xs)
+                }
+                .padding(AppSpacing.xl)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                // Tag pill
+                if let tagLabel = article.tagLabel {
+                    ArticleTagPill(text: tagLabel)
+                        .padding(AppSpacing.lg)
+                }
             }
+            .aspectRatio(16/9, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
         }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -369,6 +525,24 @@ private struct MoneyMovesCategorySectionHeader: View {
             }
 
             Spacer()
+        }
+    }
+}
+
+// MARK: - Grainy Texture (kept for backward compatibility)
+private struct GrainyTextureOverlay: View {
+    var body: some View {
+        Canvas { context, size in
+            for _ in 0..<Int(size.width * size.height / 50) {
+                let x = CGFloat.random(in: 0..<size.width)
+                let y = CGFloat.random(in: 0..<size.height)
+                let opacity = Double.random(in: 0.02...0.08)
+
+                context.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: 1, height: 1)),
+                    with: .color(.white.opacity(opacity))
+                )
+            }
         }
     }
 }

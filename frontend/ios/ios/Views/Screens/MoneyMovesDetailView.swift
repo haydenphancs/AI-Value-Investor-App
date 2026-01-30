@@ -15,7 +15,6 @@ struct MoneyMovesDetailView: View {
     @State private var valueTraps: [MoneyMove] = []
     @State private var battles: [MoneyMove] = []
     @State private var selectedArticle: MoneyMoveArticle?
-    @State private var showArticleDetail: Bool = false
 
     var body: some View {
         ZStack {
@@ -38,7 +37,6 @@ struct MoneyMovesDetailView: View {
                             article: MoneyMoveArticle.sampleDigitalFinance,
                             onTap: {
                                 selectedArticle = MoneyMoveArticle.sampleDigitalFinance
-                                showArticleDetail = true
                             }
                         )
                         .padding(.horizontal, AppSpacing.lg)
@@ -75,11 +73,9 @@ struct MoneyMovesDetailView: View {
             }
         }
         .navigationBarHidden(true)
-        .fullScreenCover(isPresented: $showArticleDetail) {
-            if let article = selectedArticle {
-                MoneyMoveArticleDetailView(article: article)
-                    .environmentObject(audioManager)
-            }
+        .fullScreenCover(item: $selectedArticle) { article in
+            MoneyMoveArticleDetailView(article: article)
+                .environmentObject(audioManager)
         }
         .onAppear {
             loadSampleData()
@@ -157,7 +153,6 @@ struct MoneyMovesDetailView: View {
     private func handleMoveTap(_ move: MoneyMove) {
         // Create article from move and show detail
         selectedArticle = createArticleFromMove(move)
-        showArticleDetail = true
     }
 
     private func handleBookmark(_ move: MoneyMove) {

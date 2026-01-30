@@ -25,6 +25,7 @@ struct MoneyMoveArticle: Identifiable {
     // Hero section
     let heroGradientColors: [String]
     let tagLabel: String?
+    let isFeatured: Bool // Indicates if this is a featured article
 
     // Content sections
     let keyHighlights: [ArticleHighlight]
@@ -283,6 +284,156 @@ extension MoneyMoveArticle {
         hasAudioVersion: true,
         heroGradientColors: ["1E3A5F", "0D1B2A", "1B263B"],
         tagLabel: "MUST READ",
+        isFeatured: false,
+        keyHighlights: [
+            ArticleHighlight(
+                icon: "building.columns.fill",
+                title: "The Alpha",
+                description: "As technology becomes ubiquitous, decentralized finance (DeFi) is reshaping how we invest."
+            ),
+            ArticleHighlight(
+                icon: "chart.line.uptrend.xyaxis",
+                title: "Key Trends",
+                description: "The pace of banking innovation has never been faster. This conversation isn't about tomorrow's shift."
+            ),
+            ArticleHighlight(
+                icon: "shield.checkered",
+                title: "Risk Factors",
+                description: "Despite strong prospects, regulatory challenges and market volatility remain key concerns."
+            )
+        ],
+        sections: [
+            ArticleSection(
+                title: "The Rise of Decentralized Finance",
+                icon: "chart.bar.fill",
+                content: [
+                    .paragraph("Decentralized finance, or DeFi, represents a fundamental shift in how financial services are delivered. By removing intermediaries through blockchain technology and smart contracts, DeFi platforms are offering users direct access to financial instruments that were once the exclusive domain of institutions."),
+                    .paragraph("The implications are profound. Users can now access loans, trade assets, and earn yields on their digital assets without needing to seek permission or provide extensive documentation."),
+                    .callout(
+                        icon: "lightbulb.fill",
+                        text: "DeFi protocols have processed over $180B in total value locked, representing a 340% increase from last year.",
+                        style: .highlight
+                    ),
+                    .bulletList([
+                        "Permissionless lending and borrowing",
+                        "Automated market makers (AMMs)",
+                        "Yield farming and liquidity mining",
+                        "Cross-chain interoperability"
+                    ])
+                ],
+                hasGlowEffect: true
+            ),
+            ArticleSection(
+                title: "Artificial Intelligence in Banking",
+                icon: "cpu.fill",
+                content: [
+                    .paragraph("Traditional banks are not standing still. The integration of artificial intelligence and machine learning has revolutionized everything from fraud detection to customer service. AI-powered chatbots now handle over 70% of customer inquiries, while advanced algorithms identify suspicious transactions in milliseconds."),
+                    .subheading("Enhanced Security"),
+                    .paragraph("Biometric authentication, combined with behavioral analysis, has reduced fraud rates by 45% across major financial institutions. Banks are investing heavily in zero-trust security architectures."),
+                    .subheading("Personalized Experiences"),
+                    .paragraph("Machine learning models analyze spending patterns to provide personalized financial advice, automatically categorize transactions, and predict future expenses with remarkable accuracy.")
+                ]
+            ),
+            ArticleSection(
+                title: "Embedded Finance and Super Apps",
+                icon: "apps.iphone",
+                content: [
+                    .paragraph("The boundaries between financial services and other digital experiences are dissolving. Embedded finance allows non-financial companies to offer banking, lending, and payment services seamlessly within their platforms."),
+                    .quote(
+                        text: "The future of finance isn't about going to the bank—it's about banking coming to you, wherever you are.",
+                        attribution: "Industry Analyst"
+                    ),
+                    .paragraph("Super apps like WeChat in China have already demonstrated the power of consolidating multiple services. Western markets are now seeing similar evolution, with ride-sharing apps offering banking, e-commerce platforms providing credit, and social media enabling peer-to-peer payments.")
+                ]
+            ),
+            ArticleSection(
+                title: "Navigating the New Financial Frontier",
+                icon: "map.fill",
+                content: [
+                    .paragraph("The transformation of finance through technology is not a distant future speculation—it's happening now. From the way we pay for groceries to how global corporations manage treasury operations, every aspect of our financial lives is being reimagined."),
+                    .callout(
+                        icon: "exclamationmark.triangle.fill",
+                        text: "Investors should remain vigilant. While opportunities abound, the regulatory landscape is still evolving, and not all innovations will survive.",
+                        style: .warning
+                    ),
+                    .paragraph("The journey ahead promises to be transformative—reshaping not just how we manage money, but how we think about value, ownership, and economic participation in an increasingly connected world.")
+                ]
+            )
+        ],
+        statistics: [
+            ArticleStatistic(value: "$180B", label: "Total Value Locked", trend: .up, trendValue: "340%"),
+            ArticleStatistic(value: "4.2M", label: "Daily Active Users", trend: .up, trendValue: "127%"),
+            ArticleStatistic(value: "2,400+", label: "DeFi Protocols", trend: .up, trendValue: "89%")
+        ],
+        comments: [
+            ArticleComment(
+                authorName: "Alex Johnson",
+                authorAvatar: nil,
+                content: "Excellent breakdown of the current DeFi landscape! The data on portfolio fragility suggests wealth creation through early adoption needs more critical analysis.",
+                postedAt: Calendar.current.date(byAdding: .hour, value: -5, to: Date())!,
+                likeCount: 47,
+                replyCount: 8,
+                isVerified: false
+            ),
+            ArticleComment(
+                authorName: "Maya Patel",
+                authorAvatar: nil,
+                content: "As a traditional banker transitioning to fintech, this article perfectly captures the challenges and opportunities we face. The embedded finance section was particularly insightful.",
+                postedAt: Calendar.current.date(byAdding: .hour, value: -12, to: Date())!,
+                likeCount: 32,
+                replyCount: 3,
+                isVerified: true
+            )
+        ],
+        relatedArticles: [
+            RelatedArticle(
+                title: "The FTX Collapse",
+                subtitle: "What the failure of crypto's top exchange tells us about the future.",
+                category: .valueTraps,
+                readTimeMinutes: 14,
+                viewCount: "2.8M",
+                gradientColors: ["DC2626", "991B1B"]
+            ),
+            RelatedArticle(
+                title: "How Amazon Built Its Moat",
+                subtitle: "The strategy behind unstoppable dominance.",
+                category: .blueprints,
+                readTimeMinutes: 12,
+                viewCount: "3.1M",
+                gradientColors: ["059669", "047857"]
+            ),
+            RelatedArticle(
+                title: "How AI Is Revolutionizing Stock Market Analysis",
+                subtitle: "From pattern recognition to predictive analytics.",
+                category: .blueprints,
+                readTimeMinutes: 16,
+                viewCount: "1.9M",
+                gradientColors: ["7C3AED", "5B21B6"]
+            )
+        ]
+    )
+    
+    /// Featured version of the digital finance article with orange gradient for hero card
+    static let featuredDigitalFinance = MoneyMoveArticle(
+        title: "The Future of Digital Finance",
+        subtitle: "Exploring the intersection of fintech innovation, cryptocurrency adoption, and traditional banking transformation.",
+        category: .blueprints,
+        author: ArticleAuthor(
+            name: "The Alpha",
+            avatarName: nil,
+            title: "Investment Research",
+            isVerified: true,
+            followerCount: "45.2k"
+        ),
+        publishedAt: Calendar.current.date(byAdding: .day, value: -3, to: Date())!,
+        readTimeMinutes: 18,
+        viewCount: "4.2M",
+        commentCount: 124,
+        isBookmarked: false,
+        hasAudioVersion: true,
+        heroGradientColors: ["EA580C", "C2410C", "9A3412"], // Orange gradient for featured articles
+        tagLabel: "MUST READ",
+        isFeatured: true, // Mark as featured to show "FEATURED DEEP DIVE" instead of category
         keyHighlights: [
             ArticleHighlight(
                 icon: "building.columns.fill",

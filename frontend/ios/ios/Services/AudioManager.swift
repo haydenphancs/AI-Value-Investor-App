@@ -81,7 +81,7 @@ final class AudioManager: ObservableObject {
     // MARK: - Audio Session Setup
     private func setupAudioSession() {
         do {
-            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetooth, .allowAirPlay])
+            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
             try audioSession.setActive(true)
         } catch {
             print("Failed to setup audio session: \(error)")
@@ -259,7 +259,8 @@ final class AudioManager: ObservableObject {
 
     private func startSleepTimer() {
         sleepTimerInstance = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 if self.sleepTimerRemaining > 0 {
                     self.sleepTimerRemaining -= 1
@@ -284,7 +285,8 @@ final class AudioManager: ObservableObject {
 
         let interval = 1.0 / playbackSpeed.rawValue
         playbackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 if self.currentTime < self.duration {
                     self.currentTime += 1

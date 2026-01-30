@@ -36,7 +36,7 @@ struct ArticleQuoteBlock: View {
 
                 // Quote text
                 Text(text)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textPrimary)
                     .italic()
                     .lineSpacing(6)

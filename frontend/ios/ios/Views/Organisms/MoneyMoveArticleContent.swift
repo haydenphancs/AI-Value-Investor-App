@@ -9,31 +9,12 @@ import SwiftUI
 
 struct MoneyMoveArticleContent: View {
     let article: MoneyMoveArticle
-    var onAuthorTapped: (() -> Void)?
-    var onFollowTapped: (() -> Void)?
-    var isFollowing: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
-            // Author row
-            ArticleAuthorRow(
-                author: article.author,
-                showFollowButton: true,
-                isFollowing: isFollowing,
-                onFollowTapped: onFollowTapped,
-                onAuthorTapped: onAuthorTapped
-            )
-            .padding(.horizontal, AppSpacing.lg)
-
             // Key highlights
             if !article.keyHighlights.isEmpty {
                 MoneyMoveArticleKeyHighlights(highlights: article.keyHighlights)
-                    .padding(.horizontal, AppSpacing.lg)
-            }
-
-            // Statistics grid
-            if !article.statistics.isEmpty {
-                ArticleStatisticsGrid(statistics: article.statistics)
                     .padding(.horizontal, AppSpacing.lg)
             }
 
@@ -43,7 +24,6 @@ struct MoneyMoveArticleContent: View {
                     MoneyMoveArticleSectionContent(section: section)
                 }
             }
-            .padding(.horizontal, AppSpacing.lg)
 
             // Comments section
             if !article.comments.isEmpty {

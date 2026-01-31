@@ -13,7 +13,6 @@ struct BookLibraryView: View {
     @State private var searchText = ""
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
-    @State private var showBookDetail = false
 
     private var filteredBooks: [LibraryBook] {
         if searchText.isEmpty {
@@ -95,7 +94,6 @@ struct BookLibraryView: View {
                             .padding(.horizontal, AppSpacing.lg)
                             .onTapGesture {
                                 selectedBook = book
-                                showBookDetail = true
                             }
                         }
 
@@ -109,12 +107,9 @@ struct BookLibraryView: View {
         .onAppear {
             loadBooks()
         }
-        .fullScreenCover(isPresented: $showBookDetail) {
-            if let book = selectedBook {
-                BookDetailView(book: book)
-                    .environmentObject(audioManager)
-                    .preferredColorScheme(.dark)
-            }
+        .fullScreenCover(item: $selectedBook) { book in
+            BookDetailView(book: book)
+                .environmentObject(audioManager)
         }
     }
 

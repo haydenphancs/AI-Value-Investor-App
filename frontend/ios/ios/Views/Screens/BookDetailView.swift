@@ -589,7 +589,7 @@ private struct KeyHighlightCard: View {
     }
 }
 
-// MARK: - Core Chapters Section
+// MARK: - Core Chapters Section (Timeline Style)
 private struct CoreChaptersSection: View {
     let chapters: [BookCoreChapter]
 
@@ -599,67 +599,69 @@ private struct CoreChaptersSection: View {
                 .font(AppTypography.headline)
                 .foregroundColor(AppColors.textPrimary)
 
-            VStack(spacing: AppSpacing.md) {
-                ForEach(chapters) { chapter in
-                    CoreChapterCard(chapter: chapter)
+            // Timeline layout
+            VStack(spacing: 0) {
+                ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
+                    CoreChapterTimelineRow(
+                        chapter: chapter,
+                        isLast: index == chapters.count - 1
+                    )
                 }
             }
         }
     }
 }
 
-// MARK: - Core Chapter Card
-private struct CoreChapterCard: View {
+// MARK: - Core Chapter Timeline Row
+private struct CoreChapterTimelineRow: View {
     let chapter: BookCoreChapter
+    let isLast: Bool
 
-    // Chapter number badge colors based on position
-    private var badgeColor: Color {
-        let colors: [Color] = [
-            Color(hex: "EF4444"), // Red
-            Color(hex: "F97316"), // Orange
-            Color(hex: "F59E0B"), // Amber
-            Color(hex: "84CC16"), // Lime
-            Color(hex: "22C55E"), // Green
-            Color(hex: "14B8A6"), // Teal
-            Color(hex: "06B6D4"), // Cyan
-            Color(hex: "3B82F6"), // Blue
-            Color(hex: "8B5CF6"), // Violet
-            Color(hex: "A855F7"), // Purple
-        ]
-        let index = (chapter.number - 1) % colors.count
-        return colors[index]
-    }
+    private let badgeColor = Color(hex: "14B8A6") // Teal color matching the design
+    private let lineColor = Color(hex: "2A3441") // Subtle dark line
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            // Number badge
-            ZStack {
-                Circle()
-                    .fill(badgeColor)
-                    .frame(width: 28, height: 28)
+        HStack(alignment: .top, spacing: AppSpacing.lg) {
+            // Timeline column with badge and connecting line
+            ZStack(alignment: .top) {
+                // Connecting line (behind the badge)
+                if !isLast {
+                    VStack {
+                        Spacer()
+                            .frame(height: 16) // Half of badge height to start line from center
+                        Rectangle()
+                            .fill(lineColor)
+                            .frame(width: 2)
+                    }
+                }
 
-                Text("\(chapter.number)")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.white)
+                // Number badge
+                ZStack {
+                    Circle()
+                        .fill(badgeColor)
+                        .frame(width: 32, height: 32)
+
+                    Text("\(chapter.number)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                }
             }
+            .frame(width: 32)
 
-            // Content
+            // Content column
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(chapter.title)
                     .font(AppTypography.bodyBold)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(chapter.description)
-                    .font(AppTypography.caption)
+                    .font(AppTypography.callout)
                     .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(2)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Spacer(minLength: 0)
+            .padding(.bottom, isLast ? 0 : AppSpacing.xxl)
         }
-        .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
     }
 }
 

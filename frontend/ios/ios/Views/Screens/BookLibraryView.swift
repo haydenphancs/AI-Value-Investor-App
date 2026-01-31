@@ -113,6 +113,7 @@ struct BookLibraryView: View {
             if let book = selectedBook {
                 BookDetailView(book: book)
                     .environmentObject(audioManager)
+                    .preferredColorScheme(.dark)
             }
         }
     }

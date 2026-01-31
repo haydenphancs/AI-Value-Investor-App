@@ -286,7 +286,7 @@ struct LibraryBook: Identifiable {
     }
 
     var formattedChapters: String {
-        "\(chapterCount) Chapters"
+        "\(chapterCount) Cores"
     }
 
     var formattedAudioDuration: String {
@@ -296,7 +296,7 @@ struct LibraryBook: Identifiable {
     }
 
     var formattedReadTime: String {
-        "\(readTimeMinutes) min read"
+        "\(readTimeMinutes) min"
     }
 
     var formattedViewCount: String {
@@ -304,9 +304,9 @@ struct LibraryBook: Identifiable {
     }
 
     var formattedLastUpdated: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: lastUpdated)
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: lastUpdated)
+        return "Updated \(year)"
     }
 
     /// Convert to AudioEpisode for playback

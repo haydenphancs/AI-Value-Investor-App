@@ -166,6 +166,42 @@ struct EducationBook: Identifiable {
     }
 }
 
+// MARK: - Book Level
+enum BookLevel: String, CaseIterable {
+    case starter = "Starter"
+    case intermediate = "Intermediate"
+    case advanced = "Advanced"
+
+    var color: Color {
+        switch self {
+        case .starter: return Color(hex: "06B6D4") // Cyan
+        case .intermediate: return Color(hex: "8B5CF6") // Purple
+        case .advanced: return Color(hex: "F59E0B") // Amber
+        }
+    }
+}
+
+// MARK: - Book Category Tag
+enum BookCategoryTag: String, CaseIterable {
+    case mindset = "Mindset"
+    case finance = "Finance"
+    case strategy = "Strategy"
+    case analysis = "Analysis"
+    case psychology = "Psychology"
+    case investing = "Investing"
+    case economics = "Economics"
+    case business = "Business"
+}
+
+// MARK: - Book Author
+struct BookAuthor: Identifiable {
+    let id = UUID()
+    let name: String
+    let title: String
+    let bio: String
+    let avatarGradientColors: [String]
+}
+
 // MARK: - Library Book (For Book Library/Curriculum View)
 struct LibraryBook: Identifiable {
     let id = UUID()
@@ -181,6 +217,20 @@ struct LibraryBook: Identifiable {
     let coverGradientStart: String
     let coverGradientEnd: String
 
+    // Detail view properties
+    let level: BookLevel
+    let chapterCount: Int
+    let categoryTags: [BookCategoryTag]
+    let whyThisBook: String
+    let authorDetail: BookAuthor
+    let audioDurationSeconds: Int
+    let readTimeMinutes: Int
+    let viewCount: String
+    let lastUpdated: Date
+
+    // Core concepts for the book
+    let coreConceptTitles: [String]
+
     var formattedRating: String {
         String(format: "%.1f", rating)
     }
@@ -195,6 +245,45 @@ struct LibraryBook: Identifiable {
 
     var formattedKeyIdeas: String {
         "\(keyIdeasCount) Key Ideas"
+    }
+
+    var formattedChapters: String {
+        "\(chapterCount) Chapters"
+    }
+
+    var formattedAudioDuration: String {
+        let minutes = audioDurationSeconds / 60
+        let seconds = audioDurationSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var formattedReadTime: String {
+        "\(readTimeMinutes) min read"
+    }
+
+    var formattedViewCount: String {
+        viewCount
+    }
+
+    var formattedLastUpdated: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: lastUpdated)
+    }
+
+    /// Convert to AudioEpisode for playback
+    var audioEpisode: AudioEpisode {
+        AudioEpisode(
+            id: "book-\(id.uuidString)",
+            title: title,
+            subtitle: "by \(author)",
+            artworkGradientColors: [coverGradientStart, coverGradientEnd],
+            artworkIcon: "book.fill",
+            duration: TimeInterval(audioDurationSeconds),
+            category: .books,
+            authorName: author,
+            sourceId: id.uuidString
+        )
     }
 }
 
@@ -370,7 +459,7 @@ extension LibraryBook {
         // Book 1 - MASTERED
         LibraryBook(
             title: "Rich Dad Poor Dad",
-            author: "Robert Kiyosaki",
+            author: "Robert T. Kiyosaki",
             description: "What the rich teach their kids about money that the poor and middle class do not.",
             pageCount: 336,
             publishedYear: 1997,
@@ -379,7 +468,22 @@ extension LibraryBook {
             isMastered: true,
             keyIdeasCount: 12,
             coverGradientStart: "7C3AED",
-            coverGradientEnd: "4C1D95"
+            coverGradientEnd: "4C1D95",
+            level: .starter,
+            chapterCount: 10,
+            categoryTags: [.mindset, .finance],
+            whyThisBook: "Rich Dad Poor Dad is Robert Kiyosaki's best-selling book about the difference in mindset between the poor, middle class, and rich. It advocates the importance of financial literacy, financial independence and building wealth through investing in assets.\n\nThe book is largely based on Kiyosaki's upbringing and education in Hawaii. It highlights the different attitudes toward money, work, and life between his biological father and the father of his best friend.",
+            authorDetail: BookAuthor(
+                name: "Robert T. Kiyosaki",
+                title: "Entrepreneur, Investor & Author",
+                bio: "Robert Kiyosaki is an American businessman and author. He founded the Rich Dad Company which provides personal finance and business education through books and videos.",
+                avatarGradientColors: ["3B82F6", "1E40AF"]
+            ),
+            audioDurationSeconds: 1080,
+            readTimeMinutes: 18,
+            viewCount: "4.2M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 27))!,
+            coreConceptTitles: ["Assets vs Liabilities", "Cash Flow Quadrant", "Financial Education", "Building Wealth", "Tax Strategies", "Investment Mindset"]
         ),
         // Book 2 - MASTERED
         LibraryBook(
@@ -393,7 +497,22 @@ extension LibraryBook {
             isMastered: true,
             keyIdeasCount: 18,
             coverGradientStart: "1E3A5F",
-            coverGradientEnd: "0F1F35"
+            coverGradientEnd: "0F1F35",
+            level: .intermediate,
+            chapterCount: 20,
+            categoryTags: [.investing, .analysis, .strategy],
+            whyThisBook: "The Intelligent Investor is widely considered the bible of value investing. Benjamin Graham's timeless wisdom on how to think about investing has guided generations of the world's most successful investors.\n\nThe book teaches the concept of 'Mr. Market,' margin of safety, and the distinction between investing and speculation. Warren Buffett credits this book for shaping his investment philosophy.",
+            authorDetail: BookAuthor(
+                name: "Benjamin Graham",
+                title: "Father of Value Investing",
+                bio: "Benjamin Graham was an influential economist, professor, and professional investor. Known as the 'father of value investing,' he mentored Warren Buffett and developed fundamental analysis techniques still used today.",
+                avatarGradientColors: ["1E3A5F", "0F1F35"]
+            ),
+            audioDurationSeconds: 2700,
+            readTimeMinutes: 45,
+            viewCount: "8.1M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 20))!,
+            coreConceptTitles: ["Mr. Market", "Margin of Safety", "Value vs Growth", "Defensive Investing", "Enterprise Value", "Stock Selection"]
         ),
         // Book 3
         LibraryBook(
@@ -407,7 +526,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 15,
             coverGradientStart: "059669",
-            coverGradientEnd: "064E3B"
+            coverGradientEnd: "064E3B",
+            level: .starter,
+            chapterCount: 20,
+            categoryTags: [.psychology, .mindset, .finance],
+            whyThisBook: "Morgan Housel explores the strange ways people think about money and teaches you how to make better sense of one of life's most important topics.\n\nThrough 19 short stories, the book demonstrates that financial success is not about what you know technically but how you behave. It's about soft skills that are often overlooked in financial education.",
+            authorDetail: BookAuthor(
+                name: "Morgan Housel",
+                title: "Partner at Collaborative Fund",
+                bio: "Morgan Housel is a partner at Collaborative Fund and a former columnist at The Motley Fool and The Wall Street Journal. He is a two-time winner of the Best in Business Award from the Society of American Business Editors.",
+                avatarGradientColors: ["059669", "047857"]
+            ),
+            audioDurationSeconds: 1560,
+            readTimeMinutes: 26,
+            viewCount: "5.7M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 15))!,
+            coreConceptTitles: ["Compounding", "Getting Wealthy vs Staying Wealthy", "Tails Drive Everything", "Room for Error", "Man in the Car Paradox", "Saving Money"]
         ),
         // Book 4
         LibraryBook(
@@ -421,7 +555,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 14,
             coverGradientStart: "2D4A3E",
-            coverGradientEnd: "1A2D25"
+            coverGradientEnd: "1A2D25",
+            level: .intermediate,
+            chapterCount: 18,
+            categoryTags: [.investing, .strategy, .analysis],
+            whyThisBook: "Peter Lynch ran the Magellan Fund at Fidelity, achieving an average annual return of 29.2% over 13 years. In this book, he shares his investment approach of finding 'tenbaggers' - stocks that increase tenfold in value.\n\nLynch teaches investors to use their everyday experiences to find investment opportunities, categorizing stocks into six types to help identify the best opportunities.",
+            authorDetail: BookAuthor(
+                name: "Peter Lynch",
+                title: "Legendary Fidelity Fund Manager",
+                bio: "Peter Lynch is a legendary American investor, known for achieving an average annual return of 29.2% as manager of the Magellan Fund at Fidelity Investments, making it the best-performing mutual fund in the world.",
+                avatarGradientColors: ["2D4A3E", "1A2D25"]
+            ),
+            audioDurationSeconds: 1680,
+            readTimeMinutes: 28,
+            viewCount: "3.2M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 10))!,
+            coreConceptTitles: ["Invest in What You Know", "Tenbaggers", "Six Stock Categories", "PEG Ratio", "Story Analysis", "When to Sell"]
         ),
         // Book 5
         LibraryBook(
@@ -435,7 +584,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 16,
             coverGradientStart: "4A1E1E",
-            coverGradientEnd: "2D1212"
+            coverGradientEnd: "2D1212",
+            level: .intermediate,
+            chapterCount: 14,
+            categoryTags: [.investing, .strategy, .analysis],
+            whyThisBook: "Philip Fisher pioneered growth investing and developed the 'scuttlebutt' method of research. This book presents Fisher's 15 points to look for in a common stock.\n\nWarren Buffett describes himself as '85% Graham and 15% Fisher,' highlighting the profound impact this book had on his transition from pure value investing to quality-focused investing.",
+            authorDetail: BookAuthor(
+                name: "Philip Fisher",
+                title: "Pioneer of Growth Investing",
+                bio: "Philip Fisher was an American stock investor known for his investment philosophy, detailed in his book 'Common Stocks and Uncommon Profits.' He pioneered the growth investing strategy and influenced Warren Buffett.",
+                avatarGradientColors: ["4A1E1E", "2D1212"]
+            ),
+            audioDurationSeconds: 1440,
+            readTimeMinutes: 24,
+            viewCount: "2.1M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,
+            coreConceptTitles: ["15 Points to Consider", "Scuttlebutt Method", "Quality Growth", "Management Analysis", "Long-term Holding", "When to Sell"]
         ),
         // Book 6
         LibraryBook(
@@ -449,7 +613,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 10,
             coverGradientStart: "1E40AF",
-            coverGradientEnd: "1E3A8A"
+            coverGradientEnd: "1E3A8A",
+            level: .starter,
+            chapterCount: 20,
+            categoryTags: [.investing, .strategy],
+            whyThisBook: "John Bogle, founder of Vanguard, revolutionized investing by creating the first index fund. This book makes the case for passive investing and demonstrates why most active managers fail to beat the market.\n\nThe book teaches the importance of low costs, broad diversification, and staying the course through market volatility.",
+            authorDetail: BookAuthor(
+                name: "John C. Bogle",
+                title: "Founder of Vanguard Group",
+                bio: "John Clifton Bogle was the founder and chief executive of The Vanguard Group. He is credited with creating the first index fund and was a driving force behind the growth of passive investing.",
+                avatarGradientColors: ["1E40AF", "1E3A8A"]
+            ),
+            audioDurationSeconds: 1320,
+            readTimeMinutes: 22,
+            viewCount: "2.8M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 28))!,
+            coreConceptTitles: ["Index Fund Advantage", "Cost Matters", "Stay the Course", "Reversion to Mean", "Asset Allocation", "Simple is Best"]
         ),
         // Book 7
         LibraryBook(
@@ -463,7 +642,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 13,
             coverGradientStart: "7C2D12",
-            coverGradientEnd: "451A03"
+            coverGradientEnd: "451A03",
+            level: .intermediate,
+            chapterCount: 15,
+            categoryTags: [.economics, .investing, .analysis],
+            whyThisBook: "Burton Malkiel's classic introduces the efficient market hypothesis and challenges the notion that expert stock pickers can consistently beat the market.\n\nThe book covers both fundamental and technical analysis, exploring their limitations, and makes the case for a diversified, low-cost investment strategy.",
+            authorDetail: BookAuthor(
+                name: "Burton Malkiel",
+                title: "Professor at Princeton University",
+                bio: "Burton Gordon Malkiel is an American economist and writer, most known for his classic finance book A Random Walk Down Wall Street. He is a proponent of the efficient market hypothesis.",
+                avatarGradientColors: ["7C2D12", "451A03"]
+            ),
+            audioDurationSeconds: 1920,
+            readTimeMinutes: 32,
+            viewCount: "1.9M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 20))!,
+            coreConceptTitles: ["Efficient Market Theory", "Random Walk", "Fundamental Analysis", "Technical Analysis", "Behavioral Finance", "Life-Cycle Investing"]
         ),
         // Book 8
         LibraryBook(
@@ -477,7 +671,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 20,
             coverGradientStart: "B45309",
-            coverGradientEnd: "78350F"
+            coverGradientEnd: "78350F",
+            level: .advanced,
+            chapterCount: 8,
+            categoryTags: [.investing, .business, .strategy],
+            whyThisBook: "This collection compiles Warren Buffett's annual shareholder letters into a coherent philosophy of investing and business management.\n\nThe essays cover corporate governance, finance, investing, and common stock, providing direct insight into the mind of the world's most successful investor.",
+            authorDetail: BookAuthor(
+                name: "Warren Buffett",
+                title: "Chairman & CEO, Berkshire Hathaway",
+                bio: "Warren Edward Buffett is an American business magnate, investor, and philanthropist. Known as the 'Oracle of Omaha,' he is one of the most successful investors in history and consistently ranks among the world's wealthiest people.",
+                avatarGradientColors: ["B45309", "78350F"]
+            ),
+            audioDurationSeconds: 2100,
+            readTimeMinutes: 35,
+            viewCount: "4.5M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 15))!,
+            coreConceptTitles: ["Circle of Competence", "Economic Moats", "Owner Earnings", "Mr. Market", "Intrinsic Value", "Capital Allocation"]
         ),
         // Book 9
         LibraryBook(
@@ -491,7 +700,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 22,
             coverGradientStart: "374151",
-            coverGradientEnd: "1F2937"
+            coverGradientEnd: "1F2937",
+            level: .advanced,
+            chapterCount: 52,
+            categoryTags: [.analysis, .investing, .finance],
+            whyThisBook: "The foundational text of value investing, Security Analysis established the discipline of professional financial analysis during the Great Depression.\n\nThis comprehensive guide covers bond analysis, preferred stock analysis, and common stock analysis with timeless principles that remain relevant today.",
+            authorDetail: BookAuthor(
+                name: "Benjamin Graham & David Dodd",
+                title: "Founders of Value Investing",
+                bio: "Benjamin Graham and David Dodd were professors at Columbia Business School who together wrote Security Analysis, establishing the intellectual foundation for what would later be called value investing.",
+                avatarGradientColors: ["374151", "1F2937"]
+            ),
+            audioDurationSeconds: 3600,
+            readTimeMinutes: 60,
+            viewCount: "1.5M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 10))!,
+            coreConceptTitles: ["Intrinsic Value", "Margin of Safety", "Bond Analysis", "Balance Sheet Analysis", "Income Statement Analysis", "Working Capital"]
         ),
         // Book 10
         LibraryBook(
@@ -505,7 +729,22 @@ extension LibraryBook {
             isMastered: false,
             keyIdeasCount: 17,
             coverGradientStart: "581C87",
-            coverGradientEnd: "3B0764"
+            coverGradientEnd: "3B0764",
+            level: .advanced,
+            chapterCount: 20,
+            categoryTags: [.investing, .psychology, .strategy],
+            whyThisBook: "Howard Marks distills 40 years of investment wisdom into the essential principles that separate successful investors from the rest.\n\nThe book covers second-level thinking, understanding market cycles, managing risk, and the importance of contrarian thinking in achieving superior returns.",
+            authorDetail: BookAuthor(
+                name: "Howard Marks",
+                title: "Co-Chairman, Oaktree Capital",
+                bio: "Howard Stanley Marks is an American investor and writer. He is the co-founder and co-chairman of Oaktree Capital Management, the largest investor in distressed securities worldwide.",
+                avatarGradientColors: ["581C87", "3B0764"]
+            ),
+            audioDurationSeconds: 1200,
+            readTimeMinutes: 20,
+            viewCount: "2.3M",
+            lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 5))!,
+            coreConceptTitles: ["Second-Level Thinking", "Understanding Risk", "Market Cycles", "Contrarian Investing", "Patient Opportunism", "Defensive Investing"]
         )
     ]
 }

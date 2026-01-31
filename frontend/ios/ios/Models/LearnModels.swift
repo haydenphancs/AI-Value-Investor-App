@@ -202,6 +202,39 @@ struct BookAuthor: Identifiable {
     let avatarGradientColors: [String]
 }
 
+// MARK: - Key Highlight
+struct BookKeyHighlight: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let iconName: String
+    let iconColor: String
+}
+
+// MARK: - Core Chapter
+struct BookCoreChapter: Identifiable {
+    let id = UUID()
+    let number: Int
+    let title: String
+    let description: String
+}
+
+// MARK: - Book Discussion/Review
+struct BookDiscussion: Identifiable {
+    let id = UUID()
+    let authorName: String
+    let authorAvatarGradient: [String]
+    let rating: Int // 1-5 stars
+    let content: String
+    let postedDate: Date
+
+    var formattedDate: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: postedDate, relativeTo: Date())
+    }
+}
+
 // MARK: - Library Book (For Book Library/Curriculum View)
 struct LibraryBook: Identifiable {
     let id = UUID()
@@ -228,8 +261,10 @@ struct LibraryBook: Identifiable {
     let viewCount: String
     let lastUpdated: Date
 
-    // Core concepts for the book
-    let coreConceptTitles: [String]
+    // Core tab content
+    let keyHighlights: [BookKeyHighlight]
+    let coreChapters: [BookCoreChapter]
+    let discussions: [BookDiscussion]
 
     var formattedRating: String {
         String(format: "%.1f", rating)
@@ -455,8 +490,33 @@ extension CommunityDiscussion {
 }
 
 extension LibraryBook {
+    // Sample discussions used across books
+    private static let sampleDiscussions: [BookDiscussion] = [
+        BookDiscussion(
+            authorName: "Michael Chen",
+            authorAvatarGradient: ["3B82F6", "1E40AF"],
+            rating: 5,
+            content: "This book completely changed my perspective on money and wealth. The lessons about assets vs liabilities are eye-opening. Highly recommend for anyone wanting to improve their financial literacy!",
+            postedDate: Calendar.current.date(byAdding: .day, value: -2, to: Date())!
+        ),
+        BookDiscussion(
+            authorName: "Sarah Johnson",
+            authorAvatarGradient: ["EC4899", "BE185D"],
+            rating: 5,
+            content: "A must-read for everyone! The storytelling approach makes complex financial concepts easy to understand. I've already started applying these principles to my own finances.",
+            postedDate: Calendar.current.date(byAdding: .day, value: -5, to: Date())!
+        ),
+        BookDiscussion(
+            authorName: "David Park",
+            authorAvatarGradient: ["22C55E", "15803D"],
+            rating: 4,
+            content: "Great foundational book for beginners. Some concepts are a bit simplified, but that's what makes it accessible. Perfect starting point for your investment journey.",
+            postedDate: Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+        )
+    ]
+
     static let sampleData: [LibraryBook] = [
-        // Book 1 - MASTERED
+        // Book 1 - Rich Dad Poor Dad - MASTERED
         LibraryBook(
             title: "Rich Dad Poor Dad",
             author: "Robert T. Kiyosaki",
@@ -483,9 +543,28 @@ extension LibraryBook {
             readTimeMinutes: 18,
             viewCount: "4.2M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 27))!,
-            coreConceptTitles: ["Assets vs Liabilities", "Cash Flow Quadrant", "Financial Education", "Building Wealth", "Tax Strategies", "Investment Mindset"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Assets vs. Liabilities", description: "The rich acquire assets. The poor and middle class acquire liabilities that they think are assets.", iconName: "chart.pie.fill", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Financial Education", description: "Schools don't teach financial literacy. You must educate yourself about money and investing.", iconName: "book.fill", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Work to Learn", description: "Don't work for money. Work to learn skills that will help you become financially independent.", iconName: "lightbulb.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Take Risks", description: "Playing it safe is actually the riskiest thing you can do. Learn to manage risk and take calculated chances.", iconName: "bolt.fill", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Rich Dad, Poor Dad", description: "Two mindsets toward money: employee thinking vs. investor thinking."),
+                BookCoreChapter(number: 2, title: "The Rich Don't Work for Money", description: "How assets generate income without trading time for pay."),
+                BookCoreChapter(number: 3, title: "Why Teach Financial Literacy?", description: "Argues that understanding money, risk, and accounting is essential—and why schools rarely teach it."),
+                BookCoreChapter(number: 4, title: "Mind Your Own Business", description: "Build and buy assets outside your main job."),
+                BookCoreChapter(number: 5, title: "The History of Taxes and the Power of Corporations", description: "Why rules favor asset owners and businesses, not employees."),
+                BookCoreChapter(number: 6, title: "The Rich Invent Money", description: "Creativity, leverage, and opportunity matter more than cash."),
+                BookCoreChapter(number: 7, title: "Work to Learn—Don't Work for Money", description: "Emphasizes choosing jobs for skill-building rather than just salary."),
+                BookCoreChapter(number: 8, title: "Overcoming Obstacles", description: "Identifies fear, cynicism, laziness, and bad habits that prevent financial progress."),
+                BookCoreChapter(number: 9, title: "Getting Started", description: "Outlines practical ways to begin investing in yourself and your financial education."),
+                BookCoreChapter(number: 10, title: "Still Want More? Here Are Some To-Do's", description: "Additional resources, tips, and strategies for those committed to achieving financial independence and wealth.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 2 - MASTERED
+
+        // Book 2 - The Intelligent Investor - MASTERED
         LibraryBook(
             title: "The Intelligent Investor",
             author: "Benjamin Graham",
@@ -512,9 +591,24 @@ extension LibraryBook {
             readTimeMinutes: 45,
             viewCount: "8.1M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 20))!,
-            coreConceptTitles: ["Mr. Market", "Margin of Safety", "Value vs Growth", "Defensive Investing", "Enterprise Value", "Stock Selection"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Mr. Market", description: "Think of the market as a moody partner who offers to buy or sell shares daily at different prices.", iconName: "person.fill.questionmark", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Margin of Safety", description: "Always buy at a significant discount to intrinsic value to protect against errors and bad luck.", iconName: "shield.fill", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Investor vs Speculator", description: "An investor analyzes fundamentals; a speculator bets on price movements.", iconName: "chart.bar.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Defensive Investing", description: "Build a diversified portfolio that doesn't require constant attention.", iconName: "lock.shield.fill", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Investment versus Speculation", description: "Defining what it means to be a true investor rather than a gambler."),
+                BookCoreChapter(number: 2, title: "The Investor and Inflation", description: "How to protect your portfolio against the erosion of purchasing power."),
+                BookCoreChapter(number: 3, title: "A Century of Stock Market History", description: "Lessons from 100 years of market performance."),
+                BookCoreChapter(number: 4, title: "General Portfolio Policy", description: "The defensive investor's approach to asset allocation."),
+                BookCoreChapter(number: 5, title: "The Defensive Investor and Common Stocks", description: "Criteria for selecting quality stocks for conservative portfolios."),
+                BookCoreChapter(number: 6, title: "The Enterprising Investor", description: "Strategies for more active investors seeking higher returns.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 3
+
+        // Book 3 - The Psychology of Money
         LibraryBook(
             title: "The Psychology of Money",
             author: "Morgan Housel",
@@ -541,9 +635,24 @@ extension LibraryBook {
             readTimeMinutes: 26,
             viewCount: "5.7M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 15))!,
-            coreConceptTitles: ["Compounding", "Getting Wealthy vs Staying Wealthy", "Tails Drive Everything", "Room for Error", "Man in the Car Paradox", "Saving Money"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Compounding", description: "The most powerful force in finance. Small gains over long periods create enormous wealth.", iconName: "arrow.up.right", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Room for Error", description: "Plan for things going wrong. Survival is the cornerstone of wealth building.", iconName: "exclamationmark.shield.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Wealth is Hidden", description: "True wealth is what you don't see—money not spent on visible luxuries.", iconName: "eye.slash.fill", iconColor: "8B5CF6"),
+                BookKeyHighlight(title: "Reasonable > Rational", description: "Being reasonable is more sustainable than being coldly rational with money.", iconName: "heart.fill", iconColor: "EC4899")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "No One's Crazy", description: "Everyone has unique experiences that shape their financial behavior."),
+                BookCoreChapter(number: 2, title: "Luck & Risk", description: "Nothing is as good or bad as it seems; outcomes involve luck."),
+                BookCoreChapter(number: 3, title: "Never Enough", description: "The hardest financial skill is getting the goalpost to stop moving."),
+                BookCoreChapter(number: 4, title: "Confounding Compounding", description: "The counterintuitive math behind exponential growth."),
+                BookCoreChapter(number: 5, title: "Getting Wealthy vs. Staying Wealthy", description: "Making money requires risk; keeping it requires humility."),
+                BookCoreChapter(number: 6, title: "Tails, You Win", description: "A few outlier events drive the majority of outcomes.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 4
+
+        // Book 4 - One Up On Wall Street
         LibraryBook(
             title: "One Up On Wall Street",
             author: "Peter Lynch",
@@ -570,9 +679,24 @@ extension LibraryBook {
             readTimeMinutes: 28,
             viewCount: "3.2M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 10))!,
-            coreConceptTitles: ["Invest in What You Know", "Tenbaggers", "Six Stock Categories", "PEG Ratio", "Story Analysis", "When to Sell"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Invest in What You Know", description: "Your personal experiences give you an edge over Wall Street analysts.", iconName: "lightbulb.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Tenbaggers", description: "Look for stocks with the potential to increase 10x in value.", iconName: "arrow.up.circle.fill", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Six Stock Categories", description: "Classify stocks as slow growers, stalwarts, fast growers, cyclicals, turnarounds, or asset plays.", iconName: "square.grid.2x2.fill", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Do Your Homework", description: "Research the company's story, financials, and competitive position.", iconName: "doc.text.magnifyingglass", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "The Making of a Stockpicker", description: "Lynch's journey to becoming a legendary investor."),
+                BookCoreChapter(number: 2, title: "The Wall Street Oxymorons", description: "Why individual investors can beat the professionals."),
+                BookCoreChapter(number: 3, title: "Is This Gambling, or What?", description: "Distinguishing investing from speculation."),
+                BookCoreChapter(number: 4, title: "Passing the Mirror Test", description: "Knowing yourself before investing."),
+                BookCoreChapter(number: 5, title: "Is This a Good Market?", description: "Why market timing doesn't work."),
+                BookCoreChapter(number: 6, title: "Stalking the Tenbagger", description: "Finding stocks with multi-bagger potential.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 5
+
+        // Book 5 - Common Stocks and Uncommon Profits
         LibraryBook(
             title: "Common Stocks and Uncommon Profits",
             author: "Philip Fisher",
@@ -599,9 +723,24 @@ extension LibraryBook {
             readTimeMinutes: 24,
             viewCount: "2.1M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,
-            coreConceptTitles: ["15 Points to Consider", "Scuttlebutt Method", "Quality Growth", "Management Analysis", "Long-term Holding", "When to Sell"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Scuttlebutt Method", description: "Research by talking to customers, suppliers, competitors, and employees.", iconName: "bubble.left.and.bubble.right.fill", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "15 Points", description: "A checklist of qualities to evaluate before investing in a company.", iconName: "checklist", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Hold for Long Term", description: "Buy great companies and hold them for years or decades.", iconName: "clock.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Management Quality", description: "The caliber of management is crucial to long-term success.", iconName: "person.3.fill", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Clues from the Past", description: "How historical performance indicates future potential."),
+                BookCoreChapter(number: 2, title: "What 'Scuttlebutt' Can Do", description: "The power of on-the-ground research."),
+                BookCoreChapter(number: 3, title: "What to Buy: The Fifteen Points", description: "Fisher's famous checklist for stock selection."),
+                BookCoreChapter(number: 4, title: "What to Buy: Applying This to Your Own Needs", description: "Customizing the approach to your situation."),
+                BookCoreChapter(number: 5, title: "When to Buy", description: "Timing your purchases for maximum value."),
+                BookCoreChapter(number: 6, title: "When to Sell", description: "The rare circumstances that justify selling.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 6
+
+        // Book 6 - The Little Book of Common Sense Investing
         LibraryBook(
             title: "The Little Book of Common Sense Investing",
             author: "John C. Bogle",
@@ -628,9 +767,24 @@ extension LibraryBook {
             readTimeMinutes: 22,
             viewCount: "2.8M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 28))!,
-            coreConceptTitles: ["Index Fund Advantage", "Cost Matters", "Stay the Course", "Reversion to Mean", "Asset Allocation", "Simple is Best"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Index Funds Win", description: "Most active managers underperform the market over time.", iconName: "chart.line.uptrend.xyaxis", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Costs Matter", description: "Every dollar paid in fees is a dollar less in returns.", iconName: "dollarsign.circle.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Stay the Course", description: "Time in the market beats timing the market.", iconName: "clock.arrow.circlepath", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: "sparkles", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "A Parable", description: "The Gotrocks family learns about the cost of financial intermediaries."),
+                BookCoreChapter(number: 2, title: "Rational Exuberance", description: "Understanding long-term stock market returns."),
+                BookCoreChapter(number: 3, title: "Cast Your Lot with Business", description: "Why owning businesses beats speculating."),
+                BookCoreChapter(number: 4, title: "How Most Investors Turn a Winner's Game into a Loser's Game", description: "The mathematics of active management failure."),
+                BookCoreChapter(number: 5, title: "The Grand Illusion", description: "Why past performance doesn't predict future results."),
+                BookCoreChapter(number: 6, title: "Taxes Are Costs, Too", description: "The hidden drag of tax inefficiency.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 7
+
+        // Book 7 - A Random Walk Down Wall Street
         LibraryBook(
             title: "A Random Walk Down Wall Street",
             author: "Burton Malkiel",
@@ -657,9 +811,24 @@ extension LibraryBook {
             readTimeMinutes: 32,
             viewCount: "1.9M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 20))!,
-            coreConceptTitles: ["Efficient Market Theory", "Random Walk", "Fundamental Analysis", "Technical Analysis", "Behavioral Finance", "Life-Cycle Investing"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Efficient Markets", description: "Stock prices reflect all available information, making consistent outperformance difficult.", iconName: "equal.circle.fill", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Random Walk", description: "Short-term price movements are unpredictable and follow a random pattern.", iconName: "shuffle", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Diversification", description: "Don't put all your eggs in one basket; spread risk across assets.", iconName: "square.grid.3x3.fill", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Buy and Hold", description: "Time in the market beats timing the market.", iconName: "hand.raised.fill", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Firm Foundations and Castles in the Air", description: "Two theories of how markets work."),
+                BookCoreChapter(number: 2, title: "The Madness of Crowds", description: "Historical bubbles and manias."),
+                BookCoreChapter(number: 3, title: "Stock Valuation from the Sixties", description: "How valuation methods evolved."),
+                BookCoreChapter(number: 4, title: "The Biggest Bubble of All", description: "Lessons from the internet bubble."),
+                BookCoreChapter(number: 5, title: "Technical and Fundamental Analysis", description: "Examining the two main approaches to picking stocks."),
+                BookCoreChapter(number: 6, title: "A New Walking Shoe", description: "Modern portfolio theory explained.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 8
+
+        // Book 8 - The Essays of Warren Buffett
         LibraryBook(
             title: "The Essays of Warren Buffett",
             author: "Warren Buffett & Lawrence Cunningham",
@@ -686,9 +855,24 @@ extension LibraryBook {
             readTimeMinutes: 35,
             viewCount: "4.5M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 15))!,
-            coreConceptTitles: ["Circle of Competence", "Economic Moats", "Owner Earnings", "Mr. Market", "Intrinsic Value", "Capital Allocation"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Circle of Competence", description: "Stay within areas you truly understand.", iconName: "circle.dashed", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Economic Moats", description: "Invest in businesses with durable competitive advantages.", iconName: "shield.checkered", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Owner Earnings", description: "Focus on cash flow available to shareholders after maintenance capex.", iconName: "banknote.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Long-term Focus", description: "Our favorite holding period is forever.", iconName: "infinity", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Corporate Governance", description: "How boards and managers should serve shareholders."),
+                BookCoreChapter(number: 2, title: "Corporate Finance and Investing", description: "Capital allocation and investment philosophy."),
+                BookCoreChapter(number: 3, title: "Alternatives to Common Stock", description: "Fixed-income securities and other investments."),
+                BookCoreChapter(number: 4, title: "Common Stock", description: "How to value and select individual stocks."),
+                BookCoreChapter(number: 5, title: "Mergers and Acquisitions", description: "When acquisitions create or destroy value."),
+                BookCoreChapter(number: 6, title: "Accounting and Valuation", description: "Understanding financial statements deeply.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 9
+
+        // Book 9 - Security Analysis
         LibraryBook(
             title: "Security Analysis",
             author: "Benjamin Graham & David Dodd",
@@ -715,9 +899,24 @@ extension LibraryBook {
             readTimeMinutes: 60,
             viewCount: "1.5M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 10))!,
-            coreConceptTitles: ["Intrinsic Value", "Margin of Safety", "Bond Analysis", "Balance Sheet Analysis", "Income Statement Analysis", "Working Capital"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Intrinsic Value", description: "Every security has a value based on its underlying fundamentals.", iconName: "dollarsign.square.fill", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Margin of Safety", description: "The difference between price and value protects against loss.", iconName: "shield.fill", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Financial Statement Analysis", description: "Deep dive into balance sheets, income statements, and cash flows.", iconName: "doc.text.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Bond Analysis", description: "Evaluating fixed income securities for safety and yield.", iconName: "percent", iconColor: "8B5CF6")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "The Scope and Limits of Security Analysis", description: "Defining what analysis can and cannot do."),
+                BookCoreChapter(number: 2, title: "Fundamental Elements in the Problem of Analysis", description: "Core concepts underlying all security analysis."),
+                BookCoreChapter(number: 3, title: "Sources of Information", description: "Where to find reliable data for analysis."),
+                BookCoreChapter(number: 4, title: "Distinctions Between Investment and Speculation", description: "A clear framework for classifying activities."),
+                BookCoreChapter(number: 5, title: "Classification of Securities", description: "Understanding different types of financial instruments."),
+                BookCoreChapter(number: 6, title: "The Selection of Fixed-Value Investments", description: "Criteria for choosing bonds and preferred stocks.")
+            ],
+            discussions: sampleDiscussions
         ),
-        // Book 10
+
+        // Book 10 - The Most Important Thing
         LibraryBook(
             title: "The Most Important Thing",
             author: "Howard Marks",
@@ -744,7 +943,21 @@ extension LibraryBook {
             readTimeMinutes: 20,
             viewCount: "2.3M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 5))!,
-            coreConceptTitles: ["Second-Level Thinking", "Understanding Risk", "Market Cycles", "Contrarian Investing", "Patient Opportunism", "Defensive Investing"]
+            keyHighlights: [
+                BookKeyHighlight(title: "Second-Level Thinking", description: "Go beyond the obvious to find insights others miss.", iconName: "brain.head.profile", iconColor: "8B5CF6"),
+                BookKeyHighlight(title: "Understanding Risk", description: "Risk means more things can happen than will happen.", iconName: "exclamationmark.triangle.fill", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Market Cycles", description: "Markets swing between euphoria and despair; position accordingly.", iconName: "waveform.path", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Contrarian Thinking", description: "The best opportunities come from disagreeing with consensus.", iconName: "arrow.left.arrow.right", iconColor: "22C55E")
+            ],
+            coreChapters: [
+                BookCoreChapter(number: 1, title: "Second-Level Thinking", description: "The foundation of superior returns."),
+                BookCoreChapter(number: 2, title: "Understanding Market Efficiency", description: "What efficient markets mean for investors."),
+                BookCoreChapter(number: 3, title: "Value", description: "The relationship between price and intrinsic value."),
+                BookCoreChapter(number: 4, title: "The Relationship Between Price and Value", description: "Why buying below value is essential."),
+                BookCoreChapter(number: 5, title: "Understanding Risk", description: "Redefining risk beyond volatility."),
+                BookCoreChapter(number: 6, title: "Recognizing Risk", description: "When risk is highest and lowest.")
+            ],
+            discussions: sampleDiscussions
         )
     ]
 }

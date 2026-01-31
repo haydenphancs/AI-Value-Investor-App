@@ -188,17 +188,6 @@ struct NewsDetailView: View {
     }
 }
 
-// MARK: - Share Sheet (UIKit Bridge)
-struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}
-
 // MARK: - Shimmer Effect
 extension View {
     func shimmer() -> some View {

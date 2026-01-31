@@ -266,6 +266,9 @@ struct LibraryBook: Identifiable {
     let coreChapters: [BookCoreChapter]
     let discussions: [BookDiscussion]
 
+    // User progress - which chapter the user is currently on (1-indexed)
+    let currentChapter: Int
+
     var formattedRating: String {
         String(format: "%.1f", rating)
     }
@@ -530,7 +533,7 @@ extension LibraryBook {
             coverGradientStart: "7C3AED",
             coverGradientEnd: "4C1D95",
             level: .starter,
-            chapterCount: 10,
+            chapterCount: 7,
             categoryTags: [.mindset, .finance],
             whyThisBook: "Rich Dad Poor Dad is Robert Kiyosaki's best-selling book about the difference in mindset between the poor, middle class, and rich. It advocates the importance of financial literacy, financial independence and building wealth through investing in assets.\n\nThe book is largely based on Kiyosaki's upbringing and education in Hawaii. It highlights the different attitudes toward money, work, and life between his biological father and the father of his best friend.",
             authorDetail: BookAuthor(
@@ -550,18 +553,16 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Take Risks", description: "Playing it safe is actually the riskiest thing you can do. Learn to manage risk and take calculated chances.", iconName: "bolt.fill", iconColor: "8B5CF6")
             ],
             coreChapters: [
-                BookCoreChapter(number: 1, title: "Rich Dad, Poor Dad", description: "Two mindsets toward money: employee thinking vs. investor thinking."),
-                BookCoreChapter(number: 2, title: "The Rich Don't Work for Money", description: "How assets generate income without trading time for pay."),
-                BookCoreChapter(number: 3, title: "Why Teach Financial Literacy?", description: "Argues that understanding money, risk, and accounting is essential—and why schools rarely teach it."),
-                BookCoreChapter(number: 4, title: "Mind Your Own Business", description: "Build and buy assets outside your main job."),
-                BookCoreChapter(number: 5, title: "The History of Taxes and the Power of Corporations", description: "Why rules favor asset owners and businesses, not employees."),
-                BookCoreChapter(number: 6, title: "The Rich Invent Money", description: "Creativity, leverage, and opportunity matter more than cash."),
-                BookCoreChapter(number: 7, title: "Work to Learn—Don't Work for Money", description: "Emphasizes choosing jobs for skill-building rather than just salary."),
-                BookCoreChapter(number: 8, title: "Overcoming Obstacles", description: "Identifies fear, cynicism, laziness, and bad habits that prevent financial progress."),
-                BookCoreChapter(number: 9, title: "Getting Started", description: "Outlines practical ways to begin investing in yourself and your financial education."),
-                BookCoreChapter(number: 10, title: "Still Want More? Here Are Some To-Do's", description: "Additional resources, tips, and strategies for those committed to achieving financial independence and wealth.")
+                BookCoreChapter(number: 1, title: "De-Programming the \"Employee\" Mindset", description: "Stop trading time for money by breaking the psychological cycle of fear and greed that keeps 90% of people trapped in the Rat Race."),
+                BookCoreChapter(number: 2, title: "Mastering the Financial Scorecard", description: "Wealth isn't about how much you make, but how much you keep—learn to read the \"report card\" of adulthood by strictly distinguishing assets from liabilities."),
+                BookCoreChapter(number: 3, title: "The Corporate Shield Strategy", description: "Utilize the \"secret weapon\" of the wealthy to legally minimize tax exposure and protect your assets before the government gets paid."),
+                BookCoreChapter(number: 4, title: "The Opportunity Hunter", description: "Train your brain to see deals where others see chaos; financial intelligence is simply having more options than the average person."),
+                BookCoreChapter(number: 5, title: "Trading Security for Skills", description: "View your job as a paid internship where you acquire the \"Triangle of Skills\"—sales, marketing, and communication—rather than a safety net."),
+                BookCoreChapter(number: 6, title: "Conquering the Inner Saboteur", description: "Identify and neutralize the emotional barriers that kill investment deals even when the numbers make sense."),
+                BookCoreChapter(number: 7, title: "The \"First 3 Steps\" Launchpad", description: "A tactical checklist to move from \"analysis paralysis\" to your first asset acquisition within 90 days.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 2
         ),
 
         // Book 2 - The Intelligent Investor - MASTERED
@@ -605,7 +606,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "The Defensive Investor and Common Stocks", description: "Criteria for selecting quality stocks for conservative portfolios."),
                 BookCoreChapter(number: 6, title: "The Enterprising Investor", description: "Strategies for more active investors seeking higher returns.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 6
         ),
 
         // Book 3 - The Psychology of Money
@@ -649,7 +651,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Getting Wealthy vs. Staying Wealthy", description: "Making money requires risk; keeping it requires humility."),
                 BookCoreChapter(number: 6, title: "Tails, You Win", description: "A few outlier events drive the majority of outcomes.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 4 - One Up On Wall Street
@@ -693,7 +696,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Is This a Good Market?", description: "Why market timing doesn't work."),
                 BookCoreChapter(number: 6, title: "Stalking the Tenbagger", description: "Finding stocks with multi-bagger potential.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 5 - Common Stocks and Uncommon Profits
@@ -737,7 +741,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "When to Buy", description: "Timing your purchases for maximum value."),
                 BookCoreChapter(number: 6, title: "When to Sell", description: "The rare circumstances that justify selling.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 6 - The Little Book of Common Sense Investing
@@ -781,7 +786,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "The Grand Illusion", description: "Why past performance doesn't predict future results."),
                 BookCoreChapter(number: 6, title: "Taxes Are Costs, Too", description: "The hidden drag of tax inefficiency.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 7 - A Random Walk Down Wall Street
@@ -825,7 +831,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Technical and Fundamental Analysis", description: "Examining the two main approaches to picking stocks."),
                 BookCoreChapter(number: 6, title: "A New Walking Shoe", description: "Modern portfolio theory explained.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 8 - The Essays of Warren Buffett
@@ -869,7 +876,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Mergers and Acquisitions", description: "When acquisitions create or destroy value."),
                 BookCoreChapter(number: 6, title: "Accounting and Valuation", description: "Understanding financial statements deeply.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 9 - Security Analysis
@@ -913,7 +921,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Classification of Securities", description: "Understanding different types of financial instruments."),
                 BookCoreChapter(number: 6, title: "The Selection of Fixed-Value Investments", description: "Criteria for choosing bonds and preferred stocks.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         ),
 
         // Book 10 - The Most Important Thing
@@ -957,7 +966,8 @@ extension LibraryBook {
                 BookCoreChapter(number: 5, title: "Understanding Risk", description: "Redefining risk beyond volatility."),
                 BookCoreChapter(number: 6, title: "Recognizing Risk", description: "When risk is highest and lowest.")
             ],
-            discussions: sampleDiscussions
+            discussions: sampleDiscussions,
+            currentChapter: 1
         )
     ]
 }

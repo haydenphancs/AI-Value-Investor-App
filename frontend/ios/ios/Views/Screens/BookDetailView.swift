@@ -624,35 +624,35 @@ private struct CoreChapterTimelineRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.lg) {
             // Timeline column with badge and connecting line
-            ZStack(alignment: .top) {
-                // Connecting line (behind the badge)
+            ZStack {
+                // Connecting line (behind the badge, centered horizontally)
                 if !isLast {
-                    VStack {
-                        Spacer()
-                            .frame(height: 16) // Half of badge height to start line from center
-                        Rectangle()
-                            .fill(lineColor)
-                            .frame(width: 2)
-                    }
+                    Rectangle()
+                        .fill(lineColor)
+                        .frame(width: 2)
+                        .padding(.top, 16) // Start from center of badge
                 }
 
                 // Number badge - filled or outline based on completion
-                ZStack {
-                    if isCompleted {
-                        // Filled badge for completed/current chapters
-                        Circle()
-                            .fill(completedColor)
-                            .frame(width: 32, height: 32)
-                    } else {
-                        // Outline-only badge for unread chapters
-                        Circle()
-                            .strokeBorder(uncompletedColor, lineWidth: 2)
-                            .frame(width: 32, height: 32)
-                    }
+                VStack {
+                    ZStack {
+                        if isCompleted {
+                            // Filled badge for completed/current chapters
+                            Circle()
+                                .fill(completedColor)
+                                .frame(width: 32, height: 32)
+                        } else {
+                            // Outline-only badge for unread chapters
+                            Circle()
+                                .strokeBorder(uncompletedColor, lineWidth: 2)
+                                .frame(width: 32, height: 32)
+                        }
 
-                    Text("\(chapter.number)")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(isCompleted ? .white : uncompletedColor)
+                        Text("\(chapter.number)")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(isCompleted ? .white : uncompletedColor)
+                    }
+                    Spacer()
                 }
             }
             .frame(width: 32)

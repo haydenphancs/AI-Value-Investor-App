@@ -518,77 +518,240 @@ private struct BookDetailCoreContent: View {
     let book: LibraryBook
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xl) {
-            // Section header
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("Core Concepts")
-                    .font(AppTypography.headline)
-                    .foregroundColor(AppColors.textPrimary)
+        VStack(alignment: .leading, spacing: AppSpacing.xxl) {
+            // Key Highlights Section
+            KeyHighlightsSection(highlights: book.keyHighlights)
 
-                Text("Key ideas and frameworks from this book")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-            }
+            // Core Chapters Section
+            CoreChaptersSection(chapters: book.coreChapters)
 
-            // Core concept cards
-            VStack(spacing: AppSpacing.md) {
-                ForEach(Array(book.coreConceptTitles.enumerated()), id: \.offset) { index, concept in
-                    BookDetailConceptCard(
-                        number: index + 1,
-                        title: concept,
-                        isLocked: index >= 2 && !book.isMastered
-                    )
-                }
-            }
+            // Discussion Section
+            DiscussionSection(discussions: book.discussions)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)
     }
 }
 
-// MARK: - Concept Card
-private struct BookDetailConceptCard: View {
-    let number: Int
-    let title: String
-    let isLocked: Bool
+// MARK: - Key Highlights Section
+private struct KeyHighlightsSection: View {
+    let highlights: [BookKeyHighlight]
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // Number badge
-            ZStack {
-                Circle()
-                    .fill(isLocked ? AppColors.cardBackgroundLight : AppColors.primaryBlue.opacity(0.2))
-                    .frame(width: 36, height: 36)
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            Text("Key Highlights")
+                .font(AppTypography.headline)
+                .foregroundColor(AppColors.textPrimary)
 
-                if isLocked {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(AppColors.textMuted)
-                } else {
-                    Text("\(number)")
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.primaryBlue)
+            VStack(spacing: AppSpacing.md) {
+                ForEach(highlights) { highlight in
+                    KeyHighlightCard(highlight: highlight)
                 }
             }
+        }
+    }
+}
 
-            // Title
-            Text(title)
-                .font(AppTypography.body)
-                .foregroundColor(isLocked ? AppColors.textMuted : AppColors.textPrimary)
+// MARK: - Key Highlight Card
+private struct KeyHighlightCard: View {
+    let highlight: BookKeyHighlight
 
-            Spacer()
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(Color(hex: highlight.iconColor).opacity(0.15))
+                    .frame(width: 40, height: 40)
 
-            // Chevron
-            if !isLocked {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(AppColors.textMuted)
+                Image(systemName: highlight.iconName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Color(hex: highlight.iconColor))
             }
+
+            // Content
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text(highlight.title)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(highlight.description)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(2)
+            }
+
+            Spacer(minLength: 0)
         }
         .padding(AppSpacing.md)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.medium)
-        .opacity(isLocked ? 0.6 : 1)
+    }
+}
+
+// MARK: - Core Chapters Section
+private struct CoreChaptersSection: View {
+    let chapters: [BookCoreChapter]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            Text("Core Chapters")
+                .font(AppTypography.headline)
+                .foregroundColor(AppColors.textPrimary)
+
+            VStack(spacing: AppSpacing.md) {
+                ForEach(chapters) { chapter in
+                    CoreChapterCard(chapter: chapter)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Core Chapter Card
+private struct CoreChapterCard: View {
+    let chapter: BookCoreChapter
+
+    // Chapter number badge colors based on position
+    private var badgeColor: Color {
+        let colors: [Color] = [
+            Color(hex: "EF4444"), // Red
+            Color(hex: "F97316"), // Orange
+            Color(hex: "F59E0B"), // Amber
+            Color(hex: "84CC16"), // Lime
+            Color(hex: "22C55E"), // Green
+            Color(hex: "14B8A6"), // Teal
+            Color(hex: "06B6D4"), // Cyan
+            Color(hex: "3B82F6"), // Blue
+            Color(hex: "8B5CF6"), // Violet
+            Color(hex: "A855F7"), // Purple
+        ]
+        let index = (chapter.number - 1) % colors.count
+        return colors[index]
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            // Number badge
+            ZStack {
+                Circle()
+                    .fill(badgeColor)
+                    .frame(width: 28, height: 28)
+
+                Text("\(chapter.number)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+            }
+
+            // Content
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text(chapter.title)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(chapter.description)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
+// MARK: - Discussion Section
+private struct DiscussionSection: View {
+    let discussions: [BookDiscussion]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Header
+            HStack {
+                Text("Discussion")
+                    .font(AppTypography.headline)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Button(action: {}) {
+                    Text("See All")
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(AppColors.accentCyan)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            // Discussion cards
+            VStack(spacing: AppSpacing.md) {
+                ForEach(discussions) { discussion in
+                    DiscussionCard(discussion: discussion)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Discussion Card
+private struct DiscussionCard: View {
+    let discussion: BookDiscussion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Header with avatar, name, date, and rating
+            HStack(spacing: AppSpacing.md) {
+                // Avatar
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: discussion.authorAvatarGradient.map { Color(hex: $0) },
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 36, height: 36)
+
+                    Text(discussion.authorName.prefix(1))
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                }
+
+                // Name and date
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(discussion.authorName)
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    Text(discussion.formattedDate)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+
+                Spacer()
+
+                // Star rating
+                HStack(spacing: 2) {
+                    ForEach(1...5, id: \.self) { star in
+                        Image(systemName: star <= discussion.rating ? "star.fill" : "star")
+                            .font(.system(size: 10))
+                            .foregroundColor(star <= discussion.rating ? Color(hex: "F59E0B") : AppColors.textMuted)
+                    }
+                }
+            }
+
+            // Content
+            Text(discussion.content)
+                .font(AppTypography.callout)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(3)
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
     }
 }
 

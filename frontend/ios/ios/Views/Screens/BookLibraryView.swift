@@ -9,8 +9,11 @@ import SwiftUI
 
 struct BookLibraryView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audioManager: AudioManager
     @State private var searchText = ""
     @State private var books: [LibraryBook] = []
+    @State private var selectedBook: LibraryBook?
+    @State private var showBookDetail = false
 
     private var filteredBooks: [LibraryBook] {
         if searchText.isEmpty {
@@ -90,6 +93,10 @@ struct BookLibraryView: View {
                                 onReview: { handleReview(book) }
                             )
                             .padding(.horizontal, AppSpacing.lg)
+                            .onTapGesture {
+                                selectedBook = book
+                                showBookDetail = true
+                            }
                         }
 
                         // Bottom padding for safe area
@@ -101,6 +108,12 @@ struct BookLibraryView: View {
         .navigationBarHidden(true)
         .onAppear {
             loadBooks()
+        }
+        .fullScreenCover(isPresented: $showBookDetail) {
+            if let book = selectedBook {
+                BookDetailView(book: book)
+                    .environmentObject(audioManager)
+            }
         }
     }
 
@@ -377,5 +390,6 @@ private struct ProgressCardGrainyOverlay: View {
 
 #Preview {
     BookLibraryView()
+        .environmentObject(AudioManager.shared)
         .preferredColorScheme(.dark)
 }

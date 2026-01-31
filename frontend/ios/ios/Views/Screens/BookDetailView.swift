@@ -519,11 +519,8 @@ private struct BookDetailCoreContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
-            // Key Highlights Section
-            KeyHighlightsSection(highlights: book.keyHighlights)
-
-            // Core Chapters Section
-            CoreChaptersSection(chapters: book.coreChapters)
+            // Core Chapters Section (with progress tracking)
+            CoreChaptersSection(chapters: book.coreChapters, currentChapter: book.currentChapter)
 
             // Discussion Section
             DiscussionSection(discussions: book.discussions)
@@ -592,6 +589,7 @@ private struct KeyHighlightCard: View {
 // MARK: - Core Chapters Section (Timeline Style)
 private struct CoreChaptersSection: View {
     let chapters: [BookCoreChapter]
+    let currentChapter: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -604,7 +602,8 @@ private struct CoreChaptersSection: View {
                 ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
                     CoreChapterTimelineRow(
                         chapter: chapter,
-                        isLast: index == chapters.count - 1
+                        isLast: index == chapters.count - 1,
+                        isCompleted: chapter.number <= currentChapter
                     )
                 }
             }
@@ -616,8 +615,10 @@ private struct CoreChaptersSection: View {
 private struct CoreChapterTimelineRow: View {
     let chapter: BookCoreChapter
     let isLast: Bool
+    let isCompleted: Bool
 
-    private let badgeColor = Color(hex: "14B8A6") // Teal color matching the design
+    private let completedColor = Color(hex: "14B8A6") // Teal color for completed
+    private let uncompletedColor = Color(hex: "3F4A5A") // Muted color for outline
     private let lineColor = Color(hex: "2A3441") // Subtle dark line
 
     var body: some View {
@@ -635,15 +636,23 @@ private struct CoreChapterTimelineRow: View {
                     }
                 }
 
-                // Number badge
+                // Number badge - filled or outline based on completion
                 ZStack {
-                    Circle()
-                        .fill(badgeColor)
-                        .frame(width: 32, height: 32)
+                    if isCompleted {
+                        // Filled badge for completed/current chapters
+                        Circle()
+                            .fill(completedColor)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        // Outline-only badge for unread chapters
+                        Circle()
+                            .strokeBorder(uncompletedColor, lineWidth: 2)
+                            .frame(width: 32, height: 32)
+                    }
 
                     Text("\(chapter.number)")
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
+                        .foregroundColor(isCompleted ? .white : uncompletedColor)
                 }
             }
             .frame(width: 32)

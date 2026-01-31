@@ -623,42 +623,38 @@ private struct CoreChapterTimelineRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.lg) {
             // Timeline column with badge and connecting line
-            ZStack(alignment: .top) {
-                // Vertical container for alignment
-                VStack(spacing: 0) {
-                    // Badge
-                    Color.clear
-                        .frame(width: badgeSize, height: badgeSize)
-                    
-                    // Connecting line (after the badge, touches the outline)
-                    if !isLast {
-                        Rectangle()
-                            .fill(lineColor)
-                            .frame(width: 2)
-                    }
+            ZStack {
+                // Connecting line (behind the badge, centered horizontally)
+                if !isLast {
+                    Rectangle()
+                        .fill(lineColor)
+                        .frame(width: 2)
+                        .padding(.top, 16) // Start from center of badge
                 }
-                
-                // Number badge - overlaid on top
-                ZStack {
-                    if isCompleted {
-                        // Filled badge for completed/current chapters
-                        Circle()
-                            .fill(completedColor)
-                            .frame(width: badgeSize, height: badgeSize)
-                    } else {
-                        // Outline-only badge for unread chapters
-                        Circle()
-                            .strokeBorder(uncompletedColor, lineWidth: 2)
-                            .frame(width: badgeSize, height: badgeSize)
-                    }
 
-                    Text("\(chapter.number)")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(isCompleted ? .white : uncompletedColor)
+                // Number badge - filled or outline based on completion
+                VStack {
+                    ZStack {
+                        if isCompleted {
+                            // Filled badge for completed/current chapters
+                            Circle()
+                                .fill(completedColor)
+                                .frame(width: 32, height: 32)
+                        } else {
+                            // Outline-only badge for unread chapters
+                            Circle()
+                                .strokeBorder(uncompletedColor, lineWidth: 2)
+                                .frame(width: 32, height: 32)
+                        }
+
+                        Text("\(chapter.number)")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(isCompleted ? .white : uncompletedColor)
+                    }
+                    Spacer()
                 }
-                .frame(width: badgeSize, height: badgeSize, alignment: .center)
             }
-            .frame(width: badgeSize, alignment: .center)
+            .frame(width: 32)
 
             // Content column
             VStack(alignment: .leading, spacing: AppSpacing.xs) {

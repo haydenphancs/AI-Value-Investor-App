@@ -39,6 +39,7 @@ struct BookDetailView: View {
             // Background
             AppColors.background
                 .ignoresSafeArea()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Main scrollable content
             ScrollView(showsIndicators: false) {
@@ -104,7 +105,6 @@ struct BookDetailView: View {
             }
         }
         .navigationBarHidden(true)
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $showShareSheet) {
             if let url = URL(string: "https://app.example.com/book/\(book.id)") {
                 ShareSheet(items: [book.title, "by \(book.author)", url])
@@ -357,27 +357,29 @@ private struct BookDetailListenRow: View {
             Spacer()
 
             // Stats
-            HStack(spacing: AppSpacing.lg) {
-                // Read time
-                HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 12))
-                        .foregroundColor(AppColors.textMuted)
+            VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+                HStack(spacing: AppSpacing.md) {
+                    // Read time
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(AppColors.textMuted)
 
-                    Text(book.formattedReadTime)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                }
+                        Text(book.formattedReadTime)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
 
-                // Views
-                HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "eye")
-                        .font(.system(size: 12))
-                        .foregroundColor(AppColors.textMuted)
+                    // Views
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(AppColors.textMuted)
 
-                    Text(book.formattedViewCount)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
+                        Text(book.formattedViewCount)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
                 }
 
                 // Date
@@ -593,10 +595,6 @@ private struct CoreChaptersSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Text("Core Chapters")
-                .font(AppTypography.headline)
-                .foregroundColor(AppColors.textPrimary)
-
             // Timeline layout
             VStack(spacing: 0) {
                 ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
@@ -620,42 +618,47 @@ private struct CoreChapterTimelineRow: View {
     private let completedColor = Color(hex: "14B8A6") // Teal color for completed
     private let uncompletedColor = Color(hex: "3F4A5A") // Muted color for outline
     private let lineColor = Color(hex: "2A3441") // Subtle dark line
+    private let badgeSize: CGFloat = 32
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.lg) {
             // Timeline column with badge and connecting line
             ZStack(alignment: .top) {
-                // Connecting line (behind the badge)
-                if !isLast {
-                    VStack {
-                        Spacer()
-                            .frame(height: 16) // Half of badge height to start line from center
+                // Vertical container for alignment
+                VStack(spacing: 0) {
+                    // Badge
+                    Color.clear
+                        .frame(width: badgeSize, height: badgeSize)
+                    
+                    // Connecting line (after the badge, touches the outline)
+                    if !isLast {
                         Rectangle()
                             .fill(lineColor)
                             .frame(width: 2)
                     }
                 }
-
-                // Number badge - filled or outline based on completion
+                
+                // Number badge - overlaid on top
                 ZStack {
                     if isCompleted {
                         // Filled badge for completed/current chapters
                         Circle()
                             .fill(completedColor)
-                            .frame(width: 32, height: 32)
+                            .frame(width: badgeSize, height: badgeSize)
                     } else {
                         // Outline-only badge for unread chapters
                         Circle()
                             .strokeBorder(uncompletedColor, lineWidth: 2)
-                            .frame(width: 32, height: 32)
+                            .frame(width: badgeSize, height: badgeSize)
                     }
 
                     Text("\(chapter.number)")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(isCompleted ? .white : uncompletedColor)
                 }
+                .frame(width: badgeSize, height: badgeSize, alignment: .center)
             }
-            .frame(width: 32)
+            .frame(width: badgeSize, alignment: .center)
 
             // Content column
             VStack(alignment: .leading, spacing: AppSpacing.xs) {

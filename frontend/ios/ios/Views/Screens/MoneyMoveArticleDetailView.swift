@@ -58,16 +58,19 @@ struct MoneyMoveArticleDetailView: View {
                         article: article,
                         audioEpisode: audioEpisode,
                         onBackTapped: handleBackTapped,
-                        onShareTapped: handleShareTapped
+                        onShareTapped: handleShareTapped,
+                        isBookmarked: isBookmarked,
+                        onBookmarkTapped: handleBookmarkTapped,
+                        onMoreTapped: handleMoreTapped
                     )
 
                     // Content
                     MoneyMoveArticleContent(article: article)
                     .padding(.top, AppSpacing.lg)
 
-                    // Extra padding for action bar
+                    // Bottom padding
                     Color.clear
-                        .frame(height: 100)
+                        .frame(height: 40)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -89,20 +92,6 @@ struct MoneyMoveArticleDetailView: View {
                 miniHeader
                     .opacity(headerOpacity)
             }
-
-            // Bottom action bar
-            VStack {
-                Spacer()
-                ArticleActionBar(
-                    audioEpisode: article.hasAudioVersion ? audioEpisode : nil,
-                    hasAudioVersion: article.hasAudioVersion,
-                    isBookmarked: isBookmarked,
-                    onShareTapped: handleShareTapped,
-                    onBookmarkTapped: handleBookmarkTapped,
-                    onMoreTapped: handleMoreTapped
-                )
-            }
-            .ignoresSafeArea(.container, edges: .bottom)
         }
         .navigationBarHidden(true)
         .preferredColorScheme(.dark)

@@ -616,8 +616,8 @@ private struct CoreChapterTimelineRow: View {
     let isCompleted: Bool
 
     private let completedColor = Color(hex: "14B8A6") // Teal color for completed
-    private let uncompletedColor = Color(hex: "3F4A5A") // Muted color for outline
-    private let lineColor = Color(hex: "2A3441") // Subtle dark line
+    private let uncompletedColor = Color(hex: "2DD4BF").opacity(0.5) // Muted color for outline
+    private let lineColor = Color(hex: "2DD4BF").opacity(0.5) // Subtle dark line
     private let badgeSize: CGFloat = 32
 
     var body: some View {
@@ -634,7 +634,7 @@ private struct CoreChapterTimelineRow: View {
                         // Actual line
                         Rectangle()
                             .fill(lineColor)
-                            .frame(width: 2)
+                            .frame(width: 1)
                     }
                 }
                 
@@ -651,7 +651,7 @@ private struct CoreChapterTimelineRow: View {
                         } else {
                             // Outline-only badge for unread chapters
                             Circle()
-                                .strokeBorder(uncompletedColor, lineWidth: 2)
+                                .strokeBorder(uncompletedColor, lineWidth: 1)
                                 .frame(width: 32, height: 32)
                         }
 

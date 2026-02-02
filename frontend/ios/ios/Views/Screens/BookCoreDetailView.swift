@@ -101,7 +101,9 @@ struct BookCoreDetailView: View {
                     .padding(.top, AppSpacing.xxl)
 
                     // Bottom padding for bars
-                    Color.clear.frame(height: showAudioBar ? 180 : 120)
+                    // GlobalMiniPlayer (72pt) + AI bar (~60pt) + spacing = ~160pt when both visible
+                    // AI bar alone = ~120pt when audio hidden
+                    Color.clear.frame(height: showAudioBar && isCurrentEpisode ? 180 : 140)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -146,16 +148,20 @@ struct BookCoreDetailView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // Audio player bar (hides on scroll down)
+                // Audio controls (hides on scroll down)
                 if showAudioBar {
-                    CoreDetailAudioBar(
-                        content: content,
-                        isPlaying: isPlaying,
-                        progress: isCurrentEpisode ? audioManager.progress : 0,
-                        onPlayTapped: handlePlayTapped,
-                        onBarTapped: handleAudioBarTapped
-                    )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    if isCurrentEpisode {
+                        // Show GlobalMiniPlayer when this chapter is playing
+                        GlobalMiniPlayer()
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    } else {
+                        // Show play button when not playing
+                        CoreDetailPlayButton(
+                            content: content,
+                            onPlayTapped: handlePlayTapped
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
 
                 // AI chat bar (always visible)
@@ -171,16 +177,20 @@ struct BookCoreDetailView: View {
         let scrollDelta = newOffset - previousScrollOffset
 
         // Only update visibility if we've scrolled a meaningful amount
-        if abs(scrollDelta) > 10 {
-            if scrollDelta > 0 && newOffset > 100 {
+        if abs(scrollDelta) > 5 {
+            if scrollDelta > 0 && newOffset > 80 {
                 // Scrolling down - hide audio bar
-                withAnimation {
-                    showAudioBar = false
+                if showAudioBar {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showAudioBar = false
+                    }
                 }
             } else if scrollDelta < 0 {
                 // Scrolling up - show audio bar
-                withAnimation {
-                    showAudioBar = true
+                if !showAudioBar {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showAudioBar = true
+                    }
                 }
             }
             previousScrollOffset = newOffset
@@ -232,20 +242,9 @@ struct BookCoreDetailView: View {
     }
     
     private func handlePlayTapped() {
-        if isCurrentEpisode {
-            audioManager.togglePlayPause()
-        } else {
-            audioManager.play(currentAudioEpisode)
-        }
-    }
-
-    private func handleAudioBarTapped() {
-        // If not playing this episode, start it first
         if !isCurrentEpisode {
             audioManager.play(currentAudioEpisode)
         }
-        // Open full screen player
-        audioManager.expandPlayer()
     }
 
     private func handleAISend() {
@@ -713,77 +712,55 @@ private struct CoreDetailMiniHeader: View {
     }
 }
 
-// MARK: - Audio Bar
-private struct CoreDetailAudioBar: View {
+// MARK: - Play Button
+private struct CoreDetailPlayButton: View {
     let content: CoreChapterContent
-    let isPlaying: Bool
-    let progress: Double
     let onPlayTapped: () -> Void
-    let onBarTapped: () -> Void
 
     var body: some View {
-        Button(action: onBarTapped) {
-            VStack(spacing: 0) {
-                // Progress bar
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        Rectangle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(height: 3)
+        Button(action: onPlayTapped) {
+            HStack(spacing: AppSpacing.md) {
+                // Play button
+                ZStack {
+                    Circle()
+                        .fill(AppColors.primaryBlue)
+                        .frame(width: 44, height: 44)
 
-                        Rectangle()
-                            .fill(AppColors.primaryBlue)
-                            .frame(width: geometry.size.width * progress, height: 3)
-                    }
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.white)
+                        .offset(x: 1)
                 }
-                .frame(height: 3)
 
-                // Main content
-                HStack(spacing: AppSpacing.md) {
-                    // Play/Pause button
-                    Button(action: onPlayTapped) {
-                        ZStack {
-                            Circle()
-                                .fill(AppColors.textPrimary)
-                                .frame(width: 40, height: 40)
+                // Title info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(content.chapterTitle)
+                        .font(AppTypography.bodyBold)
+                        .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(1)
 
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(AppColors.background)
-                                .offset(x: isPlaying ? 0 : 1)
-                        }
-                    }
-                    .buttonStyle(PlainButtonStyle())
-
-                    // Title info
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(content.chapterTitle)
-                            .font(AppTypography.bodyBold)
-                            .foregroundColor(AppColors.textPrimary)
-                            .lineLimit(1)
-
-                        Text(content.formattedDuration)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
-
-                    Spacer()
-
-                    // Playback speed indicator
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "speaker.wave.2.fill")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(AppColors.textSecondary)
-
-                        Text("1.0x")
-                            .font(AppTypography.captionBold)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
+                    Text(content.formattedDuration)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
                 }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.vertical, AppSpacing.md)
+
+                Spacer()
+
+                // Waveform icon
+                Image(systemName: "waveform")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(AppColors.textSecondary)
             }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
             .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.extraLarge)
+            .overlay(
+                RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge)
+                    .strokeBorder(AppColors.primaryBlue.opacity(0.3), lineWidth: 1)
+            )
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.sm)
         }
         .buttonStyle(PlainButtonStyle())
     }

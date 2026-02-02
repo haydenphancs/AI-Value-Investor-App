@@ -80,7 +80,8 @@ struct ArticleActionBar: View {
         .background(
             ZStack {
                 // Glassmorphism background
-                VisualEffectBlur(blurStyle: .systemThinMaterialDark)
+                Color.clear
+                    .background(.thinMaterial)
 
                 // Gradient overlay
                 LinearGradient(
@@ -92,8 +93,8 @@ struct ArticleActionBar: View {
                     endPoint: .bottom
                 )
             }
-            .shadow(color: Color.black.opacity(0.3), radius: 8, y: -4)
         )
+        .shadow(color: Color.black.opacity(0.3), radius: 8, y: -4)
     }
 }
 

@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct BulletPointIndicator: View {
-    let type: BulletPoint.IndicatorType
+    let type: ChatBulletPoint.IndicatorType
 
     var body: some View {
         Image(systemName: type.iconName)

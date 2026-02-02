@@ -85,10 +85,10 @@ struct ChatConversationView: View {
                         overallSentiment: .bullish,
                         percentage: 68,
                         bulletPoints: [
-                            BulletPoint(text: "Strong delivery numbers exceeded expectations", indicatorType: .success),
-                            BulletPoint(text: "Production ramping up successfully", indicatorType: .success),
-                            BulletPoint(text: "Competition intensifying in the market", indicatorType: .warning),
-                            BulletPoint(text: "Analyst price targets vary widely", indicatorType: .info)
+                            ChatBulletPoint(text: "Strong delivery numbers exceeded expectations", indicatorType: .success),
+                            ChatBulletPoint(text: "Production ramping up successfully", indicatorType: .success),
+                            ChatBulletPoint(text: "Competition intensifying in the market", indicatorType: .warning),
+                            ChatBulletPoint(text: "Analyst price targets vary widely", indicatorType: .info)
                         ],
                         dataUpdatedText: "Data updated just now"
                     ))

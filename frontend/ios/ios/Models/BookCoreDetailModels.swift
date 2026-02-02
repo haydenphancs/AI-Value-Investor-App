@@ -100,10 +100,10 @@ struct CalloutContent: Identifiable {
     let id = UUID()
     let title: String
     let text: String
-    let style: CalloutStyle
+    let style: CoreCalloutStyle
 }
 
-enum CalloutStyle {
+enum CoreCalloutStyle {
     case info
     case warning
     case success

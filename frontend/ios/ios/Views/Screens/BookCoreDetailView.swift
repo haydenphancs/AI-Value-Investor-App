@@ -16,9 +16,32 @@ struct BookCoreDetailView: View {
     @State private var previousScrollOffset: CGFloat = 0
     @State private var showAudioBar: Bool = true
     @State private var inputText: String = ""
+    @State private var currentContent: CoreChapterContent
 
-    let content: CoreChapterContent
     let book: LibraryBook
+    let allCores: [BookCoreChapter]
+    
+    init(content: CoreChapterContent, book: LibraryBook) {
+        self.book = book
+        self.allCores = book.coreChapters
+        self._currentContent = State(initialValue: content)
+    }
+    
+    private var currentCoreIndex: Int {
+        allCores.firstIndex { $0.number == currentContent.chapterNumber } ?? 0
+    }
+    
+    private var hasPreviousCore: Bool {
+        currentCoreIndex > 0
+    }
+    
+    private var hasNextCore: Bool {
+        currentCoreIndex < allCores.count - 1
+    }
+    
+    private var content: CoreChapterContent {
+        currentContent
+    }
 
     // Computed property for header opacity based on scroll
     private var headerOpacity: Double {
@@ -99,14 +122,24 @@ struct BookCoreDetailView: View {
             if headerOpacity > 0 {
                 CoreDetailMiniHeader(
                     content: content,
-                    onBackTapped: { dismiss() }
+                    hasPrevious: hasPreviousCore,
+                    hasNext: hasNextCore,
+                    onBackTapped: handleBackTapped,
+                    onCloseTapped: handleCloseTapped,
+                    onNextTapped: handleNextTapped
                 )
                 .opacity(headerOpacity)
             }
 
             // Navigation header (transparent)
             if headerOpacity == 0 {
-                CoreDetailNavigationHeader(onBackTapped: { dismiss() })
+                CoreDetailNavigationHeader(
+                    hasPrevious: hasPreviousCore,
+                    hasNext: hasNextCore,
+                    onBackTapped: handleBackTapped,
+                    onCloseTapped: handleCloseTapped,
+                    onNextTapped: handleNextTapped
+                )
             }
 
             // Bottom bars
@@ -157,6 +190,47 @@ struct BookCoreDetailView: View {
     }
 
     // MARK: - Actions
+    private func handleCloseTapped() {
+        dismiss()
+    }
+    
+    private func handleBackTapped() {
+        guard hasPreviousCore else {
+            dismiss()
+            return
+        }
+        navigateToPreviousCore()
+    }
+    
+    private func handleNextTapped() {
+        guard hasNextCore else { return }
+        navigateToNextCore()
+    }
+    
+    private func navigateToPreviousCore() {
+        let previousIndex = currentCoreIndex - 1
+        guard previousIndex >= 0, let newContent = allCores[previousIndex].getDetailContent(for: book) else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            currentContent = newContent
+        }
+        // Reset scroll position
+        scrollOffset = 0
+        previousScrollOffset = 0
+        showAudioBar = true
+    }
+    
+    private func navigateToNextCore() {
+        let nextIndex = currentCoreIndex + 1
+        guard nextIndex < allCores.count, let newContent = allCores[nextIndex].getDetailContent(for: book) else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            currentContent = newContent
+        }
+        // Reset scroll position
+        scrollOffset = 0
+        previousScrollOffset = 0
+        showAudioBar = true
+    }
+    
     private func handlePlayTapped() {
         if isCurrentEpisode {
             audioManager.togglePlayPause()
@@ -214,20 +288,7 @@ private struct CoreDetailHeaderSection: View {
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Book info
-            HStack(spacing: AppSpacing.xs) {
-                Text(content.bookTitle)
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
 
-                Text("by")
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textMuted)
-
-                Text(content.bookAuthor)
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(AppColors.textSecondary)
-            }
 
             // Divider
             Rectangle()
@@ -424,7 +485,7 @@ private struct CoreActionStepCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Title with indicator
-            HStack(spacing: AppSpacing.md) {
+            HStack(alignment: .top, spacing: AppSpacing.md) {
                 // Checkbox indicator
                 ZStack {
                     Circle()
@@ -444,6 +505,7 @@ private struct CoreActionStepCard: View {
                 Text(step.title)
                     .font(AppTypography.headline)
                     .foregroundColor(AppColors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Description
@@ -454,6 +516,7 @@ private struct CoreActionStepCard: View {
                 .padding(.leading, 24 + AppSpacing.md)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
@@ -524,16 +587,21 @@ private struct CoreCalloutView: View {
 
 // MARK: - Navigation Header
 private struct CoreDetailNavigationHeader: View {
+    let hasPrevious: Bool
+    let hasNext: Bool
     let onBackTapped: () -> Void
+    let onCloseTapped: () -> Void
+    let onNextTapped: () -> Void
 
     var body: some View {
         HStack {
+            // Back button (left)
             Button(action: onBackTapped) {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 16, weight: .semibold))
 
-                    Text("Back")
+                    Text(hasPrevious ? "Prev" : "Back")
                         .font(AppTypography.bodyBold)
                 }
                 .foregroundColor(AppColors.textPrimary)
@@ -543,6 +611,39 @@ private struct CoreDetailNavigationHeader: View {
             .buttonStyle(PlainButtonStyle())
 
             Spacer()
+            
+            // Close button (center)
+            Button(action: onCloseTapped) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(AppColors.textPrimary)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            Spacer()
+            
+            // Next button (right)
+            if hasNext {
+                Button(action: onNextTapped) {
+                    HStack(spacing: AppSpacing.sm) {
+                        Text("Next")
+                            .font(AppTypography.bodyBold)
+                        
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .foregroundColor(AppColors.textPrimary)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+                }
+                .buttonStyle(PlainButtonStyle())
+            } else {
+                // Invisible spacer to balance layout
+                Color.clear
+                    .frame(width: 80)
+            }
         }
         .padding(.top, AppSpacing.sm)
     }
@@ -551,10 +652,15 @@ private struct CoreDetailNavigationHeader: View {
 // MARK: - Mini Header
 private struct CoreDetailMiniHeader: View {
     let content: CoreChapterContent
+    let hasPrevious: Bool
+    let hasNext: Bool
     let onBackTapped: () -> Void
+    let onCloseTapped: () -> Void
+    let onNextTapped: () -> Void
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
+            // Back button
             Button(action: onBackTapped) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 16, weight: .semibold))
@@ -562,6 +668,7 @@ private struct CoreDetailMiniHeader: View {
             }
             .buttonStyle(PlainButtonStyle())
 
+            // Chapter info
             VStack(alignment: .leading, spacing: 2) {
                 Text(content.formattedChapterLabel)
                     .font(AppTypography.caption)
@@ -574,6 +681,28 @@ private struct CoreDetailMiniHeader: View {
             }
 
             Spacer()
+            
+            // Close button
+            Button(action: onCloseTapped) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(AppColors.textPrimary)
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            // Next button
+            if hasNext {
+                Button(action: onNextTapped) {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text("Next")
+                            .font(AppTypography.bodyBold)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .foregroundColor(AppColors.textPrimary)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)

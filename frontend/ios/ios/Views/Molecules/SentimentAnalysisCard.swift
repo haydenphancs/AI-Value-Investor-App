@@ -50,10 +50,10 @@ struct SentimentAnalysisCard: View {
             overallSentiment: .bullish,
             percentage: 68,
             bulletPoints: [
-                BulletPoint(text: "Strong delivery numbers exceeded expectations in Q4", indicatorType: .success),
-                BulletPoint(text: "Cybertruck production ramping up successfully", indicatorType: .success),
-                BulletPoint(text: "Competition intensifying in EV market", indicatorType: .warning),
-                BulletPoint(text: "Analyst price targets range from $180-$350", indicatorType: .info)
+                ChatBulletPoint(text: "Strong delivery numbers exceeded expectations in Q4", indicatorType: .success),
+                ChatBulletPoint(text: "Cybertruck production ramping up successfully", indicatorType: .success),
+                ChatBulletPoint(text: "Competition intensifying in EV market", indicatorType: .warning),
+                ChatBulletPoint(text: "Analyst price targets range from $180-$350", indicatorType: .info)
             ],
             dataUpdatedText: "Data updated 5 minutes ago"
         )

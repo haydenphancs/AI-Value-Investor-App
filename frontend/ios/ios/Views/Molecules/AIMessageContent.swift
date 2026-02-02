@@ -63,8 +63,8 @@ struct AIMessageContent: View {
                     overallSentiment: .bullish,
                     percentage: 68,
                     bulletPoints: [
-                        BulletPoint(text: "Strong delivery numbers exceeded expectations in Q4", indicatorType: .success),
-                        BulletPoint(text: "Competition intensifying in EV market", indicatorType: .warning)
+                        ChatBulletPoint(text: "Strong delivery numbers exceeded expectations in Q4", indicatorType: .success),
+                        ChatBulletPoint(text: "Competition intensifying in EV market", indicatorType: .warning)
                     ],
                     dataUpdatedText: "Data updated 5 minutes ago"
                 ))

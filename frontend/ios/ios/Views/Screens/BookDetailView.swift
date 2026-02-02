@@ -518,17 +518,30 @@ private struct BookDetailAuthorCard: View {
 // MARK: - Core Content
 private struct BookDetailCoreContent: View {
     let book: LibraryBook
+    @State private var selectedChapter: BookCoreChapter?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
             // Core Chapters Section (with progress tracking)
-            CoreChaptersSection(chapters: book.coreChapters, currentChapter: book.currentChapter)
+            CoreChaptersSection(
+                chapters: book.coreChapters,
+                currentChapter: book.currentChapter,
+                onChapterTapped: { chapter in
+                    selectedChapter = chapter
+                }
+            )
 
             // Discussion Section
             DiscussionSection(discussions: book.discussions)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)
+        .fullScreenCover(item: $selectedChapter) { chapter in
+            if let content = chapter.getDetailContent(for: book) {
+                BookCoreDetailView(content: content, book: book)
+                    .environmentObject(AudioManager.shared)
+            }
+        }
     }
 }
 
@@ -592,6 +605,7 @@ private struct KeyHighlightCard: View {
 private struct CoreChaptersSection: View {
     let chapters: [BookCoreChapter]
     let currentChapter: Int
+    var onChapterTapped: ((BookCoreChapter) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -601,7 +615,10 @@ private struct CoreChaptersSection: View {
                     CoreChapterTimelineRow(
                         chapter: chapter,
                         isLast: index == chapters.count - 1,
-                        isCompleted: chapter.number <= currentChapter
+                        isCompleted: chapter.number <= currentChapter,
+                        onTapped: {
+                            onChapterTapped?(chapter)
+                        }
                     )
                 }
             }
@@ -614,6 +631,7 @@ private struct CoreChapterTimelineRow: View {
     let chapter: BookCoreChapter
     let isLast: Bool
     let isCompleted: Bool
+    var onTapped: (() -> Void)?
 
     private let completedColor = Color(hex: "14B8A6") // Teal color for completed
     private let uncompletedColor = Color(hex: "2DD4BF").opacity(0.5) // Muted color for outline
@@ -621,66 +639,79 @@ private struct CoreChapterTimelineRow: View {
     private let badgeSize: CGFloat = 32
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.lg) {
-            // Timeline column with badge and connecting line
-            ZStack(alignment: .top) {
-                // Connecting line (starts from bottom edge of badge)
-                if !isLast {
-                    VStack(spacing: 0) {
-                        // Spacer for badge height
-                        Color.clear
-                            .frame(width: 2, height: 32)
-                        
-                        // Actual line
-                        Rectangle()
-                            .fill(lineColor)
-                            .frame(width: 1)
-                    }
-                }
-                
-                // Number badge - filled or outline based on completion
-                HStack {
-                    Spacer(minLength: 0)
-                    
-                    ZStack {
-                        if isCompleted {
-                            // Filled badge for completed/current chapters
-                            Circle()
-                                .fill(completedColor)
-                                .frame(width: 32, height: 32)
-                        } else {
-                            // Outline-only badge for unread chapters
-                            Circle()
-                                .strokeBorder(uncompletedColor, lineWidth: 1)
-                                .frame(width: 32, height: 32)
-                        }
+        Button(action: { onTapped?() }) {
+            HStack(alignment: .top, spacing: AppSpacing.lg) {
+                // Timeline column with badge and connecting line
+                ZStack(alignment: .top) {
+                    // Connecting line (starts from bottom edge of badge)
+                    if !isLast {
+                        VStack(spacing: 0) {
+                            // Spacer for badge height
+                            Color.clear
+                                .frame(width: 2, height: 32)
 
-                        Text("\(chapter.number)")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(isCompleted ? .white : uncompletedColor)
+                            // Actual line
+                            Rectangle()
+                                .fill(lineColor)
+                                .frame(width: 1)
+                        }
                     }
-                    .frame(width: 32, height: 32)
-                    
-                    Spacer(minLength: 0)
+
+                    // Number badge - filled or outline based on completion
+                    HStack {
+                        Spacer(minLength: 0)
+
+                        ZStack {
+                            if isCompleted {
+                                // Filled badge for completed/current chapters
+                                Circle()
+                                    .fill(completedColor)
+                                    .frame(width: 32, height: 32)
+                            } else {
+                                // Outline-only badge for unread chapters
+                                Circle()
+                                    .strokeBorder(uncompletedColor, lineWidth: 1)
+                                    .frame(width: 32, height: 32)
+                            }
+
+                            Text("\(chapter.number)")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(isCompleted ? .white : uncompletedColor)
+                        }
+                        .frame(width: 32, height: 32)
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: 32)
                 }
                 .frame(width: 32)
-            }
-            .frame(width: 32)
 
-            // Content column
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text(chapter.title)
-                    .font(AppTypography.bodyBold)
-                    .foregroundColor(AppColors.textPrimary)
+                // Content column
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    HStack {
+                        Text(chapter.title)
+                            .font(AppTypography.bodyBold)
+                            .foregroundColor(AppColors.textPrimary)
 
-                Text(chapter.description)
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+
+                        // Chevron indicator
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
+                    Text(chapter.description)
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(.bottom, isLast ? 0 : AppSpacing.xxl)
             }
-            .padding(.bottom, isLast ? 0 : AppSpacing.xxl)
         }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 

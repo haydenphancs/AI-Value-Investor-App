@@ -1,0 +1,722 @@
+//
+//  BookCoreDetailView.swift
+//  ios
+//
+//  Book Core Detail View - Detailed content view for a specific core chapter
+//  Displays chapter content with sections, audio playback, and AI chat
+//
+
+import SwiftUI
+
+// MARK: - Book Core Detail View
+struct BookCoreDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audioManager: AudioManager
+    @State private var scrollOffset: CGFloat = 0
+    @State private var previousScrollOffset: CGFloat = 0
+    @State private var showAudioBar: Bool = true
+    @State private var inputText: String = ""
+
+    let content: CoreChapterContent
+    let book: LibraryBook
+
+    // Computed property for header opacity based on scroll
+    private var headerOpacity: Double {
+        let fadeStart: CGFloat = 60
+        let fadeEnd: CGFloat = 120
+        if scrollOffset < fadeStart { return 0 }
+        if scrollOffset > fadeEnd { return 1 }
+        return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
+    }
+
+    private var currentAudioEpisode: AudioEpisode {
+        AudioEpisode(
+            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
+            title: content.chapterTitle,
+            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
+            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
+            artworkIcon: "book.fill",
+            duration: TimeInterval(content.audioDurationSeconds),
+            category: .books,
+            authorName: content.bookAuthor,
+            sourceId: book.id.uuidString
+        )
+    }
+
+    private var isCurrentEpisode: Bool {
+        audioManager.currentEpisode?.id == currentAudioEpisode.id
+    }
+
+    private var isPlaying: Bool {
+        isCurrentEpisode && audioManager.isPlaying
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Background
+            AppColors.background
+                .ignoresSafeArea()
+
+            // Main scrollable content
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Header spacer for back button area
+                    Color.clear
+                        .frame(height: 60)
+
+                    // Chapter header
+                    CoreDetailHeaderSection(content: content, book: book)
+                        .padding(.horizontal, AppSpacing.lg)
+
+                    // Content sections
+                    LazyVStack(alignment: .leading, spacing: AppSpacing.xxl) {
+                        ForEach(content.sections) { section in
+                            CoreSectionView(section: section)
+                        }
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.xxl)
+
+                    // Bottom padding for bars
+                    Color.clear.frame(height: showAudioBar ? 180 : 120)
+                }
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(
+                                key: CoreDetailScrollOffsetKey.self,
+                                value: -proxy.frame(in: .named("coreDetailScroll")).origin.y
+                            )
+                    }
+                )
+            }
+            .coordinateSpace(name: "coreDetailScroll")
+            .onPreferenceChange(CoreDetailScrollOffsetKey.self) { value in
+                handleScrollChange(newOffset: value)
+            }
+
+            // Sticky mini header (appears on scroll)
+            if headerOpacity > 0 {
+                CoreDetailMiniHeader(
+                    content: content,
+                    onBackTapped: { dismiss() }
+                )
+                .opacity(headerOpacity)
+            }
+
+            // Navigation header (transparent)
+            if headerOpacity == 0 {
+                CoreDetailNavigationHeader(onBackTapped: { dismiss() })
+            }
+
+            // Bottom bars
+            VStack(spacing: 0) {
+                Spacer()
+
+                // Audio player bar (hides on scroll down)
+                if showAudioBar {
+                    CoreDetailAudioBar(
+                        content: content,
+                        isPlaying: isPlaying,
+                        progress: isCurrentEpisode ? audioManager.progress : 0,
+                        onPlayTapped: handlePlayTapped,
+                        onBarTapped: handleAudioBarTapped
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                // AI chat bar (always visible)
+                CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showAudioBar)
+        }
+        .navigationBarHidden(true)
+    }
+
+    // MARK: - Scroll Handling
+    private func handleScrollChange(newOffset: CGFloat) {
+        let scrollDelta = newOffset - previousScrollOffset
+
+        // Only update visibility if we've scrolled a meaningful amount
+        if abs(scrollDelta) > 10 {
+            if scrollDelta > 0 && newOffset > 100 {
+                // Scrolling down - hide audio bar
+                withAnimation {
+                    showAudioBar = false
+                }
+            } else if scrollDelta < 0 {
+                // Scrolling up - show audio bar
+                withAnimation {
+                    showAudioBar = true
+                }
+            }
+            previousScrollOffset = newOffset
+        }
+
+        scrollOffset = newOffset
+    }
+
+    // MARK: - Actions
+    private func handlePlayTapped() {
+        if isCurrentEpisode {
+            audioManager.togglePlayPause()
+        } else {
+            audioManager.play(currentAudioEpisode)
+        }
+    }
+
+    private func handleAudioBarTapped() {
+        // If not playing this episode, start it first
+        if !isCurrentEpisode {
+            audioManager.play(currentAudioEpisode)
+        }
+        // Open full screen player
+        audioManager.expandPlayer()
+    }
+
+    private func handleAISend() {
+        guard !inputText.isEmpty else { return }
+        print("Ask AI about chapter: \(inputText)")
+        inputText = ""
+    }
+}
+
+// MARK: - Scroll Offset Preference Key
+private struct CoreDetailScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Header Section
+private struct CoreDetailHeaderSection: View {
+    let content: CoreChapterContent
+    let book: LibraryBook
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Chapter badge
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "book.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(book.level.color)
+
+                Text(content.formattedChapterLabel.uppercased())
+                    .font(AppTypography.captionBold)
+                    .foregroundColor(book.level.color)
+                    .tracking(0.8)
+            }
+
+            // Chapter title
+            Text(content.chapterTitle)
+                .font(AppTypography.largeTitle)
+                .foregroundColor(AppColors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Book info
+            HStack(spacing: AppSpacing.xs) {
+                Text(content.bookTitle)
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textSecondary)
+
+                Text("by")
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textMuted)
+
+                Text(content.bookAuthor)
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
+                .padding(.top, AppSpacing.sm)
+        }
+    }
+}
+
+// MARK: - Section View
+private struct CoreSectionView: View {
+    let section: CoreChapterSection
+
+    var body: some View {
+        switch section.content {
+        case .text(let text):
+            if section.type == .heading {
+                CoreHeadingView(text: text)
+            } else {
+                CoreParagraphView(text: text)
+            }
+
+        case .richText(let attributedString):
+            Text(attributedString)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(6)
+
+        case .quote(let quote):
+            CoreQuoteView(quote: quote)
+
+        case .assetList(let assets):
+            CoreAssetListView(assets: assets, title: section.title)
+
+        case .actionPlan(let steps):
+            CoreActionPlanView(steps: steps)
+
+        case .bulletPoints(let points):
+            CoreBulletPointsView(points: points, title: section.title)
+
+        case .callout(let callout):
+            CoreCalloutView(callout: callout)
+        }
+    }
+}
+
+// MARK: - Heading View
+private struct CoreHeadingView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(AppTypography.title2)
+            .foregroundColor(AppColors.textPrimary)
+            .padding(.top, AppSpacing.md)
+    }
+}
+
+// MARK: - Paragraph View
+private struct CoreParagraphView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(AppTypography.body)
+            .foregroundColor(AppColors.textSecondary)
+            .lineSpacing(6)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+// MARK: - Quote View
+private struct CoreQuoteView: View {
+    let quote: QuoteContent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Quote icon
+            Image(systemName: "quote.opening")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(AppColors.accentCyan.opacity(0.6))
+
+            // Quote text
+            Text(quote.text)
+                .font(.system(size: 16, weight: .medium, design: .serif))
+                .foregroundColor(AppColors.textPrimary)
+                .lineSpacing(6)
+                .italic()
+
+            // Attribution
+            HStack(spacing: AppSpacing.xs) {
+                Rectangle()
+                    .fill(AppColors.accentCyan)
+                    .frame(width: 24, height: 2)
+
+                Text(quote.author)
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.accentCyan)
+
+                if let source = quote.source {
+                    Text(",")
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.textMuted)
+
+                    Text(source)
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.textSecondary)
+                        .italic()
+                }
+            }
+        }
+        .padding(AppSpacing.xl)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+    }
+}
+
+// MARK: - Asset List View
+private struct CoreAssetListView: View {
+    let assets: [AssetCategory]
+    let title: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            if let title = title {
+                Text(title)
+                    .font(AppTypography.headline)
+                    .foregroundColor(AppColors.textPrimary)
+            }
+
+            VStack(spacing: AppSpacing.md) {
+                ForEach(assets) { asset in
+                    CoreAssetCard(asset: asset)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Asset Card
+private struct CoreAssetCard: View {
+    let asset: AssetCategory
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.lg) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(Color(hex: asset.iconColor).opacity(0.15))
+                    .frame(width: 44, height: 44)
+
+                Image(systemName: asset.icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(Color(hex: asset.iconColor))
+            }
+
+            // Content
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text(asset.title)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(asset.description)
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
+// MARK: - Action Plan View
+private struct CoreActionPlanView: View {
+    let steps: [ActionStep]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            ForEach(steps) { step in
+                CoreActionStepCard(step: step)
+            }
+        }
+    }
+}
+
+// MARK: - Action Step Card
+private struct CoreActionStepCard: View {
+    let step: ActionStep
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Title with indicator
+            HStack(spacing: AppSpacing.md) {
+                // Checkbox indicator
+                ZStack {
+                    Circle()
+                        .strokeBorder(
+                            step.isCompleted ? AppColors.bullish : AppColors.primaryBlue,
+                            lineWidth: 2
+                        )
+                        .frame(width: 24, height: 24)
+
+                    if step.isCompleted {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(AppColors.bullish)
+                    }
+                }
+
+                Text(step.title)
+                    .font(AppTypography.headline)
+                    .foregroundColor(AppColors.textPrimary)
+            }
+
+            // Description
+            Text(step.description)
+                .font(AppTypography.callout)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(4)
+                .padding(.leading, 24 + AppSpacing.md)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+    }
+}
+
+// MARK: - Bullet Points View
+private struct CoreBulletPointsView: View {
+    let points: [BulletPoint]
+    let title: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            if let title = title {
+                Text(title)
+                    .font(AppTypography.headline)
+                    .foregroundColor(AppColors.textPrimary)
+            }
+
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                ForEach(points) { point in
+                    HStack(alignment: .top, spacing: AppSpacing.md) {
+                        Circle()
+                            .fill(point.isHighlighted ? AppColors.accentCyan : AppColors.textMuted)
+                            .frame(width: 6, height: 6)
+                            .padding(.top, 6)
+
+                        Text(point.text)
+                            .font(point.isHighlighted ? AppTypography.bodyBold : AppTypography.body)
+                            .foregroundColor(point.isHighlighted ? AppColors.textPrimary : AppColors.textSecondary)
+                            .lineSpacing(4)
+                    }
+                }
+            }
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+    }
+}
+
+// MARK: - Callout View
+private struct CoreCalloutView: View {
+    let callout: CalloutContent
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            Image(systemName: callout.style.iconName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(callout.style.iconColor)
+
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text(callout.title)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(callout.text)
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(4)
+            }
+        }
+        .padding(AppSpacing.lg)
+        .background(callout.style.backgroundColor)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
+// MARK: - Navigation Header
+private struct CoreDetailNavigationHeader: View {
+    let onBackTapped: () -> Void
+
+    var body: some View {
+        HStack {
+            Button(action: onBackTapped) {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+
+                    Text("Back")
+                        .font(AppTypography.bodyBold)
+                }
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Spacer()
+        }
+        .padding(.top, AppSpacing.sm)
+    }
+}
+
+// MARK: - Mini Header
+private struct CoreDetailMiniHeader: View {
+    let content: CoreChapterContent
+    let onBackTapped: () -> Void
+
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            Button(action: onBackTapped) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(AppColors.textPrimary)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(content.formattedChapterLabel)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+
+                Text(content.chapterTitle)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+        .background(
+            AppColors.background
+                .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+        )
+    }
+}
+
+// MARK: - Audio Bar
+private struct CoreDetailAudioBar: View {
+    let content: CoreChapterContent
+    let isPlaying: Bool
+    let progress: Double
+    let onPlayTapped: () -> Void
+    let onBarTapped: () -> Void
+
+    var body: some View {
+        Button(action: onBarTapped) {
+            VStack(spacing: 0) {
+                // Progress bar
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(AppColors.cardBackgroundLight)
+                            .frame(height: 3)
+
+                        Rectangle()
+                            .fill(AppColors.primaryBlue)
+                            .frame(width: geometry.size.width * progress, height: 3)
+                    }
+                }
+                .frame(height: 3)
+
+                // Main content
+                HStack(spacing: AppSpacing.md) {
+                    // Play/Pause button
+                    Button(action: onPlayTapped) {
+                        ZStack {
+                            Circle()
+                                .fill(AppColors.textPrimary)
+                                .frame(width: 40, height: 40)
+
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppColors.background)
+                                .offset(x: isPlaying ? 0 : 1)
+                        }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+
+                    // Title info
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(content.chapterTitle)
+                            .font(AppTypography.bodyBold)
+                            .foregroundColor(AppColors.textPrimary)
+                            .lineLimit(1)
+
+                        Text(content.formattedDuration)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+
+                    Spacer()
+
+                    // Playback speed indicator
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(AppColors.textSecondary)
+
+                        Text("1.0x")
+                            .font(AppTypography.captionBold)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+            }
+            .background(AppColors.cardBackground)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+// MARK: - Ask AI Bar
+private struct CoreDetailAskAIBar: View {
+    @Binding var inputText: String
+    let onSend: () -> Void
+
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            // AI icon
+            Image(systemName: "sparkles")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(AppColors.accentCyan)
+
+            // Text field
+            TextField("Ask Caudex AI...", text: $inputText)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textPrimary)
+                .submitLabel(.send)
+                .onSubmit(onSend)
+
+            Spacer()
+
+            // Send button
+            Button(action: onSend) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(inputText.isEmpty ? AppColors.textMuted : AppColors.primaryBlue)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(inputText.isEmpty)
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.extraLarge)
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.bottom, AppSpacing.lg)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppColors.background.opacity(0),
+                    AppColors.background.opacity(0.95),
+                    AppColors.background
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        )
+    }
+}
+
+// MARK: - Preview
+#Preview {
+    BookCoreDetailView(
+        content: .sampleFinancialScorecard,
+        book: LibraryBook.sampleData[0]
+    )
+    .environmentObject(AudioManager.shared)
+    .preferredColorScheme(.dark)
+}

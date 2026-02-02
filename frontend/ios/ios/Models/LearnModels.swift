@@ -217,6 +217,51 @@ struct BookCoreChapter: Identifiable {
     let number: Int
     let title: String
     let description: String
+
+    /// Returns the detailed content for this chapter if available
+    /// This links to the full CoreChapterContent for the detail view
+    func getDetailContent(for book: LibraryBook) -> CoreChapterContent? {
+        // Map chapter numbers to their detailed content
+        // In a real app, this would fetch from a database or API
+        switch (book.curriculumOrder, number) {
+        case (1, 1): return .sampleEmployeeMindset
+        case (1, 2): return .sampleFinancialScorecard
+        default: return createGenericContent(for: book)
+        }
+    }
+
+    /// Creates generic content for chapters without detailed content
+    private func createGenericContent(for book: LibraryBook) -> CoreChapterContent {
+        CoreChapterContent(
+            chapterNumber: number,
+            chapterTitle: title,
+            bookTitle: book.title,
+            bookAuthor: book.author,
+            sections: [
+                CoreChapterSection(
+                    type: .heading,
+                    title: nil,
+                    content: .text("Overview")
+                ),
+                CoreChapterSection(
+                    type: .paragraph,
+                    title: nil,
+                    content: .text(description)
+                ),
+                CoreChapterSection(
+                    type: .callout,
+                    title: nil,
+                    content: .callout(CalloutContent(
+                        title: "Coming Soon",
+                        text: "Detailed content for this chapter is being developed. Check back soon for the full learning experience.",
+                        style: .info
+                    ))
+                )
+            ],
+            audioDurationSeconds: 600,
+            currentProgress: 0.0
+        )
+    }
 }
 
 // MARK: - Book Discussion/Review

@@ -13,6 +13,7 @@ struct ChatInputSection: View {
     var onSend: (() -> Void)?
     var onVoiceTap: (() -> Void)?
     var onImageTap: (() -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.md) {
@@ -20,7 +21,8 @@ struct ChatInputSection: View {
             ChatInputBar(
                 text: $inputText,
                 onAttachmentTap: onAttachmentTap,
-                onSend: onSend
+                onSend: onSend,
+                onFocusChange: onFocusChange
             )
 
             // Voice and Image options

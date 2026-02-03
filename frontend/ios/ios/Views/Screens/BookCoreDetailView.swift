@@ -14,7 +14,6 @@ struct BookCoreDetailView: View {
     @EnvironmentObject private var audioManager: AudioManager
     @State private var scrollOffset: CGFloat = 0
     @State private var previousScrollOffset: CGFloat = 0
-    @State private var showAudioBar: Bool = true
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
 
@@ -93,8 +92,8 @@ struct BookCoreDetailView: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.xxl)
 
-                    // Bottom padding for audio player + AI bar
-                    Color.clear.frame(height: showAudioBar ? 180 : 120)
+                    // Bottom padding for global audio player + AI bar
+                    Color.clear.frame(height: 180)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -137,17 +136,9 @@ struct BookCoreDetailView: View {
                 .zIndex(10)
             }
 
-            // Bottom bars
+            // Bottom AI chat bar
             VStack(spacing: 0) {
                 Spacer()
-
-                // Audio player (hides on scroll down, shows on scroll up)
-                if showAudioBar {
-                    GlobalMiniPlayer()
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                // AI chat bar
                 CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
             }
         }
@@ -156,7 +147,11 @@ struct BookCoreDetailView: View {
             // Load the audio episode when view appears (paused)
             audioManager.load(currentAudioEpisode)
         }
-        .onChange(of: currentContent.chapterNumber) {
+        .onDisappear {
+            // Reset scroll hiding when leaving the view
+            audioManager.resetScrollHiding()
+        }
+        .onChange(of: currentContent.chapterNumber) { _ in
             // Load new episode when navigating between chapters (paused)
             audioManager.load(currentAudioEpisode)
         }
@@ -166,23 +161,15 @@ struct BookCoreDetailView: View {
     private func handleScrollChange(newOffset: CGFloat) {
         let scrollDelta = newOffset - previousScrollOffset
 
-        // Update audio bar visibility based on scroll direction
+        // Update global audio player visibility based on scroll direction
         // Require minimum scroll delta to avoid flickering
         if abs(scrollDelta) > 8 {
             if scrollDelta > 0 && newOffset > 50 {
-                // Scrolling down - hide audio bar
-                if showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        showAudioBar = false
-                    }
-                }
+                // Scrolling down - hide global audio player
+                audioManager.hidePlayerByScroll()
             } else if scrollDelta < -8 {
-                // Scrolling up - show audio bar
-                if !showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        showAudioBar = true
-                    }
-                }
+                // Scrolling up - show global audio player
+                audioManager.showPlayerAfterScroll()
             }
             previousScrollOffset = newOffset
         }
@@ -217,10 +204,10 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position and show audio bar
+        // Reset scroll position and show audio player
         scrollOffset = 0
         previousScrollOffset = 0
-        showAudioBar = true
+        audioManager.resetScrollHiding()
     }
 
     private func navigateToNextCore() {
@@ -229,10 +216,10 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position and show audio bar
+        // Reset scroll position and show audio player
         scrollOffset = 0
         previousScrollOffset = 0
-        showAudioBar = true
+        audioManager.resetScrollHiding()
     }
     
     private func handleAISend() {

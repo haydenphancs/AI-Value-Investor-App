@@ -156,7 +156,7 @@ struct BookCoreDetailView: View {
             // Load the audio episode when view appears (paused)
             audioManager.load(currentAudioEpisode)
         }
-        .onChange(of: currentContent.chapterNumber) { _ in
+        .onChange(of: currentContent.chapterNumber) {
             // Load new episode when navigating between chapters (paused)
             audioManager.load(currentAudioEpisode)
         }

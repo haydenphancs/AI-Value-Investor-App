@@ -45,56 +45,78 @@ struct MoneyMoveArticleDetailView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
+        ZStack {
+            // Main content layer
+            ZStack(alignment: .top) {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
 
-            // Main scrollable content
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
-                    // Hero header
-                    MoneyMoveArticleHeroHeader(
-                        article: article,
-                        audioEpisode: audioEpisode,
-                        onBackTapped: handleBackTapped,
-                        onShareTapped: handleShareTapped,
-                        isBookmarked: isBookmarked,
-                        onBookmarkTapped: handleBookmarkTapped,
-                        onMoreTapped: handleMoreTapped
-                    )
+                // Main scrollable content
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        // Hero header
+                        MoneyMoveArticleHeroHeader(
+                            article: article,
+                            audioEpisode: audioEpisode,
+                            onBackTapped: handleBackTapped,
+                            onShareTapped: handleShareTapped,
+                            isBookmarked: isBookmarked,
+                            onBookmarkTapped: handleBookmarkTapped,
+                            onMoreTapped: handleMoreTapped
+                        )
 
-                    // Content
-                    MoneyMoveArticleContent(article: article)
-                    .padding(.top, AppSpacing.lg)
+                        // Content
+                        MoneyMoveArticleContent(article: article)
+                        .padding(.top, AppSpacing.lg)
 
-                    // Bottom padding
-                    Color.clear
-                        .frame(height: 40)
-                }
-                .background(
-                    GeometryReader { proxy in
+                        // Bottom padding (extra space for mini player)
                         Color.clear
-                            .preference(
-                                key: ScrollOffsetPreferenceKey.self,
-                                value: -proxy.frame(in: .named("scroll")).origin.y
-                            )
+                            .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
                     }
-                )
-            }
-            .coordinateSpace(name: "scroll")
-            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
-                scrollOffset = value
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(
+                                    key: ScrollOffsetPreferenceKey.self,
+                                    value: -proxy.frame(in: .named("scroll")).origin.y
+                                )
+                        }
+                    )
+                }
+                .coordinateSpace(name: "scroll")
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+                    scrollOffset = value
+                }
+
+                // Sticky mini header (appears on scroll)
+                if headerOpacity > 0 {
+                    miniHeader
+                        .opacity(headerOpacity)
+                }
             }
 
-            // Sticky mini header (appears on scroll)
-            if headerOpacity > 0 {
-                miniHeader
-                    .opacity(headerOpacity)
+            // Global Mini Player (floating at bottom)
+            if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
+                VStack {
+                    Spacer()
+                    GlobalMiniPlayer()
+                        .padding(.bottom, AppSpacing.lg)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            // Full Screen Player (modal overlay)
+            if audioManager.showFullScreenPlayer {
+                FullScreenAudioPlayer()
+                    .transition(.move(edge: .bottom))
+                    .zIndex(100)
             }
         }
         .navigationBarHidden(true)
         .preferredColorScheme(.dark)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .onAppear {
             isBookmarked = article.isBookmarked
         }

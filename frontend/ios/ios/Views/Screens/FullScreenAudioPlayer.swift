@@ -54,7 +54,8 @@ struct FullScreenAudioPlayer: View {
                     Spacer()
                         .frame(height: geometry.safeAreaInsets.bottom + AppSpacing.xl)
                 }
-                .padding(.horizontal, AppSpacing.xl)
+                .padding(.leading, AppSpacing.sm)
+                .padding(.trailing, AppSpacing.xxxl)
             }
             .offset(y: dragOffset)
             .gesture(
@@ -147,6 +148,7 @@ struct FullScreenAudioPlayer: View {
                             .tracking(0.8)
                     }
                     .foregroundColor(episode.category.accentColor)
+                    .frame(maxWidth: .infinity)
                 }
 
                 Spacer()
@@ -160,6 +162,7 @@ struct FullScreenAudioPlayer: View {
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                 }
+                .offset(x: -7)
             }
         }
     }
@@ -203,6 +206,7 @@ struct FullScreenAudioPlayer: View {
                     audioManager.seekToProgress(progress)
                 }
             )
+            .padding(.horizontal, AppSpacing.xl)
 
             // Time labels
             HStack {
@@ -218,6 +222,7 @@ struct FullScreenAudioPlayer: View {
                     .foregroundColor(AppColors.textSecondary)
                     .monospacedDigit()
             }
+            .padding(.horizontal, AppSpacing.xl)
         }
     }
 
@@ -358,22 +363,22 @@ struct AudioProgressSlider: View {
                 // Track background
                 Capsule()
                     .fill(Color.white.opacity(0.2))
-                    .frame(height: 4)
+                    .frame(height: 3)
 
                 // Progress fill
                 Capsule()
                     .fill(AppColors.textPrimary)
-                    .frame(width: geometry.size.width * displayProgress, height: 4)
+                    .frame(width: geometry.size.width * displayProgress, height: 3)
 
                 // Thumb (visible on drag)
                 if isDragging {
                     Circle()
                         .fill(AppColors.textPrimary)
-                        .frame(width: 16, height: 16)
-                        .offset(x: (geometry.size.width * displayProgress) - 8)
+                        .frame(width: 14, height: 14)
+                        .offset(x: (geometry.size.width * displayProgress) - 7)
                 }
             }
-            .frame(height: 24)
+            .frame(height: 20)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -389,7 +394,7 @@ struct AudioProgressSlider: View {
                     }
             )
         }
-        .frame(height: 24)
+        .frame(height: 20)
     }
 }
 

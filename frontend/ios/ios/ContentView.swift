@@ -379,4 +379,5 @@ struct TabPlaceholderView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(AudioManager.shared)
 }

@@ -106,6 +106,19 @@ final class AudioManager: ObservableObject {
 
     // MARK: - Playback Controls
 
+    /// Load a new episode without starting playback (starts paused)
+    func load(_ episode: AudioEpisode) {
+        // Add current episode to history if exists
+        if let current = currentEpisode {
+            addToHistory(current)
+        }
+
+        currentEpisode = episode
+        duration = episode.duration
+        currentTime = 0
+        playbackState = .paused
+    }
+
     /// Play a new episode
     func play(_ episode: AudioEpisode) {
         // Add current episode to history if exists

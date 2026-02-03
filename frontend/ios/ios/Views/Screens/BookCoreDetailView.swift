@@ -131,6 +131,7 @@ struct BookCoreDetailView: View {
                     onNextTapped: handleNextTapped
                 )
                 .opacity(headerOpacity)
+                .zIndex(10)
             }
 
             // Navigation header (transparent)
@@ -142,6 +143,7 @@ struct BookCoreDetailView: View {
                     onCloseTapped: handleCloseTapped,
                     onNextTapped: handleNextTapped
                 )
+                .zIndex(10)
             }
 
             // Bottom bars
@@ -201,10 +203,12 @@ struct BookCoreDetailView: View {
 
     // MARK: - Actions
     private func handleCloseTapped() {
+        print("🔴 DEBUG: Close button tapped")
         dismiss()
     }
     
     private func handleBackTapped() {
+        print("🔵 DEBUG: Back button tapped")
         guard hasPreviousCore else {
             dismiss()
             return
@@ -213,6 +217,7 @@ struct BookCoreDetailView: View {
     }
     
     private func handleNextTapped() {
+        print("🟢 DEBUG: Next button tapped")
         guard hasNextCore else { return }
         navigateToNextCore()
     }
@@ -604,8 +609,8 @@ private struct CoreDetailNavigationHeader: View {
                         .font(AppTypography.bodyBold)
                 }
                 .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.vertical, AppSpacing.md)
+                .frame(height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -616,8 +621,8 @@ private struct CoreDetailNavigationHeader: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(AppColors.textPrimary)
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.vertical, AppSpacing.md)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
             
@@ -634,17 +639,22 @@ private struct CoreDetailNavigationHeader: View {
                             .font(.system(size: 16, weight: .semibold))
                     }
                     .foregroundColor(AppColors.textPrimary)
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.vertical, AppSpacing.md)
+                    .frame(height: 44)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(PlainButtonStyle())
             } else {
                 // Invisible spacer to balance layout
                 Color.clear
-                    .frame(width: 80)
+                    .frame(width: 80, height: 44)
             }
         }
+        .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.sm)
+        .background(
+            AppColors.background
+                .ignoresSafeArea(edges: .top)
+        )
     }
 }
 
@@ -664,6 +674,8 @@ private struct CoreDetailMiniHeader: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -686,6 +698,8 @@ private struct CoreDetailMiniHeader: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
             
@@ -699,6 +713,8 @@ private struct CoreDetailMiniHeader: View {
                             .font(.system(size: 16, weight: .semibold))
                     }
                     .foregroundColor(AppColors.textPrimary)
+                    .frame(height: 44)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(PlainButtonStyle())
             }
@@ -708,6 +724,7 @@ private struct CoreDetailMiniHeader: View {
         .background(
             AppColors.background
                 .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+                .ignoresSafeArea(edges: .top)
         )
     }
 }

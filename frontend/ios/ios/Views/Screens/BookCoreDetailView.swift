@@ -150,16 +150,15 @@ struct BookCoreDetailView: View {
                 // AI chat bar
                 CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showAudioBar)
         }
         .navigationBarHidden(true)
         .onAppear {
-            // Load the audio episode when view appears
-            audioManager.play(currentAudioEpisode)
+            // Load the audio episode when view appears (paused)
+            audioManager.load(currentAudioEpisode)
         }
         .onChange(of: currentContent.chapterNumber) { _ in
-            // Play new episode when navigating between chapters
-            audioManager.play(currentAudioEpisode)
+            // Load new episode when navigating between chapters (paused)
+            audioManager.load(currentAudioEpisode)
         }
     }
 
@@ -168,18 +167,19 @@ struct BookCoreDetailView: View {
         let scrollDelta = newOffset - previousScrollOffset
 
         // Update audio bar visibility based on scroll direction
-        if abs(scrollDelta) > 5 {
-            if scrollDelta > 0 && newOffset > 80 {
+        // Require minimum scroll delta to avoid flickering
+        if abs(scrollDelta) > 8 {
+            if scrollDelta > 0 && newOffset > 50 {
                 // Scrolling down - hide audio bar
                 if showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.25)) {
+                    withAnimation(.easeInOut(duration: 0.3)) {
                         showAudioBar = false
                     }
                 }
-            } else if scrollDelta < 0 {
+            } else if scrollDelta < -8 {
                 // Scrolling up - show audio bar
                 if !showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.25)) {
+                    withAnimation(.easeInOut(duration: 0.3)) {
                         showAudioBar = true
                     }
                 }

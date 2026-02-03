@@ -13,6 +13,7 @@ struct BookCoreDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var scrollOffset: CGFloat = 0
     @State private var previousScrollOffset: CGFloat = 0
+    @State private var showAudioBar: Bool = true
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
 
@@ -76,8 +77,8 @@ struct BookCoreDetailView: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.xxl)
 
-                    // Bottom padding for AI bar
-                    Color.clear.frame(height: 120)
+                    // Bottom padding for audio player + AI bar
+                    Color.clear.frame(height: showAudioBar ? 180 : 120)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -120,13 +121,20 @@ struct BookCoreDetailView: View {
                 .zIndex(10)
             }
 
-            // Bottom bar
+            // Bottom bars
             VStack(spacing: 0) {
                 Spacer()
+
+                // Audio player (hides on scroll down, shows on scroll up)
+                if showAudioBar {
+                    GlobalMiniPlayer()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
 
                 // AI chat bar
                 CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showAudioBar)
         }
         .navigationBarHidden(true)
     }
@@ -135,8 +143,23 @@ struct BookCoreDetailView: View {
     private func handleScrollChange(newOffset: CGFloat) {
         let scrollDelta = newOffset - previousScrollOffset
 
-        // Track scroll position for header opacity
+        // Update audio bar visibility based on scroll direction
         if abs(scrollDelta) > 5 {
+            if scrollDelta > 0 && newOffset > 80 {
+                // Scrolling down - hide audio bar
+                if showAudioBar {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showAudioBar = false
+                    }
+                }
+            } else if scrollDelta < 0 {
+                // Scrolling up - show audio bar
+                if !showAudioBar {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showAudioBar = true
+                    }
+                }
+            }
             previousScrollOffset = newOffset
         }
 
@@ -170,9 +193,10 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position
+        // Reset scroll position and show audio bar
         scrollOffset = 0
         previousScrollOffset = 0
+        showAudioBar = true
     }
 
     private func navigateToNextCore() {
@@ -181,9 +205,10 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position
+        // Reset scroll position and show audio bar
         scrollOffset = 0
         previousScrollOffset = 0
+        showAudioBar = true
     }
     
     private func handleAISend() {

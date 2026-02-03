@@ -30,6 +30,9 @@ final class AudioManager: ObservableObject {
     @Published private(set) var queue: [AudioQueueItem] = []
     @Published private(set) var playbackHistory: [AudioEpisode] = []
 
+    // Playback completion publisher - fires when current episode finishes naturally
+    let playbackDidComplete = PassthroughSubject<AudioEpisode, Never>()
+
     // UI State
     @Published var isMiniPlayerExpanded: Bool = false
     @Published var showFullScreenPlayer: Bool = false
@@ -319,6 +322,11 @@ final class AudioManager: ObservableObject {
 
     private func handlePlaybackComplete() {
         stopPlaybackTimer()
+
+        // Notify listeners that the episode completed naturally
+        if let episode = currentEpisode {
+            playbackDidComplete.send(episode)
+        }
 
         if !queue.isEmpty {
             playNext()

@@ -1,7 +1,7 @@
-//
+// note
 //  InvestorJourneyViewModel.swift
 //  ios
-//
+// 
 //  ViewModel for The Investor Journey screen - MVVM Architecture
 //
 

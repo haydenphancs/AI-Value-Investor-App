@@ -226,7 +226,7 @@ struct BookCoreDetailView: View {
 
         // If there's a next core, navigate to it after a delay
         if hasNextCore {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 navigateToNextCore()
             }
         }

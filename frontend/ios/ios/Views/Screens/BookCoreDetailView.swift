@@ -11,6 +11,7 @@ import SwiftUI
 // MARK: - Book Core Detail View
 struct BookCoreDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audioManager: AudioManager
     @State private var scrollOffset: CGFloat = 0
     @State private var previousScrollOffset: CGFloat = 0
     @State private var showAudioBar: Bool = true
@@ -49,6 +50,21 @@ struct BookCoreDetailView: View {
         if scrollOffset < fadeStart { return 0 }
         if scrollOffset > fadeEnd { return 1 }
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
+    }
+
+    // Audio episode for the current chapter
+    private var currentAudioEpisode: AudioEpisode {
+        AudioEpisode(
+            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
+            title: content.chapterTitle,
+            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
+            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
+            artworkIcon: "book.fill",
+            duration: TimeInterval(content.audioDurationSeconds),
+            category: .books,
+            authorName: content.bookAuthor,
+            sourceId: book.id.uuidString
+        )
     }
 
     var body: some View {
@@ -137,6 +153,14 @@ struct BookCoreDetailView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showAudioBar)
         }
         .navigationBarHidden(true)
+        .onAppear {
+            // Load the audio episode when view appears
+            audioManager.play(currentAudioEpisode)
+        }
+        .onChange(of: currentContent.chapterNumber) { _ in
+            // Play new episode when navigating between chapters
+            audioManager.play(currentAudioEpisode)
+        }
     }
 
     // MARK: - Scroll Handling
@@ -745,5 +769,6 @@ private struct CoreDetailAskAIBar: View {
         content: .sampleFinancialScorecard,
         book: LibraryBook.sampleData[0]
     )
+    .environmentObject(AudioManager.shared)
     .preferredColorScheme(.dark)
 }

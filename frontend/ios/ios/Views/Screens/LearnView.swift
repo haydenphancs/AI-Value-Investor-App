@@ -208,5 +208,6 @@ struct LearnView: View {
 
 #Preview {
     LearnView()
+        .environmentObject(AudioManager.shared)
         .preferredColorScheme(.dark)
 }

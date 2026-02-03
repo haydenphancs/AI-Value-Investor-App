@@ -33,6 +33,8 @@ final class AudioManager: ObservableObject {
     // UI State
     @Published var isMiniPlayerExpanded: Bool = false
     @Published var showFullScreenPlayer: Bool = false
+    @Published var isCompactMode: Bool = false  // True when chat keyboard is active (shows status island)
+    @Published var isPlayerHiddenByScroll: Bool = false  // True when scroll-based hiding is active
 
     // MARK: - Computed Properties
     var isPlaying: Bool {
@@ -353,6 +355,41 @@ final class AudioManager: ObservableObject {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             showFullScreenPlayer = false
         }
+    }
+
+    /// Enter compact mode (status island at top)
+    func enterCompactMode() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            isCompactMode = true
+        }
+    }
+
+    /// Exit compact mode (show full mini player at bottom)
+    func exitCompactMode() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            isCompactMode = false
+        }
+    }
+
+    /// Hide player via scroll (used by detail screens)
+    func hidePlayerByScroll() {
+        guard !isPlayerHiddenByScroll else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isPlayerHiddenByScroll = true
+        }
+    }
+
+    /// Show player after scroll hiding
+    func showPlayerAfterScroll() {
+        guard isPlayerHiddenByScroll else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isPlayerHiddenByScroll = false
+        }
+    }
+
+    /// Reset scroll hiding state (call when leaving detail screens)
+    func resetScrollHiding() {
+        isPlayerHiddenByScroll = false
     }
 
     // MARK: - Helpers

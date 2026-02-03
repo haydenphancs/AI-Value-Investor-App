@@ -12,6 +12,9 @@ struct ChatInputBar: View {
     var placeholder: String = "Ask Caudex anything..."
     var onAttachmentTap: (() -> Void)?
     var onSend: (() -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
+
+    @FocusState private var isTextFieldFocused: Bool
 
     private var canSend: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -31,6 +34,7 @@ struct ChatInputBar: View {
                     .foregroundColor(AppColors.textPrimary)
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
+                    .focused($isTextFieldFocused)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.md)
@@ -43,6 +47,9 @@ struct ChatInputBar: View {
                     onSend?()
                 }
             }
+        }
+        .onChange(of: isTextFieldFocused) { focused in
+            onFocusChange?(focused)
         }
     }
 }

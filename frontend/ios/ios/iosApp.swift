@@ -94,10 +94,10 @@ struct RootView: View {
             case .unauthenticated:
                 // For now, go straight to main app (no auth required yet)
                 // Later: Show onboarding/login
-                MainTabView()
+                RootContainerView()
 
             case .authenticated:
-                MainTabView()
+                RootContainerView()
             }
         }
         .overlay {

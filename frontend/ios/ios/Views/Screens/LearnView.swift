@@ -9,6 +9,7 @@ import SwiftUI
 
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
+    @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false

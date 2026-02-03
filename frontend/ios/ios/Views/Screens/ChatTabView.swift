@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct ChatTabView: View {
+    @EnvironmentObject private var audioManager: AudioManager
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
     @State private var conversationMessages: [RichChatMessage] = []
@@ -87,7 +88,8 @@ struct ChatTabView: View {
                 onAttachmentTap: handleAttachmentTap,
                 onSend: handleSend,
                 onVoiceTap: handleVoiceTap,
-                onImageTap: handleImageTap
+                onImageTap: handleImageTap,
+                onFocusChange: handleInputFocusChange
             )
         }
     }
@@ -188,6 +190,15 @@ struct ChatTabView: View {
         print("Image input tapped")
     }
 
+    private func handleInputFocusChange(_ isFocused: Bool) {
+        // Enter/exit compact mode for audio player when chat keyboard is active
+        if isFocused {
+            audioManager.enterCompactMode()
+        } else {
+            audioManager.exitCompactMode()
+        }
+    }
+
     // MARK: - Helper Methods
     private func generateMockResponse(for query: String) -> RichChatMessage {
         let responseText = "This is a mock response to: \"\(query)\". In a real implementation, this would connect to your AI service."
@@ -206,6 +217,7 @@ struct ChatTabView: View {
 
         ChatTabView()
     }
+    .environmentObject(AudioManager.shared)
     .preferredColorScheme(.dark)
 }
 
@@ -219,5 +231,6 @@ struct ChatTabView: View {
                 // This preview shows history by default
             }
     }
+    .environmentObject(AudioManager.shared)
     .preferredColorScheme(.dark)
 }

@@ -15,16 +15,34 @@ struct RootContainerView: View {
         ZStack {
             // Layer 1: Main Tab Navigation
             MainTabView()
-                .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode)
+                .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode && !audioManager.isCompactMode)
 
-            // Layer 2: Mini Player (floating above tab bar)
+            // Layer 2: Audio Player States
             if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
-                VStack {
-                    Spacer()
-                    GlobalMiniPlayer()
-                        .padding(.bottom, 49) // Tab bar height
+                if audioManager.isCompactMode {
+                    // State B: Status Island (top, minimal pill near Dynamic Island)
+                    VStack {
+                        AudioStatusIsland()
+                            .padding(.top, 8) // Below Dynamic Island
+                        Spacer()
+                    }
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
+                } else if !audioManager.isPlayerHiddenByScroll {
+                    // State A: Full Mini Player (bottom, floating above tab bar)
+                    // Hidden when scroll-based hiding is active
+                    VStack {
+                        Spacer()
+                        GlobalMiniPlayer()
+                            .padding(.bottom, 49) // Tab bar height
+                    }
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .bottom).combined(with: .opacity)
+                    ))
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             // Layer 3: Full Screen Player (modal overlay)
@@ -36,6 +54,8 @@ struct RootContainerView: View {
         }
         .environmentObject(audioManager)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
+        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .preferredColorScheme(.dark)
     }

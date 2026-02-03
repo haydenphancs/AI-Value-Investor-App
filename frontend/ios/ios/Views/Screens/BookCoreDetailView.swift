@@ -11,10 +11,8 @@ import SwiftUI
 // MARK: - Book Core Detail View
 struct BookCoreDetailView: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var audioManager: AudioManager
     @State private var scrollOffset: CGFloat = 0
     @State private var previousScrollOffset: CGFloat = 0
-    @State private var showAudioBar: Bool = true
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
 
@@ -52,28 +50,6 @@ struct BookCoreDetailView: View {
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
     }
 
-    private var currentAudioEpisode: AudioEpisode {
-        AudioEpisode(
-            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
-            title: content.chapterTitle,
-            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
-            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
-            artworkIcon: "book.fill",
-            duration: TimeInterval(content.audioDurationSeconds),
-            category: .books,
-            authorName: content.bookAuthor,
-            sourceId: book.id.uuidString
-        )
-    }
-
-    private var isCurrentEpisode: Bool {
-        audioManager.currentEpisode?.id == currentAudioEpisode.id
-    }
-
-    private var isPlaying: Bool {
-        isCurrentEpisode && audioManager.isPlaying
-    }
-
     var body: some View {
         ZStack(alignment: .top) {
             // Background
@@ -100,10 +76,8 @@ struct BookCoreDetailView: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.xxl)
 
-                    // Bottom padding for bars
-                    // GlobalMiniPlayer (72pt) + AI bar (~60pt) + spacing = ~160pt when both visible
-                    // AI bar alone = ~120pt when audio hidden
-                    Color.clear.frame(height: showAudioBar && isCurrentEpisode ? 180 : 140)
+                    // Bottom padding for AI bar
+                    Color.clear.frame(height: 120)
                 }
                 .background(
                     GeometryReader { proxy in
@@ -146,30 +120,13 @@ struct BookCoreDetailView: View {
                 .zIndex(10)
             }
 
-            // Bottom bars
+            // Bottom bar
             VStack(spacing: 0) {
                 Spacer()
 
-                // Audio controls (hides on scroll down)
-                if showAudioBar {
-                    if isCurrentEpisode {
-                        // Show GlobalMiniPlayer when this chapter is playing
-                        GlobalMiniPlayer()
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    } else {
-                        // Show play button when not playing
-                        CoreDetailPlayButton(
-                            content: content,
-                            onPlayTapped: handlePlayTapped
-                        )
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-
-                // AI chat bar (always visible)
+                // AI chat bar
                 CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showAudioBar)
         }
         .navigationBarHidden(true)
     }
@@ -178,23 +135,8 @@ struct BookCoreDetailView: View {
     private func handleScrollChange(newOffset: CGFloat) {
         let scrollDelta = newOffset - previousScrollOffset
 
-        // Only update visibility if we've scrolled a meaningful amount
+        // Track scroll position for header opacity
         if abs(scrollDelta) > 5 {
-            if scrollDelta > 0 && newOffset > 80 {
-                // Scrolling down - hide audio bar
-                if showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        showAudioBar = false
-                    }
-                }
-            } else if scrollDelta < 0 {
-                // Scrolling up - show audio bar
-                if !showAudioBar {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        showAudioBar = true
-                    }
-                }
-            }
             previousScrollOffset = newOffset
         }
 
@@ -231,9 +173,8 @@ struct BookCoreDetailView: View {
         // Reset scroll position
         scrollOffset = 0
         previousScrollOffset = 0
-        showAudioBar = true
     }
-    
+
     private func navigateToNextCore() {
         let nextIndex = currentCoreIndex + 1
         guard nextIndex < allCores.count, let newContent = allCores[nextIndex].getDetailContent(for: book) else { return }
@@ -243,15 +184,8 @@ struct BookCoreDetailView: View {
         // Reset scroll position
         scrollOffset = 0
         previousScrollOffset = 0
-        showAudioBar = true
     }
     
-    private func handlePlayTapped() {
-        if !isCurrentEpisode {
-            audioManager.play(currentAudioEpisode)
-        }
-    }
-
     private func handleAISend() {
         guard !inputText.isEmpty else { return }
         print("Ask AI about chapter: \(inputText)")
@@ -729,60 +663,6 @@ private struct CoreDetailMiniHeader: View {
     }
 }
 
-// MARK: - Play Button
-private struct CoreDetailPlayButton: View {
-    let content: CoreChapterContent
-    let onPlayTapped: () -> Void
-
-    var body: some View {
-        Button(action: onPlayTapped) {
-            HStack(spacing: AppSpacing.md) {
-                // Play button
-                ZStack {
-                    Circle()
-                        .fill(AppColors.primaryBlue)
-                        .frame(width: 44, height: 44)
-
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(.white)
-                        .offset(x: 1)
-                }
-
-                // Title info
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(content.chapterTitle)
-                        .font(AppTypography.bodyBold)
-                        .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(1)
-
-                    Text(content.formattedDuration)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                Spacer()
-
-                // Waveform icon
-                Image(systemName: "waveform")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(AppColors.textSecondary)
-            }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.vertical, AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.extraLarge)
-            .overlay(
-                RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge)
-                    .strokeBorder(AppColors.primaryBlue.opacity(0.3), lineWidth: 1)
-            )
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.bottom, AppSpacing.sm)
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-}
-
 // MARK: - Ask AI Bar
 private struct CoreDetailAskAIBar: View {
     @Binding var inputText: String
@@ -840,6 +720,5 @@ private struct CoreDetailAskAIBar: View {
         content: .sampleFinancialScorecard,
         book: LibraryBook.sampleData[0]
     )
-    .environmentObject(AudioManager.shared)
     .preferredColorScheme(.dark)
 }

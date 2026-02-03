@@ -51,12 +51,15 @@ struct LearnContentView: View {
         }
         .navigationDestination(isPresented: $showingInvestorJourney) {
             InvestorJourneyView(scrollToNextLesson: shouldScrollToNextLesson)
+                .environmentObject(audioManager)
         }
         .navigationDestination(isPresented: $showingMoneyMovesDetail) {
             MoneyMovesDetailView()
+                .environmentObject(audioManager)
         }
         .navigationDestination(isPresented: $showingBookLibrary) {
             BookLibraryView()
+                .environmentObject(audioManager)
         }
         .navigationBarHidden(true)
         }

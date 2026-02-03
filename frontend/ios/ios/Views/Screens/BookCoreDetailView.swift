@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 
 // MARK: - Book Core Detail View
 struct BookCoreDetailView: View {
@@ -16,6 +17,10 @@ struct BookCoreDetailView: View {
     @State private var previousScrollOffset: CGFloat = 0
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
+
+    // Completion tracking
+    @State private var completedCoreNumbers: Set<Int> = []
+    @State private var audioCompletionCancellable: AnyCancellable?
 
     let book: LibraryBook
     let allCores: [BookCoreChapter]
@@ -37,9 +42,15 @@ struct BookCoreDetailView: View {
     private var hasNextCore: Bool {
         currentCoreIndex < allCores.count - 1
     }
-    
+
     private var content: CoreChapterContent {
         currentContent
+    }
+
+    private var isCurrentCoreCompleted: Bool {
+        // Check if already completed by user during this session, or previously completed (chapter <= currentChapter)
+        completedCoreNumbers.contains(currentContent.chapterNumber) ||
+        currentContent.chapterNumber < book.currentChapter
     }
 
     // Computed property for header opacity based on scroll
@@ -89,6 +100,15 @@ struct BookCoreDetailView: View {
                             CoreSectionView(section: section)
                         }
                     }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.xxl)
+
+                    // Victory Button - Complete & Continue
+                    CoreCompletionButton(
+                        isCompleted: isCurrentCoreCompleted,
+                        hasNextCore: hasNextCore,
+                        onComplete: handleCoreCompletion
+                    )
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.xxl)
 
@@ -146,10 +166,23 @@ struct BookCoreDetailView: View {
         .onAppear {
             // Load the audio episode when view appears (paused)
             audioManager.load(currentAudioEpisode)
+
+            // Subscribe to audio completion events
+            audioCompletionCancellable = audioManager.playbackDidComplete
+                .receive(on: DispatchQueue.main)
+                .sink { [self] completedEpisode in
+                    // Check if the completed episode matches the current core's audio
+                    if completedEpisode.id == currentAudioEpisode.id {
+                        handleCoreCompletion()
+                    }
+                }
         }
         .onDisappear {
             // Reset scroll hiding when leaving the view
             audioManager.resetScrollHiding()
+            // Cancel audio completion subscription
+            audioCompletionCancellable?.cancel()
+            audioCompletionCancellable = nil
         }
         .onChange(of: currentContent.chapterNumber) { _ in
             // Load new episode when navigating between chapters (paused)
@@ -175,6 +208,28 @@ struct BookCoreDetailView: View {
         }
 
         scrollOffset = newOffset
+    }
+
+    // MARK: - Completion Handling
+    private func handleCoreCompletion() {
+        // Don't re-complete if already done
+        guard !isCurrentCoreCompleted else { return }
+
+        // Trigger success haptic feedback
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+
+        // Mark current core as completed
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            completedCoreNumbers.insert(currentContent.chapterNumber)
+        }
+
+        // If there's a next core, navigate to it after a delay
+        if hasNextCore {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                navigateToNextCore()
+            }
+        }
     }
 
     // MARK: - Actions
@@ -747,6 +802,45 @@ private struct CoreDetailAskAIBar: View {
             )
             .ignoresSafeArea()
         )
+    }
+}
+
+// MARK: - Completion Button
+private struct CoreCompletionButton: View {
+    let isCompleted: Bool
+    let hasNextCore: Bool
+    let onComplete: () -> Void
+
+    var body: some View {
+        Button(action: {
+            if !isCompleted {
+                onComplete()
+            }
+        }) {
+            HStack(spacing: AppSpacing.md) {
+                Text(isCompleted ? "Review Again" : "Complete & Continue")
+                    .font(AppTypography.bodyBold)
+
+                Image(systemName: isCompleted ? "arrow.counterclockwise" : "arrow.right")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundColor(isCompleted ? AppColors.textSecondary : .white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .background(
+                Group {
+                    if isCompleted {
+                        RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                            .strokeBorder(AppColors.textMuted, lineWidth: 1.5)
+                    } else {
+                        RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                            .fill(AppColors.primaryBlue)
+                    }
+                }
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .animation(.easeInOut(duration: 0.25), value: isCompleted)
     }
 }
 

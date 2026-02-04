@@ -340,19 +340,19 @@ struct SectorExposureInfoSheet: View {
                         }
 
                         VStack(alignment: .leading, spacing: AppSpacing.md) {
-                            InfoBulletPoint(
+                            WhaleBulletPoint(
                                 icon: "target",
                                 text: "Understand the investor's focus areas and conviction sectors"
                             )
-                            InfoBulletPoint(
+                            WhaleBulletPoint(
                                 icon: "arrow.triangle.branch",
                                 text: "See how diversified or concentrated their portfolio is"
                             )
-                            InfoBulletPoint(
+                            WhaleBulletPoint(
                                 icon: "chart.line.uptrend.xyaxis",
                                 text: "Track shifts in sector allocation over time"
                             )
-                            InfoBulletPoint(
+                            WhaleBulletPoint(
                                 icon: "exclamationmark.triangle",
                                 text: "Identify potential risks from sector concentration"
                             )
@@ -399,8 +399,8 @@ struct SectorExposureInfoSheet: View {
     }
 }
 
-// MARK: - Info Bullet Point
-struct InfoBulletPoint: View {
+// MARK: - Whale Bullet Point
+struct WhaleBulletPoint: View {
     let icon: String
     let text: String
 
@@ -487,8 +487,12 @@ struct WhaleBehaviorSummaryCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackgroundLight)
+        .background(Color.clear)
         .cornerRadius(AppCornerRadius.medium)
+        .overlay(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .stroke(AppColors.primaryBlue.opacity(0.3), lineWidth: 1)
+        )
     }
 }
 

@@ -87,8 +87,8 @@ private struct WaveformIndicator: View {
                 startAnimation()
             }
         }
-        .onChange(of: isPlaying) { playing in
-            if playing {
+        .onChange(of: isPlaying) { oldValue, newValue in
+            if newValue {
                 startAnimation()
             }
         }
@@ -118,8 +118,8 @@ private struct WaveformBar: View {
                     animateBar()
                 }
             }
-            .onChange(of: isPlaying) { playing in
-                if playing {
+            .onChange(of: isPlaying) { oldValue, newValue in
+                if newValue {
                     animateBar()
                 } else {
                     withAnimation(.easeOut(duration: 0.2)) {

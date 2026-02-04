@@ -184,7 +184,7 @@ struct BookCoreDetailView: View {
             audioCompletionCancellable?.cancel()
             audioCompletionCancellable = nil
         }
-        .onChange(of: currentContent.chapterNumber) { _ in
+        .onChange(of: currentContent.chapterNumber) {
             // Load new episode when navigating between chapters (paused)
             audioManager.load(currentAudioEpisode)
         }
@@ -220,7 +220,7 @@ struct BookCoreDetailView: View {
         generator.notificationOccurred(.success)
 
         // Mark current core as completed
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+        _ = withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             completedCoreNumbers.insert(currentContent.chapterNumber)
         }
 

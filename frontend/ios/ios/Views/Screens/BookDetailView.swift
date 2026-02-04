@@ -317,12 +317,53 @@ private struct BookDetailListenRow: View {
     @EnvironmentObject private var audioManager: AudioManager
     let book: LibraryBook
 
-    private var isCurrentEpisode: Bool {
-        audioManager.currentEpisode?.id == book.audioEpisode.id
+    // Check if this is the current book being played (any core)
+    private var isCurrentBookPlaying: Bool {
+        guard let currentEpisode = audioManager.currentEpisode else { return false }
+        return currentEpisode.sourceId == book.id.uuidString && audioManager.isPlaying
     }
 
-    private var isPlaying: Bool {
-        isCurrentEpisode && audioManager.isPlaying
+    // Check if the specific core we would resume is playing
+    private var isResumeCorePlaying: Bool {
+        guard let currentEpisode = audioManager.currentEpisode else { return false }
+        return currentEpisode.id == resumeCoreAudioEpisode.id && audioManager.isPlaying
+    }
+
+    // User has progress if currentChapter > 1 (they've completed at least core 1)
+    private var hasProgress: Bool {
+        book.currentChapter > 1
+    }
+
+    // The core to resume from (currentChapter is the one they're working on)
+    private var resumeCoreNumber: Int {
+        book.currentChapter
+    }
+
+    // Get the audio episode for the resume core
+    private var resumeCoreAudioEpisode: AudioEpisode {
+        let coreChapter = book.coreChapters[safe: resumeCoreNumber - 1] ?? book.coreChapters[0]
+        return AudioEpisode(
+            id: "book-\(book.id.uuidString)-core-\(resumeCoreNumber)",
+            title: coreChapter.title,
+            subtitle: "\(book.title) - Core \(resumeCoreNumber)",
+            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
+            artworkIcon: "book.fill",
+            duration: TimeInterval(book.audioDurationSeconds / book.coreChapters.count),
+            category: .books,
+            authorName: book.author,
+            sourceId: book.id.uuidString
+        )
+    }
+
+    // Button label based on state
+    private var buttonLabel: String {
+        if isResumeCorePlaying {
+            return "Now Playing"
+        } else if hasProgress {
+            return "Continue Core \(resumeCoreNumber)"
+        } else {
+            return "Listen Now"
+        }
     }
 
     var body: some View {
@@ -335,14 +376,14 @@ private struct BookDetailListenRow: View {
                             .fill(AppColors.textPrimary)
                             .frame(width: 48, height: 48)
 
-                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: isResumeCorePlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 18, weight: .bold))
                             .foregroundColor(AppColors.background)
-                            .offset(x: isPlaying ? 0 : 2)
+                            .offset(x: isResumeCorePlaying ? 0 : 2)
                     }
 
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                        Text(isPlaying ? "Now Playing" : "Listen Now")
+                        Text(buttonLabel)
                             .font(AppTypography.bodyBold)
                             .foregroundColor(AppColors.textPrimary)
 
@@ -394,10 +435,11 @@ private struct BookDetailListenRow: View {
     }
 
     private func handlePlayTapped() {
-        if isCurrentEpisode {
+        if isResumeCorePlaying {
             audioManager.togglePlayPause()
         } else {
-            audioManager.play(book.audioEpisode)
+            // Play the resume core (or Core 1 for new users)
+            audioManager.play(resumeCoreAudioEpisode)
         }
     }
 }
@@ -910,6 +952,13 @@ private struct BookDetailAskAIBar: View {
         guard !inputText.isEmpty else { return }
         print("Ask AI: \(inputText)")
         inputText = ""
+    }
+}
+
+// MARK: - Safe Array Subscript
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

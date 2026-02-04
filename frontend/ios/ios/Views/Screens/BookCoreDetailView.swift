@@ -22,6 +22,9 @@ struct BookCoreDetailView: View {
     @State private var completedCoreNumbers: Set<Int> = []
     @State private var audioCompletionCancellable: AnyCancellable?
 
+    // Track if user initiated playback from this view
+    @State private var didStartPlaybackInThisView: Bool = false
+
     let book: LibraryBook
     let allCores: [BookCoreChapter]
     
@@ -91,8 +94,12 @@ struct BookCoreDetailView: View {
                         .frame(height: 60)
 
                     // Chapter header
-                    CoreDetailHeaderSection(content: content, book: book)
-                        .padding(.horizontal, AppSpacing.lg)
+                    CoreDetailHeaderSection(
+                        content: content,
+                        book: book,
+                        onPlayStarted: { didStartPlaybackInThisView = true }
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
 
                     // Content sections
                     LazyVStack(alignment: .leading, spacing: AppSpacing.xxl) {
@@ -160,8 +167,8 @@ struct BookCoreDetailView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // Global Mini Player (for fullScreenCover presentation)
-                if audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
+                // Global Mini Player (only show if user started playback from this view)
+                if didStartPlaybackInThisView && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -170,6 +177,7 @@ struct BookCoreDetailView: View {
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: didStartPlaybackInThisView)
         }
         .navigationBarHidden(true)
         .onAppear {
@@ -306,6 +314,7 @@ private struct CoreDetailHeaderSection: View {
     @EnvironmentObject private var audioManager: AudioManager
     let content: CoreChapterContent
     let book: LibraryBook
+    var onPlayStarted: (() -> Void)?
 
     // Audio episode for this chapter
     private var audioEpisode: AudioEpisode {
@@ -376,6 +385,8 @@ private struct CoreDetailHeaderSection: View {
             audioManager.play(audioEpisode)
             // Force show the global audio player
             audioManager.resetScrollHiding()
+            // Notify parent that playback started
+            onPlayStarted?()
         }
     }
 }

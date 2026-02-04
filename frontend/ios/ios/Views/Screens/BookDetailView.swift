@@ -118,6 +118,10 @@ struct BookDetailView: View {
                 ShareSheet(items: [book.title, "by \(book.author)", url])
             }
         }
+        .onDisappear {
+            // Reset scroll hiding when leaving to ensure main screen player shows
+            audioManager.resetScrollHiding()
+        }
     }
 }
 

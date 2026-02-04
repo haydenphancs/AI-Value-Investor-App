@@ -889,10 +889,12 @@ private struct CoreCompletionButton: View {
 
 // MARK: - Preview
 #Preview {
+    @Previewable @StateObject var audioManager = AudioManager.shared
+
     BookCoreDetailView(
         content: .sampleFinancialScorecard,
         book: LibraryBook.sampleData[0]
     )
-    .environmentObject(AudioManager.shared)
+    .environmentObject(audioManager)
     .preferredColorScheme(.dark)
 }

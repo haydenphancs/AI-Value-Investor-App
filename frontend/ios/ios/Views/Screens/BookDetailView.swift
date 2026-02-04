@@ -964,6 +964,9 @@ private extension Array {
 
 // MARK: - Preview
 #Preview {
+    @Previewable @StateObject var audioManager = AudioManager.shared
+
     BookDetailView(book: LibraryBook.sampleData[0])
-        .environmentObject(AudioManager.shared)
+        .environmentObject(audioManager)
+        .preferredColorScheme(.dark)
 }

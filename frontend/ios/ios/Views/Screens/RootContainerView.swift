@@ -18,6 +18,8 @@ struct RootContainerView: View {
                 .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode && !audioManager.isCompactMode)
 
             // Layer 2: Audio Player States
+            // Note: isPlayerHiddenByScroll is only used within detail views (BookCoreDetailView),
+            // not at the root level. The main screen always shows the player when active.
             if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
                 if audioManager.isCompactMode {
                     // State B: Status Island (top, minimal pill near Dynamic Island)
@@ -30,9 +32,8 @@ struct RootContainerView: View {
                         insertion: .move(edge: .top).combined(with: .opacity),
                         removal: .move(edge: .top).combined(with: .opacity)
                     ))
-                } else if !audioManager.isPlayerHiddenByScroll {
+                } else {
                     // State A: Full Mini Player (bottom, floating above tab bar)
-                    // Hidden when scroll-based hiding is active
                     VStack {
                         Spacer()
                         GlobalMiniPlayer()
@@ -55,7 +56,6 @@ struct RootContainerView: View {
         .environmentObject(audioManager)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
-        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .preferredColorScheme(.dark)
     }

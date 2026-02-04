@@ -22,8 +22,8 @@ struct BookCoreDetailView: View {
     @State private var completedCoreNumbers: Set<Int> = []
     @State private var audioCompletionCancellable: AnyCancellable?
 
-    // Track if user initiated playback from this view
-    @State private var didStartPlaybackInThisView: Bool = false
+    // Track if user initiated playback from this view or if it was already playing
+    @State private var shouldShowPlayer: Bool = false
 
     let book: LibraryBook
     let allCores: [BookCoreChapter]
@@ -97,7 +97,7 @@ struct BookCoreDetailView: View {
                     CoreDetailHeaderSection(
                         content: content,
                         book: book,
-                        onPlayStarted: { didStartPlaybackInThisView = true }
+                        onPlayStarted: { shouldShowPlayer = true }
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
@@ -167,8 +167,8 @@ struct BookCoreDetailView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // Global Mini Player (only show if user started playback from this view)
-                if didStartPlaybackInThisView && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
+                // Global Mini Player (show if audio was playing or user started playback)
+                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -177,10 +177,15 @@ struct BookCoreDetailView: View {
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: didStartPlaybackInThisView)
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shouldShowPlayer)
         }
         .navigationBarHidden(true)
         .onAppear {
+            // If audio is already playing, show the player
+            if audioManager.hasActiveEpisode && audioManager.isPlaying {
+                shouldShowPlayer = true
+            }
+
             // Load the audio episode when view appears (paused)
             audioManager.load(currentAudioEpisode)
 

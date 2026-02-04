@@ -57,6 +57,14 @@ struct ChatTabView: View {
             }
             .animation(.easeInOut(duration: 0.15), value: showingHistory)
         }
+        .onAppear {
+            // Move audio player to Dynamic Island when entering chat
+            audioManager.enterCompactMode()
+        }
+        .onDisappear {
+            // Move audio player back to bottom when leaving chat
+            audioManager.exitCompactMode()
+        }
     }
 
     // MARK: - Chat Content

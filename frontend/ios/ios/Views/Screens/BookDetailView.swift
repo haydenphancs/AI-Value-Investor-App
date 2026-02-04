@@ -101,8 +101,16 @@ struct BookDetailView: View {
             // Bottom Ask AI bar
             VStack {
                 Spacer()
+
+                // Global Mini Player (for fullScreenCover presentation)
+                if audioManager.hasActiveEpisode {
+                    GlobalMiniPlayer()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 BookDetailAskAIBar()
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         }
         .navigationBarHidden(true)
         .sheet(isPresented: $showShareSheet) {

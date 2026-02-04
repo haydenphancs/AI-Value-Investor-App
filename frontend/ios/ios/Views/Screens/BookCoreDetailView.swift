@@ -294,12 +294,33 @@ private struct CoreDetailScrollOffsetKey: PreferenceKey {
 
 // MARK: - Header Section
 private struct CoreDetailHeaderSection: View {
+    @EnvironmentObject private var audioManager: AudioManager
     let content: CoreChapterContent
     let book: LibraryBook
 
+    // Audio episode for this chapter
+    private var audioEpisode: AudioEpisode {
+        AudioEpisode(
+            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
+            title: content.chapterTitle,
+            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
+            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
+            artworkIcon: "book.fill",
+            duration: TimeInterval(content.audioDurationSeconds),
+            category: .books,
+            authorName: content.bookAuthor,
+            sourceId: book.id.uuidString
+        )
+    }
+
+    private var isThisCoreAudioPlaying: Bool {
+        guard let currentEpisode = audioManager.currentEpisode else { return false }
+        return currentEpisode.id == audioEpisode.id && audioManager.isPlaying
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Chapter badge
+            // Chapter badge with play button
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "book.fill")
                     .font(.system(size: 12, weight: .semibold))
@@ -309,6 +330,18 @@ private struct CoreDetailHeaderSection: View {
                     .font(AppTypography.captionBold)
                     .foregroundColor(book.level.color)
                     .tracking(0.8)
+
+                Spacer()
+
+                // Direct Play button
+                Button(action: handleDirectPlay) {
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
+                }
+                .buttonStyle(PlainButtonStyle())
             }
 
             // Chapter title
@@ -317,13 +350,23 @@ private struct CoreDetailHeaderSection: View {
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
-
-
             // Divider
             Rectangle()
                 .fill(AppColors.cardBackgroundLight)
                 .frame(height: 1)
                 .padding(.top, AppSpacing.sm)
+        }
+    }
+
+    private func handleDirectPlay() {
+        if isThisCoreAudioPlaying {
+            // Pause if already playing this core
+            audioManager.togglePlayPause()
+        } else {
+            // Start playing this core's audio
+            audioManager.play(audioEpisode)
+            // Force show the global audio player
+            audioManager.resetScrollHiding()
         }
     }
 }

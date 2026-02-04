@@ -15,7 +15,7 @@ struct GlobalMiniPlayer: View {
 
     // Layout constants
     private let playerWidthRatio: CGFloat = 0.88 // 88% of screen width
-    private let playerHeight: CGFloat = 72
+    private let playerHeight: CGFloat = 60
     private let capsuleCornerRadius: CGFloat = 36 // Full capsule effect
 
     // Animation constants
@@ -197,19 +197,19 @@ struct GlobalMiniPlayer: View {
 
     // MARK: - Progress Bar
     private func progressBar(width: CGFloat) -> some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                // Background track (subtle)
-                Rectangle()
-                    .fill(Color.white.opacity(0.1))
-                    .frame(height: 3)
+        let barWidth = width - (AppSpacing.lg * 2)
+        
+        return ZStack(alignment: .leading) {
+            // Background track (subtle)
+            Rectangle()
+                .fill(Color.white.opacity(0.1))
+                .frame(width: barWidth, height: 3)
 
-                // Progress fill
-                Rectangle()
-                    .fill(AppColors.primaryBlue)
-                    .frame(width: max(0, (width - AppSpacing.lg * 2) * audioManager.progress), height: 3)
-                    .animation(.linear(duration: 0.1), value: audioManager.progress)
-            }
+            // Progress fill
+            Rectangle()
+                .fill(AppColors.primaryBlue)
+                .frame(width: max(0, barWidth * audioManager.progress), height: 3)
+                .animation(.linear(duration: 0.1), value: audioManager.progress)
         }
         .frame(height: 3)
         .padding(.horizontal, AppSpacing.lg)

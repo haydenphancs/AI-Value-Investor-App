@@ -12,55 +12,60 @@ struct TrackingContentView: View {
     @StateObject private var viewModel = TrackingViewModel()
 
     var body: some View {
-        ZStack {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
+        NavigationStack {
+            ZStack {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
 
-            // Main Content
-            VStack(spacing: 0) {
-                // Header with Search and Tab Control
-                TrackingHeader(
-                    searchText: $viewModel.searchText,
-                    selectedTab: $viewModel.selectedTab,
-                    onProfileTapped: handleProfileTapped,
-                    onSearchSubmit: handleSearchSubmit
+                // Main Content
+                VStack(spacing: 0) {
+                    // Header with Search and Tab Control
+                    TrackingHeader(
+                        searchText: $viewModel.searchText,
+                        selectedTab: $viewModel.selectedTab,
+                        onProfileTapped: handleProfileTapped,
+                        onSearchSubmit: handleSearchSubmit
+                    )
+
+                    // Tab Content
+                    TabView(selection: $viewModel.selectedTab) {
+                        // Assets Tab
+                        AssetsTabContent(viewModel: viewModel)
+                            .tag(TrackingTab.assets)
+
+                        // Whales Tab
+                        WhalesTabContent(viewModel: viewModel)
+                            .tag(TrackingTab.whales)
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
+                }
+
+                // Loading overlay
+                if viewModel.isLoading {
+                    LoadingOverlay()
+                }
+            }
+            .sheet(isPresented: $viewModel.showAddAssetSheet) {
+                AddAssetSheet(onDismiss: {
+                    viewModel.showAddAssetSheet = false
+                })
+            }
+            .sheet(isPresented: $viewModel.showSortSheet) {
+                SortOptionsSheet(
+                    selectedOption: viewModel.sortOption,
+                    onSelect: { option in
+                        viewModel.selectSortOption(option)
+                    },
+                    onDismiss: {
+                        viewModel.showSortSheet = false
+                    }
                 )
-
-                // Tab Content
-                TabView(selection: $viewModel.selectedTab) {
-                    // Assets Tab
-                    AssetsTabContent(viewModel: viewModel)
-                        .tag(TrackingTab.assets)
-
-                    // Whales Tab
-                    WhalesTabContent(viewModel: viewModel)
-                        .tag(TrackingTab.whales)
-                }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
             }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
+            .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
+                TickerDetailView(tickerSymbol: ticker)
             }
-        }
-        .sheet(isPresented: $viewModel.showAddAssetSheet) {
-            AddAssetSheet(onDismiss: {
-                viewModel.showAddAssetSheet = false
-            })
-        }
-        .sheet(isPresented: $viewModel.showSortSheet) {
-            SortOptionsSheet(
-                selectedOption: viewModel.sortOption,
-                onSelect: { option in
-                    viewModel.selectSortOption(option)
-                },
-                onDismiss: {
-                    viewModel.showSortSheet = false
-                }
-            )
         }
     }
 

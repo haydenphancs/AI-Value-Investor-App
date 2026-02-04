@@ -29,17 +29,22 @@ struct ChatInputBar: View {
 
             // Text field
             HStack {
-                TextField(placeholder, text: $text)
+                TextField(placeholder, text: $text, axis: .vertical)
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textPrimary)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
+                    .autocapitalization(.sentences)
+                    .disableAutocorrection(false)
                     .focused($isTextFieldFocused)
+                    .lineLimit(1...5)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.md)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.large)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isTextFieldFocused = true
+            }
 
             // Send button
             SendButton(isEnabled: canSend) {

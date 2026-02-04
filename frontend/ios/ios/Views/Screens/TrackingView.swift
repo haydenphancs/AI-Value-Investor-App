@@ -66,6 +66,9 @@ struct TrackingContentView: View {
             .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
                 TickerDetailView(tickerSymbol: ticker)
             }
+            .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
+                WhaleProfileView(whaleId: whaleId)
+            }
         }
     }
 
@@ -141,7 +144,8 @@ struct WhalesTabContent: View {
                 if !viewModel.trackedWhales.isEmpty {
                     TrackedWhalesSection(
                         whales: viewModel.trackedWhales,
-                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) }
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
                     )
                 }
 
@@ -149,6 +153,7 @@ struct WhalesTabContent: View {
                 MostPopularWhalesSection(
                     whales: viewModel.popularWhales,
                     onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                    onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) },
                     onMoreTapped: { viewModel.viewMorePopularWhales() }
                 )
 
@@ -289,6 +294,7 @@ struct WhaleActivityCard: View {
 struct TrackedWhalesSection: View {
     let whales: [TrendingWhale]
     var onFollowToggle: ((TrendingWhale) -> Void)?
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -299,9 +305,11 @@ struct TrackedWhalesSection: View {
 
             VStack(spacing: AppSpacing.md) {
                 ForEach(whales) { whale in
-                    WhaleCard(whale: whale) {
-                        onFollowToggle?(whale)
-                    }
+                    WhaleCard(
+                        whale: whale,
+                        onFollowToggle: { onFollowToggle?(whale) },
+                        onTap: { onWhaleTapped?(whale) }
+                    )
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
@@ -313,6 +321,7 @@ struct TrackedWhalesSection: View {
 struct MostPopularWhalesSection: View {
     let whales: [TrendingWhale]
     var onFollowToggle: ((TrendingWhale) -> Void)?
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
     var onMoreTapped: (() -> Void)?
 
     var body: some View {
@@ -338,9 +347,11 @@ struct MostPopularWhalesSection: View {
 
             VStack(spacing: AppSpacing.md) {
                 ForEach(whales) { whale in
-                    WhaleCard(whale: whale) {
-                        onFollowToggle?(whale)
-                    }
+                    WhaleCard(
+                        whale: whale,
+                        onFollowToggle: { onFollowToggle?(whale) },
+                        onTap: { onWhaleTapped?(whale) }
+                    )
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
@@ -352,49 +363,55 @@ struct MostPopularWhalesSection: View {
 struct WhaleCard: View {
     let whale: TrendingWhale
     var onFollowToggle: (() -> Void)?
+    var onTap: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // Avatar
-            Circle()
-                .fill(AppColors.cardBackgroundLight)
-                .frame(width: 44, height: 44)
-                .overlay(
-                    Image(systemName: "person.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(AppColors.textMuted)
-                )
+        Button {
+            onTap?()
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                // Avatar
+                Circle()
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(AppColors.textMuted)
+                    )
 
-            // Info
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(whale.name)
-                    .font(AppTypography.bodyBold)
-                    .foregroundColor(AppColors.textPrimary)
+                // Info
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    Text(whale.name)
+                        .font(AppTypography.bodyBold)
+                        .foregroundColor(AppColors.textPrimary)
 
-                Text(whale.formattedFollowers)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
+                    Text(whale.formattedFollowers)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+
+                Spacer()
+
+                // Follow Button
+                Button {
+                    onFollowToggle?()
+                } label: {
+                    Text(whale.isFollowing ? "Following" : "Follow")
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(whale.isFollowing ? AppColors.textSecondary : .white)
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryBlue)
+                        .cornerRadius(AppCornerRadius.pill)
+                }
+                .buttonStyle(.plain)
             }
-
-            Spacer()
-
-            // Follow Button
-            Button {
-                onFollowToggle?()
-            } label: {
-                Text(whale.isFollowing ? "Following" : "Follow")
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(whale.isFollowing ? AppColors.textSecondary : .white)
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.vertical, AppSpacing.sm)
-                    .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryBlue)
-                    .cornerRadius(AppCornerRadius.pill)
-            }
-            .buttonStyle(.plain)
+            .padding(AppSpacing.lg)
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.large)
         }
-        .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .buttonStyle(.plain)
     }
 }
 

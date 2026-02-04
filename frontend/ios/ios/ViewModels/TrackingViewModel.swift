@@ -45,6 +45,7 @@ class TrackingViewModel: ObservableObject {
     
     // Navigation States
     @Published var selectedTickerSymbol: String?
+    @Published var selectedWhaleId: String?
 
     // MARK: - Computed Properties
 
@@ -161,6 +162,11 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewWhaleDetail(_ activity: WhaleActivity) {
-        print("View whale detail: \(activity.entityName)")
+        // Convert entity name to whale ID format
+        selectedWhaleId = activity.entityName.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
+    func viewWhaleProfile(_ whale: TrendingWhale) {
+        selectedWhaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
     }
 }

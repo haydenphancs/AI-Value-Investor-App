@@ -48,8 +48,8 @@ struct ChatInputBar: View {
                 }
             }
         }
-        .onChange(of: isTextFieldFocused) { focused in
-            onFocusChange?(focused)
+        .onChange(of: isTextFieldFocused) { oldValue, newValue in
+            onFocusChange?(newValue)
         }
     }
 }

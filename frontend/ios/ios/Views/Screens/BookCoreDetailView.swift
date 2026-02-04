@@ -159,8 +159,17 @@ struct BookCoreDetailView: View {
             // Bottom AI chat bar
             VStack(spacing: 0) {
                 Spacer()
+
+                // Global Mini Player (for fullScreenCover presentation)
+                if audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
+                    GlobalMiniPlayer()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
+            .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
         }
         .navigationBarHidden(true)
         .onAppear {

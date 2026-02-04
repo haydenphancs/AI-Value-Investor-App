@@ -249,7 +249,8 @@ extension WhaleProfile {
         sectorExposure: [
             WhaleSectorAllocation(name: "Tech", percentage: 42, colorHex: "3B82F6"),
             WhaleSectorAllocation(name: "Finance", percentage: 31, colorHex: "22C55E"),
-            WhaleSectorAllocation(name: "Energy", percentage: 27, colorHex: "F97316")
+            WhaleSectorAllocation(name: "Energy", percentage: 17, colorHex: "F97316"),
+            WhaleSectorAllocation(name: "Other", percentage: 10, colorHex: "6B7280")
         ],
         currentHoldings: [
             WhaleHolding(ticker: "AAPL", companyName: "Apple Inc.", allocation: 47.8, changePercent: 1.8),
@@ -289,9 +290,10 @@ extension WhaleProfile {
         portfolioValue: 14_200_000_000,
         ytdReturn: -8.3,
         sectorExposure: [
-            WhaleSectorAllocation(name: "Tech", percentage: 65, colorHex: "3B82F6"),
+            WhaleSectorAllocation(name: "Tech", percentage: 55, colorHex: "3B82F6"),
             WhaleSectorAllocation(name: "Healthcare", percentage: 20, colorHex: "22C55E"),
-            WhaleSectorAllocation(name: "Finance", percentage: 15, colorHex: "F97316")
+            WhaleSectorAllocation(name: "Finance", percentage: 15, colorHex: "F97316"),
+            WhaleSectorAllocation(name: "Other", percentage: 10, colorHex: "6B7280")
         ],
         currentHoldings: [
             WhaleHolding(ticker: "TSLA", companyName: "Tesla Inc.", allocation: 12.5, changePercent: -2.3),

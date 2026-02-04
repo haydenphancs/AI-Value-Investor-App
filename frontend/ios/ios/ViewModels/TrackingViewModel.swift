@@ -42,6 +42,9 @@ class TrackingViewModel: ObservableObject {
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
+    
+    // Navigation States
+    @Published var selectedTickerSymbol: String?
 
     // MARK: - Computed Properties
 
@@ -150,7 +153,7 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewAssetDetail(_ asset: TrackedAsset) {
-        print("View asset detail: \(asset.ticker)")
+        selectedTickerSymbol = asset.ticker
     }
 
     func viewAlertDetail(_ alert: AlertEvent) {

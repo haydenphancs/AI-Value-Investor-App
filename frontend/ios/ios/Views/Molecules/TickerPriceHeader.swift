@@ -30,11 +30,11 @@ struct TickerPriceHeader: View {
             HStack(alignment: .top) {
                 // Left side - Company info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    Text(companyName)
+                    Text(symbol)
                         .font(AppTypography.title2)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text(symbol)
+                    Text(companyName)
                         .font(AppTypography.subheadline)
                         .foregroundColor(AppColors.textSecondary)
                 }

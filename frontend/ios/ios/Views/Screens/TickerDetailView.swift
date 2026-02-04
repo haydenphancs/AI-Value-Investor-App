@@ -14,7 +14,7 @@ struct TickerDetailView: View {
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
     @State private var isTabBarPinned: Bool = false
-    @State private var headerHeight: CGFloat = 0
+    @State private var scrollOffset: CGFloat = 0
 
     let tickerSymbol: String
 
@@ -41,15 +41,6 @@ struct TickerDetailView: View {
                     isFavorite: viewModel.isFavorite,
                     tickerSymbol: isTabBarPinned ? viewModel.tickerData?.symbol : nil,
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
-                )
-                .animation(.easeInOut(duration: 0.2), value: isTabBarPinned)
-                .background(
-                    GeometryReader { geometry in
-                        Color.clear
-                            .onAppear {
-                                headerHeight = geometry.frame(in: .global).maxY
-                            }
-                    }
                 )
 
                 // Scrollable Content with pinned tab bar
@@ -78,19 +69,6 @@ struct TickerDetailView: View {
                             .padding(.top, AppSpacing.lg)
                         }
 
-                        // Invisible marker to track scroll position (this scrolls away)
-                        Color.clear
-                            .frame(height: 1)
-                            .background(
-                                GeometryReader { geometry in
-                                    Color.clear
-                                        .preference(
-                                            key: ScrollMarkerPreferenceKey.self,
-                                            value: geometry.frame(in: .global).minY
-                                        )
-                                }
-                            )
-
                         // Section with pinned tab bar header
                         Section {
                             // Tab Content
@@ -107,16 +85,24 @@ struct TickerDetailView: View {
                                     .frame(height: 1)
                             }
                             .background(AppColors.background)
+                            .background(
+                                GeometryReader { geometry in
+                                    Color.clear
+                                        .preference(
+                                            key: TabBarPositionPreferenceKey.self,
+                                            value: geometry.frame(in: .named("scroll")).minY
+                                        )
+                                }
+                            )
                         }
                     }
                 }
-                .onPreferenceChange(ScrollMarkerPreferenceKey.self) { markerY in
-                    // Tab bar is pinned when the marker scrolls above the header
-                    let shouldPin = markerY <= headerHeight
+                .coordinateSpace(name: "scroll")
+                .onPreferenceChange(TabBarPositionPreferenceKey.self) { position in
+                    // Tab bar is pinned when it reaches the top
+                    let shouldPin = position <= 0
                     if shouldPin != isTabBarPinned {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            isTabBarPinned = shouldPin
-                        }
+                        isTabBarPinned = shouldPin
                     }
                 }
                 .refreshable {
@@ -299,8 +285,8 @@ struct TickerDetailView: View {
     }
 }
 
-// MARK: - Scroll Marker Preference Key
-struct ScrollMarkerPreferenceKey: PreferenceKey {
+// MARK: - Tab Bar Position Preference Key
+struct TabBarPositionPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = .infinity
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()

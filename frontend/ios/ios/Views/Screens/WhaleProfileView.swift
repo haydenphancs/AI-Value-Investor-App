@@ -132,27 +132,16 @@ struct WhaleProfileHeader: View {
                 HStack(spacing: AppSpacing.sm) {
                     if profile.isFollowing {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 14, weight: .bold))
                     }
                     Text(profile.isFollowing ? "Following" : "Follow")
                         .font(AppTypography.calloutBold)
                 }
-                .foregroundColor(profile.isFollowing ? AppColors.bullish : .white)
+                .foregroundColor(.white)
                 .padding(.horizontal, AppSpacing.xl)
-                .padding(.vertical, AppSpacing.sm)
-                .background(
-                    profile.isFollowing
-                        ? AppColors.bullish.opacity(0.15)
-                        : AppColors.primaryBlue
-                )
+                .padding(.vertical, AppSpacing.md)
+                .background(AppColors.primaryBlue)
                 .cornerRadius(AppCornerRadius.pill)
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                        .stroke(
-                            profile.isFollowing ? AppColors.bullish : Color.clear,
-                            lineWidth: 1
-                        )
-                )
             }
             .buttonStyle(.plain)
 
@@ -264,6 +253,7 @@ struct WhalePortfolioStats: View {
 // MARK: - Sector Exposure Section
 struct WhaleSectorExposureSection: View {
     let sectors: [WhaleSectorAllocation]
+    @State private var showInfoSheet: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -275,7 +265,7 @@ struct WhaleSectorExposureSection: View {
                 Spacer()
 
                 Button {
-                    // Info action
+                    showInfoSheet = true
                 } label: {
                     Image(systemName: "info.circle")
                         .font(.system(size: 16))
@@ -300,6 +290,132 @@ struct WhaleSectorExposureSection: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .sheet(isPresented: $showInfoSheet) {
+            SectorExposureInfoSheet()
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+// MARK: - Sector Exposure Info Sheet
+struct SectorExposureInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                    // What is Sector Exposure
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "chart.pie.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.primaryBlue)
+
+                            Text("What is Sector Exposure?")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        Text("Sector exposure shows how an investor's portfolio is distributed across different market sectors. It reveals their investment strategy and risk preferences.")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineSpacing(4)
+                    }
+
+                    Divider()
+                        .background(AppColors.cardBackgroundLight)
+
+                    // Why it Matters
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "lightbulb.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.alertOrange)
+
+                            Text("Why It Matters")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            InfoBulletPoint(
+                                icon: "target",
+                                text: "Understand the investor's focus areas and conviction sectors"
+                            )
+                            InfoBulletPoint(
+                                icon: "arrow.triangle.branch",
+                                text: "See how diversified or concentrated their portfolio is"
+                            )
+                            InfoBulletPoint(
+                                icon: "chart.line.uptrend.xyaxis",
+                                text: "Track shifts in sector allocation over time"
+                            )
+                            InfoBulletPoint(
+                                icon: "exclamationmark.triangle",
+                                text: "Identify potential risks from sector concentration"
+                            )
+                        }
+                    }
+
+                    Divider()
+                        .background(AppColors.cardBackgroundLight)
+
+                    // How to Use
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "hand.tap.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.bullish)
+
+                            Text("How to Use This")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        Text("Compare the whale's sector exposure to your own portfolio. If you want to follow their strategy, consider similar sector weightings. Use this to identify sectors they're bullish on.")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineSpacing(4)
+                    }
+
+                    Spacer().frame(height: AppSpacing.xl)
+                }
+                .padding(AppSpacing.xl)
+            }
+            .background(AppColors.background)
+            .navigationTitle("Sector Exposure")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Info Bullet Point
+struct InfoBulletPoint: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(AppColors.primaryBlue)
+                .frame(width: 20)
+
+            Text(text)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(2)
+        }
     }
 }
 
@@ -330,17 +446,8 @@ struct WhaleCurrentPicksSection: View {
                 .buttonStyle(.plain)
             }
 
-            // Behavior Summary
-            HStack(alignment: .top, spacing: AppSpacing.sm) {
-                Text("Behavior Summary:")
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
-
-                Text(behaviorSummary.formattedSummary)
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textSecondary)
-            }
-            .padding(.bottom, AppSpacing.xs)
+            // Behavior Summary Card
+            WhaleBehaviorSummaryCard(behaviorSummary: behaviorSummary)
 
             // Holdings List
             VStack(spacing: 0) {
@@ -360,6 +467,28 @@ struct WhaleCurrentPicksSection: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+    }
+}
+
+// MARK: - Behavior Summary Card
+struct WhaleBehaviorSummaryCard: View {
+    let behaviorSummary: WhaleBehaviorSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Behavior Summary:")
+                .font(AppTypography.calloutBold)
+                .foregroundColor(AppColors.textSecondary)
+
+            Text(behaviorSummary.formattedSummary)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackgroundLight)
+        .cornerRadius(AppCornerRadius.medium)
     }
 }
 

@@ -19,6 +19,7 @@ struct WhaleProfile: Identifiable, Codable {
     let ytdReturn: Double
     let sectorExposure: [WhaleSectorAllocation]
     let currentHoldings: [WhaleHolding]
+    let recentTradeGroups: [WhaleTradeGroup]
     let recentTrades: [WhaleTrade]
     let behaviorSummary: WhaleBehaviorSummary
     let sentimentSummary: String
@@ -147,7 +148,68 @@ struct WhaleHolding: Identifiable, Codable {
     }
 }
 
+// MARK: - Whale Trade Group
+/// A batch of trades filed on a specific date, displayed as a single card
+struct WhaleTradeGroup: Identifiable, Codable {
+    let id: String
+    let date: Date
+    let tradeCount: Int
+    let netAction: WhaleTradeAction
+    let netAmount: Double
+    let summary: String?
+
+    /// Formatted date — shows relative for recent, or "MMM dd, yyyy" otherwise
+    var formattedDate: String {
+        let calendar = Calendar.current
+        let now = Date()
+        let daysAgo = calendar.dateComponents([.day], from: date, to: now).day ?? 0
+
+        if daysAgo == 0 {
+            return "Today"
+        } else if daysAgo == 1 {
+            return "Yesterday"
+        } else if daysAgo <= 14 {
+            return "\(daysAgo) days ago"
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMM dd, yyyy"
+            return formatter.string(from: date)
+        }
+    }
+
+    var formattedTradeCount: String {
+        "\(tradeCount) \(tradeCount == 1 ? "trade" : "trades")"
+    }
+
+    var formattedNetAmount: String {
+        let prefix = netAction == .bought ? "+" : "- "
+        return "\(prefix)\(formatAmount(netAmount)) \(netAction.rawValue)"
+    }
+
+    private func formatAmount(_ amount: Double) -> String {
+        let absAmount = abs(amount)
+        if absAmount >= 1_000_000_000 {
+            return String(format: "$%.2fB", absAmount / 1_000_000_000)
+        } else if absAmount >= 1_000_000 {
+            return String(format: "$%.1fM", absAmount / 1_000_000)
+        } else if absAmount >= 1_000 {
+            return String(format: "$%.0fK", absAmount / 1_000)
+        }
+        return String(format: "$%.0f", absAmount)
+    }
+
+    init(id: String = UUID().uuidString, date: Date, tradeCount: Int, netAction: WhaleTradeAction, netAmount: Double, summary: String? = nil) {
+        self.id = id
+        self.date = date
+        self.tradeCount = tradeCount
+        self.netAction = netAction
+        self.netAmount = netAmount
+        self.summary = summary
+    }
+}
+
 // MARK: - Whale Trade
+/// Individual trade — used inside a trade group detail screen
 struct WhaleTrade: Identifiable, Codable {
     let id: String
     let ticker: String
@@ -236,6 +298,15 @@ struct WhaleBehaviorSummary: Codable {
     }
 }
 
+// MARK: - Date Helper
+private func dateFrom(month: Int, day: Int, year: Int) -> Date {
+    var components = DateComponents()
+    components.year = year
+    components.month = month
+    components.day = day
+    return Calendar.current.date(from: components) ?? Date()
+}
+
 // MARK: - Sample Data
 extension WhaleProfile {
     static let warrenBuffett = WhaleProfile(
@@ -264,13 +335,14 @@ extension WhaleProfile {
             WhaleHolding(ticker: "USB", companyName: "U.S. Bancorp", allocation: 2.1, changePercent: 0.2),
             WhaleHolding(ticker: "BK", companyName: "Bank of NY Mellon", allocation: 1.8, changePercent: -0.5)
         ],
-        recentTrades: [
-            WhaleTrade(ticker: "ZYZ", companyName: "XYZ", action: .bought, amount: 1_100_000, changePercent: 1.5, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!),
-            WhaleTrade(ticker: "AAPL", companyName: "Apple Inc.", action: .bought, amount: 3_300_000, changePercent: 2.5, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!),
-            WhaleTrade(ticker: "CVX", companyName: "Coca-Cola", action: .bought, amount: 2_640_000, changePercent: 2.5, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!),
-            WhaleTrade(ticker: "CVX", companyName: "Chevron Corp.", action: .bought, amount: 2_500_000, changePercent: 1.5, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!),
-            WhaleTrade(ticker: "BAC", companyName: "Bank of America", action: .sold, amount: 2_100_000, changePercent: 0.5, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!)
+        recentTradeGroups: [
+            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!, tradeCount: 6, netAction: .bought, netAmount: 4_340_000_000, summary: "Significant rebalancing (trimmed 3 Tech positions)"),
+            WhaleTradeGroup(date: dateFrom(month: 1, day: 4, year: 2025), tradeCount: 12, netAction: .bought, netAmount: 2_200_000_000),
+            WhaleTradeGroup(date: dateFrom(month: 12, day: 23, year: 2025), tradeCount: 9, netAction: .sold, netAmount: 4_500_000_000, summary: "Significant sold with 3 closed positions in Banking sector"),
+            WhaleTradeGroup(date: dateFrom(month: 10, day: 4, year: 2025), tradeCount: 9, netAction: .sold, netAmount: 2_870_000_000),
+            WhaleTradeGroup(date: dateFrom(month: 8, day: 29, year: 2025), tradeCount: 11, netAction: .bought, netAmount: 1_450_000_000)
         ],
+        recentTrades: [],
         behaviorSummary: WhaleBehaviorSummary(
             action: "Accumulating",
             primaryFocus: "energy stocks",
@@ -300,9 +372,11 @@ extension WhaleProfile {
             WhaleHolding(ticker: "COIN", companyName: "Coinbase", allocation: 8.2, changePercent: 5.1),
             WhaleHolding(ticker: "ROKU", companyName: "Roku Inc.", allocation: 7.8, changePercent: -1.2)
         ],
-        recentTrades: [
-            WhaleTrade(ticker: "TSLA", companyName: "Tesla Inc.", action: .bought, amount: 25_000_000, changePercent: -2.3, date: Calendar.current.date(byAdding: .day, value: -1, to: Date())!)
+        recentTradeGroups: [
+            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -2, to: Date())!, tradeCount: 8, netAction: .bought, netAmount: 156_000_000, summary: "Heavy TSLA accumulation across ARK funds"),
+            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -9, to: Date())!, tradeCount: 5, netAction: .sold, netAmount: 42_000_000)
         ],
+        recentTrades: [],
         behaviorSummary: WhaleBehaviorSummary(
             action: "Buying",
             primaryFocus: "innovation stocks",

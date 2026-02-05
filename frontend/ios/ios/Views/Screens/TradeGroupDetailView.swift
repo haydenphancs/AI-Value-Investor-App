@@ -311,7 +311,7 @@ struct TradeActionBadge: View {
         TradeGroupDetailView(
             tradeGroup: WhaleProfile.warrenBuffett.recentTradeGroups.first!,
             whaleName: "Warren Buffett")
-        .padding(.top, 20)
+    
     }
  
 }

@@ -97,6 +97,14 @@ struct WhaleProfileView: View {
         .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
             TickerDetailView(tickerSymbol: ticker)
         }
+        .navigationDestination(item: $viewModel.selectedTradeGroupId) { groupId in
+            if let group = viewModel.tradeGroup(for: groupId) {
+                TradeGroupDetailView(
+                    tradeGroup: group,
+                    whaleName: viewModel.profile?.name ?? ""
+                )
+            }
+        }
     }
 }
 

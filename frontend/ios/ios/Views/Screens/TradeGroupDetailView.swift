@@ -27,11 +27,11 @@ struct TradeGroupDetailView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: AppSpacing.xl) {
-                    // Header
-                    TradeGroupDetailHeader(
-                        date: viewModel.tradeGroup.formattedDateFull,
-                        whaleName: viewModel.whaleName
-                    )
+                    // Whale Name
+                    Text(viewModel.whaleName)
+                        .font(AppTypography.title)
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(maxWidth: .infinity)
 
                     // Filter Tabs
                     TradeFilterTabBar(
@@ -86,30 +86,16 @@ struct TradeGroupDetailView: View {
                         .foregroundColor(AppColors.textPrimary)
                 }
             }
+
+            ToolbarItem(placement: .principal) {
+                Text(viewModel.tradeGroup.formattedDateFull)
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textSecondary)
+            }
         }
         .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
             TickerDetailView(tickerSymbol: ticker)
         }
-    }
-}
-
-// MARK: - Trade Group Detail Header
-struct TradeGroupDetailHeader: View {
-    let date: String
-    let whaleName: String
-
-    var body: some View {
-        VStack(spacing: AppSpacing.xs) {
-            Text(date)
-                .font(AppTypography.callout)
-                .foregroundColor(AppColors.textSecondary)
-
-            Text(whaleName)
-                .font(AppTypography.title)
-                .foregroundColor(AppColors.textPrimary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, AppSpacing.sm)
     }
 }
 

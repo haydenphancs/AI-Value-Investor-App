@@ -599,13 +599,18 @@ struct WhaleRecentTradesSection: View {
                 .buttonStyle(.plain)
             }
 
-            // Trade Group Cards
-            VStack(spacing: AppSpacing.md) {
+            // Trade Groups List
+            VStack(spacing: 0) {
                 ForEach(tradeGroups) { group in
                     WhaleTradeGroupCard(
                         group: group,
                         onTap: { onTradeGroupTapped?(group) }
                     )
+
+                    if group.id != tradeGroups.last?.id {
+                        Divider()
+                            .background(AppColors.cardBackgroundLight)
+                    }
                 }
             }
         }
@@ -631,7 +636,7 @@ struct WhaleTradeGroupCard: View {
                     HStack {
                         Text(group.formattedDate)
                             .font(AppTypography.bodyBold)
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(AppColors.textSecondary)
 
                         Spacer()
 
@@ -660,9 +665,7 @@ struct WhaleTradeGroupCard: View {
                     .foregroundColor(AppColors.textMuted)
                     .padding(.leading, AppSpacing.md)
             }
-            .padding(AppSpacing.lg)
-            .background(AppColors.cardBackgroundLight)
-            .cornerRadius(AppCornerRadius.medium)
+            .padding(.vertical, AppSpacing.md)
         }
         .buttonStyle(.plain)
     }

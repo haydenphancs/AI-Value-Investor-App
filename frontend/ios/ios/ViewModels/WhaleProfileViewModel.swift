@@ -20,8 +20,10 @@ class WhaleProfileViewModel: ObservableObject {
 
     // Navigation
     @Published var selectedTickerSymbol: String?
+    @Published var selectedTradeGroupId: String?
     @Published var showAllHoldings: Bool = false
     @Published var showAllTrades: Bool = false
+    @Published var showRecentTradesInfo: Bool = false
 
     // MARK: - Configuration
 
@@ -39,37 +41,14 @@ class WhaleProfileViewModel: ObservableObject {
         return Array(profile.currentHoldings.prefix(maxVisibleHoldings))
     }
 
-    var displayedTrades: [WhaleTrade] {
+    var displayedTradeGroups: [WhaleTradeGroup] {
         guard let profile = profile else { return [] }
-        if showAllTrades {
-            return profile.recentTrades
-        }
-        return Array(profile.recentTrades.prefix(maxVisibleTrades))
+        return profile.recentTradeGroups
     }
 
     var hasMoreHoldings: Bool {
         guard let profile = profile else { return false }
         return profile.currentHoldings.count > maxVisibleHoldings
-    }
-
-    var hasMoreTrades: Bool {
-        guard let profile = profile else { return false }
-        return profile.recentTrades.count > maxVisibleTrades
-    }
-
-    var tradeGroupDate: String {
-        guard let firstTrade = profile?.recentTrades.first else { return "" }
-        let calendar = Calendar.current
-        let now = Date()
-        let daysAgo = calendar.dateComponents([.day], from: firstTrade.date, to: now).day ?? 0
-
-        if daysAgo == 0 {
-            return "TODAY"
-        } else if daysAgo == 1 {
-            return "YESTERDAY"
-        } else {
-            return "\(daysAgo) DAYS AGO"
-        }
     }
 
     // MARK: - Initialization
@@ -129,6 +108,7 @@ class WhaleProfileViewModel: ObservableObject {
             ytdReturn: currentProfile.ytdReturn,
             sectorExposure: currentProfile.sectorExposure,
             currentHoldings: currentProfile.currentHoldings,
+            recentTradeGroups: currentProfile.recentTradeGroups,
             recentTrades: currentProfile.recentTrades,
             behaviorSummary: currentProfile.behaviorSummary,
             sentimentSummary: currentProfile.sentimentSummary,
@@ -141,16 +121,12 @@ class WhaleProfileViewModel: ObservableObject {
         selectedTickerSymbol = holding.ticker
     }
 
-    func viewTrade(_ trade: WhaleTrade) {
-        selectedTickerSymbol = trade.ticker
+    func viewTradeGroup(_ group: WhaleTradeGroup) {
+        selectedTradeGroupId = group.id
     }
 
     func viewMoreHoldings() {
         showAllHoldings = true
-    }
-
-    func viewMoreTrades() {
-        showAllTrades = true
     }
 
     func showOptionsMenu() {

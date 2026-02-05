@@ -51,10 +51,9 @@ struct WhaleProfileView: View {
 
                         // Recent Trades
                         WhaleRecentTradesSection(
-                            trades: viewModel.displayedTrades,
-                            dateLabel: viewModel.tradeGroupDate,
-                            onTradeTapped: { viewModel.viewTrade($0) },
-                            onViewMoreTapped: { viewModel.viewMoreTrades() }
+                            tradeGroups: viewModel.displayedTradeGroups,
+                            onTradeGroupTapped: { viewModel.viewTradeGroup($0) },
+                            onInfoTapped: { viewModel.showRecentTradesInfo = true }
                         )
 
                         // Sentiment Summary
@@ -572,10 +571,9 @@ struct WhaleTickerIcon: View {
 
 // MARK: - Recent Trades Section
 struct WhaleRecentTradesSection: View {
-    let trades: [WhaleTrade]
-    let dateLabel: String
-    var onTradeTapped: ((WhaleTrade) -> Void)?
-    var onViewMoreTapped: (() -> Void)?
+    let tradeGroups: [WhaleTradeGroup]
+    var onTradeGroupTapped: ((WhaleTradeGroup) -> Void)?
+    var onInfoTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -588,27 +586,21 @@ struct WhaleRecentTradesSection: View {
                 Spacer()
 
                 Button {
-                    onViewMoreTapped?()
+                    onInfoTapped?()
                 } label: {
-                    Text("View More")
-                        .font(AppTypography.callout)
-                        .foregroundColor(AppColors.primaryBlue)
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 16))
+                        .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(.plain)
             }
 
-            // Date Label
-            Text(dateLabel)
-                .font(AppTypography.captionBold)
-                .foregroundColor(AppColors.textMuted)
-                .padding(.top, AppSpacing.xs)
-
-            // Trades List
+            // Trade Group Cards
             VStack(spacing: AppSpacing.md) {
-                ForEach(trades) { trade in
-                    WhaleTradeRow(
-                        trade: trade,
-                        onTap: { onTradeTapped?(trade) }
+                ForEach(tradeGroups) { group in
+                    WhaleTradeGroupCard(
+                        group: group,
+                        onTap: { onTradeGroupTapped?(group) }
                     )
                 }
             }
@@ -619,76 +611,56 @@ struct WhaleRecentTradesSection: View {
     }
 }
 
-// MARK: - Whale Trade Row
-struct WhaleTradeRow: View {
-    let trade: WhaleTrade
+// MARK: - Whale Trade Group Card
+struct WhaleTradeGroupCard: View {
+    let group: WhaleTradeGroup
     var onTap: (() -> Void)?
 
     var body: some View {
         Button {
             onTap?()
         } label: {
-            HStack(spacing: AppSpacing.md) {
-                // Ticker and Company
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Text(trade.ticker)
+            HStack(spacing: 0) {
+                // Left content
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    // Row 1: Date + Trade count
+                    HStack {
+                        Text(group.formattedDate)
                             .font(AppTypography.bodyBold)
                             .foregroundColor(AppColors.textPrimary)
 
-                        Text(trade.companyName)
+                        Spacer()
+
+                        Text(group.formattedTradeCount)
                             .font(AppTypography.callout)
                             .foregroundColor(AppColors.textSecondary)
-                            .lineLimit(1)
                     }
 
-                    HStack(spacing: AppSpacing.sm) {
-                        // Change percentage
-                        Text(trade.formattedChange)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-
-                        Text("\u{2192}")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-
-                        Text(trade.formattedChange)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
-                }
-
-                Spacer()
-
-                // Action Badge and Amount
-                VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                    WhaleTradeActionBadge(action: trade.action)
-
-                    Text(trade.formattedAmount)
+                    // Row 2: Net amount + action
+                    Text(group.formattedNetAmount)
                         .font(AppTypography.bodyBold)
-                        .foregroundColor(AppColors.textPrimary)
+                        .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
+
+                    // Row 3: Optional summary
+                    if let summary = group.summary {
+                        Text(summary)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .lineLimit(2)
+                    }
                 }
+
+                // Chevron
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.leading, AppSpacing.md)
             }
-            .padding(AppSpacing.md)
+            .padding(AppSpacing.lg)
             .background(AppColors.cardBackgroundLight)
             .cornerRadius(AppCornerRadius.medium)
         }
         .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Trade Action Badge
-struct WhaleTradeActionBadge: View {
-    let action: WhaleTradeAction
-
-    var body: some View {
-        Text(action.rawValue)
-            .font(.system(size: 10, weight: .bold))
-            .foregroundColor(.white)
-            .padding(.horizontal, AppSpacing.sm)
-            .padding(.vertical, AppSpacing.xxs)
-            .background(action.color)
-            .cornerRadius(AppCornerRadius.small)
     }
 }
 

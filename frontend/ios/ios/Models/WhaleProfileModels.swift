@@ -157,6 +157,15 @@ struct WhaleTradeGroup: Identifiable, Codable {
     let netAction: WhaleTradeAction
     let netAmount: Double
     let summary: String?
+    let insights: [String]
+    let trades: [WhaleTrade]
+
+    /// Formatted date for the detail header (e.g. "Feb 05, 2026")
+    var formattedDateFull: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM dd, yyyy"
+        return formatter.string(from: date)
+    }
 
     /// Formatted date — shows relative for recent, or "MMM dd, yyyy" otherwise
     var formattedDate: String {
@@ -171,9 +180,7 @@ struct WhaleTradeGroup: Identifiable, Codable {
         } else if daysAgo <= 14 {
             return "\(daysAgo) days ago"
         } else {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "MMM dd, yyyy"
-            return formatter.string(from: date)
+            return formattedDateFull
         }
     }
 
@@ -198,13 +205,79 @@ struct WhaleTradeGroup: Identifiable, Codable {
         return String(format: "$%.0f", absAmount)
     }
 
-    init(id: String = UUID().uuidString, date: Date, tradeCount: Int, netAction: WhaleTradeAction, netAmount: Double, summary: String? = nil) {
+    init(
+        id: String = UUID().uuidString,
+        date: Date,
+        tradeCount: Int,
+        netAction: WhaleTradeAction,
+        netAmount: Double,
+        summary: String? = nil,
+        insights: [String] = [],
+        trades: [WhaleTrade] = []
+    ) {
         self.id = id
         self.date = date
         self.tradeCount = tradeCount
         self.netAction = netAction
         self.netAmount = netAmount
         self.summary = summary
+        self.insights = insights
+        self.trades = trades
+    }
+}
+
+// MARK: - Trade Type (filter category)
+enum WhaleTradeType: String, CaseIterable, Codable {
+    case new = "New"
+    case increased = "Increased"
+    case decreased = "Decreased"
+    case closed = "Closed"
+
+    var iconName: String {
+        switch self {
+        case .new: return "plus.circle.fill"
+        case .increased: return "plus"
+        case .decreased: return "minus"
+        case .closed: return "minus.circle.fill"
+        }
+    }
+
+    var iconColor: Color {
+        switch self {
+        case .new: return AppColors.bullish
+        case .increased: return AppColors.bullish
+        case .decreased: return AppColors.bearish
+        case .closed: return AppColors.bearish
+        }
+    }
+}
+
+// MARK: - Trade Filter Tab
+enum TradeFilterTab: String, CaseIterable {
+    case all = "All Trades"
+    case new = "New"
+    case increased = "Increased"
+    case decreased = "Decreased"
+    case closed = "Closed"
+
+    var iconName: String? {
+        switch self {
+        case .all: return nil
+        case .new: return "plus.circle.fill"
+        case .increased: return "plus"
+        case .decreased: return "minus"
+        case .closed: return "minus.circle.fill"
+        }
+    }
+
+    var iconColor: Color {
+        switch self {
+        case .all: return .clear
+        case .new: return AppColors.bullish
+        case .increased: return AppColors.bullish
+        case .decreased: return AppColors.bearish
+        case .closed: return AppColors.bearish
+        }
     }
 }
 
@@ -215,44 +288,53 @@ struct WhaleTrade: Identifiable, Codable {
     let ticker: String
     let companyName: String
     let action: WhaleTradeAction
+    let tradeType: WhaleTradeType
     let amount: Double
-    let changePercent: Double
+    let previousAllocation: Double
+    let newAllocation: Double
     let date: Date
 
     var formattedAmount: String {
         formatTradeAmount(amount)
     }
 
-    var formattedChange: String {
-        let sign = changePercent >= 0 ? "" : ""
-        return "\(sign)\(String(format: "%.1f", changePercent))%"
-    }
-
-    var timeAgoFormatted: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
+    var formattedAllocationChange: String {
+        let prev = previousAllocation == 0 ? "0%" : String(format: "%.1f%%", previousAllocation)
+        let new = newAllocation == 0 ? "0%" : String(format: "%.1f %%", newAllocation)
+        return "\(prev)  \u{2192}  \(new)"
     }
 
     private func formatTradeAmount(_ amount: Double) -> String {
         let absAmount = abs(amount)
         if absAmount >= 1_000_000_000 {
-            return String(format: "$%.2fB", amount / 1_000_000_000)
+            return String(format: "$%.2fB", absAmount / 1_000_000_000)
         } else if absAmount >= 1_000_000 {
-            return String(format: "$%.2fM", amount / 1_000_000)
+            return String(format: "$%.2fM", absAmount / 1_000_000)
         } else if absAmount >= 1_000 {
-            return String(format: "$%.0fK", amount / 1_000)
+            return String(format: "$%.0fK", absAmount / 1_000)
         }
-        return String(format: "$%.0f", amount)
+        return String(format: "$%.0f", absAmount)
     }
 
-    init(id: String = UUID().uuidString, ticker: String, companyName: String, action: WhaleTradeAction, amount: Double, changePercent: Double, date: Date) {
+    init(
+        id: String = UUID().uuidString,
+        ticker: String,
+        companyName: String,
+        action: WhaleTradeAction,
+        tradeType: WhaleTradeType = .increased,
+        amount: Double,
+        previousAllocation: Double = 0,
+        newAllocation: Double = 0,
+        date: Date = Date()
+    ) {
         self.id = id
         self.ticker = ticker
         self.companyName = companyName
         self.action = action
+        self.tradeType = tradeType
         self.amount = amount
-        self.changePercent = changePercent
+        self.previousAllocation = previousAllocation
+        self.newAllocation = newAllocation
         self.date = date
     }
 }
@@ -336,11 +418,73 @@ extension WhaleProfile {
             WhaleHolding(ticker: "BK", companyName: "Bank of NY Mellon", allocation: 1.8, changePercent: -0.5)
         ],
         recentTradeGroups: [
-            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!, tradeCount: 6, netAction: .bought, netAmount: 4_340_000_000, summary: "Significant rebalancing (trimmed 3 Tech positions)"),
-            WhaleTradeGroup(date: dateFrom(month: 1, day: 4, year: 2025), tradeCount: 12, netAction: .bought, netAmount: 2_200_000_000),
-            WhaleTradeGroup(date: dateFrom(month: 12, day: 23, year: 2025), tradeCount: 9, netAction: .sold, netAmount: 4_500_000_000, summary: "Significant sold with 3 closed positions in Banking sector"),
-            WhaleTradeGroup(date: dateFrom(month: 10, day: 4, year: 2025), tradeCount: 9, netAction: .sold, netAmount: 2_870_000_000),
-            WhaleTradeGroup(date: dateFrom(month: 8, day: 29, year: 2025), tradeCount: 11, netAction: .bought, netAmount: 1_450_000_000)
+            WhaleTradeGroup(
+                date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!,
+                tradeCount: 7,
+                netAction: .bought,
+                netAmount: 4_340_000_000,
+                summary: "Significant rebalancing (trimmed 3 Tech positions)",
+                insights: [
+                    "Net accumulating over last filed +$2.2B new positions",
+                    "Significant rebalancing (trimmed 3 Tech positions)"
+                ],
+                trades: [
+                    WhaleTrade(ticker: "XYZ", companyName: "XYZ Corp", action: .bought, tradeType: .new, amount: 3_140_000_000, previousAllocation: 0, newAllocation: 1.5),
+                    WhaleTrade(ticker: "AAPL", companyName: "Apple Inc.", action: .bought, tradeType: .increased, amount: 2_300_000_000, previousAllocation: 1.0, newAllocation: 2.5),
+                    WhaleTrade(ticker: "KO", companyName: "Coca-Cola", action: .bought, tradeType: .increased, amount: 223_640_000, previousAllocation: 1.5, newAllocation: 2.5),
+                    WhaleTrade(ticker: "CVX", companyName: "Chevron", action: .bought, tradeType: .increased, amount: 22_640_000, previousAllocation: 1.3, newAllocation: 1.5),
+                    WhaleTrade(ticker: "BAC", companyName: "Bank of America", action: .sold, tradeType: .decreased, amount: 59_100_000, previousAllocation: 1.3, newAllocation: 0.5),
+                    WhaleTrade(ticker: "BK", companyName: "Bank of NY Mellon", action: .sold, tradeType: .decreased, amount: 24_100_000, previousAllocation: 2.1, newAllocation: 1.8),
+                    WhaleTrade(ticker: "ROKU", companyName: "Roku Inc.", action: .sold, tradeType: .closed, amount: 1_130_000_000, previousAllocation: 1.3, newAllocation: 0)
+                ]
+            ),
+            WhaleTradeGroup(
+                date: dateFrom(month: 1, day: 4, year: 2025),
+                tradeCount: 12,
+                netAction: .bought,
+                netAmount: 2_200_000_000,
+                insights: ["Broad accumulation across energy and finance sectors"],
+                trades: [
+                    WhaleTrade(ticker: "OXY", companyName: "Occidental Petroleum", action: .bought, tradeType: .increased, amount: 800_000_000, previousAllocation: 3.2, newAllocation: 4.9),
+                    WhaleTrade(ticker: "CVX", companyName: "Chevron", action: .bought, tradeType: .increased, amount: 600_000_000, previousAllocation: 5.1, newAllocation: 6.7),
+                    WhaleTrade(ticker: "AAPL", companyName: "Apple Inc.", action: .bought, tradeType: .increased, amount: 500_000_000, previousAllocation: 46.8, newAllocation: 47.8)
+                ]
+            ),
+            WhaleTradeGroup(
+                date: dateFrom(month: 12, day: 23, year: 2025),
+                tradeCount: 9,
+                netAction: .sold,
+                netAmount: 4_500_000_000,
+                summary: "Significant sold with 3 closed positions in Banking sector",
+                insights: [
+                    "Significant sold with 3 closed positions in Banking sector",
+                    "Reduced exposure to regional banks"
+                ],
+                trades: [
+                    WhaleTrade(ticker: "USB", companyName: "U.S. Bancorp", action: .sold, tradeType: .decreased, amount: 1_200_000_000, previousAllocation: 3.5, newAllocation: 2.1),
+                    WhaleTrade(ticker: "BAC", companyName: "Bank of America", action: .sold, tradeType: .decreased, amount: 900_000_000, previousAllocation: 12.1, newAllocation: 11.2)
+                ]
+            ),
+            WhaleTradeGroup(
+                date: dateFrom(month: 10, day: 4, year: 2025),
+                tradeCount: 9,
+                netAction: .sold,
+                netAmount: 2_870_000_000,
+                trades: [
+                    WhaleTrade(ticker: "KHC", companyName: "Kraft Heinz", action: .sold, tradeType: .decreased, amount: 870_000_000, previousAllocation: 4.5, newAllocation: 3.8),
+                    WhaleTrade(ticker: "MCO", companyName: "Moody's Corp", action: .sold, tradeType: .decreased, amount: 500_000_000, previousAllocation: 3.2, newAllocation: 2.6)
+                ]
+            ),
+            WhaleTradeGroup(
+                date: dateFrom(month: 8, day: 29, year: 2025),
+                tradeCount: 11,
+                netAction: .bought,
+                netAmount: 1_450_000_000,
+                trades: [
+                    WhaleTrade(ticker: "AAPL", companyName: "Apple Inc.", action: .bought, tradeType: .increased, amount: 650_000_000, previousAllocation: 45.2, newAllocation: 46.8),
+                    WhaleTrade(ticker: "AXP", companyName: "American Express", action: .bought, tradeType: .increased, amount: 400_000_000, previousAllocation: 8.8, newAllocation: 9.4)
+                ]
+            )
         ],
         recentTrades: [],
         behaviorSummary: WhaleBehaviorSummary(
@@ -373,8 +517,27 @@ extension WhaleProfile {
             WhaleHolding(ticker: "ROKU", companyName: "Roku Inc.", allocation: 7.8, changePercent: -1.2)
         ],
         recentTradeGroups: [
-            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -2, to: Date())!, tradeCount: 8, netAction: .bought, netAmount: 156_000_000, summary: "Heavy TSLA accumulation across ARK funds"),
-            WhaleTradeGroup(date: Calendar.current.date(byAdding: .day, value: -9, to: Date())!, tradeCount: 5, netAction: .sold, netAmount: 42_000_000)
+            WhaleTradeGroup(
+                date: Calendar.current.date(byAdding: .day, value: -2, to: Date())!,
+                tradeCount: 8,
+                netAction: .bought,
+                netAmount: 156_000_000,
+                summary: "Heavy TSLA accumulation across ARK funds",
+                insights: ["Heavy TSLA accumulation across ARK funds"],
+                trades: [
+                    WhaleTrade(ticker: "TSLA", companyName: "Tesla Inc.", action: .bought, tradeType: .increased, amount: 120_000_000, previousAllocation: 10.5, newAllocation: 12.5),
+                    WhaleTrade(ticker: "COIN", companyName: "Coinbase", action: .bought, tradeType: .increased, amount: 36_000_000, previousAllocation: 7.5, newAllocation: 8.2)
+                ]
+            ),
+            WhaleTradeGroup(
+                date: Calendar.current.date(byAdding: .day, value: -9, to: Date())!,
+                tradeCount: 5,
+                netAction: .sold,
+                netAmount: 42_000_000,
+                trades: [
+                    WhaleTrade(ticker: "ROKU", companyName: "Roku Inc.", action: .sold, tradeType: .decreased, amount: 42_000_000, previousAllocation: 8.5, newAllocation: 7.8)
+                ]
+            )
         ],
         recentTrades: [],
         behaviorSummary: WhaleBehaviorSummary(

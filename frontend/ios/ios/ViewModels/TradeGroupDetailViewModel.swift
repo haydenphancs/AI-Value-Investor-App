@@ -7,8 +7,8 @@
 
 import Foundation
 import SwiftUI
+import Combine
 
-@MainActor
 class TradeGroupDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 

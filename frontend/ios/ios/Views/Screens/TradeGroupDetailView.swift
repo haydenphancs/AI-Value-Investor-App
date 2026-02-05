@@ -223,9 +223,7 @@ struct TradeDetailCard: View {
                         .font(AppTypography.bodyBold)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text(trade.formattedAllocationChange)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    AllocationChangeText(allocationChange: trade.formattedAllocationChange)
                 }
 
                 Spacer()
@@ -244,6 +242,37 @@ struct TradeDetailCard: View {
             .cornerRadius(AppCornerRadius.large)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Allocation Change Text
+struct AllocationChangeText: View {
+    let allocationChange: String
+    
+    var body: some View {
+        // Parse the allocation change string (e.g., "0% → 1.5%")
+        let components = allocationChange.components(separatedBy: "→")
+        
+        if components.count == 2 {
+            HStack(spacing: 2) {
+                Text(components[0].trimmingCharacters(in: .whitespaces))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                
+                Text("→")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                
+                Text(components[1].trimmingCharacters(in: .whitespaces))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textPrimary)
+            }
+        } else {
+            // Fallback if format doesn't match
+            Text(allocationChange)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+        }
     }
 }
 

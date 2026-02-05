@@ -22,7 +22,6 @@ class WhaleProfileViewModel: ObservableObject {
     @Published var selectedTickerSymbol: String?
     @Published var selectedTradeGroupId: String?
     @Published var showAllHoldings: Bool = false
-    @Published var showAllTrades: Bool = false
     @Published var showRecentTradesInfo: Bool = false
 
     // MARK: - Configuration
@@ -49,6 +48,10 @@ class WhaleProfileViewModel: ObservableObject {
     var hasMoreHoldings: Bool {
         guard let profile = profile else { return false }
         return profile.currentHoldings.count > maxVisibleHoldings
+    }
+
+    func tradeGroup(for id: String) -> WhaleTradeGroup? {
+        profile?.recentTradeGroups.first { $0.id == id }
     }
 
     // MARK: - Initialization

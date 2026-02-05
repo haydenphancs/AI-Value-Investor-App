@@ -310,8 +310,8 @@ struct TradeActionBadge: View {
     NavigationStack {
         TradeGroupDetailView(
             tradeGroup: WhaleProfile.warrenBuffett.recentTradeGroups.first!,
-            whaleName: "Warren Buffett"
-        )
+            whaleName: "Warren Buffett")
+        .padding(.top, 20)
     }
-    .preferredColorScheme(.dark)
+ 
 }

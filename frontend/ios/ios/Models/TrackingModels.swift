@@ -8,6 +8,11 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Notifications
+extension Notification.Name {
+    static let whaleFollowStateChanged = Notification.Name("whaleFollowStateChanged")
+}
+
 // MARK: - Tracking Tab
 enum TrackingTab: String, CaseIterable {
     case assets = "Assets"

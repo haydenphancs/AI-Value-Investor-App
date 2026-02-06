@@ -100,8 +100,9 @@ class WhaleProfileViewModel: ObservableObject {
     // MARK: - Actions
 
     func toggleFollow() {
-        guard var currentProfile = profile else { return }
-        currentProfile = WhaleProfile(
+        guard let currentProfile = profile else { return }
+        let newFollowState = !currentProfile.isFollowing
+        let updatedProfile = WhaleProfile(
             id: currentProfile.id,
             name: currentProfile.name,
             title: currentProfile.title,
@@ -115,9 +116,20 @@ class WhaleProfileViewModel: ObservableObject {
             recentTrades: currentProfile.recentTrades,
             behaviorSummary: currentProfile.behaviorSummary,
             sentimentSummary: currentProfile.sentimentSummary,
-            isFollowing: !currentProfile.isFollowing
+            isFollowing: newFollowState
         )
-        profile = currentProfile
+        profile = updatedProfile
+
+        // Notify TrackingViewModel so the followed whales row stays in sync
+        NotificationCenter.default.post(
+            name: .whaleFollowStateChanged,
+            object: nil,
+            userInfo: [
+                "whaleName": currentProfile.name,
+                "whaleTitle": currentProfile.title,
+                "isFollowing": newFollowState
+            ]
+        )
     }
 
     func viewHolding(_ holding: WhaleHolding) {

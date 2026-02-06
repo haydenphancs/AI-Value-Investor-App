@@ -186,8 +186,9 @@ struct TrendingWhale: Identifiable {
     let isFollowing: Bool
     let title: String
     let description: String
+    let recentTradeCount: Int
 
-    init(name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "") {
+    init(name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0) {
         self.name = name
         self.category = category
         self.avatarName = avatarName
@@ -195,6 +196,7 @@ struct TrendingWhale: Identifiable {
         self.isFollowing = isFollowing
         self.title = title
         self.description = description
+        self.recentTradeCount = recentTradeCount
     }
 
     var formattedFollowers: String {
@@ -203,6 +205,77 @@ struct TrendingWhale: Identifiable {
         }
         return "\(followersCount) followers"
     }
+
+    var formattedTradeCount: String {
+        if recentTradeCount == 1 {
+            return "1 trade"
+        }
+        return "\(recentTradeCount) trades"
+    }
+}
+
+// MARK: - Whale Trade Group Activity (for Recent Trades timeline)
+struct WhaleTradeGroupActivity: Identifiable {
+    let id = UUID()
+    let entityName: String
+    let entityAvatarName: String
+    let action: WhaleAction
+    let tradeCount: Int
+    let totalAmount: String
+    let summary: String?
+    let date: Date
+
+    var formattedDate: String {
+        let calendar = Calendar.current
+        let now = Date()
+
+        if calendar.isDateInToday(date) {
+            return "Today"
+        } else if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        }
+
+        let components = calendar.dateComponents([.day], from: date, to: now)
+        if let days = components.day, days <= 7 {
+            return "\(days) days ago"
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM dd, yyyy"
+        return formatter.string(from: date)
+    }
+
+    var formattedAmount: String {
+        switch action {
+        case .bought:
+            return "+\(totalAmount)"
+        case .sold:
+            return "- \(totalAmount)"
+        }
+    }
+
+    var formattedTradeCount: String {
+        if tradeCount == 1 {
+            return "1 trade"
+        }
+        return "\(tradeCount) trades"
+    }
+}
+
+// MARK: - Grouped Whale Trades (for timeline sections)
+struct GroupedWhaleTrades: Identifiable {
+    let id = UUID()
+    let sectionTitle: String
+    let activities: [WhaleTradeGroupActivity]
+}
+
+// MARK: - Whale Alert Banner
+struct WhaleAlertBanner: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let ticker: String?
+    let actionTitle: String
 }
 
 // MARK: - Sample Data
@@ -315,21 +388,40 @@ extension TrendingWhale {
             category: .hedgeFunds,
             avatarName: "avatar_buffett",
             followersCount: 125000,
-            isFollowing: true
-        ),
-        TrendingWhale(
-            name: "Michael Burry",
-            category: .hedgeFunds,
-            avatarName: "avatar_burry",
-            followersCount: 98000,
-            isFollowing: true
+            isFollowing: true,
+            recentTradeCount: 3
         ),
         TrendingWhale(
             name: "Nancy Pelosi",
             category: .politicians,
             avatarName: "avatar_pelosi",
             followersCount: 156000,
-            isFollowing: true
+            isFollowing: true,
+            recentTradeCount: 8
+        ),
+        TrendingWhale(
+            name: "Bill Ackman",
+            category: .hedgeFunds,
+            avatarName: "avatar_ackman",
+            followersCount: 76000,
+            isFollowing: true,
+            recentTradeCount: 4
+        ),
+        TrendingWhale(
+            name: "Michael Saylor",
+            category: .cryptoWhales,
+            avatarName: "avatar_saylor",
+            followersCount: 134000,
+            isFollowing: true,
+            recentTradeCount: 2
+        ),
+        TrendingWhale(
+            name: "Michael Burry",
+            category: .hedgeFunds,
+            avatarName: "avatar_burry",
+            followersCount: 98000,
+            isFollowing: true,
+            recentTradeCount: 1
         )
     ]
 
@@ -435,4 +527,63 @@ extension TrendingWhale {
 
     // Combined for backward compatibility
     static let sampleData: [TrendingWhale] = trackedWhalesData + popularWhalesData
+}
+
+extension WhaleTradeGroupActivity {
+    static let sampleData: [WhaleTradeGroupActivity] = [
+        WhaleTradeGroupActivity(
+            entityName: "Warren Buffett",
+            entityAvatarName: "avatar_buffett",
+            action: .bought,
+            tradeCount: 6,
+            totalAmount: "$4.34B",
+            summary: "Significant rebalancing, trimmed 3 Tech positions",
+            date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Bill Ackman",
+            entityAvatarName: "avatar_ackman",
+            action: .bought,
+            tradeCount: 4,
+            totalAmount: "$2.82B",
+            summary: nil,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 26))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Nancy Pelosi",
+            entityAvatarName: "avatar_pelosi",
+            action: .bought,
+            tradeCount: 8,
+            totalAmount: "$6.53B",
+            summary: "Huge bought, add 4 new positions in Tech sector",
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 2))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Warren Buffett",
+            entityAvatarName: "avatar_buffett",
+            action: .sold,
+            tradeCount: 12,
+            totalAmount: "$4.5B",
+            summary: "Significant sold with 3 closed positions in Banking sector",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 14))!
+        )
+    ]
+
+    static var groupedSampleData: [GroupedWhaleTrades] {
+        sampleData.map { activity in
+            GroupedWhaleTrades(
+                sectionTitle: activity.formattedDate,
+                activities: [activity]
+            )
+        }
+    }
+}
+
+extension WhaleAlertBanner {
+    static let sampleData = WhaleAlertBanner(
+        title: "Whale Alert",
+        description: "Large crypto whale just moved $50M into COIN stock",
+        ticker: "COIN",
+        actionTitle: "View Full Alert"
+    )
 }

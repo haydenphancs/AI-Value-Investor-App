@@ -53,6 +53,7 @@ class TrackingViewModel: ObservableObject {
     // Navigation States
     @Published var selectedTickerSymbol: String?
     @Published var selectedWhaleId: String?
+    @Published var selectedTradeGroup: TradeGroupNavigation?
 
     // MARK: - Init
 

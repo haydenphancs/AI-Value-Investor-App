@@ -32,8 +32,8 @@ class TrackingViewModel: ObservableObject {
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .following
     @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
-    @Published var trackedWhales: [TrendingWhale] = TrendingWhale.trackedWhalesData
-    @Published var popularWhales: [TrendingWhale] = TrendingWhale.popularWhalesData
+    @Published var trackedWhales: [TrendingWhale] = []
+    @Published var popularWhales: [TrendingWhale] = []
     @Published var heroWhales: [TrendingWhale] = TrendingWhale.heroWhalesData
     @Published var showAllWhales: Bool = false
     @Published var groupedWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.groupedSampleData
@@ -51,6 +51,71 @@ class TrackingViewModel: ObservableObject {
     @Published var selectedTickerSymbol: String?
     @Published var selectedWhaleId: String?
     @Published var selectedTradeGroup: TradeGroupNavigation?
+    
+    // MARK: - Private Properties
+    
+    private let whaleService = WhaleService.shared
+    private var cancellables = Set<AnyCancellable>()
+    
+    // MARK: - Initialization
+    
+    init() {
+        setupWhales()
+        observeFollowChanges()
+    }
+    
+    // MARK: - Setup
+    
+    private func setupWhales() {
+        updateWhaleListsFromService()
+    }
+    
+    private func observeFollowChanges() {
+        // Update whale lists when follow status changes
+        whaleService.$followedWhaleIds
+            .sink { [weak self] _ in
+                self?.updateWhaleListsFromService()
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func updateWhaleListsFromService() {
+        let allWhales = TrendingWhale.sampleData
+        let followedIds = whaleService.followedWhaleIds
+        
+        // Split whales based on follow status from shared service
+        trackedWhales = allWhales.filter { whale in
+            let whaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
+            return followedIds.contains(whaleId)
+        }.map { whale in
+            TrendingWhale(
+                name: whale.name,
+                category: whale.category,
+                avatarName: whale.avatarName,
+                followersCount: whale.followersCount,
+                isFollowing: true,
+                title: whale.title,
+                description: whale.description,
+                recentTradeCount: whale.recentTradeCount
+            )
+        }
+        
+        popularWhales = allWhales.filter { whale in
+            let whaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
+            return !followedIds.contains(whaleId)
+        }.map { whale in
+            TrendingWhale(
+                name: whale.name,
+                category: whale.category,
+                avatarName: whale.avatarName,
+                followersCount: whale.followersCount,
+                isFollowing: false,
+                title: whale.title,
+                description: whale.description,
+                recentTradeCount: whale.recentTradeCount
+            )
+        }
+    }
 
     // MARK: - Computed Properties
 
@@ -134,26 +199,11 @@ class TrackingViewModel: ObservableObject {
     }
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
-        let updatedWhale = TrendingWhale(
-            name: whale.name,
-            category: whale.category,
-            avatarName: whale.avatarName,
-            followersCount: whale.followersCount,
-            isFollowing: !whale.isFollowing,
-            title: whale.title,
-            description: whale.description
-        )
-
-        // If unfollowing from tracked whales, move to popular
-        if let index = trackedWhales.firstIndex(where: { $0.id == whale.id }) {
-            trackedWhales.remove(at: index)
-            popularWhales.insert(updatedWhale, at: 0)
-        }
-        // If following from popular whales, move to tracked
-        else if let index = popularWhales.firstIndex(where: { $0.id == whale.id }) {
-            popularWhales.remove(at: index)
-            trackedWhales.append(updatedWhale)
-        }
+        // Convert whale name to ID format
+        let whaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
+        
+        // Toggle in shared service - this will automatically update both lists
+        whaleService.toggleFollow(whaleId)
     }
 
     func viewMorePopularWhales() {

@@ -34,6 +34,8 @@ class TrackingViewModel: ObservableObject {
     @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
     @Published var trackedWhales: [TrendingWhale] = TrendingWhale.trackedWhalesData
     @Published var popularWhales: [TrendingWhale] = TrendingWhale.popularWhalesData
+    @Published var heroWhales: [TrendingWhale] = TrendingWhale.heroWhalesData
+    @Published var showAllWhales: Bool = false
 
     // Loading States
     @Published var isLoading: Bool = false
@@ -134,7 +136,9 @@ class TrackingViewModel: ObservableObject {
             category: whale.category,
             avatarName: whale.avatarName,
             followersCount: whale.followersCount,
-            isFollowing: !whale.isFollowing
+            isFollowing: !whale.isFollowing,
+            title: whale.title,
+            description: whale.description
         )
 
         // If unfollowing from tracked whales, move to popular
@@ -150,7 +154,7 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewMorePopularWhales() {
-        print("View more popular whales")
+        showAllWhales = true
     }
 
     func viewAssetDetail(_ asset: TrackedAsset) {

@@ -7,6 +7,28 @@
 
 import SwiftUI
 
+// MARK: - Navigation Models
+/// Wrapper for trade group navigation to conform to Hashable
+struct TradeGroupNavigation: Identifiable, Hashable {
+    let id: String
+    let tradeGroup: WhaleTradeGroup
+    let whaleName: String
+    
+    init(tradeGroup: WhaleTradeGroup, whaleName: String) {
+        self.id = tradeGroup.id
+        self.tradeGroup = tradeGroup
+        self.whaleName = whaleName
+    }
+    
+    static func == (lhs: TradeGroupNavigation, rhs: TradeGroupNavigation) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
 // MARK: - TrackingContentView (Used in TabView)
 struct TrackingContentView: View {
     @StateObject private var viewModel = TrackingViewModel()
@@ -68,6 +90,12 @@ struct TrackingContentView: View {
             }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)
+            }
+            .navigationDestination(item: $viewModel.selectedTradeGroup) { tradeData in
+                TradeGroupDetailView(
+                    tradeGroup: tradeData.tradeGroup,
+                    whaleName: tradeData.whaleName
+                )
             }
         }
     }
@@ -266,20 +294,26 @@ struct WhaleTradeTimelineRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             // Timeline Column
-            VStack(spacing: 0) {
-                // Top connector (hidden for first item)
-                if !isFirst {
-                    TimelineConnector(height: 8)
-                } else {
-                    Spacer().frame(height: 8)
-                }
-
-                // Dot
-                TimelineDot()
-
-                // Bottom connector (extends down alongside content)
+            ZStack(alignment: .top) {
+                // Background connector line (full height)
                 if !isLast {
-                    TimelineConnector(height: 140)
+                    VStack(spacing: 0) {
+                        Spacer()
+                            .frame(height: 4) // Half of dot size to start from center
+                        Rectangle()
+                            .fill(AppColors.textMuted.opacity(0.3))
+                            .frame(width: 1)
+                    }
+                }
+                
+                // Dot on top
+                VStack(spacing: 0) {
+                    if !isFirst {
+                        Spacer()
+                            .frame(height: 0)
+                    }
+                    TimelineDot()
+                    Spacer()
                 }
             }
             .frame(width: 20)
@@ -294,7 +328,7 @@ struct WhaleTradeTimelineRow: View {
                 // Trade Card
                 WhaleTradeCard(activity: activity, onTapped: onTapped)
             }
-            .padding(.bottom, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.md)
         }
     }
 }

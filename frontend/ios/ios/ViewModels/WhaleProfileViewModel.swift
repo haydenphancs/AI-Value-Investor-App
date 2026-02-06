@@ -165,13 +165,8 @@ class WhaleProfileViewModel: ObservableObject {
 
     func toggleFollow() {
         guard let currentProfile = profile else { return }
-        
-        // Toggle in the shared service - this will trigger updates everywhere
-        whaleService.toggleFollow(whaleId)
-        
-        // Local state will be updated via the Combine observer
-        // But we can also update immediately for instant UI feedback
-        var updatedProfile = WhaleProfile(
+        let newFollowState = !currentProfile.isFollowing
+        let updatedProfile = WhaleProfile(
             id: currentProfile.id,
             name: currentProfile.name,
             title: currentProfile.title,
@@ -186,9 +181,20 @@ class WhaleProfileViewModel: ObservableObject {
             recentTrades: currentProfile.recentTrades,
             behaviorSummary: currentProfile.behaviorSummary,
             sentimentSummary: currentProfile.sentimentSummary,
-            isFollowing: !currentProfile.isFollowing
+            isFollowing: newFollowState
         )
         profile = updatedProfile
+
+        // Notify TrackingViewModel so the followed whales row stays in sync
+        NotificationCenter.default.post(
+            name: .whaleFollowStateChanged,
+            object: nil,
+            userInfo: [
+                "whaleName": currentProfile.name,
+                "whaleTitle": currentProfile.title,
+                "isFollowing": newFollowState
+            ]
+        )
     }
 
     func viewHolding(_ holding: WhaleHolding) {

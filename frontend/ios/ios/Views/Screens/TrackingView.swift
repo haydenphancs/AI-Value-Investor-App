@@ -127,23 +127,33 @@ struct WhalesTabContent: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xl) {
-                // Activity Feed
-                WhaleActivitySection(
-                    activities: viewModel.whaleActivities,
-                    onActivityTapped: { activity in viewModel.viewWhaleDetail(activity) }
-                )
-                .padding(.top, AppSpacing.sm)
-
-                // Tracked Whales (whales the user is following)
+                // 1. Followed Whale Profiles (horizontal scroll)
                 if !viewModel.trackedWhales.isEmpty {
-                    TrackedWhalesSection(
+                    FollowedWhalesRow(
                         whales: viewModel.trackedWhales,
-                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
                         onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                    )
+                    .padding(.top, AppSpacing.sm)
+                }
+
+                // 2. Recent Trades Timeline
+                if !viewModel.groupedWhaleTrades.isEmpty {
+                    WhaleTradesTimelineSection(
+                        groupedTrades: viewModel.groupedWhaleTrades,
+                        onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) }
                     )
                 }
 
-                // Most Popular Whales (hero carousel + list)
+                // 3. Whale Alert Banner
+                if let alert = viewModel.whaleAlertBanner {
+                    WhaleAlertBannerCard(
+                        alert: alert,
+                        onViewAlert: { viewModel.viewWhaleAlert() }
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                }
+
+                // 4. Most Popular Whales (unchanged)
                 MostPopularWhalesSection(
                     heroWhales: viewModel.heroWhales,
                     whales: viewModel.popularWhales,
@@ -163,6 +173,257 @@ struct WhalesTabContent: View {
         .navigationDestination(isPresented: $viewModel.showAllWhales) {
             AllWhalesView(viewModel: viewModel)
         }
+    }
+}
+
+// MARK: - Followed Whales Row (Horizontal Scroll)
+struct FollowedWhalesRow: View {
+    let whales: [TrendingWhale]
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: AppSpacing.lg) {
+                ForEach(whales) { whale in
+                    Button {
+                        onWhaleTapped?(whale)
+                    } label: {
+                        VStack(spacing: AppSpacing.sm) {
+                            // Avatar
+                            Circle()
+                                .fill(AppColors.cardBackgroundLight)
+                                .frame(width: 64, height: 64)
+                                .overlay(
+                                    Image(systemName: "person.fill")
+                                        .font(.system(size: 28))
+                                        .foregroundColor(AppColors.textMuted)
+                                )
+
+                            // Name
+                            Text(whale.name.components(separatedBy: " ").last ?? whale.name)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textPrimary)
+                                .lineLimit(1)
+
+                            // Trade count
+                            Text(whale.formattedTradeCount)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                        }
+                        .frame(width: 72)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, AppSpacing.lg)
+        }
+    }
+}
+
+// MARK: - Whale Trades Timeline Section
+struct WhaleTradesTimelineSection: View {
+    let groupedTrades: [GroupedWhaleTrades]
+    var onActivityTapped: ((WhaleTradeGroupActivity) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Section Header
+            Text("Recent Trades")
+                .font(AppTypography.title3)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.bottom, AppSpacing.md)
+
+            // Timeline
+            VStack(spacing: 0) {
+                ForEach(Array(groupedTrades.enumerated()), id: \.element.id) { groupIndex, group in
+                    ForEach(Array(group.activities.enumerated()), id: \.element.id) { activityIndex, activity in
+                        let isFirst = groupIndex == 0 && activityIndex == 0
+                        let isLast = groupIndex == groupedTrades.count - 1
+                            && activityIndex == group.activities.count - 1
+
+                        WhaleTradeTimelineRow(
+                            activity: activity,
+                            isFirst: isFirst,
+                            isLast: isLast,
+                            onTapped: { onActivityTapped?(activity) }
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Whale Trade Timeline Row
+struct WhaleTradeTimelineRow: View {
+    let activity: WhaleTradeGroupActivity
+    let isFirst: Bool
+    let isLast: Bool
+    var onTapped: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            // Timeline Column
+            VStack(spacing: 0) {
+                // Top connector (hidden for first item)
+                if !isFirst {
+                    TimelineConnector(height: 8)
+                } else {
+                    Spacer().frame(height: 8)
+                }
+
+                // Dot
+                TimelineDot()
+
+                // Bottom connector (extends down alongside content)
+                if !isLast {
+                    TimelineConnector(height: 140)
+                }
+            }
+            .frame(width: 20)
+
+            // Content Column
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Date label
+                Text(activity.formattedDate)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+
+                // Trade Card
+                WhaleTradeCard(activity: activity, onTapped: onTapped)
+            }
+            .padding(.bottom, AppSpacing.lg)
+        }
+    }
+}
+
+// MARK: - Whale Trade Card
+struct WhaleTradeCard: View {
+    let activity: WhaleTradeGroupActivity
+    var onTapped: (() -> Void)?
+
+    var body: some View {
+        Button {
+            onTapped?()
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                // Avatar
+                Circle()
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(width: 48, height: 48)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 22))
+                            .foregroundColor(AppColors.textMuted)
+                    )
+
+                // Info
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    HStack {
+                        // Name and trade count
+                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                            Text(activity.entityName)
+                                .font(AppTypography.bodyBold)
+                                .foregroundColor(AppColors.textPrimary)
+
+                            Text(activity.formattedTradeCount)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+
+                        Spacer()
+
+                        // Amount + Action badge
+                        VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                            Text(activity.formattedAmount)
+                                .font(AppTypography.calloutBold)
+                                .foregroundColor(activity.action.color)
+
+                            Text(activity.action.rawValue)
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(activity.action.color)
+                        }
+                    }
+
+                    // Summary (if available)
+                    if let summary = activity.summary {
+                        Text(summary)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                // Chevron
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .padding(AppSpacing.lg)
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.large)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Whale Alert Banner Card
+struct WhaleAlertBannerCard: View {
+    let alert: WhaleAlertBanner
+    var onViewAlert: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(spacing: AppSpacing.md) {
+                // Bell icon
+                Circle()
+                    .fill(AppColors.alertOrange.opacity(0.2))
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        Image(systemName: "bell.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(AppColors.alertOrange)
+                    )
+
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Text(alert.title)
+                        .font(AppTypography.bodyBold)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    Text(alert.description)
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(2)
+                }
+            }
+
+            // View Full Alert button
+            Button {
+                onViewAlert?()
+            } label: {
+                Text(alert.actionTitle)
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.alertOrange)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.sm)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .stroke(AppColors.alertOrange.opacity(0.5), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                        .stroke(AppColors.alertOrange.opacity(0.3), lineWidth: 1)
+                )
+        )
     }
 }
 
@@ -204,116 +465,6 @@ struct WhaleCategoryFilter: View {
     }
 }
 
-// MARK: - Whale Activity Section
-struct WhaleActivitySection: View {
-    let activities: [WhaleActivity]
-    var onActivityTapped: ((WhaleActivity) -> Void)?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Activity Feed")
-                .font(AppTypography.title3)
-                .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
-
-            VStack(spacing: AppSpacing.md) {
-                ForEach(activities) { activity in
-                    WhaleActivityCard(activity: activity) {
-                        onActivityTapped?(activity)
-                    }
-                }
-            }
-            .padding(.horizontal, AppSpacing.lg)
-        }
-    }
-}
-
-// MARK: - Whale Activity Card
-struct WhaleActivityCard: View {
-    let activity: WhaleActivity
-    var onTap: (() -> Void)?
-
-    var body: some View {
-        Button {
-            onTap?()
-        } label: {
-            HStack(spacing: AppSpacing.md) {
-                // Avatar
-                Circle()
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 20))
-                            .foregroundColor(AppColors.textMuted)
-                    )
-
-                // Content
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Text(activity.entityName)
-                            .font(AppTypography.bodyBold)
-                            .foregroundColor(AppColors.textPrimary)
-
-                        // Action Badge
-                        Text(activity.action.rawValue)
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, AppSpacing.sm)
-                            .padding(.vertical, 2)
-                            .background(activity.action.color)
-                            .cornerRadius(AppCornerRadius.small)
-                    }
-
-                    Text("\(activity.ticker) • \(activity.amount)")
-                        .font(AppTypography.callout)
-                        .foregroundColor(AppColors.textSecondary)
-
-                    Text("\(activity.source) • \(activity.timeAgo)")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(AppColors.textMuted)
-            }
-            .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Tracked Whales Section
-struct TrackedWhalesSection: View {
-    let whales: [TrendingWhale]
-    var onFollowToggle: ((TrendingWhale) -> Void)?
-    var onWhaleTapped: ((TrendingWhale) -> Void)?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Tracked Whales")
-                .font(AppTypography.title3)
-                .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
-
-            VStack(spacing: AppSpacing.md) {
-                ForEach(whales) { whale in
-                    WhaleCard(
-                        whale: whale,
-                        onFollowToggle: { onFollowToggle?(whale) },
-                        onTap: { onWhaleTapped?(whale) }
-                    )
-                }
-            }
-            .padding(.horizontal, AppSpacing.lg)
-        }
-    }
-}
 
 // MARK: - Most Popular Whales Section
 struct MostPopularWhalesSection: View {

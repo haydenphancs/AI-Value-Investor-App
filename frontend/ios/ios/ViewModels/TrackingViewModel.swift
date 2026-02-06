@@ -36,6 +36,8 @@ class TrackingViewModel: ObservableObject {
     @Published var popularWhales: [TrendingWhale] = TrendingWhale.popularWhalesData
     @Published var heroWhales: [TrendingWhale] = TrendingWhale.heroWhalesData
     @Published var showAllWhales: Bool = false
+    @Published var groupedWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.groupedSampleData
+    @Published var whaleAlertBanner: WhaleAlertBanner? = WhaleAlertBanner.sampleData
 
     // Loading States
     @Published var isLoading: Bool = false
@@ -172,5 +174,13 @@ class TrackingViewModel: ObservableObject {
 
     func viewWhaleProfile(_ whale: TrendingWhale) {
         selectedWhaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
+    func viewTradeGroupDetail(_ activity: WhaleTradeGroupActivity) {
+        selectedWhaleId = activity.entityName.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
+    func viewWhaleAlert() {
+        print("View whale alert tapped")
     }
 }

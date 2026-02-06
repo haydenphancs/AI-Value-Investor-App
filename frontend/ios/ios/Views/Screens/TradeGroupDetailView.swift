@@ -32,6 +32,7 @@ struct TradeGroupDetailView: View {
                         .font(AppTypography.title)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(maxWidth: .infinity)
+                        .padding(.top, AppSpacing.lg)
 
                     // Filter Tabs
                     TradeFilterTabBar(

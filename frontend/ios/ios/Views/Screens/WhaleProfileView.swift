@@ -85,12 +85,14 @@ struct WhaleProfileView: View {
             }
 
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    viewModel.showOptionsMenu()
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(AppColors.textPrimary)
+                if let profile = viewModel.profile {
+                    Button {
+                        viewModel.toggleFollow()
+                    } label: {
+                        Text(profile.isFollowing ? "Following" : "Follow")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
                 }
             }
         }
@@ -132,28 +134,11 @@ struct WhaleProfileHeader: View {
                     .foregroundColor(AppColors.textSecondary)
             }
 
-            // Follow Button
-            Button {
-                onFollowToggle?()
-            } label: {
-                HStack(spacing: AppSpacing.sm) {
-                    if profile.isFollowing {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 14, weight: .bold))
-                    }
-                    Text(profile.isFollowing ? "Following" : "Follow")
-                        .font(AppTypography.calloutBold)
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, AppSpacing.xl)
-                .padding(.vertical, AppSpacing.md)
-                .background(AppColors.primaryBlue)
-                .cornerRadius(AppCornerRadius.pill)
-            }
-            .buttonStyle(.plain)
-
             // Risk Profile Badge
             WhaleRiskBadge(riskProfile: profile.riskProfile)
+
+            // Description
+            WhaleDescriptionSection(description: profile.description)
         }
         .padding(.top, AppSpacing.md)
     }
@@ -223,6 +208,39 @@ struct WhaleRiskBadge: View {
     }
 }
 
+// MARK: - Description Section
+struct WhaleDescriptionSection: View {
+    let description: String
+    @State private var isExpanded: Bool = false
+    
+    private let lineLimit: Int = 3
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text(description)
+                .font(AppTypography.callout)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(4)
+                .lineLimit(isExpanded ? nil : lineLimit)
+                .animation(.easeInOut(duration: 0.2), value: isExpanded)
+            
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                Text(isExpanded ? "Show Less" : "Show More")
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.top, AppSpacing.md)
+    }
+}
+
 // MARK: - Portfolio Stats
 struct WhalePortfolioStats: View {
     let profile: WhaleProfile
@@ -242,13 +260,13 @@ struct WhalePortfolioStats: View {
 
             Spacer()
 
-            // YTD Return
+            // Annual Return
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
                 Text(profile.formattedYTDReturn)
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
 
-                Text("YTD Return")
+                Text("Annual Return")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
@@ -393,6 +411,133 @@ struct SectorExposureInfoSheet: View {
             }
             .background(AppColors.background)
             .navigationTitle("Sector Exposure")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Recent Trades Info Sheet
+struct RecentTradesInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                    // What are Recent Trades
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.primaryBlue)
+
+                            Text("What are Recent Trades?")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                                Text("The Definition:")
+                                    .font(AppTypography.bodyBold)
+                                    .foregroundColor(AppColors.textPrimary)
+                                
+                                Text("\"Recent Trades\" captures the latest buy and sell transactions disclosed by institutional investors (Whales) or politicians.")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textSecondary)
+                                    .lineSpacing(4)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                                Text("The Data Source:")
+                                    .font(AppTypography.bodyBold)
+                                    .foregroundColor(AppColors.textPrimary)
+                                
+                                Text("This information is sourced from mandatory legal filings, such as SEC 13F Filings (for hedge funds) and Congressional Disclosures (for politicians).")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textSecondary)
+                                    .lineSpacing(4)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                                Text("The \"Lag\" Factor:")
+                                    .font(AppTypography.bodyBold)
+                                    .foregroundColor(AppColors.textPrimary)
+                                
+                                Text("Note that these trades are often reported with a delay (e.g., 45 days for 13F filings), meaning they represent a snapshot of past activity rather than real-time moves.")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textSecondary)
+                                    .lineSpacing(4)
+                            }
+                        }
+                    }
+
+                    Divider()
+                        .background(AppColors.cardBackgroundLight)
+
+                    // Why it Matters
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "lightbulb.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.alertOrange)
+
+                            Text("Why It Matters")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            WhaleBulletPoint(
+                                icon: "chart.line.uptrend.xyaxis",
+                                text: "Identify emerging trends and conviction changes"
+                            )
+                            WhaleBulletPoint(
+                                icon: "sparkles",
+                                text: "Discover new opportunities they're exploring"
+                            )
+                            WhaleBulletPoint(
+                                icon: "exclamationmark.triangle",
+                                text: "Spot positions they're reducing or exiting"
+                            )
+                        }
+                    }
+
+                    Divider()
+                        .background(AppColors.cardBackgroundLight)
+
+                    // How to Use
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "hand.tap.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.bullish)
+
+                            Text("How to Use This")
+                                .font(AppTypography.title3)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        Text("Pay attention to the size and direction of trades. Large buys signal high conviction, while sells may indicate risk concerns or profit-taking. Tap on any trade group to see detailed transaction information.")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineSpacing(4)
+                    }
+
+                    Spacer().frame(height: AppSpacing.xl)
+                }
+                .padding(AppSpacing.xl)
+            }
+            .background(AppColors.background)
+            .navigationTitle("Recent Trades")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -586,6 +731,7 @@ struct WhaleRecentTradesSection: View {
     let tradeGroups: [WhaleTradeGroup]
     var onTradeGroupTapped: ((WhaleTradeGroup) -> Void)?
     var onInfoTapped: (() -> Void)?
+    @State private var showInfoSheet: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -598,7 +744,7 @@ struct WhaleRecentTradesSection: View {
                 Spacer()
 
                 Button {
-                    onInfoTapped?()
+                    showInfoSheet = true
                 } label: {
                     Image(systemName: "info.circle")
                         .font(.system(size: 16))
@@ -625,6 +771,11 @@ struct WhaleRecentTradesSection: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .sheet(isPresented: $showInfoSheet) {
+            RecentTradesInfoSheet()
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
     }
 }
 

@@ -13,6 +13,7 @@ struct WhaleProfile: Identifiable, Codable {
     let id: String
     let name: String
     let title: String
+    let description: String
     let avatarURL: String?
     let riskProfile: WhaleRiskProfile
     let portfolioValue: Double
@@ -395,6 +396,7 @@ extension WhaleProfile {
         id: "warren-buffett",
         name: "Warren Buffett",
         title: "Berkshire Hathaway CEO",
+        description: "Warren Buffett, widely regarded as one of the greatest investors of all time, has built Berkshire Hathaway into a conglomerate worth hundreds of billions through his patient, value-oriented investment philosophy. Known as the 'Oracle of Omaha,' he focuses on businesses with strong fundamentals, competitive advantages, and reliable management. His approach emphasizes buying quality companies at reasonable prices and holding them for the long term, often decades.",
         avatarURL: nil,
         riskProfile: .safeLongTermValue,
         portfolioValue: 342_800_000_000,
@@ -501,6 +503,7 @@ extension WhaleProfile {
         id: "cathie-wood",
         name: "Cathie Wood",
         title: "ARK Invest CEO",
+        description: "Cathie Wood is the founder and CEO of ARK Invest, known for her bold, research-driven approach to disruptive innovation investing. Her firm focuses on companies at the forefront of technological breakthroughs in areas like artificial intelligence, genomics, blockchain, and automation. Unlike traditional value investors, Wood embraces volatility and concentrates her portfolios in high-conviction growth stocks that she believes will reshape industries over the next decade.",
         avatarURL: nil,
         riskProfile: .growthFocused,
         portfolioValue: 14_200_000_000,

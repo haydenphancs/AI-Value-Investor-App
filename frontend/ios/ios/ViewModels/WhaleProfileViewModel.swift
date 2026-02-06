@@ -105,6 +105,7 @@ class WhaleProfileViewModel: ObservableObject {
             id: currentProfile.id,
             name: currentProfile.name,
             title: currentProfile.title,
+            description: currentProfile.description,
             avatarURL: currentProfile.avatarURL,
             riskProfile: currentProfile.riskProfile,
             portfolioValue: currentProfile.portfolioValue,

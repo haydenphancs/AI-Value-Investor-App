@@ -640,25 +640,34 @@ struct WhaleTradeGroupCard: View {
             HStack(spacing: 0) {
                 // Left content
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    // Row 1: Date + Trade count
+                    // Row 1: Date and trade count (left), Net amount (right)
                     HStack {
-                        Text(group.formattedDate)
-                            .font(AppTypography.bodyBold)
-                            .foregroundColor(AppColors.textSecondary)
+                        // Left side: Date and trade count stacked
+                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                            Text(group.formattedDate)
+                                .font(AppTypography.bodyBold)
+                                .foregroundColor(AppColors.textSecondary)
+                            
+                            Text(group.formattedTradeCount)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
 
                         Spacer()
 
-                        Text(group.formattedTradeCount)
-                            .font(AppTypography.callout)
-                            .foregroundColor(AppColors.textSecondary)
+                        // Right side: Net amount and action
+                        VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                            Text(group.formattedNetAmount.replacingOccurrences(of: " BOUGHT", with: "").replacingOccurrences(of: " SOLD", with: ""))
+                                .font(AppTypography.calloutBold)
+                                .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
+                            
+                            Text(group.netAction.rawValue)
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
+                        }
                     }
 
-                    // Row 2: Net amount + action
-                    Text(group.formattedNetAmount)
-                        .font(AppTypography.bodyBold)
-                        .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
-
-                    // Row 3: Optional summary
+                    // Row 2: Optional summary
                     if let summary = group.summary {
                         Text(summary)
                             .font(AppTypography.caption)

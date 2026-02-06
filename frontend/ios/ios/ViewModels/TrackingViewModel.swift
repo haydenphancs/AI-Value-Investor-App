@@ -50,6 +50,7 @@ class TrackingViewModel: ObservableObject {
     // Navigation States
     @Published var selectedTickerSymbol: String?
     @Published var selectedWhaleId: String?
+    @Published var selectedTradeGroup: TradeGroupNavigation?
 
     // MARK: - Computed Properties
 
@@ -177,7 +178,100 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewTradeGroupDetail(_ activity: WhaleTradeGroupActivity) {
-        selectedWhaleId = activity.entityName.lowercased().replacingOccurrences(of: " ", with: "-")
+        // Create a WhaleTradeGroup from the activity
+        // In a real app, you'd fetch the full trade group data from your API
+        // For now, we'll create sample data based on the activity
+        
+        let tradeGroup = WhaleTradeGroup(
+            id: UUID().uuidString,
+            date: activity.date,
+            tradeCount: activity.tradeCount,
+            netAction: activity.action == .bought ? .bought : .sold,
+            netAmount: parseAmount(activity.totalAmount),
+            summary: activity.summary,
+            insights: generateInsights(for: activity),
+            trades: generateSampleTrades(for: activity)
+        )
+        
+        selectedTradeGroup = TradeGroupNavigation(tradeGroup: tradeGroup, whaleName: activity.entityName)
+    }
+    
+    // Helper to parse amount string like "$4.34B" to Double
+    private func parseAmount(_ amountString: String) -> Double {
+        let cleaned = amountString.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "")
+        
+        if let value = Double(cleaned.dropLast()) {
+            let suffix = cleaned.last
+            switch suffix {
+            case "B": return value * 1_000_000_000
+            case "M": return value * 1_000_000
+            case "K": return value * 1_000
+            default: return Double(cleaned) ?? 0
+            }
+        }
+        return 0
+    }
+    
+    // Generate sample insights
+    private func generateInsights(for activity: WhaleTradeGroupActivity) -> [String] {
+        var insights: [String] = []
+        
+        if activity.tradeCount > 5 {
+            insights.append("High trading activity detected")
+        }
+        
+        if activity.action == .bought {
+            insights.append("Bullish positioning in this sector")
+        } else {
+            insights.append("Portfolio rebalancing activity")
+        }
+        
+        return insights
+    }
+    
+    // Generate sample trades
+    private func generateSampleTrades(for activity: WhaleTradeGroupActivity) -> [WhaleTrade] {
+        // Generate sample trades based on the activity
+        let tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"]
+        let companies = ["Apple Inc.", "Microsoft", "Alphabet Inc.", "Amazon", "Tesla", "NVIDIA"]
+        
+        return (0..<min(activity.tradeCount, 6)).map { index in
+            let tradeType: WhaleTradeType = {
+                let random = Int.random(in: 0...3)
+                switch random {
+                case 0: return .new
+                case 1: return .increased
+                case 2: return .decreased
+                default: return .closed
+                }
+            }()
+            
+            let previousAllocation = Double.random(in: 0...15)
+            let newAllocation: Double
+            
+            switch tradeType {
+            case .new:
+                newAllocation = Double.random(in: 1...10)
+            case .increased:
+                newAllocation = previousAllocation + Double.random(in: 1...5)
+            case .decreased:
+                newAllocation = max(0, previousAllocation - Double.random(in: 1...5))
+            case .closed:
+                newAllocation = 0
+            }
+            
+            return WhaleTrade(
+                id: UUID().uuidString,
+                ticker: tickers[index % tickers.count],
+                companyName: companies[index % companies.count],
+                action: activity.action == .bought ? .bought : .sold,
+                tradeType: tradeType,
+                amount: Double.random(in: 1000000...50000000),
+                previousAllocation: previousAllocation,
+                newAllocation: newAllocation,
+                date: activity.date
+            )
+        }
     }
 
     func viewWhaleAlert() {

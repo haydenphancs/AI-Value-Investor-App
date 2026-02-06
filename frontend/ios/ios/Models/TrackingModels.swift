@@ -184,6 +184,18 @@ struct TrendingWhale: Identifiable {
     let avatarName: String
     let followersCount: Int
     let isFollowing: Bool
+    let title: String
+    let description: String
+
+    init(name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "") {
+        self.name = name
+        self.category = category
+        self.avatarName = avatarName
+        self.followersCount = followersCount
+        self.isFollowing = isFollowing
+        self.title = title
+        self.description = description
+    }
 
     var formattedFollowers: String {
         if followersCount >= 1000 {
@@ -328,21 +340,96 @@ extension TrendingWhale {
             category: .hedgeFunds,
             avatarName: "avatar_wood",
             followersCount: 89000,
-            isFollowing: false
+            isFollowing: false,
+            title: "ARK Invest CEO"
         ),
         TrendingWhale(
             name: "Bill Ackman",
             category: .hedgeFunds,
             avatarName: "avatar_ackman",
             followersCount: 76000,
-            isFollowing: false
+            isFollowing: false,
+            title: "Pershing Square Capital"
         ),
         TrendingWhale(
             name: "Ray Dalio",
             category: .hedgeFunds,
             avatarName: "avatar_dalio",
             followersCount: 112000,
-            isFollowing: false
+            isFollowing: false,
+            title: "Bridgewater Associates"
+        ),
+        TrendingWhale(
+            name: "Dan Gallagher",
+            category: .politicians,
+            avatarName: "avatar_gallagher",
+            followersCount: 45000,
+            isFollowing: false,
+            title: "U.S. Representative"
+        ),
+        TrendingWhale(
+            name: "Tommy Tuberville",
+            category: .politicians,
+            avatarName: "avatar_tuberville",
+            followersCount: 67000,
+            isFollowing: false,
+            title: "U.S. Senator"
+        ),
+        TrendingWhale(
+            name: "Michael Saylor",
+            category: .cryptoWhales,
+            avatarName: "avatar_saylor",
+            followersCount: 134000,
+            isFollowing: false,
+            title: "MicroStrategy Chairman"
+        ),
+        TrendingWhale(
+            name: "Vitalik Buterin",
+            category: .cryptoWhales,
+            avatarName: "avatar_vitalik",
+            followersCount: 201000,
+            isFollowing: false,
+            title: "Ethereum Co-founder"
+        )
+    ]
+
+    // Hero whales for the carousel
+    static let heroWhalesData: [TrendingWhale] = [
+        TrendingWhale(
+            name: "Warren Buffett",
+            category: .hedgeFunds,
+            avatarName: "avatar_buffett",
+            followersCount: 125000,
+            isFollowing: false,
+            title: "Berkshire Hathaway CEO",
+            description: "The Oracle of Omaha. Value investing legend with 50+ years of market-beating returns."
+        ),
+        TrendingWhale(
+            name: "Cathie Wood",
+            category: .hedgeFunds,
+            avatarName: "avatar_wood",
+            followersCount: 89000,
+            isFollowing: false,
+            title: "ARK Invest CEO",
+            description: "Disruptive innovation champion. Leading the charge in AI, genomics, and blockchain investing."
+        ),
+        TrendingWhale(
+            name: "Ray Dalio",
+            category: .hedgeFunds,
+            avatarName: "avatar_dalio",
+            followersCount: 112000,
+            isFollowing: false,
+            title: "Bridgewater Associates Founder",
+            description: "Macro investing pioneer. Built the world's largest hedge fund with radical transparency."
+        ),
+        TrendingWhale(
+            name: "Michael Burry",
+            category: .hedgeFunds,
+            avatarName: "avatar_burry",
+            followersCount: 98000,
+            isFollowing: false,
+            title: "Scion Asset Management",
+            description: "The Big Short. Legendary contrarian known for calling the 2008 housing crisis."
         )
     ]
 

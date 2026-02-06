@@ -127,18 +127,12 @@ struct WhalesTabContent: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xl) {
-                // Category Filter
-                WhaleCategoryFilter(
-                    categories: WhaleCategory.allCases,
-                    selectedCategory: $viewModel.selectedWhaleCategory
-                )
-                .padding(.top, AppSpacing.sm)
-
                 // Activity Feed
                 WhaleActivitySection(
                     activities: viewModel.whaleActivities,
                     onActivityTapped: { activity in viewModel.viewWhaleDetail(activity) }
                 )
+                .padding(.top, AppSpacing.sm)
 
                 // Tracked Whales (whales the user is following)
                 if !viewModel.trackedWhales.isEmpty {
@@ -149,8 +143,9 @@ struct WhalesTabContent: View {
                     )
                 }
 
-                // Most Popular Whales
+                // Most Popular Whales (hero carousel + list)
                 MostPopularWhalesSection(
+                    heroWhales: viewModel.heroWhales,
                     whales: viewModel.popularWhales,
                     onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
                     onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) },
@@ -164,6 +159,9 @@ struct WhalesTabContent: View {
         }
         .refreshable {
             await viewModel.refresh()
+        }
+        .navigationDestination(isPresented: $viewModel.showAllWhales) {
+            AllWhalesView(viewModel: viewModel)
         }
     }
 }
@@ -319,13 +317,14 @@ struct TrackedWhalesSection: View {
 
 // MARK: - Most Popular Whales Section
 struct MostPopularWhalesSection: View {
+    let heroWhales: [TrendingWhale]
     let whales: [TrendingWhale]
     var onFollowToggle: ((TrendingWhale) -> Void)?
     var onWhaleTapped: ((TrendingWhale) -> Void)?
     var onMoreTapped: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header with "more" button
             HStack {
                 Text("Most Popular")
@@ -345,6 +344,15 @@ struct MostPopularWhalesSection: View {
             }
             .padding(.horizontal, AppSpacing.lg)
 
+            // Hero Carousel
+            if !heroWhales.isEmpty {
+                WhaleHeroCarousel(
+                    whales: heroWhales,
+                    onWhaleTapped: onWhaleTapped
+                )
+            }
+
+            // List below hero
             VStack(spacing: AppSpacing.md) {
                 ForEach(whales) { whale in
                     WhaleCard(
@@ -356,6 +364,120 @@ struct MostPopularWhalesSection: View {
             }
             .padding(.horizontal, AppSpacing.lg)
         }
+    }
+}
+
+// MARK: - Whale Hero Carousel
+struct WhaleHeroCarousel: View {
+    let whales: [TrendingWhale]
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
+    @State private var currentIndex: Int = 0
+
+    var body: some View {
+        VStack(spacing: AppSpacing.md) {
+            TabView(selection: $currentIndex) {
+                ForEach(Array(whales.enumerated()), id: \.element.id) { index, whale in
+                    WhaleHeroCard(whale: whale) {
+                        onWhaleTapped?(whale)
+                    }
+                    .tag(index)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .frame(height: 200)
+
+            // Page indicators
+            HStack(spacing: AppSpacing.sm) {
+                ForEach(0..<whales.count, id: \.self) { index in
+                    Circle()
+                        .fill(currentIndex == index ? AppColors.primaryBlue : AppColors.textMuted.opacity(0.4))
+                        .frame(width: 7, height: 7)
+                        .animation(.easeInOut(duration: 0.2), value: currentIndex)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Whale Hero Card
+struct WhaleHeroCard: View {
+    let whale: TrendingWhale
+    var onTap: (() -> Void)?
+
+    var body: some View {
+        Button {
+            onTap?()
+        } label: {
+            ZStack(alignment: .bottomLeading) {
+                // Background gradient
+                LinearGradient(
+                    colors: [
+                        AppColors.primaryBlue.opacity(0.6),
+                        AppColors.cardBackground
+                    ],
+                    startPoint: .topTrailing,
+                    endPoint: .bottomLeading
+                )
+
+                // Content
+                HStack(spacing: AppSpacing.lg) {
+                    // Left side - text info
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Spacer()
+
+                        Text(whale.name)
+                            .font(AppTypography.title2)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        if !whale.title.isEmpty {
+                            Text(whale.title)
+                                .font(AppTypography.callout)
+                                .foregroundColor(AppColors.accentCyan)
+                        }
+
+                        if !whale.description.isEmpty {
+                            Text(whale.description)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                                .lineLimit(2)
+                        }
+
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(AppColors.textMuted)
+
+                            Text(whale.formattedFollowers)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                        }
+                        .padding(.top, AppSpacing.xs)
+                    }
+                    .padding(AppSpacing.lg)
+
+                    Spacer()
+
+                    // Right side - avatar
+                    VStack {
+                        Spacer()
+                        Circle()
+                            .fill(AppColors.cardBackgroundLight)
+                            .frame(width: 80, height: 80)
+                            .overlay(
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(AppColors.textMuted)
+                            )
+                            .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        Spacer()
+                    }
+                    .padding(.trailing, AppSpacing.xl)
+                }
+            }
+            .cornerRadius(AppCornerRadius.extraLarge)
+            .padding(.horizontal, AppSpacing.lg)
+        }
+        .buttonStyle(.plain)
     }
 }
 

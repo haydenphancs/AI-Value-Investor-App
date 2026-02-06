@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     HTTP_TIMEOUT_SECONDS: int = 30
 
     # Disclaimer (Section 5.2)
-    LEGAL_DISCLAIMER: str = "For educational purposes only. Not financial advice."
+    LEGAL_DISCLAIMER: str = "For educational purposes only. Not financial advice. AI generated content may be inaccurate. Always do your own research and consult a qualified financial advisor."
 
     model_config = SettingsConfigDict(
         env_file=".env",

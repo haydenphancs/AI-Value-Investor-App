@@ -27,10 +27,24 @@ private enum WhaleCategoryFilter: String, CaseIterable {
     }
 }
 
+// MARK: - Sort Option (only for "All" filter)
+private enum WhaleSortOption: String, CaseIterable {
+    case alphabetical = "A–Z"
+    case followers = "Followers"
+
+    var icon: String {
+        switch self {
+        case .alphabetical: return "textformat.abc"
+        case .followers: return "person.2.fill"
+        }
+    }
+}
+
 // MARK: - AllWhalesView
 struct AllWhalesView: View {
     @ObservedObject var viewModel: TrackingViewModel
     @State private var selectedFilter: WhaleCategoryFilter = .all
+    @State private var sortOption: WhaleSortOption = .followers
 
     var body: some View {
         ZStack {
@@ -69,45 +83,70 @@ struct AllWhalesView: View {
                     .padding(.horizontal, AppSpacing.lg)
                 }
                 .padding(.top, AppSpacing.md)
-                .padding(.bottom, AppSpacing.lg)
+                .padding(.bottom, AppSpacing.sm)
+
+                // Sort control — only visible when "All" is selected
+                if selectedFilter == .all {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text("Sort by")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+
+                        ForEach(WhaleSortOption.allCases, id: \.self) { option in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    sortOption = option
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: option.icon)
+                                        .font(.system(size: 10))
+                                    Text(option.rawValue)
+                                        .font(AppTypography.caption)
+                                }
+                                .foregroundColor(
+                                    sortOption == option
+                                        ? AppColors.textPrimary
+                                        : AppColors.textMuted
+                                )
+                                .padding(.horizontal, AppSpacing.md)
+                                .padding(.vertical, AppSpacing.xs)
+                                .background(
+                                    sortOption == option
+                                        ? AppColors.cardBackgroundLight
+                                        : Color.clear
+                                )
+                                .cornerRadius(AppCornerRadius.pill)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.sm)
+                }
 
                 // Whale sections
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
-                        if shouldShowCategory(.investors) {
-                            AllWhalesCategorySection(
-                                title: WhaleCategory.investors.rawValue,
-                                whales: investorWhales,
+                        if selectedFilter == .all {
+                            // Flat sorted list
+                            AllWhalesFlatList(
+                                whales: allWhalesSorted,
                                 onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
                                 onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
                             )
-                        }
-
-                        if shouldShowCategory(.institutions) {
-                            AllWhalesCategorySection(
-                                title: WhaleCategory.institutions.rawValue,
-                                whales: institutionWhales,
-                                onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
-                                onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
-                            )
-                        }
-
-                        if shouldShowCategory(.politicians) {
-                            AllWhalesCategorySection(
-                                title: WhaleCategory.politicians.rawValue,
-                                whales: politicianWhales,
-                                onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
-                                onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
-                            )
-                        }
-
-                        if shouldShowCategory(.cryptoWhales) {
-                            AllWhalesCategorySection(
-                                title: WhaleCategory.cryptoWhales.rawValue,
-                                whales: cryptoWhales,
-                                onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
-                                onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
-                            )
+                        } else {
+                            // Category-specific section
+                            if let category = selectedFilter.matchedCategory {
+                                AllWhalesCategorySection(
+                                    title: category.rawValue,
+                                    whales: whalesForCategory(category),
+                                    onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                                    onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                                )
+                            }
                         }
 
                         // Bottom spacing
@@ -122,28 +161,20 @@ struct AllWhalesView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    // MARK: - Helpers
+    // MARK: - Data
 
-    private func shouldShowCategory(_ category: WhaleCategory) -> Bool {
-        selectedFilter == .all || selectedFilter.matchedCategory == category
+    private var allWhalesSorted: [TrendingWhale] {
+        let whales = syncFollowState(viewModel.allPopularWhales)
+        switch sortOption {
+        case .alphabetical:
+            return whales.sorted { $0.name < $1.name }
+        case .followers:
+            return whales.sorted { $0.followersCount > $1.followersCount }
+        }
     }
 
-    // MARK: - Filtered by Category
-
-    private var investorWhales: [TrendingWhale] {
-        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .investors })
-    }
-
-    private var institutionWhales: [TrendingWhale] {
-        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .institutions })
-    }
-
-    private var politicianWhales: [TrendingWhale] {
-        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .politicians })
-    }
-
-    private var cryptoWhales: [TrendingWhale] {
-        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .cryptoWhales })
+    private func whalesForCategory(_ category: WhaleCategory) -> [TrendingWhale] {
+        syncFollowState(viewModel.allPopularWhales.filter { $0.category == category })
     }
 
     private func syncFollowState(_ whales: [TrendingWhale]) -> [TrendingWhale] {
@@ -163,6 +194,26 @@ struct AllWhalesView: View {
             }
             return whale
         }
+    }
+}
+
+// MARK: - Flat List (for "All" with sorting)
+private struct AllWhalesFlatList: View {
+    let whales: [TrendingWhale]
+    var onFollowToggle: ((TrendingWhale) -> Void)?
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
+
+    var body: some View {
+        VStack(spacing: AppSpacing.md) {
+            ForEach(whales) { whale in
+                WhaleCard(
+                    whale: whale,
+                    onFollowToggle: { onFollowToggle?(whale) },
+                    onTap: { onWhaleTapped?(whale) }
+                )
+            }
+        }
+        .padding(.horizontal, AppSpacing.lg)
     }
 }
 

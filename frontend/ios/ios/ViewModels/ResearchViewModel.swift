@@ -30,7 +30,10 @@ class ResearchViewModel: ObservableObject {
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
     // MARK: - Initialization
-    init() {
+    init(prefilledTicker: String? = nil) {
+        if let ticker = prefilledTicker {
+            _searchText = Published(initialValue: ticker)
+        }
         loadMockData()
     }
 

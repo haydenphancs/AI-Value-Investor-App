@@ -87,39 +87,25 @@ struct AllWhalesView: View {
 
                 // Sort control — only visible when "All" is selected
                 if selectedFilter == .all {
-                    HStack(spacing: AppSpacing.xs) {
-                        Text("Sort by")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-
-                        ForEach(WhaleSortOption.allCases, id: \.self) { option in
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    sortOption = option
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: option.icon)
-                                        .font(.system(size: 10))
-                                    Text(option.rawValue)
-                                        .font(AppTypography.caption)
-                                }
-                                .foregroundColor(
-                                    sortOption == option
-                                        ? AppColors.textPrimary
-                                        : AppColors.textMuted
-                                )
-                                .padding(.horizontal, AppSpacing.md)
-                                .padding(.vertical, AppSpacing.xs)
-                                .background(
-                                    sortOption == option
-                                        ? AppColors.cardBackgroundLight
-                                        : Color.clear
-                                )
-                                .cornerRadius(AppCornerRadius.pill)
+                    HStack {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                sortOption = sortOption == .alphabetical ? .followers : .alphabetical
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: sortOption.icon)
+                                    .font(.system(size: 12))
+                                Text("Sort by")
+                                    .font(AppTypography.caption)
+                            }
+                            .foregroundColor(AppColors.textMuted)
+                            .padding(.horizontal, AppSpacing.md)
+                            .padding(.vertical, AppSpacing.xs)
+                            .background(AppColors.cardBackground)
+                            .cornerRadius(AppCornerRadius.pill)
                         }
+                        .buttonStyle(.plain)
 
                         Spacer()
                     }
@@ -227,18 +213,10 @@ struct AllWhalesCategorySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Header
-            HStack {
-                Text(title)
-                    .font(AppTypography.title3)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Text("\(whales.count)")
-                    .font(AppTypography.callout)
-                    .foregroundColor(AppColors.textMuted)
-            }
-            .padding(.horizontal, AppSpacing.lg)
+            Text(title)
+                .font(AppTypography.title3)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
 
             // Whale Cards
             VStack(spacing: AppSpacing.md) {

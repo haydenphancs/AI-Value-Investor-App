@@ -144,10 +144,10 @@ struct DiversificationScore: Identifiable {
 
 // MARK: - Whale Category
 enum WhaleCategory: String, CaseIterable {
-    case following = "Following"
+    case investors = "Investors"
     case hedgeFunds = "Hedge Funds"
     case politicians = "Politicians"
-    case cryptoWhales = "Crypto Whales"
+    case cryptoWhales = "Crypto"
 }
 
 // MARK: - Whale Action
@@ -386,11 +386,11 @@ extension WhaleActivity {
 }
 
 extension TrendingWhale {
-    // Whales the user is following
+    // Whales the user is following (shown in FollowedWhalesRow)
     static let trackedWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Warren Buffett",
-            category: .hedgeFunds,
+            category: .investors,
             avatarName: "avatar_buffett",
             followersCount: 125000,
             isFollowing: true,
@@ -422,7 +422,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Michael Burry",
-            category: .hedgeFunds,
+            category: .investors,
             avatarName: "avatar_burry",
             followersCount: 98000,
             isFollowing: true,
@@ -430,24 +430,8 @@ extension TrendingWhale {
         )
     ]
 
-    // Popular whales to discover
-    static let popularWhalesData: [TrendingWhale] = [
-        TrendingWhale(
-            name: "Cathie Wood",
-            category: .hedgeFunds,
-            avatarName: "avatar_wood",
-            followersCount: 89000,
-            isFollowing: false,
-            title: "ARK Invest CEO"
-        ),
-        TrendingWhale(
-            name: "Bill Ackman",
-            category: .hedgeFunds,
-            avatarName: "avatar_ackman",
-            followersCount: 76000,
-            isFollowing: false,
-            title: "Pershing Square Capital"
-        ),
+    // Top 5 popular whales for main screen (mixed categories)
+    static let topPopularWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Ray Dalio",
             category: .hedgeFunds,
@@ -457,28 +441,20 @@ extension TrendingWhale {
             title: "Bridgewater Associates"
         ),
         TrendingWhale(
-            name: "Dan Gallagher",
-            category: .politicians,
-            avatarName: "avatar_gallagher",
-            followersCount: 45000,
+            name: "George Soros",
+            category: .investors,
+            avatarName: "avatar_soros",
+            followersCount: 95000,
             isFollowing: false,
-            title: "U.S. Representative"
+            title: "Soros Fund Management"
         ),
         TrendingWhale(
-            name: "Tommy Tuberville",
-            category: .politicians,
-            avatarName: "avatar_tuberville",
-            followersCount: 67000,
+            name: "Cathie Wood",
+            category: .hedgeFunds,
+            avatarName: "avatar_wood",
+            followersCount: 89000,
             isFollowing: false,
-            title: "U.S. Senator"
-        ),
-        TrendingWhale(
-            name: "Michael Saylor",
-            category: .cryptoWhales,
-            avatarName: "avatar_saylor",
-            followersCount: 134000,
-            isFollowing: false,
-            title: "MicroStrategy Chairman"
+            title: "ARK Invest CEO"
         ),
         TrendingWhale(
             name: "Vitalik Buterin",
@@ -487,6 +463,14 @@ extension TrendingWhale {
             followersCount: 201000,
             isFollowing: false,
             title: "Ethereum Co-founder"
+        ),
+        TrendingWhale(
+            name: "Tommy Tuberville",
+            category: .politicians,
+            avatarName: "avatar_tuberville",
+            followersCount: 67000,
+            isFollowing: false,
+            title: "U.S. Senator"
         )
     ]
 
@@ -494,7 +478,7 @@ extension TrendingWhale {
     static let heroWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Warren Buffett",
-            category: .hedgeFunds,
+            category: .investors,
             avatarName: "avatar_buffett",
             followersCount: 125000,
             isFollowing: false,
@@ -521,7 +505,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Michael Burry",
-            category: .hedgeFunds,
+            category: .investors,
             avatarName: "avatar_burry",
             followersCount: 98000,
             isFollowing: false,
@@ -530,8 +514,64 @@ extension TrendingWhale {
         )
     ]
 
+    // MARK: - All Whales by Category (for AllWhalesView)
+
+    // 10 Investors
+    static let allInvestorsData: [TrendingWhale] = [
+        TrendingWhale(name: "Warren Buffett", category: .investors, avatarName: "avatar_buffett", followersCount: 125000, isFollowing: false, title: "Berkshire Hathaway CEO"),
+        TrendingWhale(name: "Michael Burry", category: .investors, avatarName: "avatar_burry", followersCount: 98000, isFollowing: false, title: "Scion Asset Management"),
+        TrendingWhale(name: "George Soros", category: .investors, avatarName: "avatar_soros", followersCount: 95000, isFollowing: false, title: "Soros Fund Management"),
+        TrendingWhale(name: "Carl Icahn", category: .investors, avatarName: "avatar_icahn", followersCount: 87000, isFollowing: false, title: "Icahn Enterprises"),
+        TrendingWhale(name: "Stanley Druckenmiller", category: .investors, avatarName: "avatar_druckenmiller", followersCount: 83000, isFollowing: false, title: "Duquesne Family Office"),
+        TrendingWhale(name: "Peter Lynch", category: .investors, avatarName: "avatar_lynch", followersCount: 72000, isFollowing: false, title: "Fidelity Investments"),
+        TrendingWhale(name: "Howard Marks", category: .investors, avatarName: "avatar_marks", followersCount: 68000, isFollowing: false, title: "Oaktree Capital Co-Chairman"),
+        TrendingWhale(name: "Seth Klarman", category: .investors, avatarName: "avatar_klarman", followersCount: 54000, isFollowing: false, title: "Baupost Group"),
+        TrendingWhale(name: "Joel Greenblatt", category: .investors, avatarName: "avatar_greenblatt", followersCount: 41000, isFollowing: false, title: "Gotham Capital"),
+        TrendingWhale(name: "Mohnish Pabrai", category: .investors, avatarName: "avatar_pabrai", followersCount: 38000, isFollowing: false, title: "Pabrai Investment Funds")
+    ]
+
+    // 10 Hedge Funds
+    static let allHedgeFundsData: [TrendingWhale] = [
+        TrendingWhale(name: "Ray Dalio", category: .hedgeFunds, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates"),
+        TrendingWhale(name: "Ken Griffin", category: .hedgeFunds, avatarName: "avatar_griffin", followersCount: 92000, isFollowing: false, title: "Citadel CEO"),
+        TrendingWhale(name: "Cathie Wood", category: .hedgeFunds, avatarName: "avatar_wood", followersCount: 89000, isFollowing: false, title: "ARK Invest CEO"),
+        TrendingWhale(name: "Bill Ackman", category: .hedgeFunds, avatarName: "avatar_ackman", followersCount: 76000, isFollowing: false, title: "Pershing Square Capital"),
+        TrendingWhale(name: "Jim Simons", category: .hedgeFunds, avatarName: "avatar_simons", followersCount: 78000, isFollowing: false, title: "Renaissance Technologies"),
+        TrendingWhale(name: "Steve Cohen", category: .hedgeFunds, avatarName: "avatar_cohen", followersCount: 67000, isFollowing: false, title: "Point72 Chairman"),
+        TrendingWhale(name: "David Tepper", category: .hedgeFunds, avatarName: "avatar_tepper", followersCount: 58000, isFollowing: false, title: "Appaloosa Management"),
+        TrendingWhale(name: "Chase Coleman", category: .hedgeFunds, avatarName: "avatar_coleman", followersCount: 51000, isFollowing: false, title: "Tiger Global Management"),
+        TrendingWhale(name: "Dan Loeb", category: .hedgeFunds, avatarName: "avatar_loeb", followersCount: 45000, isFollowing: false, title: "Third Point CEO"),
+        TrendingWhale(name: "Philippe Laffont", category: .hedgeFunds, avatarName: "avatar_laffont", followersCount: 39000, isFollowing: false, title: "Coatue Management")
+    ]
+
+    // 10 Politicians
+    static let allPoliticiansData: [TrendingWhale] = [
+        TrendingWhale(name: "Nancy Pelosi", category: .politicians, avatarName: "avatar_pelosi", followersCount: 156000, isFollowing: false, title: "U.S. Representative (CA)"),
+        TrendingWhale(name: "Tommy Tuberville", category: .politicians, avatarName: "avatar_tuberville", followersCount: 67000, isFollowing: false, title: "U.S. Senator (AL)"),
+        TrendingWhale(name: "Dan Crenshaw", category: .politicians, avatarName: "avatar_crenshaw", followersCount: 53000, isFollowing: false, title: "U.S. Representative (TX)"),
+        TrendingWhale(name: "Ro Khanna", category: .politicians, avatarName: "avatar_khanna", followersCount: 35000, isFollowing: false, title: "U.S. Representative (CA)"),
+        TrendingWhale(name: "Josh Gottheimer", category: .politicians, avatarName: "avatar_gottheimer", followersCount: 31000, isFollowing: false, title: "U.S. Representative (NJ)"),
+        TrendingWhale(name: "Mark Green", category: .politicians, avatarName: "avatar_green", followersCount: 28000, isFollowing: false, title: "U.S. Representative (TN)"),
+        TrendingWhale(name: "Michael McCaul", category: .politicians, avatarName: "avatar_mccaul", followersCount: 24000, isFollowing: false, title: "U.S. Representative (TX)"),
+        TrendingWhale(name: "John Curtis", category: .politicians, avatarName: "avatar_curtis", followersCount: 22000, isFollowing: false, title: "U.S. Senator (UT)"),
+        TrendingWhale(name: "Pat Fallon", category: .politicians, avatarName: "avatar_fallon", followersCount: 19000, isFollowing: false, title: "U.S. Representative (TX)"),
+        TrendingWhale(name: "Dan Sullivan", category: .politicians, avatarName: "avatar_sullivan", followersCount: 18000, isFollowing: false, title: "U.S. Senator (AK)")
+    ]
+
+    // 5 Crypto Whales
+    static let allCryptoWhalesData: [TrendingWhale] = [
+        TrendingWhale(name: "Vitalik Buterin", category: .cryptoWhales, avatarName: "avatar_vitalik", followersCount: 201000, isFollowing: false, title: "Ethereum Co-founder"),
+        TrendingWhale(name: "Changpeng Zhao", category: .cryptoWhales, avatarName: "avatar_cz", followersCount: 175000, isFollowing: false, title: "Binance Founder"),
+        TrendingWhale(name: "Michael Saylor", category: .cryptoWhales, avatarName: "avatar_saylor", followersCount: 134000, isFollowing: false, title: "MicroStrategy Chairman"),
+        TrendingWhale(name: "Brian Armstrong", category: .cryptoWhales, avatarName: "avatar_armstrong", followersCount: 88000, isFollowing: false, title: "Coinbase CEO"),
+        TrendingWhale(name: "Chris Larsen", category: .cryptoWhales, avatarName: "avatar_larsen", followersCount: 48000, isFollowing: false, title: "Ripple Co-founder")
+    ]
+
+    // All popular whales combined
+    static let allPopularWhalesData: [TrendingWhale] = allInvestorsData + allHedgeFundsData + allPoliticiansData + allCryptoWhalesData
+
     // Combined for backward compatibility
-    static let sampleData: [TrendingWhale] = trackedWhalesData + popularWhalesData
+    static let sampleData: [TrendingWhale] = trackedWhalesData + topPopularWhalesData
 }
 
 extension WhaleTradeGroupActivity {

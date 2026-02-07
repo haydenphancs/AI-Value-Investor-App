@@ -45,6 +45,9 @@ struct AllWhalesView: View {
     @ObservedObject var viewModel: TrackingViewModel
     @State private var selectedFilter: WhaleCategoryFilter = .all
     @State private var sortOption: WhaleSortOption = .followers
+    @State private var isSearching: Bool = false
+    @State private var searchText: String = ""
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         ZStack {
@@ -52,60 +55,123 @@ struct AllWhalesView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Category filter chips (horizontal scroll)
-                ScrollView(.horizontal, showsIndicators: false) {
+                // Expandable search bar
+                if isSearching {
                     HStack(spacing: AppSpacing.sm) {
-                        ForEach(WhaleCategoryFilter.allCases, id: \.self) { filter in
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 14))
+                                .foregroundColor(AppColors.textMuted)
+
+                            TextField("Search whales...", text: $searchText)
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textPrimary)
+                                .focused($isSearchFocused)
+
+                            if !searchText.isEmpty {
+                                Button {
+                                    searchText = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(AppColors.textMuted)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, AppSpacing.md)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(AppColors.cardBackground)
+                        .cornerRadius(AppCornerRadius.pill)
+
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                isSearching = false
+                                searchText = ""
+                                isSearchFocused = false
+                            }
+                        } label: {
+                            Text("Cancel")
+                                .font(AppTypography.callout)
+                                .foregroundColor(AppColors.primaryBlue)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.sm)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                // Category filter chips (horizontal scroll) — hidden while searching
+                if !isSearching {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: AppSpacing.sm) {
+                            ForEach(WhaleCategoryFilter.allCases, id: \.self) { filter in
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        selectedFilter = filter
+                                    }
+                                } label: {
+                                    Text(filter.rawValue)
+                                        .font(AppTypography.calloutBold)
+                                        .foregroundColor(
+                                            selectedFilter == filter
+                                                ? AppColors.textPrimary
+                                                : AppColors.textSecondary
+                                        )
+                                        .padding(.horizontal, AppSpacing.lg)
+                                        .padding(.vertical, AppSpacing.sm)
+                                        .background(
+                                            selectedFilter == filter
+                                                ? AppColors.cardBackgroundLight
+                                                : AppColors.cardBackground
+                                        )
+                                        .cornerRadius(AppCornerRadius.pill)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, AppSpacing.lg)
+                    }
+                    .padding(.top, AppSpacing.md)
+                    .padding(.bottom, AppSpacing.sm)
+                }
+
+                // Sort control — only visible when "All" is selected and not searching
+                if selectedFilter == .all && !isSearching {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text("Sort by")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+
+                        ForEach(WhaleSortOption.allCases, id: \.self) { option in
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) {
-                                    selectedFilter = filter
+                                    sortOption = option
                                 }
                             } label: {
-                                Text(filter.rawValue)
-                                    .font(AppTypography.calloutBold)
-                                    .foregroundColor(
-                                        selectedFilter == filter
-                                            ? AppColors.textPrimary
-                                            : AppColors.textSecondary
-                                    )
-                                    .padding(.horizontal, AppSpacing.lg)
-                                    .padding(.vertical, AppSpacing.sm)
-                                    .background(
-                                        selectedFilter == filter
-                                            ? AppColors.cardBackgroundLight
-                                            : AppColors.cardBackground
-                                    )
-                                    .cornerRadius(AppCornerRadius.pill)
+                                HStack(spacing: 4) {
+                                    Image(systemName: option.icon)
+                                        .font(.system(size: 10))
+                                    Text(option.rawValue)
+                                        .font(AppTypography.caption)
+                                }
+                                .foregroundColor(
+                                    sortOption == option
+                                        ? AppColors.textPrimary
+                                        : AppColors.textMuted
+                                )
+                                .padding(.horizontal, AppSpacing.md)
+                                .padding(.vertical, AppSpacing.xs)
+                                .background(
+                                    sortOption == option
+                                        ? AppColors.cardBackgroundLight
+                                        : Color.clear
+                                )
+                                .cornerRadius(AppCornerRadius.pill)
                             }
                             .buttonStyle(.plain)
                         }
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
-                }
-                .padding(.top, AppSpacing.md)
-                .padding(.bottom, AppSpacing.sm)
-
-                // Sort control — only visible when "All" is selected
-                if selectedFilter == .all {
-                    HStack {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                sortOption = sortOption == .alphabetical ? .followers : .alphabetical
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: sortOption.icon)
-                                    .font(.system(size: 12))
-                                Text("Sort by")
-                                    .font(AppTypography.caption)
-                            }
-                            .foregroundColor(AppColors.textMuted)
-                            .padding(.horizontal, AppSpacing.md)
-                            .padding(.vertical, AppSpacing.xs)
-                            .background(AppColors.cardBackground)
-                            .cornerRadius(AppCornerRadius.pill)
-                        }
-                        .buttonStyle(.plain)
 
                         Spacer()
                     }
@@ -116,7 +182,32 @@ struct AllWhalesView: View {
                 // Whale sections
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
-                        if selectedFilter == .all {
+                        if isSearching {
+                            // Search results — flat list
+                            if searchResults.isEmpty && !searchText.isEmpty {
+                                VStack(spacing: AppSpacing.md) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 40))
+                                        .foregroundColor(AppColors.textMuted)
+
+                                    Text("No results for \"\(searchText)\"")
+                                        .font(AppTypography.body)
+                                        .foregroundColor(AppColors.textSecondary)
+
+                                    Text("Try a different name or institution")
+                                        .font(AppTypography.caption)
+                                        .foregroundColor(AppColors.textMuted)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, AppSpacing.xxxl)
+                            } else {
+                                AllWhalesFlatList(
+                                    whales: searchResults,
+                                    onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                                    onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                                )
+                            }
+                        } else if selectedFilter == .all {
                             // Flat sorted list
                             AllWhalesFlatList(
                                 whales: allWhalesSorted,
@@ -145,6 +236,38 @@ struct AllWhalesView: View {
         }
         .navigationTitle("Popular Whales")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if !isSearching {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            isSearching = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            isSearchFocused = true
+                        }
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(AppColors.textPrimary)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Search
+
+    private var searchResults: [TrendingWhale] {
+        guard !searchText.isEmpty else { return syncFollowState(viewModel.allPopularWhales) }
+        let query = searchText.lowercased()
+        return syncFollowState(
+            viewModel.allPopularWhales.filter { whale in
+                whale.name.lowercased().contains(query) ||
+                whale.title.lowercased().contains(query) ||
+                whale.category.rawValue.lowercased().contains(query)
+            }
+        )
     }
 
     // MARK: - Data

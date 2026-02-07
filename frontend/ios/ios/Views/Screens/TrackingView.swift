@@ -461,45 +461,6 @@ struct WhaleAlertBannerCard: View {
     }
 }
 
-// MARK: - Whale Category Filter
-struct WhaleCategoryFilter: View {
-    let categories: [WhaleCategory]
-    @Binding var selectedCategory: WhaleCategory
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: AppSpacing.sm) {
-                ForEach(categories, id: \.self) { category in
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selectedCategory = category
-                        }
-                    } label: {
-                        Text(category.rawValue)
-                            .font(AppTypography.calloutBold)
-                            .foregroundColor(
-                                selectedCategory == category
-                                    ? AppColors.textPrimary
-                                    : AppColors.textSecondary
-                            )
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.sm)
-                            .background(
-                                selectedCategory == category
-                                    ? AppColors.cardBackgroundLight
-                                    : AppColors.cardBackground
-                            )
-                            .cornerRadius(AppCornerRadius.pill)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, AppSpacing.lg)
-        }
-    }
-}
-
-
 // MARK: - Most Popular Whales Section
 struct MostPopularWhalesSection: View {
     let heroWhales: [TrendingWhale]

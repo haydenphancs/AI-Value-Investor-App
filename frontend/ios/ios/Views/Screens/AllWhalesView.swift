@@ -139,39 +139,26 @@ struct AllWhalesView: View {
 
                 // Sort control — only visible when "All" is selected and not searching
                 if selectedFilter == .all && !isSearching {
-                    HStack(spacing: AppSpacing.xs) {
-                        Text("Sort by")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-
-                        ForEach(WhaleSortOption.allCases, id: \.self) { option in
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    sortOption = option
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: option.icon)
-                                        .font(.system(size: 10))
-                                    Text(option.rawValue)
-                                        .font(AppTypography.caption)
-                                }
-                                .foregroundColor(
-                                    sortOption == option
-                                        ? AppColors.textPrimary
-                                        : AppColors.textMuted
-                                )
-                                .padding(.horizontal, AppSpacing.md)
-                                .padding(.vertical, AppSpacing.xs)
-                                .background(
-                                    sortOption == option
-                                        ? AppColors.cardBackgroundLight
-                                        : Color.clear
-                                )
-                                .cornerRadius(AppCornerRadius.pill)
+                    HStack {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                sortOption = sortOption == .alphabetical ? .followers : .alphabetical
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("Sort by:")
+                                    .font(AppTypography.caption)
+                                
+                                Text(sortOption == .alphabetical ? "A-Z" : "Followed")
+                                    .font(AppTypography.caption)
+                            }
+                            .foregroundColor(AppColors.textMuted)
+                            .padding(.horizontal, AppSpacing.md)
+                            .padding(.vertical, AppSpacing.xs)
+                            .background(AppColors.cardBackground)
+                            .cornerRadius(AppCornerRadius.pill)
                         }
+                        .buttonStyle(.plain)
 
                         Spacer()
                     }

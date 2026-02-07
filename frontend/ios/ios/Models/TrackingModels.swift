@@ -145,7 +145,7 @@ struct DiversificationScore: Identifiable {
 // MARK: - Whale Category
 enum WhaleCategory: String, CaseIterable {
     case investors = "Investors"
-    case hedgeFunds = "Hedge Funds"
+    case institutions = "Institutions"
     case politicians = "Politicians"
     case cryptoWhales = "Crypto"
 }
@@ -406,7 +406,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Bill Ackman",
-            category: .hedgeFunds,
+            category: .institutions,
             avatarName: "avatar_ackman",
             followersCount: 76000,
             isFollowing: true,
@@ -434,7 +434,7 @@ extension TrendingWhale {
     static let topPopularWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Ray Dalio",
-            category: .hedgeFunds,
+            category: .institutions,
             avatarName: "avatar_dalio",
             followersCount: 112000,
             isFollowing: false,
@@ -450,7 +450,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Cathie Wood",
-            category: .hedgeFunds,
+            category: .institutions,
             avatarName: "avatar_wood",
             followersCount: 89000,
             isFollowing: false,
@@ -487,7 +487,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Cathie Wood",
-            category: .hedgeFunds,
+            category: .institutions,
             avatarName: "avatar_wood",
             followersCount: 89000,
             isFollowing: false,
@@ -496,7 +496,7 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Ray Dalio",
-            category: .hedgeFunds,
+            category: .institutions,
             avatarName: "avatar_dalio",
             followersCount: 112000,
             isFollowing: false,
@@ -530,18 +530,18 @@ extension TrendingWhale {
         TrendingWhale(name: "Mohnish Pabrai", category: .investors, avatarName: "avatar_pabrai", followersCount: 38000, isFollowing: false, title: "Pabrai Investment Funds")
     ]
 
-    // 10 Hedge Funds
-    static let allHedgeFundsData: [TrendingWhale] = [
-        TrendingWhale(name: "Ray Dalio", category: .hedgeFunds, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates"),
-        TrendingWhale(name: "Ken Griffin", category: .hedgeFunds, avatarName: "avatar_griffin", followersCount: 92000, isFollowing: false, title: "Citadel CEO"),
-        TrendingWhale(name: "Cathie Wood", category: .hedgeFunds, avatarName: "avatar_wood", followersCount: 89000, isFollowing: false, title: "ARK Invest CEO"),
-        TrendingWhale(name: "Bill Ackman", category: .hedgeFunds, avatarName: "avatar_ackman", followersCount: 76000, isFollowing: false, title: "Pershing Square Capital"),
-        TrendingWhale(name: "Jim Simons", category: .hedgeFunds, avatarName: "avatar_simons", followersCount: 78000, isFollowing: false, title: "Renaissance Technologies"),
-        TrendingWhale(name: "Steve Cohen", category: .hedgeFunds, avatarName: "avatar_cohen", followersCount: 67000, isFollowing: false, title: "Point72 Chairman"),
-        TrendingWhale(name: "David Tepper", category: .hedgeFunds, avatarName: "avatar_tepper", followersCount: 58000, isFollowing: false, title: "Appaloosa Management"),
-        TrendingWhale(name: "Chase Coleman", category: .hedgeFunds, avatarName: "avatar_coleman", followersCount: 51000, isFollowing: false, title: "Tiger Global Management"),
-        TrendingWhale(name: "Dan Loeb", category: .hedgeFunds, avatarName: "avatar_loeb", followersCount: 45000, isFollowing: false, title: "Third Point CEO"),
-        TrendingWhale(name: "Philippe Laffont", category: .hedgeFunds, avatarName: "avatar_laffont", followersCount: 39000, isFollowing: false, title: "Coatue Management")
+    // 10 Institutions
+    static let allInstitutionsData: [TrendingWhale] = [
+        TrendingWhale(name: "Ray Dalio", category: .institutions, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates"),
+        TrendingWhale(name: "Ken Griffin", category: .institutions, avatarName: "avatar_griffin", followersCount: 92000, isFollowing: false, title: "Citadel CEO"),
+        TrendingWhale(name: "Cathie Wood", category: .institutions, avatarName: "avatar_wood", followersCount: 89000, isFollowing: false, title: "ARK Invest CEO"),
+        TrendingWhale(name: "Bill Ackman", category: .institutions, avatarName: "avatar_ackman", followersCount: 76000, isFollowing: false, title: "Pershing Square Capital"),
+        TrendingWhale(name: "Jim Simons", category: .institutions, avatarName: "avatar_simons", followersCount: 78000, isFollowing: false, title: "Renaissance Technologies"),
+        TrendingWhale(name: "Steve Cohen", category: .institutions, avatarName: "avatar_cohen", followersCount: 67000, isFollowing: false, title: "Point72 Chairman"),
+        TrendingWhale(name: "David Tepper", category: .institutions, avatarName: "avatar_tepper", followersCount: 58000, isFollowing: false, title: "Appaloosa Management"),
+        TrendingWhale(name: "Chase Coleman", category: .institutions, avatarName: "avatar_coleman", followersCount: 51000, isFollowing: false, title: "Tiger Global Management"),
+        TrendingWhale(name: "Dan Loeb", category: .institutions, avatarName: "avatar_loeb", followersCount: 45000, isFollowing: false, title: "Third Point CEO"),
+        TrendingWhale(name: "Philippe Laffont", category: .institutions, avatarName: "avatar_laffont", followersCount: 39000, isFollowing: false, title: "Coatue Management")
     ]
 
     // 10 Politicians
@@ -568,7 +568,7 @@ extension TrendingWhale {
     ]
 
     // All popular whales combined
-    static let allPopularWhalesData: [TrendingWhale] = allInvestorsData + allHedgeFundsData + allPoliticiansData + allCryptoWhalesData
+    static let allPopularWhalesData: [TrendingWhale] = allInvestorsData + allInstitutionsData + allPoliticiansData + allCryptoWhalesData
 
     // Combined for backward compatibility
     static let sampleData: [TrendingWhale] = trackedWhalesData + topPopularWhalesData

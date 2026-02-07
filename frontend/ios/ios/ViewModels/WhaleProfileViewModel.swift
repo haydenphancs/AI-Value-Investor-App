@@ -125,6 +125,7 @@ class WhaleProfileViewModel: ObservableObject {
             name: .whaleFollowStateChanged,
             object: nil,
             userInfo: [
+                "whaleId": whaleId,
                 "whaleName": currentProfile.name,
                 "whaleTitle": currentProfile.title,
                 "isFollowing": newFollowState

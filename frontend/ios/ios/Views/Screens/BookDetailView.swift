@@ -10,15 +10,15 @@ import SwiftUI
 
 // MARK: - Book Detail Tab
 enum BookDetailTab: String, CaseIterable {
-    case about = "About"
     case core = "Core"
+    case about = "About"
 }
 
 // MARK: - Book Detail View
 struct BookDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
-    @State private var selectedTab: BookDetailTab = .about
+    @State private var selectedTab: BookDetailTab = .core
     @State private var isBookmarked: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var scrollOffset: CGFloat = 0

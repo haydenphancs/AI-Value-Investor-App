@@ -425,13 +425,29 @@ extension NextLesson {
 
 extension MoneyMove {
     static let sampleData: [MoneyMove] = [
-        // The Blueprints - Success stories
+        // Mix of categories for visual variety
         MoneyMove(
             title: "How Amazon Built Its Moat",
             subtitle: "The strategy behind unstoppable dominance.",
             category: .blueprints,
             estimatedMinutes: 12,
             learnerCount: "2.1k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "The Fall of Enron",
+            subtitle: "Red flags every investor should know.",
+            category: .valueTraps,
+            estimatedMinutes: 15,
+            learnerCount: "1.5k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Netflix vs. Disney+",
+            subtitle: "The streaming wars breakdown.",
+            category: .battles,
+            estimatedMinutes: 14,
+            learnerCount: "2.3k",
             isBookmarked: false
         ),
         MoneyMove(
@@ -442,14 +458,12 @@ extension MoneyMove {
             learnerCount: "1.8k",
             isBookmarked: false
         ),
-        
-        // Value Traps - Failures and lessons
         MoneyMove(
-            title: "The Fall of Enron",
-            subtitle: "Red flags every investor should know.",
-            category: .valueTraps,
-            estimatedMinutes: 15,
-            learnerCount: "1.5k",
+            title: "Tesla vs. Traditional Auto",
+            subtitle: "Innovation meets industry giants.",
+            category: .battles,
+            estimatedMinutes: 13,
+            learnerCount: "1.9k",
             isBookmarked: false
         ),
         MoneyMove(
@@ -458,24 +472,6 @@ extension MoneyMove {
             category: .valueTraps,
             estimatedMinutes: 11,
             learnerCount: "1.3k",
-            isBookmarked: false
-        ),
-        
-        // Battles - Comparative analysis
-        MoneyMove(
-            title: "Netflix vs. Disney+",
-            subtitle: "The streaming wars breakdown.",
-            category: .battles,
-            estimatedMinutes: 14,
-            learnerCount: "2.3k",
-            isBookmarked: false
-        ),
-        MoneyMove(
-            title: "Tesla vs. Traditional Auto",
-            subtitle: "Innovation meets industry giants.",
-            category: .battles,
-            estimatedMinutes: 13,
-            learnerCount: "1.9k",
             isBookmarked: false
         )
     ]

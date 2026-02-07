@@ -186,8 +186,18 @@ class TrackingViewModel: ObservableObject {
 
     private func handleFollowStateChange(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
-              let whaleName = userInfo["whaleName"] as? String,
               let isFollowing = userInfo["isFollowing"] as? Bool else { return }
+
+        let whaleId = userInfo["whaleId"] as? String ?? ""
+        let whaleName = userInfo["whaleName"] as? String ?? ""
+
+        // Match whale by ID (slug) first, then fall back to name
+        func nameToId(_ name: String) -> String {
+            name.lowercased().replacingOccurrences(of: " ", with: "-")
+        }
+        func matches(_ whale: TrendingWhale) -> Bool {
+            nameToId(whale.name) == whaleId || whale.name == whaleName
+        }
 
         // Helper to create an updated whale with new follow state
         func makeUpdated(_ whale: TrendingWhale, following: Bool) -> TrendingWhale {
@@ -204,24 +214,24 @@ class TrackingViewModel: ObservableObject {
         }
 
         // Update isFollowing in-place across all discovery lists
-        if let index = popularWhales.firstIndex(where: { $0.name == whaleName }) {
+        if let index = popularWhales.firstIndex(where: { matches($0) }) {
             popularWhales[index] = makeUpdated(popularWhales[index], following: isFollowing)
         }
-        if let index = allPopularWhales.firstIndex(where: { $0.name == whaleName }) {
+        if let index = allPopularWhales.firstIndex(where: { matches($0) }) {
             allPopularWhales[index] = makeUpdated(allPopularWhales[index], following: isFollowing)
         }
-        if let index = heroWhales.firstIndex(where: { $0.name == whaleName }) {
+        if let index = heroWhales.firstIndex(where: { matches($0) }) {
             heroWhales[index] = makeUpdated(heroWhales[index], following: isFollowing)
         }
 
         if isFollowing {
             // Already tracked — nothing to do
-            guard !trackedWhales.contains(where: { $0.name == whaleName }) else { return }
+            guard !trackedWhales.contains(where: { matches($0) }) else { return }
 
             // Find whale data from any list to copy into tracked
-            if let whale = allPopularWhales.first(where: { $0.name == whaleName }) {
+            if let whale = allPopularWhales.first(where: { matches($0) }) {
                 trackedWhales.append(makeUpdated(whale, following: true))
-            } else if let whale = heroWhales.first(where: { $0.name == whaleName }) {
+            } else if let whale = heroWhales.first(where: { matches($0) }) {
                 trackedWhales.append(makeUpdated(whale, following: true))
             } else {
                 // Whale not in any list — create from notification data
@@ -238,7 +248,7 @@ class TrackingViewModel: ObservableObject {
             }
         } else {
             // Unfollowing — remove from tracked
-            trackedWhales.removeAll { $0.name == whaleName }
+            trackedWhales.removeAll { matches($0) }
         }
     }
 

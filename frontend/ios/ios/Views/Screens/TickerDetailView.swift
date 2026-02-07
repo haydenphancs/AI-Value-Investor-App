@@ -13,6 +13,7 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
+    @State private var showResearchView = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
 
@@ -163,6 +164,9 @@ struct TickerDetailView: View {
                 detailData: TechnicalAnalysisDetailData.sampleData
             )
         }
+        .navigationDestination(isPresented: $showResearchView) {
+            ResearchContentView(prefilledTicker: tickerSymbol)
+        }
     }
 
     // MARK: - Tab Content
@@ -174,7 +178,9 @@ struct TickerDetailView: View {
             if let tickerData = viewModel.tickerData {
                 TickerDetailOverviewContent(
                     tickerData: tickerData,
-                    onDeepResearchTap: viewModel.handleDeepResearch,
+                    onDeepResearchTap: {
+                        showResearchView = true
+                    },
                     onWebsiteTap: viewModel.handleWebsiteTap,
                     onRelatedTickerTap: viewModel.handleRelatedTickerTap
                 )

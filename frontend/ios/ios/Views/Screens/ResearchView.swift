@@ -8,7 +8,11 @@
 import SwiftUI
 
 struct ResearchContentView: View {
-    @StateObject private var viewModel = ResearchViewModel()
+    @StateObject private var viewModel: ResearchViewModel
+    
+    init(prefilledTicker: String? = nil) {
+        _viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
+    }
 
     var body: some View {
         ZStack {

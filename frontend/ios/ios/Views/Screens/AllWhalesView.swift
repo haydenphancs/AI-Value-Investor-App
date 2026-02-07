@@ -3,7 +3,7 @@
 //  ios
 //
 //  All Whales screen — shown when user taps "more" on Most Popular Whales
-//  Contains category filter chips + scrollable whale list
+//  Displays whales in categorized sections: Investors, Hedge Funds, Politicians, Crypto
 //
 
 import SwiftUI
@@ -11,78 +11,130 @@ import SwiftUI
 // MARK: - AllWhalesView
 struct AllWhalesView: View {
     @ObservedObject var viewModel: TrackingViewModel
-    @State private var selectedCategory: WhaleCategory = .following
 
     var body: some View {
         ZStack {
             AppColors.background
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                // Category filter chips
-                WhaleCategoryFilter(
-                    categories: WhaleCategory.allCases,
-                    selectedCategory: $selectedCategory
-                )
-                .padding(.top, AppSpacing.md)
-                .padding(.bottom, AppSpacing.lg)
+            ScrollView(showsIndicators: false) {
+                LazyVStack(spacing: AppSpacing.xxl) {
+                    // Investors Section
+                    AllWhalesCategorySection(
+                        title: WhaleCategory.investors.rawValue,
+                        whales: investorWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                    )
 
-                // Whale list
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.md) {
-                        ForEach(filteredWhales) { whale in
-                            WhaleCard(
-                                whale: whale,
-                                onFollowToggle: { viewModel.toggleFollowWhale(whale) },
-                                onTap: { viewModel.viewWhaleProfile(whale) }
-                            )
-                        }
+                    // Hedge Funds Section
+                    AllWhalesCategorySection(
+                        title: WhaleCategory.hedgeFunds.rawValue,
+                        whales: hedgeFundWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                    )
 
-                        if filteredWhales.isEmpty {
-                            VStack(spacing: AppSpacing.md) {
-                                Image(systemName: "person.3.fill")
-                                    .font(.system(size: 40))
-                                    .foregroundColor(AppColors.textMuted)
+                    // Politicians Section
+                    AllWhalesCategorySection(
+                        title: WhaleCategory.politicians.rawValue,
+                        whales: politicianWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                    )
 
-                                Text("No whales found")
-                                    .font(AppTypography.body)
-                                    .foregroundColor(AppColors.textSecondary)
+                    // Crypto Section
+                    AllWhalesCategorySection(
+                        title: WhaleCategory.cryptoWhales.rawValue,
+                        whales: cryptoWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                    )
 
-                                Text("Try selecting a different category")
-                                    .font(AppTypography.caption)
-                                    .foregroundColor(AppColors.textMuted)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, AppSpacing.xxxl)
-                        }
-
-                        // Bottom spacing
-                        Spacer()
-                            .frame(height: 100)
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
+                    // Bottom spacing
+                    Spacer()
+                        .frame(height: 100)
                 }
+                .padding(.top, AppSpacing.md)
             }
         }
         .navigationTitle("Popular Whales")
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    // MARK: - Filtered Whales
-    private var filteredWhales: [TrendingWhale] {
-        let allWhales = viewModel.popularWhales + viewModel.trackedWhales + viewModel.heroWhales
-        // Remove duplicates by name
-        var seen = Set<String>()
-        let unique = allWhales.filter { whale in
-            guard !seen.contains(whale.name) else { return false }
-            seen.insert(whale.name)
-            return true
-        }
+    // MARK: - Filtered by Category
 
-        if selectedCategory == .following {
-            return unique.filter { $0.isFollowing }
+    private var investorWhales: [TrendingWhale] {
+        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .investors })
+    }
+
+    private var hedgeFundWhales: [TrendingWhale] {
+        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .hedgeFunds })
+    }
+
+    private var politicianWhales: [TrendingWhale] {
+        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .politicians })
+    }
+
+    private var cryptoWhales: [TrendingWhale] {
+        syncFollowState(viewModel.allPopularWhales.filter { $0.category == .cryptoWhales })
+    }
+
+    private func syncFollowState(_ whales: [TrendingWhale]) -> [TrendingWhale] {
+        let trackedNames = Set(viewModel.trackedWhales.map(\.name))
+        return whales.map { whale in
+            if trackedNames.contains(whale.name) && !whale.isFollowing {
+                return TrendingWhale(
+                    name: whale.name,
+                    category: whale.category,
+                    avatarName: whale.avatarName,
+                    followersCount: whale.followersCount,
+                    isFollowing: true,
+                    title: whale.title,
+                    description: whale.description,
+                    recentTradeCount: whale.recentTradeCount
+                )
+            }
+            return whale
         }
-        return unique.filter { $0.category == selectedCategory }
+    }
+}
+
+// MARK: - Category Section
+struct AllWhalesCategorySection: View {
+    let title: String
+    let whales: [TrendingWhale]
+    var onFollowToggle: ((TrendingWhale) -> Void)?
+    var onWhaleTapped: ((TrendingWhale) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Section Header
+            HStack {
+                Text(title)
+                    .font(AppTypography.title3)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Text("\(whales.count)")
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+
+            // Whale Cards
+            VStack(spacing: AppSpacing.md) {
+                ForEach(whales) { whale in
+                    WhaleCard(
+                        whale: whale,
+                        onFollowToggle: { onFollowToggle?(whale) },
+                        onTap: { onWhaleTapped?(whale) }
+                    )
+                }
+            }
+            .padding(.horizontal, AppSpacing.lg)
+        }
     }
 }
 

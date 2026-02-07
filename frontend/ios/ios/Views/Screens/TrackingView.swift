@@ -110,6 +110,92 @@ struct TrackingContentView: View {
     }
 }
 
+// MARK: - TrackingContentViewWithBinding (Used when tab navigation needed)
+struct TrackingContentViewWithBinding: View {
+    @StateObject private var viewModel = TrackingViewModel()
+    @Binding var selectedTab: HomeTab
+    @Binding var researchTickerSymbol: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
+
+                // Main Content
+                VStack(spacing: 0) {
+                    // Header with Search and Tab Control
+                    TrackingHeader(
+                        searchText: $viewModel.searchText,
+                        selectedTab: $viewModel.selectedTab,
+                        onProfileTapped: handleProfileTapped,
+                        onSearchSubmit: handleSearchSubmit
+                    )
+
+                    // Tab Content
+                    TabView(selection: $viewModel.selectedTab) {
+                        // Assets Tab
+                        AssetsTabContent(viewModel: viewModel)
+                            .tag(TrackingTab.assets)
+
+                        // Whales Tab
+                        WhalesTabContent(viewModel: viewModel)
+                            .tag(TrackingTab.whales)
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
+                }
+
+                // Loading overlay
+                if viewModel.isLoading {
+                    LoadingOverlay()
+                }
+            }
+            .sheet(isPresented: $viewModel.showAddAssetSheet) {
+                AddAssetSheet(onDismiss: {
+                    viewModel.showAddAssetSheet = false
+                })
+            }
+            .sheet(isPresented: $viewModel.showSortSheet) {
+                SortOptionsSheet(
+                    selectedOption: viewModel.sortOption,
+                    onSelect: { option in
+                        viewModel.selectSortOption(option)
+                    },
+                    onDismiss: {
+                        viewModel.showSortSheet = false
+                    }
+                )
+            }
+            .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
+                TickerDetailView(tickerSymbol: ticker, onNavigateToResearch: {
+                    researchTickerSymbol = ticker
+                    selectedTab = .research
+                })
+            }
+            .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
+                WhaleProfileView(whaleId: whaleId)
+            }
+            .navigationDestination(item: $viewModel.selectedTradeGroup) { tradeData in
+                TradeGroupDetailView(
+                    tradeGroup: tradeData.tradeGroup,
+                    whaleName: tradeData.whaleName
+                )
+            }
+        }
+    }
+
+    // MARK: - Action Handlers
+    private func handleProfileTapped() {
+        print("Profile tapped")
+    }
+
+    private func handleSearchSubmit() {
+        print("Search submitted: \(viewModel.searchText)")
+    }
+}
+
 // MARK: - Assets Tab Content
 struct AssetsTabContent: View {
     @ObservedObject var viewModel: TrackingViewModel

@@ -13,14 +13,15 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
-    @State private var showResearchView = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
 
     let tickerSymbol: String
+    var onNavigateToResearch: (() -> Void)?
 
-    init(tickerSymbol: String) {
+    init(tickerSymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
         self.tickerSymbol = tickerSymbol
+        self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: TickerDetailViewModel(tickerSymbol: tickerSymbol))
     }
 
@@ -164,9 +165,6 @@ struct TickerDetailView: View {
                 detailData: TechnicalAnalysisDetailData.sampleData
             )
         }
-        .navigationDestination(isPresented: $showResearchView) {
-            ResearchContentView(prefilledTicker: tickerSymbol)
-        }
     }
 
     // MARK: - Tab Content
@@ -179,7 +177,7 @@ struct TickerDetailView: View {
                 TickerDetailOverviewContent(
                     tickerData: tickerData,
                     onDeepResearchTap: {
-                        showResearchView = true
+                        handleDeepResearchTap()
                     },
                     onWebsiteTap: viewModel.handleWebsiteTap,
                     onRelatedTickerTap: viewModel.handleRelatedTickerTap
@@ -268,6 +266,13 @@ struct TickerDetailView: View {
 
     private func handleBackTapped() {
         dismiss()
+    }
+
+    private func handleDeepResearchTap() {
+        if let onNavigateToResearch = onNavigateToResearch {
+            dismiss()
+            onNavigateToResearch()
+        }
     }
 
     private func handleMoreTapped() {

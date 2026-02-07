@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var selectedTab: HomeTab = .home
+    @State private var researchTickerSymbol: String? = nil
 
     var body: some View {
         ZStack {
@@ -22,15 +23,27 @@ struct ContentView: View {
                 case .updates:
                     UpdatesView(selectedTab: $selectedTab)
                 case .research:
-                    ResearchViewWithBinding(selectedTab: $selectedTab)
+                    ResearchViewWithBinding(
+                        selectedTab: $selectedTab,
+                        prefilledTicker: researchTickerSymbol
+                    )
                 case .tracking:
-                    TrackingViewWithBinding(selectedTab: $selectedTab)
+                    TrackingViewWithBinding(
+                        selectedTab: $selectedTab,
+                        researchTickerSymbol: $researchTickerSymbol
+                    )
                 case .wiser:
                     WiserViewWithBinding(selectedTab: $selectedTab)
                 }
             }
         }
         .preferredColorScheme(.dark)
+        .onChange(of: selectedTab) { oldValue, newValue in
+            // Clear the research ticker when leaving research tab
+            if oldValue == .research && newValue != .research {
+                researchTickerSymbol = nil
+            }
+        }
     }
 }
 
@@ -123,8 +136,15 @@ struct HomeViewWithBinding: View {
 
 // MARK: - ResearchView with Binding Support
 struct ResearchViewWithBinding: View {
-    @StateObject private var viewModel = ResearchViewModel()
+    @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
+    let prefilledTicker: String?
+
+    init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil) {
+        self._selectedTab = selectedTab
+        self.prefilledTicker = prefilledTicker
+        self._viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -309,6 +329,7 @@ struct ResearchViewWithBinding: View {
 // MARK: - TrackingView with Binding Support
 struct TrackingViewWithBinding: View {
     @Binding var selectedTab: HomeTab
+    @Binding var researchTickerSymbol: String?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -316,7 +337,10 @@ struct TrackingViewWithBinding: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TrackingContentView()
+                TrackingContentViewWithBinding(
+                    selectedTab: $selectedTab,
+                    researchTickerSymbol: $researchTickerSymbol
+                )
 
                 CustomTabBar(selectedTab: $selectedTab)
             }

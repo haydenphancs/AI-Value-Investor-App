@@ -21,22 +21,91 @@ struct InvestorJourneySection: View {
                 onSeeAll?()
             }
 
-            // Journey Progress Card (if available) - now on top
-            if let track = journeyTrack {
-                JourneyProgressCard(
-                    track: track,
-                    onContinue: onContinue,
-                    onItemTap: onItemTap
-                )
-            }
+            // Merged Card: Journey Progress and Level badges combined
+            VStack(spacing: 0) {
+                // Journey Progress content (if available)
+                if let track = journeyTrack {
+                    VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                        // Header with track info and progress
+                        HStack {
+                            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                                HStack(spacing: AppSpacing.sm) {
+                                    // Level icon
+                                    Image(systemName: track.level.iconName)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(track.level.color)
 
-            // Level badges in a horizontal row - now below
-            HStack(spacing: 0) {
-                ForEach(InvestorLevel.allCases, id: \.rawValue) { level in
-                    levelBadgeWithConnector(level: level)
+                                    Text("\(track.level.rawValue) Track")
+                                        .font(AppTypography.headline)
+                                        .foregroundColor(AppColors.textPrimary)
+                                }
+
+                                Text(track.formattedProgress)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textSecondary)
+                            }
+
+                            Spacer()
+
+                            // Progress percentage
+                            Text("\(track.progressPercentage)%")
+                                .font(.system(size: 28, weight: .bold, design: .rounded))
+                                .foregroundColor(track.level.color)
+                        }
+
+                        // Progress bar
+                        GeometryReader { geometry in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(AppColors.cardBackgroundLight)
+                                    .frame(height: 8)
+
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(track.level.color)
+                                    .frame(width: geometry.size.width * CGFloat(track.progress), height: 8)
+                            }
+                        }
+                        .frame(height: 8)
+
+                        // Journey items - show only active item
+                        VStack(spacing: 0) {
+                            ForEach(Array(track.items.enumerated()), id: \.element.id) { index, item in
+                                if item.isActive {
+                                    JourneyItemRow(
+                                        item: item,
+                                        isLast: true
+                                    ) {
+                                        onItemTap?(item)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Continue Learning button
+                        Button(action: {
+                            onContinue?()
+                        }) {
+                            Text("Resume Lessons")
+                                .font(AppTypography.bodyBold)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, AppSpacing.md)
+                                .background(track.level.color)
+                                .cornerRadius(AppCornerRadius.medium)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    .padding(AppSpacing.lg)
                 }
+
+                // Level badges in a horizontal row
+                HStack(spacing: 0) {
+                    ForEach(InvestorLevel.allCases, id: \.rawValue) { level in
+                        levelBadgeWithConnector(level: level)
+                    }
+                }
+                .padding(AppSpacing.lg)
             }
-            .padding(AppSpacing.lg)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.extraLarge)
         }
@@ -49,16 +118,48 @@ struct InvestorJourneySection: View {
         let isCompleted = level.index < currentLevel.index
 
         HStack(spacing: 0) {
-            LevelBadge(level: level, isActive: isActive, isCompleted: isCompleted)
-                .frame(maxWidth: .infinity)
+            // Badge container
+            VStack(spacing: AppSpacing.xs) {
+                // Icon circle with connector overlay
+                ZStack {
+                    // Connector line behind the badge (if not first)
+                    if level != .foundation {
+                        HStack(spacing: 0) {
+                            Rectangle()
+                                .fill(level.index <= currentLevel.index ? level.color.opacity(0.5) : AppColors.cardBackgroundLight)
+                                .frame(width: 24, height: 2)
+                            Spacer()
+                        }
+                    }
+                    
+                    // Connector line after the badge (if not last)
+                    if level != .master {
+                        HStack(spacing: 0) {
+                            Spacer()
+                            Rectangle()
+                                .fill(isCompleted ? level.color.opacity(0.5) : AppColors.cardBackgroundLight)
+                                .frame(width: 24, height: 2)
+                        }
+                    }
+                    
+                    // Badge circle (on top of connector lines)
+                    ZStack {
+                        Circle()
+                            .fill(isActive || isCompleted ? level.color : AppColors.cardBackgroundLight)
+                            .frame(width: 44, height: 44)
 
-            // Connector line (except for last item)
-            if level != .master {
-                Rectangle()
-                    .fill(isCompleted ? level.color.opacity(0.5) : AppColors.cardBackgroundLight)
-                    .frame(height: 2)
-                    .frame(maxWidth: 20)
+                        Image(systemName: level.iconName)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(isActive || isCompleted ? .white : AppColors.textMuted)
+                    }
+                }
+
+                // Label
+                Text(level.rawValue)
+                    .font(AppTypography.caption)
+                    .foregroundColor(isActive || isCompleted ? AppColors.textPrimary : AppColors.textMuted)
             }
+            .frame(maxWidth: .infinity)
         }
     }
 }

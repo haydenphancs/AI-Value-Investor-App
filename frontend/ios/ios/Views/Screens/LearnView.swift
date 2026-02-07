@@ -79,13 +79,6 @@ struct LearnContentView: View {
                 )
                 .padding(.top, AppSpacing.md)
 
-                // Next Lesson Section
-                if let lesson = viewModel.nextLesson {
-                    NextLessonSection(lesson: lesson) {
-                        handleStartLesson(lesson)
-                    }
-                }
-
                 // Money Moves Section
                 if !viewModel.moneyMoves.isEmpty {
                     MoneyMovesSection(
@@ -160,10 +153,6 @@ struct LearnContentView: View {
 
     private func handleJourneyItemTap(_ item: JourneyItem) {
         print("Journey item tapped: \(item.title)")
-    }
-
-    private func handleStartLesson(_ lesson: NextLesson) {
-        viewModel.startLesson(lesson)
     }
 
     private func handleSeeAllMoneyMoves() {

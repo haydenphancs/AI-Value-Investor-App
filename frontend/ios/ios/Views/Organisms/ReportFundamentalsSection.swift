@@ -1,0 +1,93 @@
+//
+//  ReportFundamentalsSection.swift
+//  ios
+//
+//  Organism: Fundamentals & Growth deep dive content with 2x2 metric grid + assessment
+//
+
+import SwiftUI
+
+struct ReportFundamentalsSection: View {
+    let metrics: [DeepDiveMetricCard]
+    let assessment: ReportOverallAssessment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // 2x2 metric grid
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: AppSpacing.md),
+                    GridItem(.flexible(), spacing: AppSpacing.md)
+                ],
+                spacing: AppSpacing.md
+            ) {
+                ForEach(metrics) { metric in
+                    ReportDeepDiveMetricCard(data: metric)
+                }
+            }
+
+            // Overall Assessment
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 14))
+                        .foregroundColor(AppColors.neutral)
+
+                    Text("Overall Assessment")
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(AppColors.textPrimary)
+                }
+
+                Text(assessment.text)
+                    .font(AppTypography.subheadline)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(3)
+
+                // Rating summary
+                HStack(spacing: AppSpacing.xl) {
+                    VStack(spacing: AppSpacing.xs) {
+                        Text(String(format: "%.1f", assessment.averageRating))
+                            .font(AppTypography.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(AppColors.textPrimary)
+                        Text("Avg Rating")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
+                    VStack(spacing: AppSpacing.xs) {
+                        Text("\(assessment.strongCount)")
+                            .font(AppTypography.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(AppColors.bullish)
+                        Text("Strong")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
+                    VStack(spacing: AppSpacing.xs) {
+                        Text("\(assessment.weakCount)")
+                            .font(AppTypography.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(AppColors.bearish)
+                        Text("Weak")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
+            }
+        }
+    }
+}
+
+#Preview {
+    ReportFundamentalsSection(
+        metrics: TickerReportData.sampleOracle.fundamentalMetrics,
+        assessment: TickerReportData.sampleOracle.overallAssessment
+    )
+    .padding()
+    .background(AppColors.cardBackground)
+    .preferredColorScheme(.dark)
+}

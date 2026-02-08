@@ -139,6 +139,7 @@ struct ResearchViewWithBinding: View {
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
+    @State private var selectedReportTicker: ReportTickerNavigation?
 
     init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil) {
         self._selectedTab = selectedTab
@@ -165,6 +166,12 @@ struct ResearchViewWithBinding: View {
             if viewModel.isLoading {
                 LoadingOverlay()
             }
+        }
+        .fullScreenCover(item: $selectedReportTicker) { nav in
+            NavigationStack {
+                TickerReportView(ticker: nav.ticker)
+            }
+            .preferredColorScheme(.dark)
         }
     }
 
@@ -302,7 +309,11 @@ struct ResearchViewWithBinding: View {
     }
 
     private func handleReportTapped(_ report: AnalysisReport) {
-        viewModel.openReport(report)
+        guard report.status == .ready else {
+            viewModel.openReport(report)
+            return
+        }
+        selectedReportTicker = ReportTickerNavigation(ticker: report.ticker)
     }
 
     private func handleRetryTapped(_ report: AnalysisReport) {

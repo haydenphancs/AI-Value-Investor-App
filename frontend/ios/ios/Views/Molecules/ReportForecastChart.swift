@@ -13,44 +13,89 @@ struct ReportForecastChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Revenue Forecast header
+            // Header
             HStack {
-                Text("Revenue Forecast")
+                Text("Revenue & EPS Forecast")
                     .font(AppTypography.calloutBold)
                     .foregroundColor(AppColors.textSecondary)
 
                 Spacer()
             }
 
-            // CAGR badge
-            Text(forecast.formattedCAGR)
-                .font(AppTypography.calloutBold)
-                .foregroundColor(AppColors.bullish)
-
-            // Bar chart
+            // Combined chart with bars and line
             Chart {
+                // Revenue bars
                 ForEach(forecast.projections) { projection in
                     BarMark(
                         x: .value("Period", projection.label),
                         y: .value("Revenue", projection.value),
-                        width: .ratio(0.5)
+                        width: .ratio(0.6)
                     )
                     .foregroundStyle(
                         projection.isForecast
-                            ? AppColors.primaryBlue.opacity(0.5)
+                            ? AppColors.primaryBlue.opacity(0.6)
                             : AppColors.primaryBlue
                     )
                     .cornerRadius(AppCornerRadius.small)
-                    .annotation(position: .top) {
-                        Text(projection.label)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
+                }
+                
+                // EPS line
+                ForEach(forecast.epsProjections) { eps in
+                    LineMark(
+                        x: .value("Period", eps.label),
+                        y: .value("EPS", eps.value * 20)  // Scale EPS to fit with revenue
+                    )
+                    .foregroundStyle(AppColors.growthYoYYellow)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                    
+                    PointMark(
+                        x: .value("Period", eps.label),
+                        y: .value("EPS", eps.value * 20)
+                    )
+                    .foregroundStyle(AppColors.growthYoYYellow)
+                    .symbolSize(60)
                 }
             }
             .chartYAxis(.hidden)
-            .chartXAxis(.hidden)
-            .frame(height: 120)
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisValueLabel()
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textSecondary)
+                }
+            }
+            .frame(height: 160)
+            
+            // EPS labels above chart area
+            HStack(spacing: 0) {
+                ForEach(forecast.epsProjections) { eps in
+                    Text(eps.label)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.growthYoYYellow)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            // Legend
+            HStack(spacing: AppSpacing.lg) {
+                HStack(spacing: AppSpacing.xs) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(AppColors.primaryBlue)
+                        .frame(width: 12, height: 12)
+                    Text("Revenue: \(forecast.formattedCAGR)")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                
+                HStack(spacing: AppSpacing.xs) {
+                    Circle()
+                        .fill(AppColors.growthYoYYellow)
+                        .frame(width: 12, height: 12)
+                    Text("EPS: \(forecast.formattedEPSGrowth)")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+            }
 
             // Management Guidance
             VStack(alignment: .leading, spacing: AppSpacing.sm) {

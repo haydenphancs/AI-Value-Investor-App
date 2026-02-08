@@ -17,9 +17,6 @@ struct ReportMacroGeopoliticalSection: View {
             // Threat Level Bar
             threatLevelSection
 
-            // Risk factor grid
-            riskFactorGrid
-
             // Intelligence Brief
             intelligenceBriefSection
 
@@ -54,39 +51,6 @@ struct ReportMacroGeopoliticalSection: View {
                         .stroke(data.overallThreatLevel.color.opacity(0.2), lineWidth: 1)
                 )
         )
-    }
-
-    // MARK: - Risk Factor Grid
-
-    private var riskFactorGrid: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "exclamationmark.shield.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppColors.textSecondary)
-                Text("Risk Factors")
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Text("\(data.riskFactors.count) monitored")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: AppSpacing.md),
-                    GridItem(.flexible(), spacing: AppSpacing.md)
-                ],
-                spacing: AppSpacing.md
-            ) {
-                ForEach(data.riskFactors) { factor in
-                    ReportRiskFactorCard(factor: factor)
-                }
-            }
-        }
     }
 
     // MARK: - Intelligence Brief

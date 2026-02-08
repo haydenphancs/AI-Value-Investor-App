@@ -423,6 +423,202 @@ struct CriticalFactor: Identifiable {
     }
 }
 
+// MARK: - Price Movement
+
+enum PriceTimeframe: String, CaseIterable, Identifiable {
+    case oneDay = "1D"
+    case oneWeek = "1W"
+    case oneMonth = "1M"
+
+    var id: String { rawValue }
+}
+
+struct PricePoint: Identifiable {
+    let id = UUID()
+    let index: Int          // x-axis position
+    let price: Double
+    let volume: Double?
+}
+
+struct PriceMovementStats {
+    let currentPrice: Double
+    let priceChange: Double
+    let percentChange: Double
+    let periodHigh: Double
+    let periodLow: Double
+    let avgVolume: String
+
+    var formattedPrice: String { String(format: "$%.2f", currentPrice) }
+    var formattedChange: String {
+        let sign = priceChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", priceChange))"
+    }
+    var formattedPercent: String {
+        let sign = percentChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", percentChange))%"
+    }
+    var isPositive: Bool { priceChange >= 0 }
+    var trendColor: Color { isPositive ? AppColors.bullish : AppColors.bearish }
+}
+
+struct ReportPriceMovementData {
+    let stats: [PriceTimeframe: PriceMovementStats]
+    let points: [PriceTimeframe: [PricePoint]]
+}
+
+// MARK: - Moat & Competition
+
+enum MoatOverallRating: String {
+    case wide = "Wide Moat"
+    case narrow = "Narrow Moat"
+    case none = "No Moat"
+
+    var color: Color {
+        switch self {
+        case .wide: return AppColors.bullish
+        case .narrow: return AppColors.neutral
+        case .none: return AppColors.bearish
+        }
+    }
+
+    var iconName: String { "shield.lefthalf.filled" }
+}
+
+struct MoatDimension: Identifiable {
+    let id = UUID()
+    let name: String        // e.g. "Switching Costs"
+    let score: Double       // 0.0 - 10.0
+    let peerScore: Double   // competitor avg for comparison
+
+    var normalizedScore: Double { score / 10.0 }
+    var normalizedPeerScore: Double { peerScore / 10.0 }
+}
+
+enum CompetitorThreatLevel: String {
+    case low = "Low"
+    case moderate = "Moderate"
+    case high = "High"
+
+    var color: Color {
+        switch self {
+        case .low: return AppColors.bullish
+        case .moderate: return AppColors.neutral
+        case .high: return AppColors.bearish
+        }
+    }
+}
+
+struct CompetitorComparison: Identifiable {
+    let id = UUID()
+    let name: String
+    let ticker: String
+    let moatScore: Double       // 0-10
+    let marketSharePercent: Double
+    let threatLevel: CompetitorThreatLevel
+}
+
+struct ReportMoatCompetitionData {
+    let overallRating: MoatOverallRating
+    let dimensions: [MoatDimension]
+    let durabilityNote: String
+    let competitors: [CompetitorComparison]
+    let competitiveInsight: String
+}
+
+// MARK: - Macro & Geopolitical
+
+enum ThreatLevel: String, CaseIterable {
+    case low = "LOW"
+    case elevated = "ELEVATED"
+    case high = "HIGH"
+    case severe = "SEVERE"
+    case critical = "CRITICAL"
+
+    var color: Color {
+        switch self {
+        case .low: return AppColors.bullish
+        case .elevated: return Color(hex: "84CC16")     // lime
+        case .high: return AppColors.neutral
+        case .severe: return AppColors.alertOrange
+        case .critical: return AppColors.bearish
+        }
+    }
+
+    var numericLevel: Int {
+        switch self {
+        case .low: return 1
+        case .elevated: return 2
+        case .high: return 3
+        case .severe: return 4
+        case .critical: return 5
+        }
+    }
+}
+
+enum MacroRiskCategory: String {
+    case inflation = "Inflation"
+    case interestRates = "Interest Rates"
+    case geopolitical = "Geopolitical"
+    case currency = "Currency"
+    case regulation = "Regulation"
+    case supplyChain = "Supply Chain"
+    case tariffs = "Trade & Tariffs"
+    case energy = "Energy"
+
+    var iconName: String {
+        switch self {
+        case .inflation: return "chart.line.uptrend.xyaxis"
+        case .interestRates: return "percent"
+        case .geopolitical: return "globe.americas"
+        case .currency: return "dollarsign.arrow.circlepath"
+        case .regulation: return "building.columns"
+        case .supplyChain: return "shippingbox"
+        case .tariffs: return "arrow.left.arrow.right"
+        case .energy: return "bolt.fill"
+        }
+    }
+}
+
+enum RiskTrend: String {
+    case improving = "Improving"
+    case stable = "Stable"
+    case worsening = "Worsening"
+
+    var iconName: String {
+        switch self {
+        case .improving: return "arrow.down.right"
+        case .stable: return "arrow.right"
+        case .worsening: return "arrow.up.right"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .improving: return AppColors.bullish
+        case .stable: return AppColors.textSecondary
+        case .worsening: return AppColors.bearish
+        }
+    }
+}
+
+struct MacroRiskFactor: Identifiable {
+    let id = UUID()
+    let category: MacroRiskCategory
+    let title: String
+    let impact: Double          // 0.0 - 1.0
+    let description: String
+    let trend: RiskTrend
+    let severity: ThreatLevel
+}
+
+struct ReportMacroData {
+    let overallThreatLevel: ThreatLevel
+    let headline: String            // "Elevated macro risk from rate policy and trade tensions"
+    let riskFactors: [MacroRiskFactor]
+    let intelligenceBrief: String   // AI summary paragraph
+    let lastUpdated: String         // "Updated Feb 8, 2026"
+}
+
 // MARK: - Deep Dive Module
 
 struct DeepDiveModule: Identifiable {
@@ -476,6 +672,15 @@ struct TickerReportData: Identifiable {
     // Deep Dive: Insider & Management
     let insiderData: ReportInsiderData
     let keyManagement: ReportKeyManagement
+
+    // Deep Dive: Price Movement
+    let priceMovement: ReportPriceMovementData
+
+    // Deep Dive: Moat & Competition
+    let moatCompetition: ReportMoatCompetitionData
+
+    // Deep Dive: Macro & Geopolitical
+    let macroData: ReportMacroData
 
     // Deep Dive: Wall Street
     let wallStreetConsensus: ReportWallStreetConsensus
@@ -628,6 +833,139 @@ extension TickerReportData {
                 KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer & Director", ownership: "0.0005%", ownershipValue: "$18.7m")
             ],
             ownershipInsight: "Oracle's high ownership ensures long-term thinking, though governance risk is high."
+        ),
+        priceMovement: ReportPriceMovementData(
+            stats: [
+                .oneDay: PriceMovementStats(
+                    currentPrice: 142.82,
+                    priceChange: -2.34,
+                    percentChange: -1.61,
+                    periodHigh: 145.90,
+                    periodLow: 141.20,
+                    avgVolume: "18.2M"
+                ),
+                .oneWeek: PriceMovementStats(
+                    currentPrice: 142.82,
+                    priceChange: 3.17,
+                    percentChange: 2.27,
+                    periodHigh: 148.50,
+                    periodLow: 138.60,
+                    avgVolume: "22.4M"
+                ),
+                .oneMonth: PriceMovementStats(
+                    currentPrice: 142.82,
+                    priceChange: -8.45,
+                    percentChange: -5.59,
+                    periodHigh: 155.30,
+                    periodLow: 134.10,
+                    avgVolume: "19.8M"
+                )
+            ],
+            points: [
+                .oneDay: {
+                    // Intraday: slight downtrend with volatility
+                    let prices: [Double] = [
+                        145.10, 145.30, 144.80, 144.50, 143.90, 144.20,
+                        143.60, 143.10, 142.80, 143.50, 143.20, 142.90,
+                        142.40, 142.10, 142.50, 142.30, 141.80, 141.20,
+                        141.60, 142.00, 142.40, 142.80, 142.60, 142.82
+                    ]
+                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 500_000...2_000_000)) }
+                }(),
+                .oneWeek: {
+                    let prices: [Double] = [
+                        139.65, 140.20, 141.50, 140.80, 142.30,
+                        143.10, 141.90, 144.50, 145.20, 148.50,
+                        147.30, 146.80, 145.60, 144.20, 143.50,
+                        142.90, 143.80, 144.10, 143.60, 142.82
+                    ]
+                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 800_000...3_000_000)) }
+                }(),
+                .oneMonth: {
+                    let prices: [Double] = [
+                        151.27, 152.50, 150.80, 149.60, 148.20,
+                        150.10, 155.30, 153.40, 151.80, 149.50,
+                        147.20, 145.80, 143.60, 142.10, 140.30,
+                        138.50, 134.10, 136.20, 138.40, 140.60,
+                        139.80, 141.20, 143.50, 142.82
+                    ]
+                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 1_000_000...4_000_000)) }
+                }()
+            ]
+        ),
+        moatCompetition: ReportMoatCompetitionData(
+            overallRating: .wide,
+            dimensions: [
+                MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),
+                MoatDimension(name: "Network Effects", score: 5.8, peerScore: 7.0),
+                MoatDimension(name: "Brand Power", score: 7.5, peerScore: 8.2),
+                MoatDimension(name: "Cost Advantage", score: 6.0, peerScore: 5.5),
+                MoatDimension(name: "Intangible Assets", score: 8.4, peerScore: 7.0)
+            ],
+            durabilityNote: "Oracle's moat is anchored by extremely high switching costs in enterprise database and ERP. Customers face multi-year migration timelines and significant retraining costs, creating durable lock-in.",
+            competitors: [
+                CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", moatScore: 9.0, marketSharePercent: 31.0, threatLevel: .high),
+                CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", moatScore: 8.5, marketSharePercent: 25.0, threatLevel: .high),
+                CompetitorComparison(name: "Google Cloud", ticker: "GOOGL", moatScore: 7.2, marketSharePercent: 11.0, threatLevel: .moderate),
+                CompetitorComparison(name: "SAP", ticker: "SAP", moatScore: 7.0, marketSharePercent: 5.0, threatLevel: .low)
+            ],
+            competitiveInsight: "Oracle holds dominant position in enterprise databases but faces intense hyperscaler competition in cloud infrastructure. Switching cost moat remains the primary defensive asset."
+        ),
+        macroData: ReportMacroData(
+            overallThreatLevel: .elevated,
+            headline: "Elevated macro risk from rate policy and US-China trade tensions",
+            riskFactors: [
+                MacroRiskFactor(
+                    category: .interestRates,
+                    title: "Fed Rate Uncertainty",
+                    impact: 0.72,
+                    description: "Higher-for-longer rates pressure growth stock valuations and increase Oracle's debt servicing costs on $86B long-term debt.",
+                    trend: .stable,
+                    severity: .high
+                ),
+                MacroRiskFactor(
+                    category: .tariffs,
+                    title: "US-China Tech Restrictions",
+                    impact: 0.65,
+                    description: "Export controls on advanced chips may constrain Oracle's AI infrastructure buildout timeline and increase hardware costs.",
+                    trend: .worsening,
+                    severity: .severe
+                ),
+                MacroRiskFactor(
+                    category: .currency,
+                    title: "USD Strength",
+                    impact: 0.40,
+                    description: "Strong dollar headwind on international revenue (37% of total). Each 1% USD rise impacts revenue by ~$180M annually.",
+                    trend: .stable,
+                    severity: .elevated
+                ),
+                MacroRiskFactor(
+                    category: .regulation,
+                    title: "AI Regulation Wave",
+                    impact: 0.55,
+                    description: "EU AI Act and potential US frameworks could increase compliance costs for Oracle's AI cloud services.",
+                    trend: .worsening,
+                    severity: .high
+                ),
+                MacroRiskFactor(
+                    category: .inflation,
+                    title: "Data Center Cost Inflation",
+                    impact: 0.58,
+                    description: "Rising construction and energy costs inflating Capex per data center by an estimated 12-18% YoY.",
+                    trend: .improving,
+                    severity: .elevated
+                ),
+                MacroRiskFactor(
+                    category: .energy,
+                    title: "Power Grid Constraints",
+                    impact: 0.45,
+                    description: "Growing energy demand for AI data centers straining regional power grids, potentially delaying new facility deployments.",
+                    trend: .worsening,
+                    severity: .elevated
+                )
+            ],
+            intelligenceBrief: "Oracle's macro exposure is concentrated in two vectors: debt sensitivity to rate policy (largest corporate bond issuer in tech) and supply chain vulnerability to US-China decoupling. The company's aggressive $80B+ Capex plan amplifies both risks. Mitigating factor: 72% of revenue is recurring subscription, providing cash flow resilience. Monitor the March Fed meeting and any escalation in semiconductor export controls.",
+            lastUpdated: "Updated Feb 8, 2026"
         ),
         wallStreetConsensus: ReportWallStreetConsensus(
             rating: .strongBuy,

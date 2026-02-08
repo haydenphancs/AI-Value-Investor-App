@@ -264,19 +264,32 @@ struct ReportOverallAssessment {
 // MARK: - Revenue Forecast Data
 
 struct ReportRevenueForecast {
-    let cagr: Double                    // percentage
+    let cagr: Double                    // percentage for revenue
+    let epsGrowth: Double               // percentage for EPS
     let managementGuidance: ManagementGuidance
     let projections: [RevenueProjection]
+    let epsProjections: [EPSProjection]
     let guidanceQuote: String?
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
     }
+    
+    var formattedEPSGrowth: String {
+        "+\(String(format: "%.0f", epsGrowth))%"
+    }
 }
 
 struct RevenueProjection: Identifiable {
     let id = UUID()
-    let label: String       // e.g. "$120", "$200B"
+    let label: String       // e.g. "$120B", "$132B"
+    let value: Double
+    let isForecast: Bool
+}
+
+struct EPSProjection: Identifiable {
+    let id = UUID()
+    let label: String       // e.g. "$4.50", "$5.10"
     let value: Double
     let isForecast: Bool
 }
@@ -811,11 +824,17 @@ extension TickerReportData {
         ),
         revenueForecast: ReportRevenueForecast(
             cagr: 15,
+            epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
                 RevenueProjection(label: "$120B", value: 120, isForecast: false),
                 RevenueProjection(label: "$132B", value: 132, isForecast: true),
                 RevenueProjection(label: "$145B", value: 145, isForecast: true)
+            ],
+            epsProjections: [
+                EPSProjection(label: "$4.50", value: 4.50, isForecast: false),
+                EPSProjection(label: "$5.10", value: 5.10, isForecast: true),
+                EPSProjection(label: "$6.20", value: 6.20, isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3"
         ),

@@ -73,7 +73,8 @@ struct ReportPriceChart: View {
                         if let volume = point.volume {
                             BarMark(
                                 x: .value("Time", point.index),
-                                y: .value("Volume", volume)
+                                y: .value("Volume", volume),
+                                width: .ratio(0.6)
                             )
                             .foregroundStyle(trendColor.opacity(0.25))
                         }

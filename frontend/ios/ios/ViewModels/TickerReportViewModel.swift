@@ -16,7 +16,7 @@ class TickerReportViewModel: ObservableObject {
     @Published var error: String?
 
     // Deep Dive Section Expansion States
-    @Published var expandedSections: Set<DeepDiveModuleType> = [.fundamentalsGrowth]
+    @Published var expandedSections: Set<DeepDiveModuleType> = []
 
     // Price Movement Timeframe
     @Published var selectedPriceTimeframe: PriceTimeframe = .oneWeek

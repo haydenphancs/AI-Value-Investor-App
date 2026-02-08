@@ -151,6 +151,8 @@ struct MoatTag: Identifiable {
 // MARK: - Key Vital: Moat Card Data
 
 struct ReportMoatData {
+    let overallRating: MoatTag.MoatStrength  // Wide, Narrow, or None
+    let primarySource: String                 // "High Switching Costs"
     let tags: [MoatTag]
     let valueLabel: String      // "Value" or "Stable"
     let stabilityLabel: String  // "Stable"
@@ -727,12 +729,14 @@ extension TickerReportData {
         ],
         keyVitals: ReportKeyVitals(
             valuation: ReportValuationData(
-                status: .overpriced,
+                status: .underpriced,
                 currentPrice: 142.82,
-                fairValue: 206,
-                upsidePotential: -0.8
+                fairValue: 190,
+                upsidePotential: 33.0
             ),
             moat: ReportMoatData(
+                overallRating: .wide,
+                primarySource: "High Switching Costs",
                 tags: [
                     MoatTag(label: "High Switching Costs", strength: .wide),
                     MoatTag(label: "Network Effects", strength: .narrow)
@@ -809,9 +813,9 @@ extension TickerReportData {
             cagr: 15,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(label: "$120", value: 120, isForecast: false),
-                RevenueProjection(label: "$00B", value: 160, isForecast: true),
-                RevenueProjection(label: "$00B", value: 200, isForecast: true)
+                RevenueProjection(label: "$120B", value: 120, isForecast: false),
+                RevenueProjection(label: "$132B", value: 132, isForecast: true),
+                RevenueProjection(label: "$145B", value: 145, isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3"
         ),

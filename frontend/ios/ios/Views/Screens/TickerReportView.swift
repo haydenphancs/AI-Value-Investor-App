@@ -149,9 +149,10 @@ struct TickerReportView: View {
                     ReportDeepDiveSection(
                         module: module,
                         isExpanded: viewModel.isSectionExpanded(module.type),
-                        onToggle: { viewModel.toggleSection(module.type) },
-                        content: AnyView(deepDiveContent(for: module.type, report: report))
-                    )
+                        onToggle: { viewModel.toggleSection(module.type) }
+                    ) {
+                        deepDiveContent(for: module.type, report: report)
+                    }
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))

@@ -7,11 +7,11 @@
 
 import SwiftUI
 
-struct ReportDeepDiveSection: View {
+struct ReportDeepDiveSection<Content: View>: View {
     let module: DeepDiveModule
     let isExpanded: Bool
     let onToggle: () -> Void
-    let content: AnyView
+    @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,9 +38,9 @@ struct ReportDeepDiveSection: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Expanded content
+            // Expanded content - only built when visible
             if isExpanded {
-                content
+                content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -63,12 +63,11 @@ struct ReportDeepDiveSection: View {
                 type: .fundamentalsGrowth
             ),
             isExpanded: true,
-            onToggle: {},
-            content: AnyView(
-                Text("Content goes here")
-                    .foregroundColor(AppColors.textSecondary)
-            )
-        )
+            onToggle: {}
+        ) {
+            Text("Content goes here")
+                .foregroundColor(AppColors.textSecondary)
+        }
         ReportDeepDiveSection(
             module: DeepDiveModule(
                 title: "Recent price movement",
@@ -76,9 +75,10 @@ struct ReportDeepDiveSection: View {
                 type: .recentPriceMovement
             ),
             isExpanded: false,
-            onToggle: {},
-            content: AnyView(EmptyView())
-        )
+            onToggle: {}
+        ) {
+            EmptyView()
+        }
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

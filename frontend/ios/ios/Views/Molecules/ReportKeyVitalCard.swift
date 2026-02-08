@@ -78,50 +78,51 @@ struct ReportMoatVitalCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Moat")
-                .font(AppTypography.footnoteBold)
-                .foregroundColor(AppColors.textPrimary)
+            // Title + Wide Moat badge
+            HStack {
+                Text("Moat")
+                    .font(AppTypography.footnoteBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                ReportSentimentBadge(
+                    text: data.overallRating.rawValue,
+                    textColor: data.overallRating.color,
+                    backgroundColor: data.overallRating.color.opacity(0.15)
+                )
+            }
 
             Divider()
                 .background(AppColors.textMuted.opacity(0.3))
 
-            // Moat tags
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(data.tags) { tag in
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "checkmark.shield.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(tag.strength.color)
-                        Text(tag.label)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
+            // Trend Badge
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text("Trend Badge")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                
+                HStack(spacing: AppSpacing.xs) {
+                    Text("➡️")
+                        .font(.system(size: 12))
+                    Text(data.stabilityLabel)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textPrimary)
                 }
             }
 
-            Spacer()
-
-            // Value/Stable labels
-            HStack(spacing: AppSpacing.sm) {
-                Text(data.valueLabel)
+            // Primary Source
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text("Primary Source")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                    .padding(.horizontal, AppSpacing.sm)
-                    .padding(.vertical, AppSpacing.xxs)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                            .stroke(AppColors.textMuted.opacity(0.3), lineWidth: 1)
-                    )
-                Text(data.stabilityLabel)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(.horizontal, AppSpacing.sm)
-                    .padding(.vertical, AppSpacing.xxs)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                            .stroke(AppColors.textMuted.opacity(0.3), lineWidth: 1)
-                    )
+                Text(data.primarySource)
+                    .font(AppTypography.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textPrimary)
             }
+
+            Spacer()
         }
         .padding(AppSpacing.md)
         .background(

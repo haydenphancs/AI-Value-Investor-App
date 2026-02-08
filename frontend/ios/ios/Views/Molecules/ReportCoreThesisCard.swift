@@ -16,23 +16,20 @@ struct ReportCoreThesisCard: View {
     }
 
     private var iconName: String {
-        isBullCase ? "arrow.up.right.circle.fill" : "arrow.down.right.circle.fill"
+        isBullCase ? "arrow.up.forward.circle.fill" : "arrow.down.forward.circle.fill"
     }
 
     private var accentColor: Color {
         isBullCase ? AppColors.bullish : AppColors.bearish
     }
 
-    private var emoji: String {
-        isBullCase ? "\u{1F4C8}" : "\u{1F4C9}"
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             HStack(spacing: AppSpacing.sm) {
-                Text(emoji)
+                Image(systemName: iconName)
                     .font(.system(size: 16))
+                    .foregroundColor(accentColor)
 
                 Text(title)
                     .font(AppTypography.headline)

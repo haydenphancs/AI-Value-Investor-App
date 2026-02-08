@@ -166,10 +166,7 @@ struct TickerReportView: View {
     private func deepDiveContent(for type: DeepDiveModuleType, report: TickerReportData) -> some View {
         switch type {
         case .recentPriceMovement:
-            ReportPriceMovementSection(
-                data: report.priceMovement,
-                selectedTimeframe: $viewModel.selectedPriceTimeframe
-            )
+            EmptyView()
         case .fundamentalsGrowth:
             ReportFundamentalsSection(
                 metrics: report.fundamentalMetrics,

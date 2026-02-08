@@ -17,10 +17,6 @@ struct ReportThreatLevelBar: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // THREAT LEVEL header
             HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(level.color)
-
                 Text("THREAT LEVEL")
                     .font(AppTypography.captionBold)
                     .foregroundColor(AppColors.textMuted)

@@ -18,15 +18,15 @@ struct ReportKeyVitalsSection: View {
                 .padding(.horizontal, AppSpacing.lg)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.md) {
+                HStack(alignment: .top, spacing: AppSpacing.md) {
                     ReportValuationVitalCard(data: vitals.valuation)
-                        .frame(width: 165)
+                        .frame(width: 185)
 
                     ReportMoatVitalCard(data: vitals.moat)
-                        .frame(width: 165)
+                        .frame(width: 185)
 
                     ReportFinancialHealthVitalCard(data: vitals.financialHealth)
-                        .frame(width: 165)
+                        .frame(width: 185)
                 }
                 .padding(.horizontal, AppSpacing.lg)
             }

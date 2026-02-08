@@ -40,11 +40,7 @@ struct ReportExecutiveSummaryCard: View {
                             .padding(.top, 6)
 
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                            Text(bullet.category + ":")
-                                .font(AppTypography.footnoteBold)
-                                .foregroundColor(AppColors.textPrimary)
-                            +
-                            Text(" " + bullet.text)
+                            Text("\(bullet.category): \(bullet.text)")
                                 .font(AppTypography.footnote)
                                 .foregroundColor(AppColors.textSecondary)
                         }

@@ -9,36 +9,42 @@ import SwiftUI
 
 struct ResearchContentView: View {
     @StateObject private var viewModel: ResearchViewModel
+    @State private var navigationPath = NavigationPath()
     
     init(prefilledTicker: String? = nil) {
         _viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
     }
 
     var body: some View {
-        ZStack {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
+        NavigationStack(path: $navigationPath) {
+            ZStack {
+                // Background
+                AppColors.background
+                    .ignoresSafeArea()
 
-            // Main Content
-            VStack(spacing: 0) {
-                // Header
-                ResearchHeader(
-                    selectedTab: $viewModel.selectedTab,
-                    onProfileTapped: handleProfileTapped
-                )
+                // Main Content
+                VStack(spacing: 0) {
+                    // Header
+                    ResearchHeader(
+                        selectedTab: $viewModel.selectedTab,
+                        onProfileTapped: handleProfileTapped
+                    )
 
-                // Tab Content
-                if viewModel.selectedTab == .research {
-                    researchTabContent
-                } else {
-                    reportsTabContent
+                    // Tab Content
+                    if viewModel.selectedTab == .research {
+                        researchTabContent
+                    } else {
+                        reportsTabContent
+                    }
+                }
+
+                // Loading overlay
+                if viewModel.isLoading {
+                    LoadingOverlay()
                 }
             }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
+            .navigationDestination(for: String.self) { ticker in
+                TickerReportView(ticker: ticker)
             }
         }
     }
@@ -166,7 +172,8 @@ struct ResearchContentView: View {
 
     // MARK: - Reports Tab Action Handlers
     private func handleReportTapped(_ report: AnalysisReport) {
-        viewModel.openReport(report)
+        guard report.status == .ready else { return }
+        navigationPath.append(report.ticker)
     }
 
     private func handleRetryTapped(_ report: AnalysisReport) {

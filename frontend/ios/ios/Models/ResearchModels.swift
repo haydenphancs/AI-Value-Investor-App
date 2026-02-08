@@ -263,6 +263,17 @@ struct AnalysisReport: Identifiable {
 
     static let mockReports: [AnalysisReport] = [
         AnalysisReport(
+            companyName: "Oracle Corporation",
+            ticker: "ORCL",
+            industry: "Enterprise Software",
+            persona: .warrenBuffett,
+            status: .ready,
+            progress: nil,
+            rating: 4.2,
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 7)) ?? Date(),
+            isRefunded: false
+        ),
+        AnalysisReport(
             companyName: "Tesla Inc.",
             ticker: "TSLA",
             industry: "Automotive",

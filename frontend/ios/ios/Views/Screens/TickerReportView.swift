@@ -165,7 +165,10 @@ struct TickerReportView: View {
     private func deepDiveContent(for type: DeepDiveModuleType, report: TickerReportData) -> some View {
         switch type {
         case .recentPriceMovement:
-            placeholderContent("Price chart and recent movement analysis")
+            ReportPriceMovementSection(
+                data: report.priceMovement,
+                selectedTimeframe: $viewModel.selectedPriceTimeframe
+            )
         case .fundamentalsGrowth:
             ReportFundamentalsSection(
                 metrics: report.fundamentalMetrics,
@@ -179,20 +182,12 @@ struct TickerReportView: View {
                 management: report.keyManagement
             )
         case .moatCompetition:
-            placeholderContent("Competitive advantage and moat analysis")
+            ReportMoatCompetitionSection(data: report.moatCompetition)
         case .macroGeopolitical:
-            placeholderContent("Macro-economic factors and geopolitical risks")
+            ReportMacroGeopoliticalSection(data: report.macroData)
         case .wallStreetConsensus:
             ReportWallStreetSection(consensus: report.wallStreetConsensus)
         }
-    }
-
-    private func placeholderContent(_ text: String) -> some View {
-        Text(text)
-            .font(AppTypography.subheadline)
-            .foregroundColor(AppColors.textMuted)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, AppSpacing.md)
     }
 
     // MARK: - View Detailed Analysis Button

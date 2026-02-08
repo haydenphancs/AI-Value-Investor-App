@@ -113,7 +113,7 @@ struct ReportMoatRadarChart: View {
 
         return ForEach(Array(dimensions.enumerated()), id: \.element.id) { index, dimension in
             let angle = angleForIndex(index, total: dimensions.count) - .pi / 2
-            let r = radius * dimension.normalizedScore
+            let r = radius * CGFloat(dimension.normalizedScore)
             let x = center.x + r * cos(angle)
             let y = center.y + r * sin(angle)
 

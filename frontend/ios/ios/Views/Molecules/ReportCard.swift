@@ -42,56 +42,87 @@ struct ReportCard: View {
                     }
                 }
 
-                // Persona info
-                HStack(spacing: AppSpacing.sm) {
-                    PersonaIcon(
-                        persona: report.persona,
-                        size: 32,
-                        isSelected: true
-                    )
+                // Persona info with score gauge on the right (for ready status)
+                if report.status == .ready, let rating = report.rating {
+                    HStack(spacing: AppSpacing.sm) {
+                        // Left: Persona info
+                        HStack(spacing: AppSpacing.sm) {
+                            PersonaIcon(
+                                persona: report.persona,
+                                size: 32,
+                                isSelected: true
+                            )
 
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(report.persona.rawValue)
-                            .font(AppTypography.footnote)
-                            .fontWeight(.semibold)
-                            .foregroundColor(AppColors.textPrimary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(report.persona.rawValue)
+                                    .font(AppTypography.footnote)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(AppColors.textPrimary)
 
-                        Text(report.persona.tagline)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
+                                Text(report.persona.tagline)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textSecondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        // Right: Score Gauge
+                        ReportScoreGauge(
+                            score: rating,
+                            maxScore: 5.0,
+                            label: "",
+                            size: .small
+                        )
                     }
-                }
+                } else {
+                    // Persona info without gauge (for processing/failed)
+                    HStack(spacing: AppSpacing.sm) {
+                        PersonaIcon(
+                            persona: report.persona,
+                            size: 32,
+                            isSelected: true
+                        )
 
-                // Status-specific content
-                switch report.status {
-                case .processing:
-                    // Progress bar
-                    ProgressBar(
-                        progress: report.progress ?? 0,
-                        color: AppColors.primaryBlue
-                    )
-
-                case .failed:
-                    // Retry button
-                    Button(action: {
-                        onRetry?()
-                    }) {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("Retry Analysis")
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(report.persona.rawValue)
                                 .font(AppTypography.footnote)
                                 .fontWeight(.semibold)
-                        }
-                        .foregroundColor(report.status.color)
-                    }
-                    .buttonStyle(PlainButtonStyle())
+                                .foregroundColor(AppColors.textPrimary)
 
-                case .ready:
-                    // Star rating
-                    HStack {
-                        StarRatingView(rating: report.rating ?? 0)
-                        Spacer()
+                            Text(report.persona.tagline)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+                    }
+
+                    // Status-specific content for non-ready reports
+                    switch report.status {
+                    case .processing:
+                        // Progress bar
+                        ProgressBar(
+                            progress: report.progress ?? 0,
+                            color: AppColors.primaryBlue
+                        )
+
+                    case .failed:
+                        // Retry button
+                        Button(action: {
+                            onRetry?()
+                        }) {
+                            HStack(spacing: AppSpacing.xs) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Retry Analysis")
+                                    .font(AppTypography.footnote)
+                                    .fontWeight(.semibold)
+                            }
+                            .foregroundColor(report.status.color)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                    case .ready:
+                        EmptyView()
                     }
                 }
 

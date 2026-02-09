@@ -11,18 +11,10 @@ struct ReportAgentBadge: View {
     let agent: ReportAgentPersona
 
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
-            Text(agent.rawValue)
-                .font(AppTypography.captionBold)
-                .foregroundColor(AppColors.textSecondary)
-                .tracking(1.2)
-
-            StarRatingView(
-                rating: agent.starRating,
-                starSize: 12,
-                showValue: false
-            )
-        }
+        Text(agent.rawValue)
+            .font(AppTypography.captionBold)
+            .foregroundColor(AppColors.textSecondary)
+            .tracking(1.2)
     }
 }
 

@@ -18,10 +18,10 @@ struct ReportTickerNavigation: Identifiable {
 // MARK: - Report Agent Persona
 
 enum ReportAgentPersona: String, CaseIterable {
-    case buffett = "BUFFETT AGENT"
-    case wood = "WOOD AGENT"
-    case lynch = "LYNCH AGENT"
-    case dalio = "DALIO AGENT"
+    case buffett = "ANALYZED BY BUFFETT AGENT"
+    case wood = "ANALYZED BY WOOD AGENT"
+    case lynch = "ANALYZED BY LYNCH AGENT"
+    case dalio = "ANALYZED BY DALIO AGENT"
 
     var starRating: Double {
         switch self {

@@ -26,7 +26,11 @@ class ResearchViewModel: ObservableObject {
 
     // Reports Tab Properties
     @Published var reports: [AnalysisReport] = AnalysisReport.mockReports
-    @Published var reportSortOption: ReportSortOption = .dateNewest
+    @Published var reportSortOption: ReportSortOption = .dateNewest {
+        didSet {
+            sortReports()
+        }
+    }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
     // MARK: - Initialization
@@ -35,6 +39,7 @@ class ResearchViewModel: ObservableObject {
             _searchText = Published(initialValue: ticker)
         }
         loadMockData()
+        sortReports()
     }
 
     // MARK: - Data Loading
@@ -104,6 +109,19 @@ class ResearchViewModel: ObservableObject {
     }
 
     // MARK: - Reports Tab Actions
+    func sortReports() {
+        switch reportSortOption {
+        case .dateNewest:
+            reports.sort { $0.date > $1.date }
+        case .dateOldest:
+            reports.sort { $0.date < $1.date }
+        case .ratingHigh:
+            reports.sort { ($0.rating ?? 0) > ($1.rating ?? 0) }
+        case .ratingLow:
+            reports.sort { ($0.rating ?? 0) < ($1.rating ?? 0) }
+        }
+    }
+
     func openReport(_ report: AnalysisReport) {
         guard report.status == .ready else { return }
         print("Opening report: \(report.companyName)")

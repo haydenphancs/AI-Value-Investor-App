@@ -45,7 +45,7 @@ struct PriceActionSparkline: View {
 
     private func sparklinePath(w: CGFloat, h: CGFloat, minVal: Double, range: Double) -> Path {
         Path { path in
-            for (i, val) in data.enumerated() {
+            for (i, _) in data.enumerated() {
                 let pt = point(for: i, w: w, h: h, minVal: minVal, range: range)
                 if i == 0 { path.move(to: pt) }
                 else { path.addLine(to: pt) }
@@ -55,7 +55,7 @@ struct PriceActionSparkline: View {
 
     private func sparklineFill(w: CGFloat, h: CGFloat, minVal: Double, range: Double) -> some View {
         Path { path in
-            for (i, val) in data.enumerated() {
+            for (i, _) in data.enumerated() {
                 let pt = point(for: i, w: w, h: h, minVal: minVal, range: range)
                 if i == 0 { path.move(to: pt) }
                 else { path.addLine(to: pt) }

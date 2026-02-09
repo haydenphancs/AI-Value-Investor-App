@@ -18,9 +18,6 @@ class TickerReportViewModel: ObservableObject {
     // Deep Dive Section Expansion States
     @Published var expandedSections: Set<DeepDiveModuleType> = []
 
-    // Price Movement Timeframe
-    @Published var selectedPriceTimeframe: PriceTimeframe = .oneWeek
-
     // MARK: - Private Properties
     private let ticker: String
 

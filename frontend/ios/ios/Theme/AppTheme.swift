@@ -17,6 +17,7 @@ struct AppColors {
     // Accent Colors
     static let primaryBlue = Color(hex: "3B82F6")
     static let accentCyan = Color(hex: "06B6D4")
+    static let accentYellow = Color(hex: "FACC15")
 
     // Sentiment Colors
     static let bullish = Color(hex: "22C55E")

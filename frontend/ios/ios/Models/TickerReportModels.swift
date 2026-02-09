@@ -264,8 +264,8 @@ struct ReportOverallAssessment {
 // MARK: - Revenue Forecast Data
 
 struct ReportRevenueForecast {
-    let cagr: Double                    // percentage for revenue
-    let epsGrowth: Double               // percentage for EPS
+    let cagr: Double                    // revenue growth percentage
+    let epsGrowth: Double               // EPS growth percentage
     let managementGuidance: ManagementGuidance
     let projections: [RevenueProjection]
     let epsProjections: [EPSProjection]
@@ -274,7 +274,7 @@ struct ReportRevenueForecast {
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
     }
-    
+
     var formattedEPSGrowth: String {
         "+\(String(format: "%.0f", epsGrowth))%"
     }
@@ -282,15 +282,11 @@ struct ReportRevenueForecast {
 
 struct RevenueProjection: Identifiable {
     let id = UUID()
-    let label: String       // e.g. "$120B", "$132B"
-    let value: Double
-    let isForecast: Bool
-}
-
-struct EPSProjection: Identifiable {
-    let id = UUID()
-    let label: String       // e.g. "$4.50", "$5.10"
-    let value: Double
+    let period: String      // x-axis category e.g. "FY24", "FY25E"
+    let revenue: Double     // revenue value (billions)
+    let revenueLabel: String // display label e.g. "$120B"
+    let eps: Double         // EPS value e.g. 4.50
+    let epsLabel: String    // display label e.g. "$4.50"
     let isForecast: Bool
 }
 
@@ -827,14 +823,9 @@ extension TickerReportData {
             epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(label: "$120B", value: 120, isForecast: false),
-                RevenueProjection(label: "$132B", value: 132, isForecast: true),
-                RevenueProjection(label: "$145B", value: 145, isForecast: true)
-            ],
-            epsProjections: [
-                EPSProjection(label: "$4.50", value: 4.50, isForecast: false),
-                EPSProjection(label: "$5.10", value: 5.10, isForecast: true),
-                EPSProjection(label: "$6.20", value: 6.20, isForecast: true)
+                RevenueProjection(period: "FY24", revenue: 120, revenueLabel: "$120B", eps: 4.50, epsLabel: "$4.50", isForecast: false),
+                RevenueProjection(period: "FY25E", revenue: 132, revenueLabel: "$132B", eps: 5.10, epsLabel: "$5.10", isForecast: true),
+                RevenueProjection(period: "FY26E", revenue: 145, revenueLabel: "$145B", eps: 6.20, epsLabel: "$6.20", isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3"
         ),

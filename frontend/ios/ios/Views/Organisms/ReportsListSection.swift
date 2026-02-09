@@ -21,15 +21,21 @@ struct ReportsListSection: View {
             Button(action: {
                 showSortMenu = true
             }) {
-                HStack(spacing: AppSpacing.xs) {
+                HStack(spacing: AppSpacing.xxs) {
                     Text("Sort")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
 
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 12))
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(AppColors.textSecondary)
                 }
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(
+                    Capsule()
+                        .fill(AppColors.cardBackgroundLight)
+                )
             }
             .buttonStyle(PlainButtonStyle())
             .confirmationDialog("Sort Reports", isPresented: $showSortMenu) {

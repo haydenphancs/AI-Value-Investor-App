@@ -90,6 +90,7 @@ struct ReportForecastChart: View {
                         .foregroundColor(AppColors.textSecondary)
                 }
             }
+            .frame(maxWidth: .infinity)
 
             // Management Guidance
             VStack(alignment: .leading, spacing: AppSpacing.sm) {

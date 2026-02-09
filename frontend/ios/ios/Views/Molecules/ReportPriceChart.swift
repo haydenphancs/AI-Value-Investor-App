@@ -89,12 +89,15 @@ struct ReportPriceChart: View {
 }
 
 #Preview {
-    let sample = TickerReportData.sampleOracle.priceMovement
-    ReportPriceChart(
-        points: sample.points[.oneDay] ?? [],
-        stats: sample.stats[.oneDay]!
+    let points = [145.1, 144.5, 143.9, 143.1, 142.8, 142.4, 141.8, 142.0, 142.8]
+        .enumerated()
+        .map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 500_000...2_000_000)) }
+    let stats = PriceMovementStats(
+        currentPrice: 142.82, priceChange: -2.34, percentChange: -1.61,
+        periodHigh: 145.90, periodLow: 141.20, avgVolume: "18.2M"
     )
-    .padding()
-    .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
+    ReportPriceChart(points: points, stats: stats)
+        .padding()
+        .background(AppColors.cardBackground)
+        .preferredColorScheme(.dark)
 }

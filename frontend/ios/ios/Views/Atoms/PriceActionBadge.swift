@@ -22,10 +22,6 @@ struct PriceActionBadge: View {
             Text(tag)
                 .font(AppTypography.captionBold)
                 .foregroundColor(AppColors.textPrimary)
-
-            Text(percentage)
-                .font(AppTypography.captionBold)
-                .foregroundColor(percentColor)
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)

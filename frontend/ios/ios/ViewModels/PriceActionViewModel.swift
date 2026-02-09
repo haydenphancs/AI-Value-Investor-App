@@ -8,6 +8,7 @@
 
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - Output Context
 
@@ -26,7 +27,6 @@ struct PriceActionContext {
 
 // MARK: - ViewModel
 
-@MainActor
 class PriceActionViewModel: ObservableObject {
     @Published private(set) var context: PriceActionContext
 

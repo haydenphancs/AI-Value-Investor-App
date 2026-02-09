@@ -431,7 +431,22 @@ struct CriticalFactor: Identifiable {
     }
 }
 
-// MARK: - Price Movement
+// MARK: - Price Action
+
+struct PriceEvent {
+    let tag: String           // "Earnings Miss", "FDA Approval", "Guidance Cut"
+    let date: String          // "Feb 2"
+    let index: Int            // position in prices array where event occurred
+}
+
+struct PriceActionData {
+    let prices: [Double]      // daily closing prices (oldest → newest)
+    let currentPrice: Double
+    let event: PriceEvent?    // optional catalyst
+    let narrative: String     // short explanation text
+}
+
+// MARK: - Price Movement (Legacy)
 
 enum PriceTimeframe: String, CaseIterable, Identifiable {
     case oneDay = "1D"
@@ -681,8 +696,8 @@ struct TickerReportData: Identifiable {
     let insiderData: ReportInsiderData
     let keyManagement: ReportKeyManagement
 
-    // Deep Dive: Price Movement
-    let priceMovement: ReportPriceMovementData
+    // Deep Dive: Price Action
+    let priceAction: PriceActionData
 
     // Deep Dive: Moat & Competition
     let moatCompetition: ReportMoatCompetitionData
@@ -843,64 +858,16 @@ extension TickerReportData {
             ],
             ownershipInsight: "Oracle's high ownership ensures long-term thinking, though governance risk is high."
         ),
-        priceMovement: ReportPriceMovementData(
-            stats: [
-                .oneDay: PriceMovementStats(
-                    currentPrice: 142.82,
-                    priceChange: -2.34,
-                    percentChange: -1.61,
-                    periodHigh: 145.90,
-                    periodLow: 141.20,
-                    avgVolume: "18.2M"
-                ),
-                .oneWeek: PriceMovementStats(
-                    currentPrice: 142.82,
-                    priceChange: 3.17,
-                    percentChange: 2.27,
-                    periodHigh: 148.50,
-                    periodLow: 138.60,
-                    avgVolume: "22.4M"
-                ),
-                .oneMonth: PriceMovementStats(
-                    currentPrice: 142.82,
-                    priceChange: -8.45,
-                    percentChange: -5.59,
-                    periodHigh: 155.30,
-                    periodLow: 134.10,
-                    avgVolume: "19.8M"
-                )
+        priceAction: PriceActionData(
+            prices: [
+                163.20, 162.80, 164.10, 163.50, 162.90,
+                161.40, 160.80, 159.20, 155.30, 150.10,
+                148.60, 145.20, 143.80, 141.50, 140.20,
+                142.10, 141.30, 143.50, 142.00, 142.82
             ],
-            points: [
-                .oneDay: {
-                    // Intraday: slight downtrend with volatility
-                    let prices: [Double] = [
-                        145.10, 145.30, 144.80, 144.50, 143.90, 144.20,
-                        143.60, 143.10, 142.80, 143.50, 143.20, 142.90,
-                        142.40, 142.10, 142.50, 142.30, 141.80, 141.20,
-                        141.60, 142.00, 142.40, 142.80, 142.60, 142.82
-                    ]
-                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 500_000...2_000_000)) }
-                }(),
-                .oneWeek: {
-                    let prices: [Double] = [
-                        139.65, 140.20, 141.50, 140.80, 142.30,
-                        143.10, 141.90, 144.50, 145.20, 148.50,
-                        147.30, 146.80, 145.60, 144.20, 143.50,
-                        142.90, 143.80, 144.10, 143.60, 142.82
-                    ]
-                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 800_000...3_000_000)) }
-                }(),
-                .oneMonth: {
-                    let prices: [Double] = [
-                        151.27, 152.50, 150.80, 149.60, 148.20,
-                        150.10, 155.30, 153.40, 151.80, 149.50,
-                        147.20, 145.80, 143.60, 142.10, 140.30,
-                        138.50, 134.10, 136.20, 138.40, 140.60,
-                        139.80, 141.20, 143.50, 142.82
-                    ]
-                    return prices.enumerated().map { PricePoint(index: $0.offset, price: $0.element, volume: Double.random(in: 1_000_000...4_000_000)) }
-                }()
-            ]
+            currentPrice: 142.82,
+            event: PriceEvent(tag: "Earnings Miss", date: "Feb 2", index: 7),
+            narrative: "Oracle dropped 12% after reporting Q3 earnings below consensus estimates. Revenue of $13.8B missed the $14.1B forecast, driven by slower-than-expected cloud migration deals. The sell-off intensified on guidance cut for Q4."
         ),
         moatCompetition: ReportMoatCompetitionData(
             overallRating: .wide,

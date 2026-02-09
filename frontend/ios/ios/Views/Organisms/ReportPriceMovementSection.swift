@@ -3,146 +3,71 @@
 //  ios
 //
 //  Organism: Recent Price Movement deep dive content.
-//  Gradient area chart with timeframe pill tabs (1D/1W/1M),
-//  stats strip with price delta, and period high/low indicators.
+//  Shows the "why" behind recent price action: catalyst badge,
+//  percentage change with smart time label, sparkline with event dot,
+//  and narrative explanation box.
 //
 
 import SwiftUI
 
 struct ReportPriceMovementSection: View {
-    let data: ReportPriceMovementData
-    @Binding var selectedTimeframe: PriceTimeframe
+    @StateObject private var viewModel: PriceActionViewModel
 
-    private var currentStats: PriceMovementStats? {
-        data.stats[selectedTimeframe]
-    }
-
-    private var currentPoints: [PricePoint] {
-        data.points[selectedTimeframe] ?? []
+    init(data: PriceActionData) {
+        _viewModel = StateObject(wrappedValue: PriceActionViewModel(data: data))
     }
 
     var body: some View {
+        let ctx = viewModel.context
+
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Timeframe tabs
-            timeframePills
+            // Badge capsule: tag + %
+            PriceActionBadge(
+                tag: ctx.tag,
+                percentage: ctx.displayPercentage,
+                isPositive: ctx.isPositive
+            )
 
-            if let stats = currentStats {
-                // Price + Change header
-                priceHeader(stats)
+            // Percentage text + time label
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text(ctx.displayPercentage)
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(ctx.trendColor)
 
-                // Chart
-                ReportPriceChart(points: currentPoints, stats: stats)
-
-                // Stats strip
-                statsStrip(stats)
-            }
-        }
-    }
-
-    // MARK: - Timeframe Pills
-
-    private var timeframePills: some View {
-        HStack(spacing: AppSpacing.sm) {
-            ForEach(PriceTimeframe.allCases) { timeframe in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedTimeframe = timeframe
-                    }
-                } label: {
-                    Text(timeframe.rawValue)
-                        .font(AppTypography.captionBold)
-                        .foregroundColor(
-                            selectedTimeframe == timeframe
-                                ? AppColors.textPrimary
-                                : AppColors.textMuted
-                        )
-                        .padding(.horizontal, AppSpacing.md)
-                        .padding(.vertical, AppSpacing.sm)
-                        .background(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                .fill(
-                                    selectedTimeframe == timeframe
-                                        ? AppColors.cardBackgroundLight
-                                        : Color.clear
-                                )
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
+                Text(ctx.timeLabel)
+                    .font(AppTypography.subheadline)
+                    .foregroundColor(AppColors.textSecondary)
             }
 
-            Spacer()
+            // Sparkline with event dot
+            PriceActionSparkline(
+                data: ctx.chartData,
+                eventIndex: ctx.eventIndex,
+                trendColor: ctx.trendColor
+            )
+
+            // Narrative box
+            Text(ctx.narrative)
+                .font(AppTypography.subheadline)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(3)
+                .padding(AppSpacing.md)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .fill(AppColors.cardBackgroundLight)
+                )
         }
-    }
-
-    // MARK: - Price Header
-
-    private func priceHeader(_ stats: PriceMovementStats) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: AppSpacing.md) {
-            Text(stats.formattedPrice)
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(AppColors.textPrimary)
-
-            HStack(spacing: AppSpacing.xs) {
-                Image(systemName: stats.isPositive ? "arrow.up.right" : "arrow.down.right")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(stats.trendColor)
-
-                Text(stats.formattedChange)
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(stats.trendColor)
-
-                Text("(\(stats.formattedPercent))")
-                    .font(AppTypography.callout)
-                    .foregroundColor(stats.trendColor)
-            }
-        }
-    }
-
-    // MARK: - Stats Strip
-
-    private func statsStrip(_ stats: PriceMovementStats) -> some View {
-        HStack(spacing: 0) {
-            statItem(label: "High", value: String(format: "$%.2f", stats.periodHigh), color: AppColors.bullish)
-            Spacer()
-            divider
-            Spacer()
-            statItem(label: "Low", value: String(format: "$%.2f", stats.periodLow), color: AppColors.bearish)
-            Spacer()
-            divider
-            Spacer()
-            statItem(label: "Avg Vol", value: stats.avgVolume, color: AppColors.textSecondary)
-        }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-        )
-    }
-
-    private func statItem(label: String, value: String, color: Color) -> some View {
-        VStack(spacing: AppSpacing.xxs) {
-            Text(label)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-            Text(value)
-                .font(AppTypography.footnoteBold)
-                .foregroundColor(color)
-        }
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(AppColors.textMuted.opacity(0.2))
-            .frame(width: 1, height: 28)
     }
 }
 
 #Preview {
-    ReportPriceMovementSection(
-        data: TickerReportData.sampleOracle.priceMovement,
-        selectedTimeframe: .constant(.oneWeek)
-    )
-    .padding()
+    ScrollView {
+        ReportPriceMovementSection(
+            data: TickerReportData.sampleOracle.priceAction
+        )
+        .padding()
+    }
     .background(AppColors.cardBackground)
     .preferredColorScheme(.dark)
 }

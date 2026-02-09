@@ -25,7 +25,6 @@ struct ReportForecastChart: View {
             Chart {
                 // Revenue bars
                 ForEach(forecast.projections) { projection in
-                    // Revenue bars
                     BarMark(
                         x: .value("Period", projection.period),
                         y: .value("Revenue", projection.revenue),
@@ -42,17 +41,21 @@ struct ReportForecastChart: View {
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textSecondary)
                     }
-
-                    // EPS line (scaled to revenue axis)
+                }
+                
+                // EPS line (scaled to revenue axis) - as a continuous series
+                ForEach(forecast.projections) { projection in
                     LineMark(
                         x: .value("Period", projection.period),
                         y: .value("EPS", projection.eps * epsScaleFactor)
                     )
                     .foregroundStyle(AppColors.accentYellow)
                     .lineStyle(StrokeStyle(lineWidth: 2))
-                    .interpolationMethod(.catmullRom)
-
-                    // EPS dots
+                    .interpolationMethod(.linear)
+                }
+                
+                // EPS dots
+                ForEach(forecast.projections) { projection in
                     PointMark(
                         x: .value("Period", projection.period),
                         y: .value("EPS", projection.eps * epsScaleFactor)
@@ -67,7 +70,13 @@ struct ReportForecastChart: View {
                 }
             }
             .chartYAxis(.hidden)
-            .chartXAxis(.hidden)
+            .chartXAxis {
+                AxisMarks(values: .automatic) { _ in
+                    AxisValueLabel()
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textSecondary)
+                }
+            }
             .frame(height: 140)
 
             // Legend row

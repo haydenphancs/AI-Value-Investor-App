@@ -28,7 +28,7 @@ class TickerReportViewModel: ObservableObject {
     let deepDiveModules: [DeepDiveModule] = [
         DeepDiveModule(title: "Recent price movement", iconName: "chart.xyaxis.line", type: .recentPriceMovement),
         DeepDiveModule(title: "Fundamentals & Growth", iconName: "chart.bar.fill", type: .fundamentalsGrowth),
-        DeepDiveModule(title: "Future Forecast", iconName: "sparkles", type: .futureForecast),
+        DeepDiveModule(title: "Future Forecast", iconName: "binoculars.fill", type: .futureForecast),
         DeepDiveModule(title: "Insider & Management", iconName: "person.2.fill", type: .insiderManagement),
         DeepDiveModule(title: "Moat & Competition", iconName: "shield.fill", type: .moatCompetition),
         DeepDiveModule(title: "Macro-Economic & Geopolitical", iconName: "globe", type: .macroGeopolitical),

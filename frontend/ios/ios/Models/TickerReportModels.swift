@@ -268,7 +268,6 @@ struct ReportRevenueForecast {
     let epsGrowth: Double               // EPS growth percentage
     let managementGuidance: ManagementGuidance
     let projections: [RevenueProjection]
-    let epsProjections: [EPSProjection]
     let guidanceQuote: String?
 
     var formattedCAGR: String {

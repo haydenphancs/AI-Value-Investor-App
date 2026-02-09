@@ -275,7 +275,7 @@ struct ReportRevenueForecast {
     }
 
     var formattedEPSGrowth: String {
-        "+\(String(format: "%.0f", epsGrowth))%"
+        "+\(String(format: "%.0f", epsGrowth))% CAGR"
     }
 }
 
@@ -822,9 +822,9 @@ extension TickerReportData {
             epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(period: "FY24", revenue: 120, revenueLabel: "$120B", eps: 4.50, epsLabel: "$4.50", isForecast: false),
-                RevenueProjection(period: "FY25E", revenue: 132, revenueLabel: "$132B", eps: 5.10, epsLabel: "$5.10", isForecast: true),
-                RevenueProjection(period: "FY26E", revenue: 145, revenueLabel: "$145B", eps: 6.20, epsLabel: "$6.20", isForecast: true)
+                RevenueProjection(period: "2026", revenue: 120, revenueLabel: "$120B", eps: 4.50, epsLabel: "$4.50", isForecast: false),
+                RevenueProjection(period: "2027", revenue: 132, revenueLabel: "$132B", eps: 5.10, epsLabel: "$5.10", isForecast: true),
+                RevenueProjection(period: "2028", revenue: 145, revenueLabel: "$145B", eps: 6.20, epsLabel: "$6.20", isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3"
         ),

@@ -167,6 +167,8 @@ struct TickerReportView: View {
         switch type {
         case .recentPriceMovement:
             ReportPriceMovementSection(data: report.priceAction)
+        case .revenueEngine:
+            ReportRevenueEngineSection(data: report.revenueEngine)
         case .fundamentalsGrowth:
             ReportFundamentalsSection(
                 metrics: report.fundamentalMetrics,

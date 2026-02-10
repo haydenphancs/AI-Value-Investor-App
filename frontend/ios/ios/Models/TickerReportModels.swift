@@ -655,6 +655,7 @@ struct DeepDiveModule: Identifiable {
 
 enum DeepDiveModuleType {
     case recentPriceMovement
+    case revenueEngine
     case fundamentalsGrowth
     case futureForecast
     case insiderManagement
@@ -700,6 +701,9 @@ struct TickerReportData: Identifiable {
 
     // Deep Dive: Price Action
     let priceAction: PriceActionData
+
+    // Deep Dive: Revenue Engine
+    let revenueEngine: ReportRevenueEngineData
 
     // Deep Dive: Moat & Competition
     let moatCompetition: ReportMoatCompetitionData
@@ -873,6 +877,7 @@ extension TickerReportData {
             event: PriceEvent(tag: "Earnings Miss", date: "Feb 2", index: 7),
             narrative: "Oracle dropped 12% after reporting Q3 earnings below consensus estimates. Revenue of $13.8B missed the $14.1B forecast, driven by slower-than-expected cloud migration deals. The sell-off intensified on guidance cut for Q4."
         ),
+        revenueEngine: ReportRevenueEngineData.sampleOracle,
         moatCompetition: ReportMoatCompetitionData(
             overallRating: .wide,
             dimensions: [

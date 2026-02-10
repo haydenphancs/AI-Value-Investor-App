@@ -61,10 +61,6 @@ struct ReportRevenueEngineSection: View {
             HStack(alignment: .center) {
                 // Role badge
                 HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: role.iconName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(role.color)
-
                     Text(role.rawValue.uppercased())
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(role.color)
@@ -123,11 +119,15 @@ struct ReportRevenueEngineSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
+                .fill(AppColors.cardBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .strokeBorder(role.color.opacity(0.2), lineWidth: 1)
+                .strokeBorder(AppColors.textMuted.opacity(0.15), lineWidth: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .strokeBorder(role.borderColor.opacity(0.2), lineWidth: 1)
         )
     }
 
@@ -140,7 +140,7 @@ struct ReportRevenueEngineSection: View {
                     .font(.system(size: 12))
                     .foregroundColor(AppColors.accentYellow)
 
-                Text("AI Insight")
+                Text("Insight")
                     .font(AppTypography.footnoteBold)
                     .foregroundColor(AppColors.accentYellow)
             }

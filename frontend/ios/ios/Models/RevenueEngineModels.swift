@@ -34,6 +34,10 @@ enum RevenueSegmentRole: String {
         color.opacity(0.15)
     }
 
+    var borderColor: Color {
+        return AppColors.textSecondary
+    }
+
     var iconName: String {
         switch self {
         case .risingSegment:

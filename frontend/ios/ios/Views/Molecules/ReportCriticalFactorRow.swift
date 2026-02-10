@@ -14,7 +14,7 @@ struct ReportCriticalFactorRow: View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             // Severity icon
             Image(systemName: factor.severity.iconName)
-                .font(.system(size: 18))
+                .font(.system(size: 16))
                 .foregroundColor(factor.severity.color)
                 .frame(width: 24, height: 24)
 

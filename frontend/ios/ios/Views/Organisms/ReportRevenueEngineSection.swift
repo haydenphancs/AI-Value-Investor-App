@@ -41,7 +41,7 @@ struct ReportRevenueEngineSection: View {
 
             HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
                 Text(data.formattedTotalRevenue)
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(data.period)
@@ -76,7 +76,7 @@ struct ReportRevenueEngineSection: View {
 
                 // Revenue amount
                 Text(segment.formattedRevenue)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -107,11 +107,11 @@ struct ReportRevenueEngineSection: View {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: segment.growth >= 0 ? "arrow.up.right" : "arrow.down.right")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(segment.growthColor)
+                        .foregroundColor(segment.growth >= -0.05 && segment.growth < 0.05 ? AppColors.textSecondary : segment.growthColor)
 
                     Text(segment.formattedGrowth)
                         .font(AppTypography.subheadline)
-                        .foregroundColor(segment.growthColor)
+                        .foregroundColor(segment.growth >= -0.05 && segment.growth < 0.05 ? AppColors.textSecondary : segment.growthColor)
                 }
             }
         }

@@ -65,9 +65,9 @@ struct ReportKeyManagementTable: View {
                     .foregroundColor(AppColors.neutral)
 
                 Text(management.ownershipInsight)
-                    .font(AppTypography.caption)
+                    .font(AppTypography.subheadline)
                     .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(2)
+                    .lineSpacing(3)
             }
             .padding(AppSpacing.sm)
             .background(

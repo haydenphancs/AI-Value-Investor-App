@@ -41,7 +41,7 @@ struct ReportRevenueEngineSection: View {
 
             HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
                 Text(data.formattedTotalRevenue)
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(data.period)

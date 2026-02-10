@@ -116,7 +116,7 @@ struct RevenueSegment: Identifiable {
         if growth >= 0.05 {
             return AppColors.bullish
         } else if growth >= -0.05 {
-            return AppColors.neutral
+            return AppColors.textSecondary
         } else {
             return AppColors.bearish
         }

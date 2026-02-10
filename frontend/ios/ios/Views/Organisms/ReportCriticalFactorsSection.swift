@@ -13,7 +13,7 @@ struct ReportCriticalFactorsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Critical Factors to Watch")
-                .font(AppTypography.title3)
+                .font(AppTypography.headline)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(factors) { factor in

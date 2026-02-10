@@ -19,7 +19,7 @@ struct ReportDeepDiveSection<Content: View>: View {
             Button(action: onToggle) {
                 HStack(spacing: AppSpacing.md) {
                     Image(systemName: module.iconName)
-                        .font(.system(size: module.iconName == "dollarsign.circle" ? 24 : 18))
+                        .font(.system(size: module.iconName == "dollarsign.circle" ? 22 : 16))
                         .foregroundColor(AppColors.primaryBlue)
                         .frame(width: module.iconName == "dollarsign.circle" ? 36 : 28, alignment: module.iconName == "dollarsign.circle" ? .leading : .center)
 

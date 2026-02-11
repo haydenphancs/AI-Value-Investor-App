@@ -360,11 +360,11 @@ struct ReportKeyManagement {
 // MARK: - Wall Street Consensus
 
 enum ConsensusRating: String {
-    case strongBuy = "Buy Rating"
-    case buy = "Buy"
-    case hold = "Hold"
-    case sell = "Sell"
-    case strongSell = "Strong Sell"
+    case strongBuy = "BUY RATING"
+    case buy = "BUY"
+    case hold = "HOLD"
+    case sell = "SELL"
+    case strongSell = "STRONG SELL"
 
     var color: Color {
         switch self {

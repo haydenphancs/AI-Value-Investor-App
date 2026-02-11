@@ -17,13 +17,16 @@ struct ReportConsensusBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Buy Rating badge
-            ReportSentimentBadge(
-                text: consensus.rating.rawValue,
-                textColor: consensus.rating.color,
-                backgroundColor: consensus.rating.backgroundColor,
-                fontSize: AppTypography.calloutBold
-            )
+            // Buy Rating badge (styled like WIDE MOAT)
+            Text(consensus.rating.rawValue)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(consensus.rating.color)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(
+                    Capsule()
+                        .fill(consensus.rating.backgroundColor)
+                )
 
             // Price targets
             HStack {

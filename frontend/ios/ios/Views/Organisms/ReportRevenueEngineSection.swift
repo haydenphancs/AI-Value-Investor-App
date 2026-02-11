@@ -119,15 +119,7 @@ struct ReportRevenueEngineSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .strokeBorder(AppColors.textMuted.opacity(0.15), lineWidth: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .strokeBorder(role.borderColor.opacity(0.2), lineWidth: 1)
+                .fill(AppColors.cardBackgroundLight)
         )
     }
 

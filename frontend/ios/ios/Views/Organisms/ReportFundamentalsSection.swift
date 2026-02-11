@@ -27,15 +27,25 @@ struct ReportFundamentalsSection: View {
             }
 
             // Overall Assessment
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
-                HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "brain.head.profile")
-                        .font(.system(size: 14))
-                        .foregroundColor(AppColors.neutral)
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "sparkles.2")
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.indigo],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .font(.system(size: 16, weight: .semibold))
 
-                    Text("Overall Assessment")
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.textPrimary)
+                    Text("Insight")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(LinearGradient(
+                            colors: [.indigo, .cyan],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
                 }
 
                 Text(assessment.text)
@@ -43,6 +53,7 @@ struct ReportFundamentalsSection: View {
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }
+            .padding(AppSpacing.md)
         }
     }
 }

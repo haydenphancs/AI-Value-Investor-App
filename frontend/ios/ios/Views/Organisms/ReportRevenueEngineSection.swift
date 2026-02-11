@@ -136,13 +136,23 @@ struct ReportRevenueEngineSection: View {
     private func analysisNoteSection(_ note: String) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "lightbulb.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppColors.accentYellow)
+                Image(systemName: "sparkles.2")
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.indigo],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .font(.system(size: 16, weight: .semibold))
 
                 Text("Insight")
-                    .font(AppTypography.footnoteBold)
-                    .foregroundColor(AppColors.accentYellow)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LinearGradient(
+                        colors: [.indigo, .cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
             }
 
             Text(note)
@@ -152,14 +162,6 @@ struct ReportRevenueEngineSection: View {
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.accentYellow.opacity(0.1))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .strokeBorder(AppColors.accentYellow.opacity(0.2), lineWidth: 1)
-        )
     }
 }
 

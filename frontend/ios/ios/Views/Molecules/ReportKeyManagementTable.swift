@@ -59,21 +59,33 @@ struct ReportKeyManagementTable: View {
             }
 
             // Ownership insight
-            HStack(alignment: .top, spacing: AppSpacing.sm) {
-                Image(systemName: "lightbulb.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppColors.neutral)
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "sparkles.2")
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.indigo],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .font(.system(size: 16, weight: .semibold))
+
+                    Text("Insight")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(LinearGradient(
+                            colors: [.indigo, .cyan],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+                }
 
                 Text(management.ownershipInsight)
-                    .font(AppTypography.caption)
+                    .font(AppTypography.subheadline)
                     .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(2)
+                    .lineSpacing(3)
             }
-            .padding(AppSpacing.sm)
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                    .fill(AppColors.neutral.opacity(0.08))
-            )
+            .padding(AppSpacing.md)
         }
     }
 }

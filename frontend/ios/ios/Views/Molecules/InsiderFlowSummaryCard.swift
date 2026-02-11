@@ -12,22 +12,22 @@ struct InsiderFlowSummaryCard: View {
     let summary: InsiderActivitySummary
 
     var body: some View {
-        VStack(spacing: AppSpacing.md) {
+        VStack(spacing: AppSpacing.sm) {
             // Two-column layout: Informative Buys | Informative Sells
             HStack(spacing: 0) {
                 // Informative Buys column
-                VStack(spacing: AppSpacing.xs) {
+                VStack(spacing: AppSpacing.xxs) {
                     Text("INFORMATIVE BUYS")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                         .tracking(0.5)
 
                     Text(summary.formattedBuys)
-                        .font(AppTypography.title2)
+                        .font(AppTypography.title3)
                         .foregroundColor(AppColors.bullish)
 
                     Text(summary.buyersLabel)
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(maxWidth: .infinity)
@@ -36,27 +36,27 @@ struct InsiderFlowSummaryCard: View {
                 Rectangle()
                     .fill(AppColors.textMuted.opacity(0.3))
                     .frame(width: 1)
-                    .padding(.vertical, AppSpacing.sm)
+                    .padding(.vertical, AppSpacing.xs)
 
                 // Informative Sells column
-                VStack(spacing: AppSpacing.xs) {
+                VStack(spacing: AppSpacing.xxs) {
                     Text("INFORMATIVE SELLS")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                         .tracking(0.5)
 
                     Text(summary.formattedSells)
-                        .font(AppTypography.title2)
+                        .font(AppTypography.title3)
                         .foregroundColor(AppColors.bearish)
 
                     Text(summary.sellersLabel)
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(maxWidth: .infinity)
             }
         }
-        .padding(AppSpacing.lg)
+        .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackground)

@@ -11,20 +11,31 @@ import SwiftUI
 struct RecentActivitiesFlowLegend: View {
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
-            legendItem(color: AppColors.bullish, label: "In Flow")
-            legendItem(color: AppColors.bearish, label: "Out Flow")
+            // In Flow: dot on left
+            legendItem(color: AppColors.bullish, label: "In Flow", dotOnRight: false)
+            Spacer()
+            // Out Flow: dot on right
+            legendItem(color: AppColors.bearish, label: "Out Flow", dotOnRight: true)
         }
     }
 
-    private func legendItem(color: Color, label: String) -> some View {
+    private func legendItem(color: Color, label: String, dotOnRight: Bool) -> some View {
         HStack(spacing: AppSpacing.xs) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
+            if !dotOnRight {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+            }
 
             Text(label)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+
+            if dotOnRight {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+            }
         }
     }
 }

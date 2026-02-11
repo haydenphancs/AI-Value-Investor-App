@@ -21,15 +21,6 @@ struct RecentActivitiesNetFlowBadge: View {
                 .font(AppTypography.calloutBold)
                 .foregroundColor(summary.netFlowColor)
         }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.sm)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(summary.isNetPositive
-                    ? AppColors.bullish.opacity(0.1)
-                    : AppColors.bearish.opacity(0.1)
-                )
-        )
     }
 }
 

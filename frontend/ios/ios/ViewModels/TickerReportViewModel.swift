@@ -23,7 +23,7 @@ class TickerReportViewModel: ObservableObject {
 
     // Deep Dive Modules - stored once to avoid regenerating UUIDs on every access
     let deepDiveModules: [DeepDiveModule] = [
-        DeepDiveModule(title: "Recent price movement", iconName: "chart.xyaxis.line", type: .recentPriceMovement),
+        DeepDiveModule(title: "Recent Price Movement", iconName: "chart.xyaxis.line", type: .recentPriceMovement),
         DeepDiveModule(title: "The Revenue Engine", iconName: "dollarsign.circle", type: .revenueEngine),
         DeepDiveModule(title: "Fundamentals & Growth", iconName: "chart.bar.fill", type: .fundamentalsGrowth),
         DeepDiveModule(title: "Future Forecast", iconName: "binoculars.fill", type: .futureForecast),

@@ -27,7 +27,8 @@ struct RecentActivitiesSection: View {
     }
 
     private var sortedInsiderActivities: [InsiderActivity] {
-        data.insiderActivities.sortedActivities(by: selectedSort, filter: selectedFilter)
+        // Always sort by date (most recent first) for both All and Informative tabs
+        return data.insiderActivities.sortedActivities(by: .byDate, filter: selectedFilter)
     }
 
     // MARK: - Body
@@ -102,14 +103,7 @@ struct RecentActivitiesSection: View {
             RecentActivitiesNetFlowBadge(summary: data.institutionalFlowSummary)
 
             // Sort selector
-            HStack {
-                Text("Sort:")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-
-                RecentActivitiesSortSelector(selectedSort: $selectedSort)
-            }
-            .padding(.top, AppSpacing.sm)
+            RecentActivitiesSortSelector(selectedSort: $selectedSort)
 
             // Activity list
             LazyVStack(spacing: AppSpacing.sm) {

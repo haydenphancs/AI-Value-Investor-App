@@ -21,22 +21,26 @@ struct RecentActivitiesSortSelector: View {
                 } label: {
                     Text(option.rawValue)
                         .font(AppTypography.callout)
-                        .foregroundColor(selectedSort == option ? AppColors.textPrimary : AppColors.textMuted)
-                        .padding(.horizontal, AppSpacing.md)
-                        .padding(.vertical, AppSpacing.xs)
+                        .foregroundColor(selectedSort == option ? AppColors.textPrimary : AppColors.textSecondary)
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
                         .background(
-                            selectedSort == option
-                                ? AppColors.cardBackgroundLight
-                                : Color.clear
+                            Group {
+                                if selectedSort == option {
+                                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                        .fill(AppColors.cardBackground)
+                                }
+                            }
                         )
-                        .cornerRadius(AppCornerRadius.small)
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(AppSpacing.xxs)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.background)
+        )
     }
 }
 

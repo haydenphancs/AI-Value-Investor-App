@@ -33,6 +33,19 @@ struct SmartMoneyFlowChart: View {
         let last = flowData.last?.month ?? ""
         return [first, middle, last]
     }
+    
+    /// Format month string from "MM/YYYY" to "MM/YY"
+    private func formatMonthLabel(_ month: String) -> String {
+        // Convert "02/2025" to "02/25"
+        let components = month.split(separator: "/")
+        guard components.count == 2,
+              let year = components.last,
+              year.count == 4 else {
+            return month // Return as-is if format is unexpected
+        }
+        let shortYear = year.suffix(2)
+        return "\(components[0])/\(shortYear)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -135,9 +148,13 @@ struct SmartMoneyFlowChart: View {
         .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
         .chartXAxis {
             AxisMarks(values: xAxisLabels) { value in
-                AxisValueLabel()
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.textMuted)
+                AxisValueLabel {
+                    if let stringValue = value.as(String.self) {
+                        Text(formatMonthLabel(stringValue))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textMuted)
+                    }
+                }
             }
         }
         .chartYAxis {

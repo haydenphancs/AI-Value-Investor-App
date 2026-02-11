@@ -460,9 +460,9 @@ struct InstitutionalActivity: Identifiable {
     }
 
     var formattedChange: String {
-        let sign = changeInMillions >= 0 ? "+" : ""
+        let sign = changeInMillions >= 0 ? "+" : "-"
         if abs(changeInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", changeInMillions / 1000))B"
+            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
         }
         return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
     }
@@ -705,11 +705,11 @@ struct InsiderActivity: Identifiable {
     }
 
     var formattedChange: String {
-        let sign = changeInMillions >= 0 ? "+" : ""
+        let sign = changeInMillions >= 0 ? "+" : "-"
         if abs(changeInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", changeInMillions / 1000))B"
+            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
         }
-        return "\(sign)$\(String(format: "%.2f", changeInMillions))M"
+        return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
     }
 
     var formattedDate: String {
@@ -763,7 +763,7 @@ struct InsiderActivitySummary {
     }
 
     var formattedNetFlow: String {
-        let sign = netInformativeFlowInMillions >= 0 ? "▲ " : "▼ "
+        let sign = netInformativeFlowInMillions >= 0 ? "+ " : "- "
         if abs(netInformativeFlowInMillions) >= 1000 {
             return "\(sign)$\(String(format: "%.2f", abs(netInformativeFlowInMillions) / 1000))B"
         }

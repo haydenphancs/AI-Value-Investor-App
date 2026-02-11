@@ -506,6 +506,14 @@ enum MoatOverallRating: String {
         }
     }
 
+    var backgroundColor: Color {
+        switch self {
+        case .wide: return AppColors.bullish.opacity(0.15)
+        case .narrow: return AppColors.neutral.opacity(0.15)
+        case .none: return AppColors.bearish.opacity(0.15)
+        }
+    }
+
     var iconName: String { "shield.lefthalf.filled" }
 }
 

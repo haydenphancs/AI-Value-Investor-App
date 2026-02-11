@@ -16,7 +16,7 @@ struct ReportPriceMovementSection: View {
     init(data: PriceActionData) {
         _viewModel = StateObject(wrappedValue: PriceActionViewModel(data: data))
     }
-
+    
     var body: some View {
         let ctx = viewModel.context
 
@@ -46,17 +46,36 @@ struct ReportPriceMovementSection: View {
                 trendColor: ctx.trendColor
             )
 
-            // Narrative box
-            Text(ctx.narrative)
-                .font(AppTypography.subheadline)
-                .foregroundColor(AppColors.textSecondary)
-                .lineSpacing(3)
-                .padding(AppSpacing.md)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(AppColors.cardBackgroundLight)
-                )
+            // Narrative box with header and explanation
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Header: sparkles icon + "Insight"
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "sparkles.2")
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.indigo],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .font(.system(size: 16, weight: .semibold))
+                    
+                    Text("Insight")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(LinearGradient(
+                            colors: [.indigo, .cyan],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+                }
+                
+                // Narrative text
+                Text(ctx.narrative)
+                    .font(AppTypography.subheadline)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(3)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

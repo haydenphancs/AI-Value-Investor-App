@@ -19,7 +19,7 @@ struct TickerReportView: View {
     var body: some View {
         ZStack {
             // Background
-            AppColors.background
+            AppColors.background    
                 .ignoresSafeArea()
 
             if viewModel.isLoading {

@@ -12,7 +12,7 @@ struct ReportMoatCompetitionSection: View {
     let data: ReportMoatCompetitionData
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xxl) {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
             // Moat Rating + Legend
             moatRatingHeader
 
@@ -24,9 +24,6 @@ struct ReportMoatCompetitionSection: View {
 
             // Peer Comparison
             peerComparisonSection
-
-            // Competitive Insight
-            competitiveInsightSection
         }
     }
 
@@ -34,26 +31,16 @@ struct ReportMoatCompetitionSection: View {
 
     private var moatRatingHeader: some View {
         HStack(spacing: AppSpacing.md) {
-            // Shield badge
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: data.overallRating.iconName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(data.overallRating.color)
-
-                Text(data.overallRating.rawValue)
-                    .font(AppTypography.headline)
-                    .foregroundColor(data.overallRating.color)
-            }
-            .padding(.horizontal, AppSpacing.md)
-            .padding(.vertical, AppSpacing.sm)
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(data.overallRating.color.opacity(0.1))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .stroke(data.overallRating.color.opacity(0.25), lineWidth: 1)
-                    )
-            )
+            // Moat badge (styled like RISING SEGMENT)
+            Text(data.overallRating.rawValue.uppercased())
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(data.overallRating.color)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(
+                    Capsule()
+                        .fill(data.overallRating.backgroundColor)
+                )
 
             Spacer()
 
@@ -87,13 +74,24 @@ struct ReportMoatCompetitionSection: View {
 
     private var durabilityInsight: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppColors.accentCyan)
-                Text("Moat Durability")
-                    .font(AppTypography.footnoteBold)
-                    .foregroundColor(AppColors.textPrimary)
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "sparkles.2")
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.indigo],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text("Insight")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LinearGradient(
+                        colors: [.indigo, .cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
             }
 
             Text(data.durabilityNote)
@@ -102,28 +100,15 @@ struct ReportMoatCompetitionSection: View {
                 .lineSpacing(3)
         }
         .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.accentCyan.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .stroke(AppColors.accentCyan.opacity(0.15), lineWidth: 1)
-                )
-        )
     }
 
     // MARK: - Peer Comparison
 
     private var peerComparisonSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "person.3.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppColors.textSecondary)
-                Text("Competitive Landscape")
-                    .font(AppTypography.calloutBold)
-                    .foregroundColor(AppColors.textPrimary)
-            }
+            Text("Competitive Landscape")
+                .font(AppTypography.calloutBold)
+                .foregroundColor(AppColors.textPrimary)
 
             ForEach(data.competitors) { competitor in
                 ReportPeerComparisonRow(competitor: competitor)
@@ -134,10 +119,26 @@ struct ReportMoatCompetitionSection: View {
     // MARK: - Competitive Insight
 
     private var competitiveInsightSection: some View {
-        HStack(alignment: .top, spacing: AppSpacing.sm) {
-            Image(systemName: "lightbulb.fill")
-                .font(.system(size: 12))
-                .foregroundColor(AppColors.neutral)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "sparkles.2")
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.indigo],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text("Insight")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LinearGradient(
+                        colors: [.indigo, .cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+            }
 
             Text(data.competitiveInsight)
                 .font(AppTypography.subheadline)
@@ -145,10 +146,6 @@ struct ReportMoatCompetitionSection: View {
                 .lineSpacing(3)
         }
         .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.neutral.opacity(0.06))
-        )
     }
 }
 

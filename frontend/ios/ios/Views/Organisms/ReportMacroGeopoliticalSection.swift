@@ -48,10 +48,26 @@ struct ReportMacroGeopoliticalSection: View {
     // MARK: - Intelligence Brief
 
     private var intelligenceBriefSection: some View {
-        HStack(alignment: .top, spacing: AppSpacing.sm) {
-            Image(systemName: "lightbulb.fill")
-                .font(.system(size: 12))
-                .foregroundColor(AppColors.neutral)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "sparkles.2")
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.indigo],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text("Insight")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LinearGradient(
+                        colors: [.indigo, .cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+            }
 
             Text(data.intelligenceBrief)
                 .font(AppTypography.subheadline)
@@ -59,10 +75,6 @@ struct ReportMacroGeopoliticalSection: View {
                 .lineSpacing(3)
         }
         .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.neutral.opacity(0.06))
-        )
     }
 }
 

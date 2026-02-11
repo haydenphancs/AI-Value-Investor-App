@@ -38,26 +38,30 @@ struct ReportValuationVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.formattedCurrentPrice)
-                    .font(AppTypography.title3)
-                    .fontWeight(.bold)
+                    .font(AppTypography.calloutBold)
+                    .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             // Fair Value
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text("Fair Value")
+                Text("Analyst Fair Value")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Text(data.formattedFairValue)
                     .font(AppTypography.calloutBold)
                     .foregroundColor(AppColors.primaryBlue)
             }
-
+            
             // Upside Potential
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text("Upside Potential")
-                    .font(AppTypography.caption)
+                    .font(AppTypography.footnote)
                     .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Text(data.formattedUpside)
                     .font(AppTypography.calloutBold)
                     .foregroundColor(data.upsideColor)
@@ -103,11 +107,11 @@ struct ReportMoatVitalCard: View {
                     .foregroundColor(AppColors.textMuted)
                 
                 HStack(spacing: AppSpacing.xs) {
-                    Text("➡️")
-                        .font(.system(size: 12))
+                    
                     Text(data.stabilityLabel)
-                        .font(AppTypography.caption)
+                        .font(AppTypography.subheadline)
                         .foregroundColor(AppColors.textPrimary)
+                        .fontWeight(.semibold)
                 }
             }
 
@@ -157,34 +161,34 @@ struct ReportFinancialHealthVitalCard: View {
             Divider()
                 .background(AppColors.textMuted.opacity(0.3))
 
-            // Altman Z-Score
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            // Altman Z-Score with Progress Bar
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("Altman Z-Score")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
 
-                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
+                HStack(alignment: .center, spacing: AppSpacing.xs) {
                     Text(data.formattedZScore)
                         .font(AppTypography.title3)
                         .fontWeight(.bold)
                         .foregroundColor(data.level.color)
-
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(AppColors.neutral)
                 }
 
+                // Z-Score Progress Bar
+                ZScoreProgressBar(score: data.altmanZScore)
+                    .frame(height: 12)
+                
                 Text(data.altmanZLabel)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
 
-            // Additional metric
+            // Additional metric - Rising Expenses
             HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "arrow.up.right")
+                Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundColor(data.additionalMetricStatus.color)
-                Text(data.additionalMetric)
+                Text(data.additionalMetricDisplayText)
                     .font(AppTypography.caption)
                     .foregroundColor(data.additionalMetricStatus.color)
             }
@@ -200,6 +204,67 @@ struct ReportFinancialHealthVitalCard: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackground)
         )
+    }
+}
+
+// MARK: - Z-Score Progress Bar
+
+struct ZScoreProgressBar: View {
+    let score: Double
+    
+    // Z-Score ranges
+    private let distressThreshold: CGFloat = 1.8
+    private let greyZoneThreshold: CGFloat = 3.0
+    private let maxScore: CGFloat = 5.0
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                // Background bar with color zones
+                HStack(spacing: 0) {
+                    // Red zone (0 to 1.8)
+                    Rectangle()
+                        .fill(AppColors.bearish.opacity(0.2))
+                        .frame(width: geometry.size.width * (distressThreshold / maxScore))
+                    
+                    // Grey zone (1.8 to 3.0)
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(width: geometry.size.width * ((greyZoneThreshold - distressThreshold) / maxScore))
+                    
+                    // Green zone (3.0+)
+                    Rectangle()
+                        .fill(AppColors.bullish.opacity(0.2))
+                        .frame(width: geometry.size.width * ((maxScore - greyZoneThreshold) / maxScore))
+                }
+                .cornerRadius(4)
+                
+                // Score marker
+                Circle()
+                    .fill(scoreColor)
+                    .frame(width: 12, height: 12)
+                    .overlay(
+                        Circle()
+                            .stroke(AppColors.cardBackground, lineWidth: 2)
+                    )
+                    .offset(x: markerPosition(in: geometry.size.width) - 6)
+            }
+        }
+    }
+    
+    private var scoreColor: Color {
+        if score < Double(distressThreshold) {
+            return AppColors.bearish
+        } else if score < Double(greyZoneThreshold) {
+            return Color.gray
+        } else {
+            return AppColors.bullish
+        }
+    }
+    
+    private func markerPosition(in width: CGFloat) -> CGFloat {
+        let clampedScore = min(max(CGFloat(score), 0), maxScore)
+        return width * (clampedScore / maxScore)
     }
 }
 

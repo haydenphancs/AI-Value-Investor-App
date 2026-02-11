@@ -168,10 +168,21 @@ enum FinancialHealthLevel: String {
 
     var color: Color {
         switch self {
-        case .strong: return AppColors.bullish
-        case .moderate: return AppColors.neutral
-        case .weak: return AppColors.alertOrange
-        case .critical: return AppColors.bearish
+        case .strong: return AppColors.bullish      // Green - Safe Zone
+        case .moderate: return AppColors.alertOrange // Orange - Grey Zone
+        case .weak: return AppColors.alertOrange     // Orange - Grey Zone
+        case .critical: return AppColors.bearish     // Red - Distress
+        }
+    }
+    
+    // Z-Score based level
+    static func fromZScore(_ score: Double) -> FinancialHealthLevel {
+        if score < 1.8 {
+            return .critical    // Red - Distress
+        } else if score < 3.0 {
+            return .weak        // Orange - Grey Zone (could also be .moderate)
+        } else {
+            return .strong      // Green - Safe Zone
         }
     }
 }
@@ -188,6 +199,14 @@ struct ReportFinancialHealthData {
 
     var formattedZScore: String {
         String(format: "%.1f", altmanZScore)
+    }
+    
+    // Convert "Increasing Cost" to "Rising Expenses" for better clarity
+    var additionalMetricDisplayText: String {
+        if additionalMetric.lowercased().contains("increasing cost") {
+            return "Rising Expenses"
+        }
+        return additionalMetric
     }
 }
 
@@ -780,11 +799,11 @@ extension TickerReportData {
                 stabilityLabel: "Stable"
             ),
             financialHealth: ReportFinancialHealthData(
-                level: .weak,
-                altmanZScore: 1.8,
-                altmanZLabel: "Below 1.8 is risk",
+                level: FinancialHealthLevel.fromZScore(1.7),  // Will be .critical (Red - Distress)
+                altmanZScore: 1.7,
+                altmanZLabel: "Distress Zone (Below 1.8)",
                 additionalMetric: "Increasing Cost",
-                additionalMetricStatus: .weak,
+                additionalMetricStatus: FinancialHealthLevel.fromZScore(1.7),
                 fcfNote: "Negative FCF in last 2 years"
             )
         ),

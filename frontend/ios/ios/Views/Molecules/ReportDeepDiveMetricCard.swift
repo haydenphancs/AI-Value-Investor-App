@@ -23,10 +23,13 @@ struct ReportDeepDiveMetricCard: View {
             // Title row with stars
             HStack {
                 Text(data.title)
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.subheadline)
+                    .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 // Star display
                 HStack(spacing: 2) {
@@ -46,8 +49,9 @@ struct ReportDeepDiveMetricCard: View {
                 ForEach(data.metrics) { metric in
                     HStack {
                         Text(metric.label)
-                            .font(AppTypography.caption)
+                            .font(AppTypography.footnote)
                             .foregroundColor(AppColors.textMuted)
+                            .lineLimit(1)
                         Spacer()
                         HStack(spacing: 2) {
                             if let trend = metric.trend {
@@ -56,7 +60,8 @@ struct ReportDeepDiveMetricCard: View {
                                     .foregroundColor(trend.color)
                             }
                             Text(metric.value)
-                                .font(AppTypography.captionBold)
+                                .font(AppTypography.footnote)
+                                .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
                         }
                     }
@@ -67,8 +72,10 @@ struct ReportDeepDiveMetricCard: View {
 
             // Quality label
             Text(data.qualityLabel)
-                .font(AppTypography.caption)
+                .font(AppTypography.footnote)
                 .foregroundColor(ratingColor)
+                .lineLimit(2)
+                .minimumScaleFactor(0.9)
                 .italic()
         }
         .padding(AppSpacing.md)

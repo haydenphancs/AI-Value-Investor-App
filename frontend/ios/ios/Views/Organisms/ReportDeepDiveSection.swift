@@ -71,7 +71,7 @@ struct ReportDeepDiveSection<Content: View>: View {
         }
         ReportDeepDiveSection(
             module: DeepDiveModule(
-                title: "Recent price movement",
+                title: "Recent Price Movement",
                 iconName: "chart.xyaxis.line",
                 type: .recentPriceMovement
             ),

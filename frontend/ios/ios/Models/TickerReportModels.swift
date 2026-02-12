@@ -36,16 +36,46 @@ enum ReportAgentPersona: String, CaseIterable {
 // MARK: - Report Quality Rating
 
 struct ReportQualityRating {
-    let score: Double       // e.g. 4.1
-    let maxScore: Double    // e.g. 5.0
-    let label: String       // e.g. "Good quality business"
+    let score: Double       // 0-100
+    let maxScore: Double    // 100
+    let label: String       // Auto-generated based on score
 
     var formattedScore: String {
-        String(format: "%.1f", score)
+        String(format: "%.0f", score)
     }
 
     var formattedMax: String {
         "/ \(Int(maxScore))"
+    }
+
+    // Helper to generate label from score
+    static func labelForScore(_ score: Double) -> String {
+        switch score {
+        case 90...100:
+            return "Excellent Quality Business"
+        case 75..<90:
+            return "Strong Quality Business"
+        case 50..<75:
+            return "Fair Quality Business"
+        case 30..<50:
+            return "Weak Quality Business"
+        default:
+            return "Distressed Quality Business"
+        }
+    }
+
+    // Convenience initializer that auto-generates label
+    init(score: Double, maxScore: Double = 100) {
+        self.score = score
+        self.maxScore = maxScore
+        self.label = ReportQualityRating.labelForScore(score)
+    }
+
+    // Full initializer for custom labels
+    init(score: Double, maxScore: Double, label: String) {
+        self.score = score
+        self.maxScore = maxScore
+        self.label = label
     }
 }
 
@@ -759,9 +789,7 @@ extension TickerReportData {
         liveDate: "Live Data as of Feb 8, 8:04 AM",
         agent: .buffett,
         qualityRating: ReportQualityRating(
-            score: 4.1,
-            maxScore: 5.0,
-            label: "Good quality business"
+            score: 82
         ),
         executiveSummaryText: "Oracle is successfully pivoting to cloud infrastructure (OCI) with a massive backlog, but cash burn increases a short-term risk.",
         executiveSummaryBullets: [

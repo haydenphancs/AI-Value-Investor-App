@@ -99,11 +99,11 @@ enum SnapshotRatingLevel: Int, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .excellent: return "Excellent"
-        case .strong: return "Strong"
-        case .average: return "Average"
-        case .weak: return "Weak"
-        case .poor: return "Poor"
+        case .excellent: return "High"
+        case .strong: return "Solid"
+        case .average: return "Moderate"
+        case .weak: return "Soft"
+        case .poor: return "Low"
         }
     }
 

@@ -139,35 +139,35 @@ struct SnapshotsInfoSheet: View {
 
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
                             RatingExplanation(
-                                rating: "Excellent",
+                                rating: "High",
                                 color: AppColors.bullish,
                                 stars: 5,
                                 description: "Outstanding performance, significantly above industry standards."
                             )
 
                             RatingExplanation(
-                                rating: "Good",
+                                rating: "Solid",
                                 color: AppColors.bullish,
                                 stars: 4,
                                 description: "Strong performance, meets or exceeds most expectations."
                             )
 
                             RatingExplanation(
-                                rating: "Average",
+                                rating: "Moderate",
                                 color: AppColors.neutral,
                                 stars: 3,
                                 description: "Average performance, some strengths and weaknesses."
                             )
 
                             RatingExplanation(
-                                rating: "Weak",
+                                rating: "Soft",
                                 color: AppColors.alertOrange,
                                 stars: 2,
                                 description: "Below-average performance, may require attention."
                             )
 
                             RatingExplanation(
-                                rating: "Poor",
+                                rating: "Low",
                                 color: AppColors.bearish,
                                 stars: 1,
                                 description: "Serious concerns, significant underperformance or risk."

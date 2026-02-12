@@ -66,10 +66,11 @@ struct ReportScoreGauge: View {
 
     private var scoreColor: Color {
         switch score {
-        case 4.5...5.0: return AppColors.bullish
-        case 3.5..<4.5: return AppColors.bullish
-        case 2.5..<3.5: return AppColors.neutral
-        default: return AppColors.bearish
+        case 90...100: return AppColors.bullish          // Excellent Quality Business
+        case 75..<90: return AppColors.bullish           // Strong Quality Business
+        case 50..<75: return AppColors.neutral           // Fair Quality Business
+        case 30..<50: return AppColors.alertOrange       // Weak Quality Business
+        default: return AppColors.bearish                // Distressed Quality Business
         }
     }
 
@@ -93,7 +94,7 @@ struct ReportScoreGauge: View {
 
                 // Score text
                 VStack(spacing: 0) {
-                    Text(String(format: "%.1f", score))
+                    Text(String(format: "%.0f", score))
                         .font(.system(size: size.scoreFontSize, weight: .bold, design: .rounded))
                         .foregroundColor(AppColors.textPrimary)
                     Text("/ \(Int(maxScore))")
@@ -113,7 +114,7 @@ struct ReportScoreGauge: View {
 }
 
 #Preview {
-    ReportScoreGauge(score: 4.1, maxScore: 5.0, label: "Good quality business")
+    ReportScoreGauge(score: 82, maxScore: 100, label: "Strong Quality Business")
         .padding()
         .background(AppColors.background)
         .preferredColorScheme(.dark)

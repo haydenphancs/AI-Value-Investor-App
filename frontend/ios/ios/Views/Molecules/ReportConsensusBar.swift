@@ -291,7 +291,7 @@ struct ReportConsensusBar: View {
             }
         }
     }
-}
+
 
 #Preview {
     ReportConsensusBar(consensus: TickerReportData.sampleOracle.wallStreetConsensus)

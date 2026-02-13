@@ -66,22 +66,27 @@ struct ReportConsensusBar: View {
     private var analystPriceChart: some View {
         VStack(alignment: .leading, spacing: 0) {
             GeometryReader { geometry in
-                let chartWidth = geometry.size.width - 80 // Reserve 80pts for badges
+                let leadingPadding: CGFloat = 20 // Align with Swift Charts leading space
+                let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges and 20pts for leading
 
                 ZStack(alignment: .leading) {
                     // Target zone gradients
                     targetZoneLines(chartWidth: chartWidth, in: geometry)
+                        .offset(x: leadingPadding)
 
                     // Price line chart
                     if !consensus.hedgeFundPriceData.isEmpty {
                         priceLineChart(chartWidth: chartWidth, in: geometry)
+                            .offset(x: leadingPadding)
                     }
 
                     // Current price indicator and dashed line
                     currentPriceIndicator(chartWidth: chartWidth, in: geometry)
+                        .offset(x: leadingPadding)
 
                     // Target badges on the right
                     targetBadges(chartWidth: chartWidth, in: geometry)
+                        .offset(x: leadingPadding)
                 }
             }
             .frame(height: 220)

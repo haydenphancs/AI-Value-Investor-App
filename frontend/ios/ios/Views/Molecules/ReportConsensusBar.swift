@@ -144,6 +144,24 @@ struct ReportConsensusBar: View {
                     Text(hedgeFundNote)
                         .font(AppTypography.subheadline)
                         .foregroundColor(AppColors.textSecondary)
+
+                    // Hedge Fund Flow Chart (Price on top, Buy/Sell volume below)
+                    if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
+                        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                            Text("12-Month Flow")
+                                .font(AppTypography.footnote)
+                                .foregroundColor(AppColors.textMuted)
+                                .padding(.top, AppSpacing.md)
+
+                            SmartMoneyFlowChart(
+                                priceData: consensus.hedgeFundPriceData,
+                                flowData: consensus.hedgeFundFlowData
+                            )
+
+                            SmartMoneyFlowLegend()
+                                .padding(.top, AppSpacing.xs)
+                        }
+                    }
                 }
             }
         }

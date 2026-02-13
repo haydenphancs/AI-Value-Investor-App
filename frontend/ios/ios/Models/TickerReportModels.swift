@@ -653,7 +653,7 @@ enum MoatOverallRating: String {
 
     var meaning: String {
         switch self {
-        case .wide: return "Elite defense based on a dominant pillar."
+        case .wide: return ""
         case .narrow: return "Strong defense, but beatable."
         case .none: return "No structural advantage."
         }

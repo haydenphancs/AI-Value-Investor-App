@@ -542,6 +542,94 @@ struct ReportPriceMovementData {
 
 // MARK: - Moat & Competition
 
+// MARK: - Market Dynamics
+
+enum MarketConcentration: String {
+    case monopoly = "Monopoly"
+    case duopoly = "Duopoly"
+    case oligopoly = "Oligopoly"
+    case fragmented = "Fragmented"
+
+    var color: Color {
+        switch self {
+        case .monopoly: return AppColors.bullish
+        case .duopoly: return AppColors.neutral
+        case .oligopoly: return AppColors.textSecondary
+        case .fragmented: return AppColors.alertOrange
+        }
+    }
+
+    var backgroundColor: Color {
+        switch self {
+        case .monopoly: return AppColors.bullish.opacity(0.15)
+        case .duopoly: return AppColors.neutral.opacity(0.15)
+        case .oligopoly: return AppColors.textSecondary.opacity(0.15)
+        case .fragmented: return AppColors.alertOrange.opacity(0.15)
+        }
+    }
+}
+
+enum LifecyclePhase: String {
+    case emerging = "Emerging"
+    case secularGrowth = "Secular Growth"
+    case mature = "Mature"
+    case declining = "Declining"
+
+    var color: Color {
+        switch self {
+        case .emerging: return AppColors.bullish
+        case .secularGrowth: return AppColors.primaryBlue
+        case .mature: return AppColors.neutral
+        case .declining: return AppColors.bearish
+        }
+    }
+
+    var backgroundColor: Color {
+        switch self {
+        case .emerging: return AppColors.bullish.opacity(0.15)
+        case .secularGrowth: return AppColors.primaryBlue.opacity(0.15)
+        case .mature: return AppColors.neutral.opacity(0.15)
+        case .declining: return AppColors.bearish.opacity(0.15)
+        }
+    }
+}
+
+struct MarketDynamics {
+    let industry: String                    // "Cloud Computing"
+    let concentration: MarketConcentration  // .oligopoly
+    let cagr5Yr: Double                     // 18.5 (percentage)
+    let currentTAM: Double                  // 900 (in billions)
+    let futureTAM: Double                   // 1600 (in billions)
+    let currentYear: String                 // "2025"
+    let futureYear: String                  // "2030"
+    let lifecyclePhase: LifecyclePhase      // .secularGrowth
+
+    var formattedCAGR: String {
+        let sign = cagr5Yr >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", cagr5Yr))%"
+    }
+
+    var formattedCurrentTAM: String {
+        if currentTAM >= 1000 {
+            return String(format: "$%.1fT", currentTAM / 1000)
+        } else {
+            return String(format: "$%.0fB", currentTAM)
+        }
+    }
+
+    var formattedFutureTAM: String {
+        if futureTAM >= 1000 {
+            return String(format: "$%.1fT", futureTAM / 1000)
+        } else {
+            return String(format: "$%.0fB", futureTAM)
+        }
+    }
+
+    var formattedTAMRange: String {
+        "\(formattedCurrentTAM) → \(formattedFutureTAM)"
+    }
+}
+
 enum MoatOverallRating: String {
     case wide = "Wide Moat"
     case narrow = "Narrow Moat"
@@ -600,6 +688,7 @@ struct CompetitorComparison: Identifiable {
 }
 
 struct ReportMoatCompetitionData {
+    let marketDynamics: MarketDynamics
     let overallRating: MoatOverallRating
     let dimensions: [MoatDimension]
     let durabilityNote: String
@@ -934,6 +1023,16 @@ extension TickerReportData {
         ),
         revenueEngine: ReportRevenueEngineData.sampleOracle,
         moatCompetition: ReportMoatCompetitionData(
+            marketDynamics: MarketDynamics(
+                industry: "Cloud Computing",
+                concentration: .oligopoly,
+                cagr5Yr: 18.5,
+                currentTAM: 900,
+                futureTAM: 1600,
+                currentYear: "2025",
+                futureYear: "2030",
+                lifecyclePhase: .secularGrowth
+            ),
             overallRating: .wide,
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

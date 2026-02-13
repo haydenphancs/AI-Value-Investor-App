@@ -87,8 +87,7 @@ struct ReportConsensusBar: View {
             .clipped()
 
             // Date labels
-            if let firstDate = consensus.hedgeFundPriceData.first?.month,
-               let lastDate = consensus.hedgeFundPriceData.last?.month {
+            if let firstDate = consensus.hedgeFundPriceData.first?.month {
                 HStack {
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text(firstDate)
@@ -311,7 +310,7 @@ struct ReportConsensusBar: View {
             }
         }
     }
-
+}
 
 #Preview {
     ReportConsensusBar(consensus: TickerReportData.sampleOracle.wallStreetConsensus)

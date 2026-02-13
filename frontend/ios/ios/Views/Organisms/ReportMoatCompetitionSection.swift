@@ -43,12 +43,6 @@ struct ReportMoatCompetitionSection: View {
                 .font(AppTypography.calloutBold)
                 .foregroundColor(AppColors.textPrimary)
 
-            // Goal subtitle
-            Text("Goal: Prove the market is big and growing.")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
-                .padding(.top, AppSpacing.xxs)
-
             // Industry and Concentration row
             HStack(spacing: AppSpacing.lg) {
                 // Industry
@@ -81,6 +75,7 @@ struct ReportMoatCompetitionSection: View {
                                 .fill(data.marketDynamics.concentration.backgroundColor)
                         )
                 }
+                .alignmentGuide(.firstTextBaseline) { d in d[.top] }
             }
             .padding(.top, AppSpacing.xs)
 
@@ -93,6 +88,7 @@ struct ReportMoatCompetitionSection: View {
                     valueColor: data.marketDynamics.cagr5Yr >= 0 ? AppColors.bullish : AppColors.bearish,
                     subtitle: nil
                 )
+                .frame(maxWidth: 75)
 
                 Divider()
                     .frame(height: 40)
@@ -145,6 +141,7 @@ struct ReportMoatCompetitionSection: View {
                     subtitle: nil,
                     isBadge: true
                 )
+                .frame(maxWidth: 105)
             }
             .padding(.top, AppSpacing.sm)
         }

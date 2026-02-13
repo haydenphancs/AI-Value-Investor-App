@@ -450,6 +450,29 @@ struct ReportWallStreetConsensus {
         String(format: "$%.0f", targetPrice)
     }
 
+    var formattedHighTarget: String {
+        String(format: "$%.0f", highTarget)
+    }
+
+    var formattedLowTarget: String {
+        String(format: "$%.0f", lowTarget)
+    }
+
+    var formattedHighTargetPercent: String {
+        let percent = ((highTarget - currentPrice) / currentPrice) * 100
+        return String(format: "%+.1f%%", percent)
+    }
+
+    var formattedAvgTargetPercent: String {
+        let percent = ((targetPrice - currentPrice) / currentPrice) * 100
+        return String(format: "%+.1f%%", percent)
+    }
+
+    var formattedLowTargetPercent: String {
+        let percent = ((lowTarget - currentPrice) / currentPrice) * 100
+        return String(format: "%+.1f%%", percent)
+    }
+
     var formattedDiscount: String {
         "Trading \(String(format: "%.1f", discountPercent))% below fair value estimate"
     }

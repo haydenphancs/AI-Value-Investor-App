@@ -56,23 +56,26 @@ struct ReportConsensusBar: View {
     private var analystPriceChart: some View {
         VStack(alignment: .leading, spacing: 0) {
             GeometryReader { geometry in
+                let chartWidth = geometry.size.width - 70 // Reserve 70pts for badges
+
                 ZStack(alignment: .leading) {
                     // Target zone lines
-                    targetZoneLines(in: geometry)
+                    targetZoneLines(chartWidth: chartWidth, in: geometry)
 
                     // Price line chart
                     if !consensus.hedgeFundPriceData.isEmpty {
-                        priceLineChart(in: geometry)
+                        priceLineChart(chartWidth: chartWidth, in: geometry)
                     }
 
                     // Current price indicator and dashed line
-                    currentPriceIndicator(in: geometry)
+                    currentPriceIndicator(chartWidth: chartWidth, in: geometry)
 
                     // Target badges on the right
-                    targetBadges(in: geometry)
+                    targetBadges(chartWidth: chartWidth, in: geometry)
                 }
             }
             .frame(height: 200)
+            .clipped()
 
             // Date labels
             if let firstDate = consensus.hedgeFundPriceData.first?.month,
@@ -95,34 +98,34 @@ struct ReportConsensusBar: View {
 
     // MARK: - Chart Components
 
-    private func targetZoneLines(in geometry: GeometryProxy) -> some View {
+    private func targetZoneLines(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         Group {
             // High target line
             Rectangle()
                 .fill(AppColors.bullish.opacity(0.2))
-                .frame(height: 1)
+                .frame(width: chartWidth, height: 1)
                 .offset(y: yPosition(for: consensus.highTarget, in: geometry))
 
             // Average target line
             Rectangle()
                 .fill(AppColors.bullish.opacity(0.2))
-                .frame(height: 1)
+                .frame(width: chartWidth, height: 1)
                 .offset(y: yPosition(for: consensus.targetPrice, in: geometry))
 
             // Low target line
             Rectangle()
                 .fill(AppColors.bearish.opacity(0.2))
-                .frame(height: 1)
+                .frame(width: chartWidth, height: 1)
                 .offset(y: yPosition(for: consensus.lowTarget, in: geometry))
         }
     }
 
-    private func priceLineChart(in geometry: GeometryProxy) -> some View {
+    private func priceLineChart(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         Path { path in
             let points = consensus.hedgeFundPriceData
             guard !points.isEmpty else { return }
 
-            let xStep = geometry.size.width / CGFloat(max(points.count - 1, 1))
+            let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
 
             // Start path
             let firstY = yPosition(for: points[0].price, in: geometry)
@@ -138,15 +141,15 @@ struct ReportConsensusBar: View {
         .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
     }
 
-    private func currentPriceIndicator(in geometry: GeometryProxy) -> some View {
+    private func currentPriceIndicator(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         let yPos = yPosition(for: consensus.currentPrice, in: geometry)
-        let xPos = geometry.size.width - 60 // Position near the end
+        let xPos = chartWidth - 50 // Position near the end of chart
 
         return Group {
             // Dashed horizontal line
             Path { path in
                 path.move(to: CGPoint(x: 0, y: yPos))
-                path.addLine(to: CGPoint(x: geometry.size.width, y: yPos))
+                path.addLine(to: CGPoint(x: chartWidth, y: yPos))
             }
             .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
@@ -166,8 +169,8 @@ struct ReportConsensusBar: View {
         }
     }
 
-    private func targetBadges(in geometry: GeometryProxy) -> some View {
-        let xPos = geometry.size.width + 5
+    private func targetBadges(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+        let xPos = chartWidth + 8 // Position badges just after chart area
 
         return Group {
             // High target badge

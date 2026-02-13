@@ -28,7 +28,7 @@ class TickerReportViewModel: ObservableObject {
         DeepDiveModule(title: "Fundamentals & Growth", iconName: "chart.bar.fill", type: .fundamentalsGrowth),
         DeepDiveModule(title: "Future Forecast", iconName: "binoculars.fill", type: .futureForecast),
         DeepDiveModule(title: "Insider & Management", iconName: "person.2.fill", type: .insiderManagement),
-        DeepDiveModule(title: "Moat & Competition", iconName: "shield.fill", type: .moatCompetition),
+        DeepDiveModule(title: "Industry & Competitive Moat", iconName: "shield.fill", type: .moatCompetition),
         DeepDiveModule(title: "Macro-Economic & Geopolitical", iconName: "globe", type: .macroGeopolitical),
         DeepDiveModule(title: "Wall Street Consensus", iconName: "building.columns.fill", type: .wallStreetConsensus)
     ]

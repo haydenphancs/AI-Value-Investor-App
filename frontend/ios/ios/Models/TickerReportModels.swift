@@ -437,6 +437,8 @@ struct ReportWallStreetConsensus {
     let valuationStatus: ValuationStatus
     let discountPercent: Double         // "Trading 33.4% below fair value estimate"
     let hedgeFundNote: String?          // "Net inflow of $430M from institutional..."
+    let hedgeFundPriceData: [StockPriceDataPoint]   // Price data for hedge fund chart
+    let hedgeFundFlowData: [SmartMoneyFlowDataPoint] // Buy/sell volume data
     let momentumUpgrades: Int
     let momentumDowngrades: Int
 
@@ -1151,6 +1153,34 @@ extension TickerReportData {
             valuationStatus: .deepUndervalued,
             discountPercent: 33.4,
             hedgeFundNote: "Net inflow of $430M from institutional investors last quarter.",
+            hedgeFundPriceData: [
+                StockPriceDataPoint(month: "02/2025", price: 163.20),
+                StockPriceDataPoint(month: "03/2025", price: 162.80),
+                StockPriceDataPoint(month: "04/2025", price: 161.40),
+                StockPriceDataPoint(month: "05/2025", price: 160.80),
+                StockPriceDataPoint(month: "06/2025", price: 159.20),
+                StockPriceDataPoint(month: "07/2025", price: 155.30),
+                StockPriceDataPoint(month: "08/2025", price: 150.10),
+                StockPriceDataPoint(month: "09/2025", price: 148.60),
+                StockPriceDataPoint(month: "10/2025", price: 145.20),
+                StockPriceDataPoint(month: "11/2025", price: 143.80),
+                StockPriceDataPoint(month: "12/2025", price: 141.50),
+                StockPriceDataPoint(month: "01/2026", price: 142.82)
+            ],
+            hedgeFundFlowData: [
+                SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 42.1, sellVolume: 35.2),
+                SmartMoneyFlowDataPoint(month: "03/2025", buyVolume: 38.5, sellVolume: 42.1),
+                SmartMoneyFlowDataPoint(month: "04/2025", buyVolume: 35.2, sellVolume: 48.3),
+                SmartMoneyFlowDataPoint(month: "05/2025", buyVolume: 48.9, sellVolume: 32.5),
+                SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 45.2, sellVolume: 38.5),
+                SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 39.8, sellVolume: 45.2),
+                SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 52.1, sellVolume: 41.3),
+                SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 44.5, sellVolume: 38.9),
+                SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 38.9, sellVolume: 55.2),
+                SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 51.2, sellVolume: 36.8),
+                SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 48.5, sellVolume: 33.2),
+                SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 55.8, sellVolume: 31.2)
+            ],
             momentumUpgrades: 8,
             momentumDowngrades: 3
         ),

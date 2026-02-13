@@ -637,21 +637,44 @@ enum MoatOverallRating: String {
 
     var color: Color {
         switch self {
-        case .wide: return AppColors.bullish
-        case .narrow: return AppColors.neutral
-        case .none: return AppColors.bearish
+        case .wide: return AppColors.alertPurple      // Indigo-500 (Purple) - Elite defense
+        case .narrow: return AppColors.accentYellow   // Yellow-500 - Strong but beatable
+        case .none: return AppColors.textSecondary    // Gray-500 - No structural advantage
         }
     }
 
     var backgroundColor: Color {
         switch self {
-        case .wide: return AppColors.bullish.opacity(0.15)
-        case .narrow: return AppColors.neutral.opacity(0.15)
-        case .none: return AppColors.bearish.opacity(0.15)
+        case .wide: return AppColors.alertPurple.opacity(0.15)
+        case .narrow: return AppColors.accentYellow.opacity(0.15)
+        case .none: return AppColors.textSecondary.opacity(0.15)
+        }
+    }
+
+    var meaning: String {
+        switch self {
+        case .wide: return "Elite defense based on a dominant pillar."
+        case .narrow: return "Strong defense, but beatable."
+        case .none: return "No structural advantage."
         }
     }
 
     var iconName: String { "shield.lefthalf.filled" }
+
+    // Calculate moat rating from dimensions using the Max-Score Rule
+    static func from(dimensions: [MoatDimension]) -> MoatOverallRating {
+        guard let maxScore = dimensions.map({ $0.score }).max() else {
+            return .none
+        }
+
+        if maxScore >= 8.5 {
+            return .wide    // Elite defense
+        } else if maxScore >= 7.0 {
+            return .narrow  // Strong but beatable
+        } else {
+            return .none    // No structural advantage
+        }
+    }
 }
 
 struct MoatDimension: Identifiable {
@@ -689,11 +712,25 @@ struct CompetitorComparison: Identifiable {
 
 struct ReportMoatCompetitionData {
     let marketDynamics: MarketDynamics
-    let overallRating: MoatOverallRating
     let dimensions: [MoatDimension]
     let durabilityNote: String
     let competitors: [CompetitorComparison]
     let competitiveInsight: String
+
+    // Computed: Overall rating based on Max-Score Rule
+    var overallRating: MoatOverallRating {
+        MoatOverallRating.from(dimensions: dimensions)
+    }
+
+    // Computed: Primary driver (highest scoring dimension)
+    var primaryDriver: MoatDimension? {
+        dimensions.max(by: { $0.score < $1.score })
+    }
+
+    // Computed: Primary driver name
+    var primaryDriverName: String {
+        primaryDriver?.name ?? "Unknown"
+    }
 }
 
 // MARK: - Macro & Geopolitical
@@ -1033,7 +1070,6 @@ extension TickerReportData {
                 futureYear: "2030",
                 lifecyclePhase: .secularGrowth
             ),
-            overallRating: .wide,
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),
                 MoatDimension(name: "Network Effects", score: 5.8, peerScore: 7.0),

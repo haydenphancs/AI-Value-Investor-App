@@ -19,26 +19,50 @@ struct ReportConsensusBar: View {
         let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
         let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
         let allPrices = targetPrices + historicalPrices
-        return allPrices.min() ?? consensus.lowTarget
+        // Add extra padding at the bottom to push content up
+        let minValue = allPrices.min() ?? consensus.lowTarget
+        let maxValue = allPrices.max() ?? consensus.highTarget
+        let range = maxValue - minValue
+        return minValue - (range * 0.3) // Add 30% padding below
     }
 
     private var maxPrice: Double {
         let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
         let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
         let allPrices = targetPrices + historicalPrices
-        return allPrices.max() ?? consensus.highTarget
+        // Add less padding at the top
+        let maxValue = allPrices.max() ?? consensus.highTarget
+        let minValue = allPrices.min() ?? consensus.lowTarget
+        let range = maxValue - minValue
+        return maxValue + (range * 0.1) // Add 10% padding above
+    }
+
+    /// Format month string from "MM/YYYY" to "MM/YY"
+    private func formatMonthLabel(_ month: String) -> String {
+        // Convert "02/2025" to "02/25"
+        let components = month.split(separator: "/")
+        guard components.count == 2,
+              let year = components.last,
+              year.count == 4 else {
+            return month // Return as-is if format is unexpected
+        }
+        let shortYear = year.suffix(2)
+        return "\(components[0])/\(shortYear)"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        VStack(alignment: .leading, spacing: 0) {
             // Title and Description
             analystPriceTargetHeader
+                .padding(.bottom, AppSpacing.lg)
 
             // Price Chart with Target Zones
             analystPriceChart
 
             // Momentum
             momentumSection
+                .padding(.top, -20)
+                .padding(.bottom, AppSpacing.lg)
 
             // Hedge Funds
             hedgeFundsSection
@@ -50,8 +74,8 @@ struct ReportConsensusBar: View {
     private var analystPriceTargetHeader: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Analyst Price Target")
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(AppColors.textPrimary)
+                .font(AppTypography.calloutBold)
+                .foregroundColor(AppColors.textSecondary)
 
             Text("One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus. Target \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget)). Current price: \(consensus.formattedCurrentPrice).")
                 .font(AppTypography.subheadline)
@@ -64,117 +88,34 @@ struct ReportConsensusBar: View {
     // MARK: - Analyst Price Chart
 
     private var analystPriceChart: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            GeometryReader { geometry in
-                let leadingPadding: CGFloat = 20 // Align with Swift Charts leading space
-                let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges and 20pts for leading
+        GeometryReader { geometry in
+            let leadingPadding: CGFloat = 20 // Align with Swift Charts leading space
+            let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges and 20pts for leading
 
-                ZStack(alignment: .leading) {
-                    // Target zone gradients
-                    targetZoneLines(chartWidth: chartWidth, in: geometry)
-                        .offset(x: leadingPadding)
-
-                    // Price line chart
-                    if !consensus.hedgeFundPriceData.isEmpty {
-                        priceLineChart(chartWidth: chartWidth, in: geometry)
-                            .offset(x: leadingPadding)
-                    }
-
-                    // Current price indicator and dashed line
-                    currentPriceIndicator(chartWidth: chartWidth, in: geometry)
-                        .offset(x: leadingPadding)
-
-                    // Target badges on the right
-                    targetBadges(chartWidth: chartWidth, in: geometry)
-                        .offset(x: leadingPadding)
+            ZStack(alignment: .leading) {
+                // Price line chart
+                if !consensus.hedgeFundPriceData.isEmpty {
+                    priceLineChart(chartWidth: chartWidth, in: geometry)
+                        .offset(x: leadingPadding, y: -120) // Move up 10 more points
                 }
-            }
-            .frame(height: 220)
-            .clipped()
 
-            // Date labels
-            if !consensus.hedgeFundPriceData.isEmpty,
-               let firstDate = consensus.hedgeFundPriceData.first?.month,
-               let lastDate = consensus.hedgeFundPriceData.last?.month {
-                HStack {
-                    Text(firstDate)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(AppColors.textMuted)
+                // Current price indicator and dashed line
+                currentPriceIndicator(chartWidth: chartWidth, in: geometry)
+                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
 
-                    Spacer()
+                // Target pole with points (far right)
+                targetPole(chartWidth: chartWidth, in: geometry)
+                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
 
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(AppColors.textMuted)
-
-                    Spacer()
-
-                    Text(lastDate)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(AppColors.textMuted)
-                }
-                .padding(.top, AppSpacing.sm)
+                // Target badges on the right
+                targetBadges(chartWidth: chartWidth, in: geometry)
+                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
             }
         }
+        .frame(height: 260)
     }
 
     // MARK: - Chart Components
-
-    private func targetZoneLines(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
-        let highY = yPosition(for: consensus.highTarget, in: geometry)
-        let avgY = yPosition(for: consensus.targetPrice, in: geometry)
-        let lowY = yPosition(for: consensus.lowTarget, in: geometry)
-
-        return Group {
-            // Gradient zone from high to average (bullish zone)
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            AppColors.bullish.opacity(0.15),
-                            AppColors.bullish.opacity(0.05)
-                        ]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: chartWidth, height: avgY - highY)
-                .offset(x: 0, y: highY)
-
-            // Gradient zone from average to low (bearish zone)
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            AppColors.bullish.opacity(0.05),
-                            AppColors.bearish.opacity(0.15)
-                        ]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: chartWidth, height: lowY - avgY)
-                .offset(x: 0, y: avgY)
-
-            // High target line
-            Rectangle()
-                .fill(AppColors.bullish.opacity(0.4))
-                .frame(width: chartWidth, height: 1.5)
-                .offset(y: highY)
-
-            // Average target line
-            Rectangle()
-                .fill(AppColors.primaryBlue.opacity(0.6))
-                .frame(width: chartWidth, height: 2)
-                .offset(y: avgY)
-
-            // Low target line
-            Rectangle()
-                .fill(AppColors.bearish.opacity(0.4))
-                .frame(width: chartWidth, height: 1.5)
-                .offset(y: lowY)
-        }
-    }
 
     private func priceLineChart(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         Path { path in
@@ -228,44 +169,82 @@ struct ReportConsensusBar: View {
         }
     }
 
+    private func targetPole(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+        let xPos = chartWidth - 3 // Position slightly left of the edge
+        let highY = yPosition(for: consensus.highTarget, in: geometry)
+        let avgY = yPosition(for: consensus.targetPrice, in: geometry)
+        let lowY = yPosition(for: consensus.lowTarget, in: geometry)
+        
+        // Extend the pole beyond the points
+        let poleExtension: CGFloat = 20
+        let extendedHighY = highY - poleExtension
+        let extendedLowY = lowY + poleExtension
+
+        return ZStack(alignment: .leading) {
+            // Thick vertical pole from low to high (extended)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(AppColors.textMuted.opacity(0.4))
+                .frame(width: 6, height: extendedLowY - extendedHighY)
+                .offset(x: xPos - 3, y: extendedHighY + (extendedLowY - extendedHighY) / 2)
+
+            // High target point (green)
+            Circle()
+                .fill(AppColors.bullish)
+                .frame(width: 12, height: 12)
+                .offset(x: xPos - 6, y: highY)
+
+            // Average target point (blue)
+            Circle()
+                .fill(AppColors.primaryBlue)
+                .frame(width: 12, height: 12)
+                .offset(x: xPos - 6, y: avgY)
+
+            // Low target point (red)
+            Circle()
+                .fill(AppColors.bearish)
+                .frame(width: 12, height: 12)
+                .offset(x: xPos - 6, y: lowY)
+        }
+    }
+
     private func targetBadges(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
-        let xPos = chartWidth + 10 // Position badges just after chart area
+        let xPos = chartWidth + 5 // Position badges closer to pole
         let highY = yPosition(for: consensus.highTarget, in: geometry)
         let avgY = yPosition(for: consensus.targetPrice, in: geometry)
         let lowY = yPosition(for: consensus.lowTarget, in: geometry)
 
         return Group {
-            // High target badge
+            // High target badge - centered vertically with the point
             targetBadge(
                 label: "Max",
                 price: consensus.formattedHighTarget,
                 percent: consensus.formattedHighTargetPercent,
                 color: AppColors.bullish
             )
-            .offset(x: xPos, y: highY - 14)
+            .offset(x: xPos, y: highY + 1)
 
-            // Average target badge
+            // Average target badge - centered vertically with the point
             targetBadge(
                 label: "Avg",
                 price: consensus.formattedTargetPrice,
                 percent: consensus.formattedAvgTargetPercent,
                 color: AppColors.primaryBlue
             )
-            .offset(x: xPos, y: avgY - 14)
+            .offset(x: xPos, y: avgY + 1)
 
-            // Low target badge
+            // Low target badge - centered vertically with the point
             targetBadge(
                 label: "Min",
                 price: consensus.formattedLowTarget,
                 percent: consensus.formattedLowTargetPercent,
                 color: AppColors.bearish
             )
-            .offset(x: xPos, y: lowY - 14)
+            .offset(x: xPos, y: lowY + 1)
         }
     }
 
     private func targetBadge(label: String, price: String, percent: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .center, spacing: 2) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundColor(AppColors.textMuted)

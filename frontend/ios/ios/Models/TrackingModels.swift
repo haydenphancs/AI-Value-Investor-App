@@ -622,6 +622,127 @@ extension WhaleTradeGroupActivity {
             )
         }
     }
+
+    // Extended sample data for "All Recent Trades" view
+    static let allSampleData: [WhaleTradeGroupActivity] = [
+        WhaleTradeGroupActivity(
+            entityName: "Warren Buffett",
+            entityAvatarName: "avatar_buffett",
+            action: .bought,
+            tradeCount: 6,
+            totalAmount: "$4.34B",
+            summary: "Significant rebalancing, trimmed 3 Tech positions",
+            date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Bill Ackman",
+            entityAvatarName: "avatar_ackman",
+            action: .bought,
+            tradeCount: 4,
+            totalAmount: "$2.82B",
+            summary: nil,
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 26))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Nancy Pelosi",
+            entityAvatarName: "avatar_pelosi",
+            action: .bought,
+            tradeCount: 8,
+            totalAmount: "$6.53B",
+            summary: "Huge bought, add 4 new positions in Tech sector",
+            date: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 2))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Warren Buffett",
+            entityAvatarName: "avatar_buffett",
+            action: .sold,
+            tradeCount: 12,
+            totalAmount: "$4.5B",
+            summary: "Significant sold with 3 closed positions in Banking sector",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 14))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Cathie Wood",
+            entityAvatarName: "avatar_wood",
+            action: .bought,
+            tradeCount: 5,
+            totalAmount: "$1.92B",
+            summary: "New positions in AI and robotics sectors",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 10))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Ray Dalio",
+            entityAvatarName: "avatar_dalio",
+            action: .sold,
+            tradeCount: 7,
+            totalAmount: "$3.21B",
+            summary: "Reduced exposure to emerging markets",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 8))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Carl Icahn",
+            entityAvatarName: "avatar_icahn",
+            action: .bought,
+            tradeCount: 3,
+            totalAmount: "$5.67B",
+            summary: "Large stake in energy sector",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 5))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Michael Burry",
+            entityAvatarName: "avatar_burry",
+            action: .sold,
+            tradeCount: 9,
+            totalAmount: "$2.45B",
+            summary: "Closed multiple tech positions",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 3))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Stanley Druckenmiller",
+            entityAvatarName: "avatar_druckenmiller",
+            action: .bought,
+            tradeCount: 6,
+            totalAmount: "$4.11B",
+            summary: "Increased healthcare holdings",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 1))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "George Soros",
+            entityAvatarName: "avatar_soros",
+            action: .bought,
+            tradeCount: 4,
+            totalAmount: "$3.87B",
+            summary: "Strategic moves in financial sector",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 28))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "David Tepper",
+            entityAvatarName: "avatar_tepper",
+            action: .sold,
+            tradeCount: 8,
+            totalAmount: "$2.93B",
+            summary: "Portfolio rebalancing across sectors",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 25))!
+        ),
+        WhaleTradeGroupActivity(
+            entityName: "Ken Griffin",
+            entityAvatarName: "avatar_griffin",
+            action: .bought,
+            tradeCount: 11,
+            totalAmount: "$6.78B",
+            summary: "Major investment in growth stocks",
+            date: Calendar.current.date(from: DateComponents(year: 2025, month: 11, day: 22))!
+        )
+    ]
+
+    static var allGroupedSampleData: [GroupedWhaleTrades] {
+        allSampleData.map { activity in
+            GroupedWhaleTrades(
+                sectionTitle: activity.formattedDate,
+                activities: [activity]
+            )
+        }
+    }
 }
 
 extension WhaleAlertBanner {

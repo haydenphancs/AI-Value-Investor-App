@@ -254,7 +254,8 @@ struct WhalesTabContent: View {
                 if !viewModel.groupedWhaleTrades.isEmpty {
                     WhaleTradesTimelineSection(
                         groupedTrades: viewModel.groupedWhaleTrades,
-                        onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) }
+                        onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) },
+                        onMoreTapped: { viewModel.viewMoreRecentTrades() }
                     )
                 }
 
@@ -286,6 +287,9 @@ struct WhalesTabContent: View {
         }
         .navigationDestination(isPresented: $viewModel.showAllWhales) {
             AllWhalesView(viewModel: viewModel)
+        }
+        .navigationDestination(isPresented: $viewModel.showAllTrades) {
+            AllRecentTradesView(viewModel: viewModel)
         }
     }
 }
@@ -338,15 +342,29 @@ struct FollowedWhalesRow: View {
 struct WhaleTradesTimelineSection: View {
     let groupedTrades: [GroupedWhaleTrades]
     var onActivityTapped: ((WhaleTradeGroupActivity) -> Void)?
+    var onMoreTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Section Header
-            Text("Recent Trades")
-                .font(AppTypography.title3)
-                .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.bottom, AppSpacing.md)
+            // Section Header with "more" button
+            HStack {
+                Text("Recent Trades")
+                    .font(AppTypography.title3)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Button {
+                    onMoreTapped?()
+                } label: {
+                    Text("more")
+                        .font(AppTypography.callout)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.md)
 
             // Timeline
             VStack(spacing: 0) {

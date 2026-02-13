@@ -187,23 +187,23 @@ struct ReportConsensusBar: View {
                 .frame(width: 6, height: extendedLowY - extendedHighY)
                 .offset(x: xPos - 3, y: extendedHighY + (extendedLowY - extendedHighY) / 2)
 
-            // High target point (green)
+            // High target point (green) - smaller
             Circle()
                 .fill(AppColors.bullish)
-                .frame(width: 12, height: 12)
-                .offset(x: xPos - 6, y: highY)
+                .frame(width: 10, height: 10)
+                .offset(x: xPos - 5, y: highY)
 
-            // Average target point (blue)
+            // Average target point (blue) - smaller
             Circle()
                 .fill(AppColors.primaryBlue)
-                .frame(width: 12, height: 12)
-                .offset(x: xPos - 6, y: avgY)
+                .frame(width: 10, height: 10)
+                .offset(x: xPos - 5, y: avgY)
 
-            // Low target point (red)
+            // Low target point (red) - smaller
             Circle()
                 .fill(AppColors.bearish)
-                .frame(width: 12, height: 12)
-                .offset(x: xPos - 6, y: lowY)
+                .frame(width: 10, height: 10)
+                .offset(x: xPos - 5, y: lowY)
         }
     }
 

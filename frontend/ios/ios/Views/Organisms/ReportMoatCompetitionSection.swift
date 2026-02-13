@@ -189,24 +189,52 @@ struct ReportMoatCompetitionSection: View {
     // MARK: - Moat Rating Header
 
     private var moatRatingHeader: some View {
-        HStack(spacing: AppSpacing.md) {
-            // Moat badge (styled like RISING SEGMENT)
-            Text(data.overallRating.rawValue.uppercased())
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(data.overallRating.color)
-                .padding(.horizontal, AppSpacing.sm)
-                .padding(.vertical, AppSpacing.xs)
-                .background(
-                    Capsule()
-                        .fill(data.overallRating.backgroundColor)
-                )
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            // Top row: Badge + Legend
+            HStack(spacing: AppSpacing.md) {
+                // Moat badge (styled like RISING SEGMENT)
+                Text(data.overallRating.rawValue.uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(data.overallRating.color)
+                    .padding(.horizontal, AppSpacing.sm)
+                    .padding(.vertical, AppSpacing.xs)
+                    .background(
+                        Capsule()
+                            .fill(data.overallRating.backgroundColor)
+                    )
 
-            Spacer()
+                Spacer()
 
-            // Legend
-            VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                legendItem(color: AppColors.primaryBlue, label: "Company")
-                legendItem(color: AppColors.textMuted, label: "Peer Avg")
+                // Legend
+                VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                    legendItem(color: AppColors.primaryBlue, label: "Company")
+                    legendItem(color: AppColors.textMuted, label: "Peer Avg")
+                }
+            }
+
+            // Primary Driver & Meaning
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                HStack(spacing: AppSpacing.xs) {
+                    Text("Primary Driver:")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+
+                    Text(data.primaryDriverName)
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    if let driver = data.primaryDriver {
+                        Text("(\(String(format: "%.1f", driver.score))/10)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(data.overallRating.color)
+                    }
+                }
+
+                Text(data.overallRating.meaning)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .italic()
             }
         }
     }

@@ -2,7 +2,7 @@
 //  ReportScoreGauge.swift
 //  ios
 //
-//  Atom: Circular score display for the report quality rating (e.g. 4.1/5)
+//  Atom: Circular score display for the report quality rating (e.g. 82)
 //
 
 import SwiftUI
@@ -93,14 +93,9 @@ struct ReportScoreGauge: View {
                     .rotationEffect(.degrees(-90))
 
                 // Score text
-                VStack(spacing: 0) {
-                    Text(String(format: "%.0f", score))
-                        .font(.system(size: size.scoreFontSize, weight: .bold, design: .rounded))
-                        .foregroundColor(AppColors.textPrimary)
-                    Text("/ \(Int(maxScore))")
-                        .font(.system(size: size.maxScoreFontSize))
-                        .foregroundColor(AppColors.textSecondary)
-                }
+                Text(String(format: "%.0f", score))
+                    .font(.system(size: size.scoreFontSize, weight: .bold, design: .rounded))
+                    .foregroundColor(AppColors.textPrimary)
             }
 
             if !label.isEmpty {

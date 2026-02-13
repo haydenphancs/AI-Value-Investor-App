@@ -453,6 +453,42 @@ struct ReportWallStreetConsensus {
     var formattedDiscount: String {
         "Trading \(String(format: "%.1f", discountPercent))% below fair value estimate"
     }
+
+    // Upside/Downside calculations
+    var lowTargetPercent: Double {
+        ((lowTarget - currentPrice) / currentPrice) * 100
+    }
+
+    var avgTargetPercent: Double {
+        ((targetPrice - currentPrice) / currentPrice) * 100
+    }
+
+    var highTargetPercent: Double {
+        ((highTarget - currentPrice) / currentPrice) * 100
+    }
+
+    var formattedLowTarget: String {
+        String(format: "$%.2f", lowTarget)
+    }
+
+    var formattedHighTarget: String {
+        String(format: "$%.2f", highTarget)
+    }
+
+    var formattedLowTargetPercent: String {
+        let sign = lowTargetPercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", lowTargetPercent))%"
+    }
+
+    var formattedAvgTargetPercent: String {
+        let sign = avgTargetPercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", avgTargetPercent))%"
+    }
+
+    var formattedHighTargetPercent: String {
+        let sign = highTargetPercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", highTargetPercent))%"
+    }
 }
 
 // MARK: - Critical Factor

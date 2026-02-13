@@ -150,7 +150,7 @@ struct ReportConsensusBar: View {
             .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
 
             // Current price badge - positioned at the end of the price line
-            if let lastPrice = consensus.hedgeFundPriceData.last {
+            if !consensus.hedgeFundPriceData.isEmpty {
                 let lastIndex = consensus.hedgeFundPriceData.count - 1
                 let xStep = chartWidth / CGFloat(max(consensus.hedgeFundPriceData.count - 1, 1))
                 let xPos = CGFloat(lastIndex) * xStep

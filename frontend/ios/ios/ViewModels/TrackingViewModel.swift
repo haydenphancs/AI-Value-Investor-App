@@ -40,7 +40,9 @@ class TrackingViewModel: ObservableObject {
     @Published var heroWhales: [TrendingWhale] = TrendingWhale.heroWhalesData
     @Published var allPopularWhales: [TrendingWhale] = TrendingWhale.allPopularWhalesData
     @Published var showAllWhales: Bool = false
+    @Published var showAllTrades: Bool = false
     @Published var groupedWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.groupedSampleData
+    @Published var allWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.allGroupedSampleData
     @Published var whaleAlertBanner: WhaleAlertBanner? = WhaleAlertBanner.sampleData
 
     // Loading States
@@ -255,6 +257,10 @@ class TrackingViewModel: ObservableObject {
 
     func viewMorePopularWhales() {
         showAllWhales = true
+    }
+
+    func viewMoreRecentTrades() {
+        showAllTrades = true
     }
 
     func viewAssetDetail(_ asset: TrackedAsset) {

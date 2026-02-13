@@ -255,7 +255,7 @@ struct WhalesTabContent: View {
                     WhaleTradesTimelineSection(
                         groupedTrades: viewModel.groupedWhaleTrades,
                         onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) },
-                        onMoreTapped: { print("More recent trades tapped") }
+                        onMoreTapped: { viewModel.viewMoreRecentTrades() }
                     )
                 }
 
@@ -287,6 +287,9 @@ struct WhalesTabContent: View {
         }
         .navigationDestination(isPresented: $viewModel.showAllWhales) {
             AllWhalesView(viewModel: viewModel)
+        }
+        .navigationDestination(isPresented: $viewModel.showAllTrades) {
+            AllRecentTradesView(viewModel: viewModel)
         }
     }
 }
@@ -343,7 +346,7 @@ struct WhaleTradesTimelineSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Section Header
+            // Section Header with "more" button
             HStack {
                 Text("Recent Trades")
                     .font(AppTypography.title3)

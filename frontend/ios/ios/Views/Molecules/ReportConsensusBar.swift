@@ -15,6 +15,20 @@ struct ReportConsensusBar: View {
         return (consensus.currentPrice - consensus.lowTarget) / (consensus.highTarget - consensus.lowTarget)
     }
 
+    private var minPrice: Double {
+        let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
+        let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
+        let allPrices = targetPrices + historicalPrices
+        return allPrices.min() ?? consensus.lowTarget
+    }
+
+    private var maxPrice: Double {
+        let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
+        let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
+        let allPrices = targetPrices + historicalPrices
+        return allPrices.max() ?? consensus.highTarget
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Title and Description
@@ -76,20 +90,22 @@ struct ReportConsensusBar: View {
             if let firstDate = consensus.hedgeFundPriceData.first?.month,
                let lastDate = consensus.hedgeFundPriceData.last?.month {
                 HStack {
-                    Text(firstDate)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                    Text(consensus.formattedTargetPrice)
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text(firstDate)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                        Text(consensus.formattedTargetPrice)
+                            .font(AppTypography.calloutBold)
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
 
-                Spacer()
+                    Spacer()
 
-                VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                    Text("High")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                        Text("High")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
                 }
                 .padding(.top, AppSpacing.xs)
             }
@@ -231,34 +247,38 @@ struct ReportConsensusBar: View {
                 .font(AppTypography.calloutBold)
                 .foregroundColor(AppColors.textSecondary)
 
-                HStack(spacing: AppSpacing.lg) {
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(AppColors.bullish)
-                        Text("\(consensus.momentumUpgrades)")
-                            .font(AppTypography.subheadline)
-                            .foregroundColor(AppColors.textPrimary)
-                        Text("Upgrades")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+            HStack(spacing: AppSpacing.lg) {
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(AppColors.bullish)
+                    Text("\(consensus.momentumUpgrades)")
+                        .font(AppTypography.subheadline)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Upgrades")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
 
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(AppColors.bearish)
-                        Text("\(consensus.momentumDowngrades)")
-                            .font(AppTypography.subheadline)
-                            .foregroundColor(AppColors.textPrimary)
-                        Text("Downgrades")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(AppColors.bearish)
+                    Text("\(consensus.momentumDowngrades)")
+                        .font(AppTypography.subheadline)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Downgrades")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
                 }
             }
+        }
+    }
 
-            // Hedge Funds
+    // MARK: - Hedge Funds Section
+
+    private var hedgeFundsSection: some View {
+        Group {
             if let hedgeFundNote = consensus.hedgeFundNote {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text("Hedge Funds")

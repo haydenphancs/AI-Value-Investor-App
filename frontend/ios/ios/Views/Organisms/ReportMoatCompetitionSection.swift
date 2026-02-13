@@ -137,9 +137,9 @@ struct ReportMoatCompetitionSection: View {
                 marketMetricColumn(
                     label: "Lifecycle Phase",
                     value: data.marketDynamics.lifecyclePhase.rawValue,
-                    valueColor: data.marketDynamics.lifecyclePhase.color,
+                    valueColor: AppColors.textPrimary,
                     subtitle: nil,
-                    isBadge: true
+                    isBadge: false
                 )
                 .frame(maxWidth: 105)
             }
@@ -173,7 +173,7 @@ struct ReportMoatCompetitionSection: View {
                     .minimumScaleFactor(0.8)
             } else {
                 Text(value)
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(valueColor)
             }
 
@@ -247,6 +247,7 @@ struct ReportMoatCompetitionSection: View {
             Text(label)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                .frame(minWidth: 55, alignment: .leading)
         }
     }
 

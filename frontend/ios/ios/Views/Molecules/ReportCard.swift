@@ -70,7 +70,7 @@ struct ReportCard: View {
                         // Right: Score Gauge
                         ReportScoreGauge(
                             score: rating,
-                            maxScore: 5.0,
+                            maxScore: 100,
                             label: "",
                             size: .small
                         )

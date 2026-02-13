@@ -243,8 +243,8 @@ struct AnalysisReport: Identifiable {
     let persona: AnalysisPersona
     let status: ReportStatus
     let progress: Double? // 0.0 to 1.0, only for processing
-    let rating: Double?   // 0.0 to 5.0, only for ready
-    let ratingLabel: String? // e.g. "Good quality business", only for ready
+    let rating: Double?   // 0-100, only for ready
+    let ratingLabel: String? // e.g. "Strong Quality Business", only for ready
     let date: Date
     let isRefunded: Bool
 
@@ -270,8 +270,8 @@ struct AnalysisReport: Identifiable {
             persona: .warrenBuffett,
             status: .ready,
             progress: nil,
-            rating: 4.2,
-            ratingLabel: "Good quality business",
+            rating: 82,
+            ratingLabel: "Strong Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 7)) ?? Date(),
             isRefunded: false
         ),
@@ -306,8 +306,8 @@ struct AnalysisReport: Identifiable {
             persona: .warrenBuffett,
             status: .ready,
             progress: nil,
-            rating: 4.5,
-            ratingLabel: "Excellent quality business",
+            rating: 90,
+            ratingLabel: "Excellent Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 24)) ?? Date(),
             isRefunded: false
         ),
@@ -318,8 +318,8 @@ struct AnalysisReport: Identifiable {
             persona: .peterLynch,
             status: .ready,
             progress: nil,
-            rating: 5.0,
-            ratingLabel: "Outstanding quality business",
+            rating: 95,
+            ratingLabel: "Excellent Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 23)) ?? Date(),
             isRefunded: false
         )

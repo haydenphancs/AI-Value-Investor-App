@@ -141,10 +141,6 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.calloutBold)
                         .foregroundColor(AppColors.textSecondary)
 
-                    Text(hedgeFundNote)
-                        .font(AppTypography.subheadline)
-                        .foregroundColor(AppColors.textSecondary)
-
                     // Hedge Fund Flow Chart (Price on top, Buy/Sell volume below)
                     if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -162,6 +158,11 @@ struct ReportConsensusBar: View {
                                 .padding(.top, AppSpacing.xs)
                         }
                     }
+
+                    Text(hedgeFundNote)
+                        .font(AppTypography.subheadline)
+                        .foregroundColor(AppColors.textSecondary)
+                        .padding(.top, AppSpacing.sm)
                 }
             }
         }

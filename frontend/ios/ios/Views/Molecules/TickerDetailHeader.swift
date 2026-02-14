@@ -9,19 +9,22 @@ import SwiftUI
 
 struct TickerDetailHeader: View {
     var onBackTapped: (() -> Void)?
+    var onSearchTapped: (() -> Void)?
     var onNotificationTapped: (() -> Void)?
     var onFavoriteTapped: (() -> Void)?
     var onMoreTapped: (() -> Void)?
     var isFavorite: Bool = false
 
-    // Optional ticker info to show when scrolled (pinned state)
-    var tickerSymbol: String? = nil
+    // Ticker symbol - always shown in header
+    var tickerSymbol: String
+
+    // Optional price to show when scrolled (pinned state)
     var tickerPrice: String? = nil
 
     var body: some View {
         HStack {
-            // Back button and optional ticker info
-            HStack(spacing: AppSpacing.sm) {
+            // Back button and ticker info
+            HStack(spacing: AppSpacing.xs) {
                 Button(action: {
                     onBackTapped?()
                 }) {
@@ -32,18 +35,17 @@ struct TickerDetailHeader: View {
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                // Ticker symbol and price (shown when pinned)
-                if let symbol = tickerSymbol, let price = tickerPrice {
-                    HStack(spacing: AppSpacing.xs) {
-                        Text(symbol)
-                            .font(AppTypography.bodyBold)
-                            .foregroundColor(AppColors.textPrimary)
+                // Ticker symbol (always visible)
+                Text(tickerSymbol)
+                    .font(AppTypography.title3)
+                    .foregroundColor(AppColors.textPrimary)
 
-                        Text(price)
-                            .font(AppTypography.body)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
-                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                // Price (shown when pinned/scrolled)
+                if let price = tickerPrice {
+                    Text(price)
+                        .font(AppTypography.body)
+                        .foregroundColor(AppColors.textSecondary)
+                        .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
 
@@ -51,6 +53,17 @@ struct TickerDetailHeader: View {
 
             // Right side buttons
             HStack(spacing: AppSpacing.md) {
+                // Search
+                Button(action: {
+                    onSearchTapped?()
+                }) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(width: 40, height: 40)
+                }
+                .buttonStyle(PlainButtonStyle())
+
                 // Notification bell
                 Button(action: {
                     onNotificationTapped?()
@@ -91,8 +104,8 @@ struct TickerDetailHeader: View {
 
 #Preview {
     VStack(spacing: AppSpacing.lg) {
-        TickerDetailHeader(isFavorite: false)
-        TickerDetailHeader(isFavorite: true)
+        TickerDetailHeader(isFavorite: false, tickerSymbol: "AAPL")
+        TickerDetailHeader(isFavorite: true, tickerSymbol: "TSLA")
         TickerDetailHeader(
             isFavorite: false,
             tickerSymbol: "AAPL",

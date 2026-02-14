@@ -219,11 +219,11 @@ extension CryptoSnapshotItem {
         CryptoSnapshotItem(
             category: .originAndTechnology,
             paragraphs: [
-                "Ethereum is the world's largest Layer 1 smart contract platform. Think of it as a giant, global computer that anyone can program. While Bitcoin was built to be digital money, Ethereum was built to be digital everything. It powers decentralized finance, NFTs, gaming, identity systems, and thousands of apps that run without any company controlling them.",
+                "Ethereum is the world's largest Layer 1 smart contract platform. Bitcoin is digital money. Ethereum is digital everything — DeFi, NFTs, gaming, and thousands of apps with no company in control.",
 
-                "It was dreamed up by Vitalik Buterin, a Russian-Canadian programmer who was just 19 years old when he published the Ethereum whitepaper in 2013. He was joined by a powerhouse group of co-founders including Gavin Wood, who invented the Solidity programming language and later went on to create Polkadot, and Joseph Lubin, who founded ConsenSys, one of the biggest blockchain companies in the world. This was not a team of amateurs. They were visionaries who saw that blockchain could do far more than just move money around.",
+                "Built by Vitalik Buterin, who wrote the whitepaper at just 19. His co-founders include Gavin Wood (invented Solidity, later created Polkadot) and Joseph Lubin (founded ConsenSys). Not amateurs — visionaries.",
 
-                "What makes Ethereum's technology stand out is the Ethereum Virtual Machine, or EVM. It became the industry standard that almost every other blockchain copies. Developers write smart contracts in Solidity, and those contracts execute exactly as written, every single time, with no middleman. After The Merge in September 2022, Ethereum switched from energy-hungry Proof of Work to Proof of Stake, slashing its energy use by over 99%. The network now processes around 15-30 transactions per second on its base layer, but with Layer 2 rollups like Arbitrum and Optimism built on top, it can handle thousands more. Security is Ethereum's obsession. Over 900,000 validators stake their own ETH to keep the network honest, making it the most economically secured blockchain on earth."
+                "The secret weapon is the EVM — the industry standard every other chain copies. After The Merge in 2022, Ethereum switched to Proof of Stake, cutting energy use by 99%. Over 900,000 validators now secure the network, making it the most economically fortified blockchain on earth."
             ]
         ),
 
@@ -231,11 +231,11 @@ extension CryptoSnapshotItem {
         CryptoSnapshotItem(
             category: .tokenomics,
             paragraphs: [
-                "Ethereum makes money the same way a highway collects tolls. Every time someone swaps tokens on Uniswap, mints an NFT, lends on Aave, or does anything on the network, they pay a gas fee in ETH. In busy periods, the network can generate tens of millions of dollars in fees per day. This is not speculative revenue. It is real economic activity from real users doing real things.",
+                "Ethereum collects tolls. Every swap on Uniswap, every NFT mint, every DeFi loan pays a gas fee in ETH. In busy periods, that is tens of millions per day in real revenue from real users.",
 
-                "Here is where it gets interesting for ETH holders. Since August 2021, a mechanism called EIP-1559 burns the majority of those gas fees permanently. That means every transaction destroys a small amount of ETH forever. When network activity is high enough, more ETH gets burned than is created through staking rewards, making ETH a deflationary asset. Since The Merge, over 4 million ETH have been burned. That is billions of dollars in value removed from circulation, which is similar in concept to a company doing stock buybacks, except it happens automatically with every single transaction.",
+                "Since EIP-1559, most of those fees get burned permanently. When activity is high, more ETH is destroyed than created — making it deflationary. Over 4 million ETH burned since The Merge. Think automatic stock buybacks, every single transaction.",
 
-                "Unlike Bitcoin, Ethereum has no hard supply cap. But it does not need one. The burn mechanism acts as a dynamic supply controller. When demand is high, supply shrinks. When demand is low, supply grows slightly. Currently around 120 million ETH exists in circulation, and the net issuance rate hovers near zero or even negative. On top of that, roughly 28% of all ETH is staked, locked up by validators earning around 3-4% annual yield. This means a huge chunk of supply is removed from the market, further tightening the available ETH for buyers."
+                "No hard supply cap like Bitcoin, but it does not need one. The burn adjusts dynamically. Around 120 million ETH in circulation, net issuance near zero, and 28% is locked in staking. Supply is tight."
             ]
         ),
 
@@ -243,13 +243,11 @@ extension CryptoSnapshotItem {
         CryptoSnapshotItem(
             category: .nextBigMoves,
             paragraphs: [
-                "The biggest thing on Ethereum's roadmap is the continued rollout of Danksharding. The first phase, called Proto-Danksharding or EIP-4844, already went live and slashed Layer 2 transaction costs by up to 100x. The next phase will dramatically expand data availability, allowing rollups to process tens of thousands of transactions per second at near-zero cost. This is Ethereum's master plan to become the settlement layer for the entire internet of value without sacrificing decentralization.",
+                "Danksharding is the big one. Phase one (EIP-4844) already slashed Layer 2 costs by 100x. The next phase aims to push throughput to tens of thousands of transactions per second at near-zero cost.",
 
-                "Ethereum has attracted the most powerful investors in the world. The Ethereum Foundation oversaw the initial development, but the ecosystem now includes backing from a16z, which has invested billions across Ethereum-based projects, Paradigm, Sequoia Capital, and most notably, BlackRock, the largest asset manager on the planet with over $10 trillion under management. When BlackRock launched its spot Ethereum ETF in mid-2024, it was the clearest signal yet that traditional finance considers Ethereum a legitimate asset class.",
+                "The investor list reads like a who's who: a16z, Paradigm, Sequoia, and BlackRock — which launched a spot Ethereum ETF and built its own tokenized fund (BUIDL) on Ethereum. When the world's largest asset manager builds on your chain, that is a signal.",
 
-                "These institutions are not investing because they think Ethereum is a cool technology experiment. They are betting that Ethereum will become the backbone of a new financial system. Tokenized real-world assets like Treasury bonds, real estate, and private equity are starting to move on-chain, and Ethereum is where most of that activity is happening. BlackRock's own tokenized fund, BUIDL, runs on Ethereum. When the world's largest asset manager builds on your platform, that is not just an endorsement. That is a signal about where finance is heading.",
-
-                "The spot Ethereum ETFs are still in their early days and inflows have been growing steadily. As financial advisors and retirement funds begin adding ETH exposure to portfolios, the demand side of the equation could shift dramatically. Some analysts estimate that ETF inflows alone could absorb billions in ETH over the coming years, which matters a lot when a significant portion of supply is already locked up in staking."
+                "ETF inflows are still early but growing steadily. As advisors and retirement funds add ETH exposure, demand could shift fast — especially with so much supply already locked in staking."
             ]
         ),
 
@@ -257,11 +255,11 @@ extension CryptoSnapshotItem {
         CryptoSnapshotItem(
             category: .risks,
             paragraphs: [
-                "The biggest existential threat to Ethereum is regulatory. The SEC has historically been ambiguous about whether ETH is a security. While the approval of spot ETFs strongly suggests it is treated as a commodity, a future administration or a global regulatory crackdown could change that overnight. If major governments decided to ban staking, restrict DeFi access, or classify ETH as an unregistered security, the price impact would be severe and the ecosystem could face an exodus of developers and users to more friendly jurisdictions.",
+                "The kill scenario is regulatory. The SEC has been ambiguous on whether ETH is a security. ETF approval suggests commodity status, but a future crackdown on staking or DeFi could change everything overnight.",
 
-                "On the technical side, Ethereum has never suffered a protocol-level hack, but the ecosystem around it has. The 2016 DAO hack led to a controversial hard fork that split the community. Smart contract exploits across DeFi have cost users billions, though these are application-level bugs rather than flaws in Ethereum itself. The shift to Proof of Stake introduced new risks too. If a few large staking providers like Lido accumulate too much control, centralization concerns grow. There is also the so-called 'complexity risk' since Ethereum's roadmap involves many moving parts, and each upgrade carries the possibility of introducing new bugs into a system securing hundreds of billions of dollars.",
+                "Ethereum itself has never been hacked, but the 2016 DAO exploit caused a hard fork that split the community. DeFi hacks have cost billions — app-level bugs, not protocol flaws. Centralization risk is growing too, with large staking providers like Lido gaining outsized control.",
 
-                "Competition is real and growing. Solana offers much faster and cheaper transactions for everyday users. Newer chains keep launching with fresh technology. While Ethereum's network effects and developer ecosystem are massive advantages, nothing in crypto is guaranteed. If Layer 2 solutions fragment liquidity or a competitor chain captures the next wave of mainstream users, Ethereum could find its dominance slowly eroded over time."
+                "Competition is real. Solana is faster and cheaper. New chains keep launching. Ethereum's network effects are massive, but if Layer 2 fragmentation or a rival chain captures the next wave of users, dominance could erode."
             ]
         )
     ]

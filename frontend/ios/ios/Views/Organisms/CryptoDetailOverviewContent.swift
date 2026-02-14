@@ -50,7 +50,7 @@ struct CryptoDetailOverviewContent: View {
 
 #Preview {
     ScrollView {
-        CryptoDetailOverviewContent(cryptoData: CryptoDetailData.sampleBitcoin)
+        CryptoDetailOverviewContent(cryptoData: CryptoDetailData.sampleEthereum)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

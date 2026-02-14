@@ -50,7 +50,7 @@ struct CryptoDetailKeyStatsSection: View {
 
 #Preview {
     ScrollView {
-        CryptoDetailKeyStatsSection(statisticsGroups: CryptoKeyStatisticsGroup.sampleData)
+        CryptoDetailKeyStatsSection(statisticsGroups: CryptoKeyStatisticsGroup.sampleETH)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

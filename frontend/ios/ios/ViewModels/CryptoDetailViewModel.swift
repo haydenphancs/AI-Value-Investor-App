@@ -48,7 +48,7 @@ class CryptoDetailViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
 
-            self.cryptoData = CryptoDetailData.sampleBitcoin
+            self.cryptoData = CryptoDetailData.sampleEthereum
             self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.cryptoSymbol)
             self.analysisData = TickerAnalysisData.sampleData
             self.isLoading = false

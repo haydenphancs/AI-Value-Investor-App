@@ -240,12 +240,151 @@ struct ReportFinancialHealthData {
     }
 }
 
+// MARK: - Vital Score (1-10 Scale)
+
+struct VitalScore {
+    let value: Int          // 1-10 (low to high)
+    let label: String       // "Strong", "Weak", etc.
+
+    init(value: Int, label: String) {
+        self.value = min(max(value, 1), 10)
+        self.label = label
+    }
+
+    var normalizedValue: Double {
+        Double(value) / 10.0
+    }
+
+    var color: Color {
+        switch value {
+        case 8...10: return AppColors.bullish
+        case 5...7: return AppColors.neutral
+        default: return AppColors.bearish
+        }
+    }
+
+    var backgroundColor: Color {
+        color.opacity(0.15)
+    }
+
+    static func labelForValue(_ value: Int) -> String {
+        switch value {
+        case 9...10: return "Excellent"
+        case 7...8: return "Strong"
+        case 5...6: return "Fair"
+        case 3...4: return "Weak"
+        default: return "Critical"
+        }
+    }
+}
+
+// MARK: - Key Vital: Revenue Card Data
+
+struct ReportRevenueVitalData {
+    let score: VitalScore
+    let totalRevenue: String            // "$14.1B"
+    let revenueGrowth: Double           // YoY percentage
+    let topSegment: String              // "Cloud Infrastructure"
+    let topSegmentGrowth: Double        // percentage
+
+    var formattedGrowth: String {
+        let sign = revenueGrowth >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", revenueGrowth))% YoY"
+    }
+
+    var formattedTopSegmentGrowth: String {
+        let sign = topSegmentGrowth >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", topSegmentGrowth))%"
+    }
+
+    var growthColor: Color {
+        revenueGrowth >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+}
+
+// MARK: - Key Vital: Insider Card Data
+
+struct ReportInsiderVitalData {
+    let score: VitalScore
+    let sentiment: InsiderSentiment
+    let netActivity: String             // "Net Selling" or "Net Buying"
+    let buyCount: Int
+    let sellCount: Int
+    let keyInsight: String              // "Heavy insider selling last 90 days"
+
+    var activityColor: Color {
+        sentiment.color
+    }
+}
+
+// MARK: - Key Vital: Macro Card Data
+
+struct ReportMacroVitalData {
+    let score: VitalScore
+    let threatLevel: ThreatLevel
+    let topRisk: String                 // "Fed Rate Uncertainty"
+    let riskTrend: RiskTrend
+    let activeRiskCount: Int            // number of elevated+ risks
+
+    var formattedRiskCount: String {
+        "\(activeRiskCount) Active"
+    }
+}
+
+// MARK: - Key Vital: Forecast Card Data
+
+struct ReportForecastVitalData {
+    let score: VitalScore
+    let revenueCAGR: Double             // percentage
+    let epsCAGR: Double                 // percentage
+    let guidance: ManagementGuidance
+    let outlook: String                 // "Accelerating Growth"
+
+    var formattedRevenueCAGR: String {
+        "+\(String(format: "%.0f", revenueCAGR))% CAGR"
+    }
+
+    var formattedEPSCAGR: String {
+        "+\(String(format: "%.0f", epsCAGR))% CAGR"
+    }
+}
+
+// MARK: - Key Vital: Wall Street Card Data
+
+struct ReportWallStreetVitalData {
+    let score: VitalScore
+    let consensusRating: ConsensusRating
+    let priceTarget: Double
+    let currentPrice: Double
+    let upgrades: Int
+    let downgrades: Int
+
+    var formattedTarget: String {
+        String(format: "$%.0f", priceTarget)
+    }
+
+    var formattedUpside: String {
+        let upside = ((priceTarget - currentPrice) / currentPrice) * 100
+        let sign = upside >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.0f", upside))%"
+    }
+
+    var upsideColor: Color {
+        priceTarget >= currentPrice ? AppColors.bullish : AppColors.bearish
+    }
+}
+
 // MARK: - Key Vitals Section
 
 struct ReportKeyVitals {
     let valuation: ReportValuationData
     let moat: ReportMoatData
     let financialHealth: ReportFinancialHealthData
+    let revenue: ReportRevenueVitalData
+    let insider: ReportInsiderVitalData
+    let macro: ReportMacroVitalData
+    let forecast: ReportForecastVitalData
+    let wallStreet: ReportWallStreetVitalData
 }
 
 // MARK: - Core Thesis Bullet
@@ -984,6 +1123,43 @@ extension TickerReportData {
                 additionalMetric: "Increasing Cost",
                 additionalMetricStatus: FinancialHealthLevel.fromZScore(1.7),
                 fcfNote: "Negative FCF in last 2 years"
+            ),
+            revenue: ReportRevenueVitalData(
+                score: VitalScore(value: 7, label: "Strong"),
+                totalRevenue: "$14.1B",
+                revenueGrowth: 18,
+                topSegment: "Cloud (OCI)",
+                topSegmentGrowth: 66
+            ),
+            insider: ReportInsiderVitalData(
+                score: VitalScore(value: 3, label: "Weak"),
+                sentiment: .negative,
+                netActivity: "Net Selling",
+                buyCount: 3,
+                sellCount: 12,
+                keyInsight: "Heavy insider selling last 90 days"
+            ),
+            macro: ReportMacroVitalData(
+                score: VitalScore(value: 5, label: "Fair"),
+                threatLevel: .elevated,
+                topRisk: "Fed Rate Uncertainty",
+                riskTrend: .stable,
+                activeRiskCount: 4
+            ),
+            forecast: ReportForecastVitalData(
+                score: VitalScore(value: 8, label: "Strong"),
+                revenueCAGR: 15,
+                epsCAGR: 18,
+                guidance: .raised,
+                outlook: "Accelerating Growth"
+            ),
+            wallStreet: ReportWallStreetVitalData(
+                score: VitalScore(value: 8, label: "Strong"),
+                consensusRating: .strongBuy,
+                priceTarget: 190,
+                currentPrice: 142,
+                upgrades: 8,
+                downgrades: 3
             )
         ),
         coreThesis: ReportCoreThesis(

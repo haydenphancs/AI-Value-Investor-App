@@ -13,6 +13,7 @@ struct TickerDetailView: View {
     @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
+    @State private var showSearch = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
 
@@ -33,15 +34,16 @@ struct TickerDetailView: View {
 
             // Main Content
             VStack(spacing: 0) {
-                // Navigation Header (always visible - back, bell, star, more buttons)
-                // Shows ticker symbol and price when tab bar is pinned
+                // Navigation Header (always visible - back, ticker symbol, search, bell, star, more)
+                // Shows price alongside ticker symbol when tab bar is pinned
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
+                    onSearchTapped: handleSearchTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleMoreTapped,
                     isFavorite: viewModel.isFavorite,
-                    tickerSymbol: isTabBarPinned ? viewModel.tickerData?.symbol : nil,
+                    tickerSymbol: tickerSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
                 )
 
@@ -165,6 +167,10 @@ struct TickerDetailView: View {
                 detailData: TechnicalAnalysisDetailData.sampleData
             )
         }
+        .fullScreenCover(isPresented: $showSearch) {
+            SearchView()
+                .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Tab Content
@@ -273,6 +279,10 @@ struct TickerDetailView: View {
             dismiss()
             onNavigateToResearch()
         }
+    }
+
+    private func handleSearchTapped() {
+        showSearch = true
     }
 
     private func handleMoreTapped() {

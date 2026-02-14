@@ -28,16 +28,10 @@ struct TickerPriceHeader: View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             // Company name and price row
             HStack(alignment: .top) {
-                // Left side - Company info
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    Text(symbol)
-                        .font(AppTypography.title2)
-                        .foregroundColor(AppColors.textPrimary)
-
-                    Text(companyName)
-                        .font(AppTypography.subheadline)
-                        .foregroundColor(AppColors.textSecondary)
-                }
+                // Left side - Company name (symbol is now in the navigation header)
+                Text(companyName)
+                    .font(AppTypography.subheadline)
+                    .foregroundColor(AppColors.textSecondary)
 
                 Spacer()
 

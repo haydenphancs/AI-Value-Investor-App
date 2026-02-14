@@ -90,8 +90,8 @@ struct TickerDetailHeader: View {
                 Button(action: {
                     onMoreTapped?()
                 }) {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 18, weight: .semibold))
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 18, weight: .regular))
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }

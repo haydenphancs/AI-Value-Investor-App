@@ -14,6 +14,7 @@ struct TickerDetailView: View {
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
     @State private var showSearch = false
+    @State private var showShareSheet = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
 
@@ -24,6 +25,27 @@ struct TickerDetailView: View {
         self.tickerSymbol = tickerSymbol
         self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: TickerDetailViewModel(tickerSymbol: tickerSymbol))
+    }
+    
+    // Share sheet items
+    private var shareItems: [Any] {
+        var items: [Any] = []
+        
+        // Share text
+        if let tickerData = viewModel.tickerData {
+            let shareText = """
+            \(tickerData.companyName) (\(tickerData.symbol))
+            \(tickerData.formattedPrice) \(tickerData.formattedChange) \(tickerData.formattedChangePercent)
+            
+            Check it out on Caudex!
+            """
+            items.append(shareText)
+        }
+        
+        // You can add more items like URLs, images, etc.
+        // items.append(URL(string: "https://yourapp.com/stock/\(tickerSymbol)")!)
+        
+        return items
     }
 
     var body: some View {
@@ -41,7 +63,7 @@ struct TickerDetailView: View {
                     onSearchTapped: handleSearchTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
                     onFavoriteTapped: viewModel.toggleFavorite,
-                    onMoreTapped: handleMoreTapped,
+                    onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
                     tickerSymbol: tickerSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
@@ -156,6 +178,9 @@ struct TickerDetailView: View {
                 handleCompare()
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(items: shareItems)
         }
         .sheet(isPresented: $showUpgradesDowngrades) {
             if let analysisData = viewModel.analysisData {
@@ -285,8 +310,8 @@ struct TickerDetailView: View {
         showSearch = true
     }
 
-    private func handleMoreTapped() {
-        showMoreOptions = true
+    private func handleShareTapped() {
+        showShareSheet = true
     }
 
     private func handleShare() {

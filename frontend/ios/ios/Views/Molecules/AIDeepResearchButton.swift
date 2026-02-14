@@ -19,7 +19,7 @@ struct AIDeepResearchButton: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 16, weight: .semibold))
 
-                Text("AI Deep Research")
+                Text("AI Analyst")
                     .font(AppTypography.bodyBold)
             }
             .foregroundColor(AppColors.textPrimary)

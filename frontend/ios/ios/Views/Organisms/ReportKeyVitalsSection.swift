@@ -27,6 +27,21 @@ struct ReportKeyVitalsSection: View {
 
                     ReportFinancialHealthVitalCard(data: vitals.financialHealth)
                         .frame(width: 185)
+
+                    ReportRevenueVitalCard(data: vitals.revenue)
+                        .frame(width: 185)
+
+                    ReportInsiderVitalCard(data: vitals.insider)
+                        .frame(width: 185)
+
+                    ReportMacroVitalCard(data: vitals.macro)
+                        .frame(width: 185)
+
+                    ReportForecastVitalCard(data: vitals.forecast)
+                        .frame(width: 185)
+
+                    ReportWallStreetVitalCard(data: vitals.wallStreet)
+                        .frame(width: 185)
                 }
                 .padding(.horizontal, AppSpacing.lg)
             }

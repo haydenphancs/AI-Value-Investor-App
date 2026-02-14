@@ -25,38 +25,36 @@ struct TickerPriceHeader: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            // Company name and price row
-            HStack(alignment: .top) {
-                // Left side - Company name (symbol is now in the navigation header)
+        HStack(alignment: .top) {
+            // Left side - Company name and market status
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(companyName)
                     .font(AppTypography.subheadline)
                     .foregroundColor(AppColors.textSecondary)
+                
+                MarketStatusBadge(status: marketStatus)
+            }
+            
+            Spacer()
+            
+            // Right side - Price info
+            VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                Text(price)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(AppColors.textPrimary)
 
-                Spacer()
+                // Price change
+                HStack(spacing: 4) {
+                    Image(systemName: arrowIcon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(changeColor)
 
-                // Right side - Price info
-                VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                    Text(price)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(AppColors.textPrimary)
-
-                    // Price change
-                    HStack(spacing: 4) {
-                        Image(systemName: arrowIcon)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(changeColor)
-
-                        Text("\(priceChange) \(priceChangePercent)")
-                            .font(AppTypography.footnote)
-                            .fontWeight(.semibold)
-                            .foregroundColor(changeColor)
-                    }
+                    Text("\(priceChange) \(priceChangePercent)")
+                        .font(AppTypography.footnote)
+                        .fontWeight(.semibold)
+                        .foregroundColor(changeColor)
                 }
             }
-
-            // Market status
-            MarketStatusBadge(status: marketStatus)
         }
         .padding(.horizontal, AppSpacing.lg)
     }

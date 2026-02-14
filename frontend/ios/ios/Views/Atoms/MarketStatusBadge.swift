@@ -29,16 +29,42 @@ struct MarketStatusBadge: View {
     }
 
     var body: some View {
-        HStack(spacing: AppSpacing.xs) {
-            // Status indicator dot
-            Circle()
-                .fill(statusColor)
-                .frame(width: 6, height: 6)
-
+        VStack(alignment: .leading, spacing: 2) {
             // Status text
-            Text(status.displayText)
+            Text(statusLabel)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textSecondary)
+            
+            // Additional info (date/time for closed market)
+            if let additionalInfo = statusAdditionalInfo {
+                Text(additionalInfo)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+        }
+    }
+    
+    private var statusLabel: String {
+        switch status {
+        case .open:
+            return "Market Open"
+        case .closed:
+            return "Market Closed"
+        case .preMarket:
+            return "Pre-Market"
+        case .afterHours:
+            return "After Hours"
+        }
+    }
+    
+    private var statusAdditionalInfo: String? {
+        switch status {
+        case .closed(let date, let time, let timezone):
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMM d"
+            return "\(formatter.string(from: date)), \(time) \(timezone)"
+        default:
+            return nil
         }
     }
 }

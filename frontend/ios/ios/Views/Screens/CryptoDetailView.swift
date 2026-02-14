@@ -292,5 +292,5 @@ struct CryptoDetailView: View {
 
 // MARK: - Preview
 #Preview {
-    CryptoDetailView(cryptoSymbol: "BTC")
+    CryptoDetailView(cryptoSymbol: "ETH")
 }

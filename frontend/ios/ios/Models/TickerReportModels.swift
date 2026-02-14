@@ -240,41 +240,27 @@ struct ReportFinancialHealthData {
     }
 }
 
-// MARK: - Vital Score (1-10 Scale)
+// MARK: - Vital Score (0.0-10.0 Scale)
 
+/// Internal importance score computed by VitalRulesEngine.
+/// The numeric value is never displayed in the UI — only VitalStatus is shown.
 struct VitalScore {
-    let value: Int          // 1-10 (low to high)
-    let label: String       // "Strong", "Weak", etc.
+    let value: Double           // 0.0-10.0 (importance, internal only)
+    let status: VitalStatus     // displayed on card badge
 
-    init(value: Int, label: String) {
-        self.value = min(max(value, 1), 10)
-        self.label = label
+    init(value: Double, status: VitalStatus) {
+        self.value = min(max(value, 0.0), 10.0)
+        self.status = status
     }
 
-    var normalizedValue: Double {
-        Double(value) / 10.0
+    /// Convenience initializer from a VitalEvaluation result.
+    init(from evaluation: VitalEvaluation) {
+        self.value = evaluation.score
+        self.status = evaluation.status
     }
 
-    var color: Color {
-        switch value {
-        case 8...10: return AppColors.bullish
-        case 5...7: return AppColors.neutral
-        default: return AppColors.bearish
-        }
-    }
-
-    var backgroundColor: Color {
-        color.opacity(0.15)
-    }
-
-    static func labelForValue(_ value: Int) -> String {
-        switch value {
-        case 9...10: return "Excellent"
-        case 7...8: return "Strong"
-        case 5...6: return "Fair"
-        case 3...4: return "Weak"
-        default: return "Critical"
-        }
+    var shouldSurface: Bool {
+        status != .neutral
     }
 }
 
@@ -375,16 +361,25 @@ struct ReportWallStreetVitalData {
 }
 
 // MARK: - Key Vitals Section
+// All fields are optional — VitalRulesEngine determines which vitals are
+// important enough to surface. nil = not noteworthy, don't display card.
 
 struct ReportKeyVitals {
-    let valuation: ReportValuationData
-    let moat: ReportMoatData
-    let financialHealth: ReportFinancialHealthData
-    let revenue: ReportRevenueVitalData
-    let insider: ReportInsiderVitalData
-    let macro: ReportMacroVitalData
-    let forecast: ReportForecastVitalData
-    let wallStreet: ReportWallStreetVitalData
+    let valuation: ReportValuationData?
+    let moat: ReportMoatData?
+    let financialHealth: ReportFinancialHealthData?
+    let revenue: ReportRevenueVitalData?
+    let insider: ReportInsiderVitalData?
+    let macro: ReportMacroVitalData?
+    let forecast: ReportForecastVitalData?
+    let wallStreet: ReportWallStreetVitalData?
+
+    /// Returns true if at least one vital card is present.
+    var hasAny: Bool {
+        valuation != nil || moat != nil || financialHealth != nil ||
+        revenue != nil || insider != nil || macro != nil ||
+        forecast != nil || wallStreet != nil
+    }
 }
 
 // MARK: - Core Thesis Bullet
@@ -1125,14 +1120,14 @@ extension TickerReportData {
                 fcfNote: "Negative FCF in last 2 years"
             ),
             revenue: ReportRevenueVitalData(
-                score: VitalScore(value: 7, label: "Strong"),
+                score: VitalScore(value: 7.0, status: .good),
                 totalRevenue: "$14.1B",
                 revenueGrowth: 18,
                 topSegment: "Cloud (OCI)",
                 topSegmentGrowth: 66
             ),
             insider: ReportInsiderVitalData(
-                score: VitalScore(value: 3, label: "Weak"),
+                score: VitalScore(value: 9.0, status: .critical),
                 sentiment: .negative,
                 netActivity: "Net Selling",
                 buyCount: 3,
@@ -1140,21 +1135,21 @@ extension TickerReportData {
                 keyInsight: "Heavy insider selling last 90 days"
             ),
             macro: ReportMacroVitalData(
-                score: VitalScore(value: 5, label: "Fair"),
+                score: VitalScore(value: 7.0, status: .warning),
                 threatLevel: .elevated,
                 topRisk: "Fed Rate Uncertainty",
                 riskTrend: .stable,
                 activeRiskCount: 4
             ),
             forecast: ReportForecastVitalData(
-                score: VitalScore(value: 8, label: "Strong"),
+                score: VitalScore(value: 7.0, status: .good),
                 revenueCAGR: 15,
                 epsCAGR: 18,
                 guidance: .raised,
                 outlook: "Accelerating Growth"
             ),
             wallStreet: ReportWallStreetVitalData(
-                score: VitalScore(value: 8, label: "Strong"),
+                score: VitalScore(value: 7.0, status: .good),
                 consensusRating: .strongBuy,
                 priceTarget: 190,
                 currentPrice: 142,

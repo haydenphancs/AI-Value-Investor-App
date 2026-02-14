@@ -222,7 +222,7 @@ struct ReportRevenueVitalCard: View {
 
                 Spacer()
 
-                VitalScoreBadge(score: data.score)
+                VitalStatusBadge(status: data.score.status)
             }
 
             Divider()
@@ -288,7 +288,7 @@ struct ReportInsiderVitalCard: View {
 
                 Spacer()
 
-                VitalScoreBadge(score: data.score)
+                VitalStatusBadge(status: data.score.status)
             }
 
             Divider()
@@ -354,7 +354,7 @@ struct ReportMacroVitalCard: View {
 
                 Spacer()
 
-                VitalScoreBadge(score: data.score)
+                VitalStatusBadge(status: data.score.status)
             }
 
             Divider()
@@ -423,7 +423,7 @@ struct ReportForecastVitalCard: View {
 
                 Spacer()
 
-                VitalScoreBadge(score: data.score)
+                VitalStatusBadge(status: data.score.status)
             }
 
             Divider()
@@ -484,7 +484,7 @@ struct ReportWallStreetVitalCard: View {
 
                 Spacer()
 
-                VitalScoreBadge(score: data.score)
+                VitalStatusBadge(status: data.score.status)
             }
 
             Divider()
@@ -546,25 +546,16 @@ struct ReportWallStreetVitalCard: View {
     }
 }
 
-// MARK: - Vital Score Badge (Shared Component)
+// MARK: - Vital Status Badge (Shared Component)
 
-struct VitalScoreBadge: View {
-    let score: VitalScore
+struct VitalStatusBadge: View {
+    let status: VitalStatus
 
     var body: some View {
-        HStack(spacing: AppSpacing.xxs) {
-            Text("\(score.value)")
-                .font(AppTypography.captionBold)
-                .foregroundColor(score.color)
-            Text("/10")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-        }
-        .padding(.horizontal, AppSpacing.sm)
-        .padding(.vertical, AppSpacing.xs)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                .fill(score.backgroundColor)
+        ReportSentimentBadge(
+            text: status.rawValue,
+            textColor: status.color,
+            backgroundColor: status.backgroundColor
         )
     }
 }
@@ -631,25 +622,33 @@ struct ZScoreProgressBar: View {
 }
 
 #Preview {
-    let sample = TickerReportData.sampleOracle
+    let vitals = TickerReportData.sampleOracle.keyVitals
     ScrollView(.horizontal) {
         HStack(alignment: .top, spacing: AppSpacing.md) {
-            ReportValuationVitalCard(data: sample.keyVitals.valuation)
-                .frame(width: 185)
-            ReportMoatVitalCard(data: sample.keyVitals.moat)
-                .frame(width: 185)
-            ReportFinancialHealthVitalCard(data: sample.keyVitals.financialHealth)
-                .frame(width: 185)
-            ReportRevenueVitalCard(data: sample.keyVitals.revenue)
-                .frame(width: 185)
-            ReportInsiderVitalCard(data: sample.keyVitals.insider)
-                .frame(width: 185)
-            ReportMacroVitalCard(data: sample.keyVitals.macro)
-                .frame(width: 185)
-            ReportForecastVitalCard(data: sample.keyVitals.forecast)
-                .frame(width: 185)
-            ReportWallStreetVitalCard(data: sample.keyVitals.wallStreet)
-                .frame(width: 185)
+            if let v = vitals.valuation {
+                ReportValuationVitalCard(data: v).frame(width: 185)
+            }
+            if let m = vitals.moat {
+                ReportMoatVitalCard(data: m).frame(width: 185)
+            }
+            if let h = vitals.financialHealth {
+                ReportFinancialHealthVitalCard(data: h).frame(width: 185)
+            }
+            if let r = vitals.revenue {
+                ReportRevenueVitalCard(data: r).frame(width: 185)
+            }
+            if let i = vitals.insider {
+                ReportInsiderVitalCard(data: i).frame(width: 185)
+            }
+            if let ma = vitals.macro {
+                ReportMacroVitalCard(data: ma).frame(width: 185)
+            }
+            if let f = vitals.forecast {
+                ReportForecastVitalCard(data: f).frame(width: 185)
+            }
+            if let w = vitals.wallStreet {
+                ReportWallStreetVitalCard(data: w).frame(width: 185)
+            }
         }
         .padding()
     }

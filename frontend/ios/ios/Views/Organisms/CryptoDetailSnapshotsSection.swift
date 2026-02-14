@@ -102,8 +102,8 @@ struct CryptoSnapshotCard: View {
 
             // Content area (when expanded)
             if isExpanded {
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    if snapshot.content.isEmpty {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    if snapshot.paragraphs.isEmpty {
                         // Placeholder for future content
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "text.alignleft")
@@ -117,11 +117,13 @@ struct CryptoSnapshotCard: View {
                         }
                         .padding(.vertical, AppSpacing.sm)
                     } else {
-                        Text(snapshot.content)
-                            .font(AppTypography.footnote)
-                            .foregroundColor(AppColors.textSecondary)
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(Array(snapshot.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                            Text(paragraph)
+                                .font(AppTypography.footnote)
+                                .foregroundColor(AppColors.textSecondary)
+                                .lineSpacing(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 .padding(.bottom, AppSpacing.md)
@@ -247,7 +249,7 @@ struct CryptoSnapshotsInfoSheet: View {
 
 #Preview {
     ScrollView {
-        CryptoDetailSnapshotsSection(snapshots: CryptoSnapshotItem.sampleData)
+        CryptoDetailSnapshotsSection(snapshots: CryptoSnapshotItem.sampleETH)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

@@ -16,6 +16,9 @@ struct IndexDetailOverviewContent: View {
             // Key Statistics
             TickerDetailKeyStatsSection(statisticsGroups: indexData.keyStatisticsGroups)
 
+            // Performance
+            TickerDetailPerformanceSection(periods: indexData.performancePeriods)
+
             // Snapshots (Valuation, Sector Performance, The Macro Forecast)
             IndexDetailSnapshotsSection(snapshots: indexData.snapshots)
 

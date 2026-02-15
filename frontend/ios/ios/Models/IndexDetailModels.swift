@@ -344,26 +344,26 @@ extension IndexMacroForecastSnapshot {
         indicators: [
             MacroForecastItem(
                 title: "GDP Growth",
-                description: "The U.S. economy is expanding at a 2.3% annualized rate. Consumer spending remains resilient, and business investment is picking up — a solid backdrop for equities.",
+                description: "Economy growing at 2.3% annualized. Consumer spending and business investment remain solid.",
                 signal: .positive
             ),
             MacroForecastItem(
                 title: "Inflation & Fed Policy",
-                description: "Core CPI is cooling but still above the Fed's 2% target at 2.8%. The Fed is expected to hold rates steady near-term, with 1–2 cuts priced in for late 2026.",
+                description: "Core CPI at 2.8%, above the 2% target. Fed likely holds steady with 1–2 cuts priced in for late 2026.",
                 signal: .neutral
             ),
             MacroForecastItem(
                 title: "Labor Market",
-                description: "Unemployment holds at 3.9% with 180K jobs added monthly. Wage growth is moderating but still above inflation — the Goldilocks scenario continues for now.",
+                description: "Unemployment at 3.9%, ~180K jobs/month. Wage growth moderating but still above inflation.",
                 signal: .positive
             ),
             MacroForecastItem(
-                title: "Global Trade & Geopolitics",
-                description: "Ongoing tariff uncertainty and supply chain shifts could weigh on margins for globally exposed companies. Trade policy remains the key wildcard for H2 2026.",
+                title: "Trade & Geopolitics",
+                description: "Tariff uncertainty could pressure margins for globally exposed companies.",
                 signal: .cautious
             )
         ],
-        storyTemplate: "The macro picture is mixed but leaning constructive. {TOP_INDICATOR} is flashing {TOP_SIGNAL}, and we're tracking {INDICATOR_COUNT} key indicators shaping the outlook. Growth is holding up, but the Fed's next move and trade policy remain the swing factors."
+        storyTemplate: "Macro outlook is constructive — {TOP_INDICATOR} is {TOP_SIGNAL}. We're watching {INDICATOR_COUNT} indicators. Growth is solid, but the Fed's next move and trade policy are the swing factors."
     )
 }
 

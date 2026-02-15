@@ -18,8 +18,8 @@ struct IndexDetailSnapshotsSection: View {
             // 2. Sector Performance
             SectorPerformanceSnapshotCard(sectorPerformance: snapshotsData.sectorPerformance)
 
-            // 3. Systemic Risk (The Bear Case)
-            SystemicRiskSnapshotCard(systemicRisk: snapshotsData.systemicRisk)
+            // 3. Macro Forecast
+            MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
 
             // Footer: AI generation info
             HStack(spacing: AppSpacing.xs) {
@@ -296,11 +296,11 @@ struct SectorPerformanceBlock: View {
 }
 
 // MARK: - ──────────────────────────────────────────────
-// MARK:   3. SYSTEMIC RISK SNAPSHOT CARD
+// MARK:   3. MACRO FORECAST SNAPSHOT CARD
 // MARK: - ──────────────────────────────────────────────
 
-struct SystemicRiskSnapshotCard: View {
-    let systemicRisk: IndexSystemicRiskSnapshot
+struct MacroForecastSnapshotCard: View {
+    let macroForecast: IndexMacroForecastSnapshot
     @State private var isExpanded: Bool = true
 
     var body: some View {
@@ -314,33 +314,33 @@ struct SystemicRiskSnapshotCard: View {
                 HStack(spacing: AppSpacing.md) {
                     ZStack {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(AppColors.bearish.opacity(0.15))
+                            .fill(AppColors.accentCyan.opacity(0.15))
                             .frame(width: 36, height: 36)
 
-                        Image(systemName: "shield.lefthalf.filled")
+                        Image(systemName: "globe.americas.fill")
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(AppColors.bearish)
+                            .foregroundColor(AppColors.accentCyan)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Systemic Risk")
+                        Text("Macro Forecast")
                             .font(AppTypography.calloutBold)
                             .foregroundColor(AppColors.textPrimary)
 
-                        Text("The Bear Case")
+                        Text("Economic Outlook")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
                     }
 
                     Spacer()
 
-                    // Risk count badge
-                    Text("\(systemicRisk.risks.count) risks")
+                    // Indicator count badge
+                    Text("\(macroForecast.indicators.count) indicators")
                         .font(AppTypography.caption)
-                        .foregroundColor(AppColors.bearish)
+                        .foregroundColor(AppColors.accentCyan)
                         .padding(.horizontal, AppSpacing.sm)
                         .padding(.vertical, AppSpacing.xxs)
-                        .background(AppColors.bearish.opacity(0.15))
+                        .background(AppColors.accentCyan.opacity(0.15))
                         .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -352,16 +352,16 @@ struct SystemicRiskSnapshotCard: View {
 
             if isExpanded {
                 // Story
-                Text(systemicRisk.resolvedStory)
+                Text(macroForecast.resolvedStory)
                     .font(AppTypography.footnote)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // Risk items
+                // Indicator items
                 VStack(spacing: AppSpacing.sm) {
-                    ForEach(systemicRisk.risks) { risk in
-                        SystemicRiskItemCard(risk: risk)
+                    ForEach(macroForecast.indicators) { indicator in
+                        MacroForecastItemCard(indicator: indicator)
                     }
                 }
             }
@@ -374,33 +374,33 @@ struct SystemicRiskSnapshotCard: View {
     }
 }
 
-// MARK: - Systemic Risk Item Card
-struct SystemicRiskItemCard: View {
-    let risk: SystemicRiskItem
+// MARK: - Macro Forecast Item Card
+struct MacroForecastItemCard: View {
+    let indicator: MacroForecastItem
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
-                Image(systemName: risk.severity.iconName)
+                Image(systemName: indicator.signal.iconName)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(risk.severity.color)
+                    .foregroundColor(indicator.signal.color)
 
-                Text(risk.title)
+                Text(indicator.title)
                     .font(AppTypography.calloutBold)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
-                Text(risk.severity.rawValue)
+                Text(indicator.signal.rawValue)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(risk.severity.color)
+                    .foregroundColor(indicator.signal.color)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, 2)
-                    .background(risk.severity.bgColor)
+                    .background(indicator.signal.bgColor)
                     .cornerRadius(AppCornerRadius.small)
             }
 
-            Text(risk.description)
+            Text(indicator.description)
                 .font(AppTypography.footnote)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)

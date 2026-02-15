@@ -93,6 +93,7 @@ struct CryptoDetailData: Identifiable {
     let chartData: [Double]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
+    let performancePeriods: [PerformancePeriod]
     let snapshots: [CryptoSnapshotItem]
     let cryptoProfile: CryptoProfile
     let relatedCryptos: [RelatedTicker]
@@ -150,6 +151,7 @@ extension CryptoDetailData {
         chartData: [3120, 3180, 3250, 3210, 3320, 3280, 3350, 3410, 3380, 3420, 3390, 3456],
         keyStatistics: CryptoKeyStatistic.sampleETH,
         keyStatisticsGroups: CryptoKeyStatisticsGroup.sampleETH,
+        performancePeriods: CryptoPerformance.sampleETH,
         snapshots: CryptoSnapshotItem.sampleETH,
         cryptoProfile: CryptoProfile(
             description: "Ethereum is the world's largest programmable blockchain and the birthplace of smart contracts, DeFi, and NFTs. Launched in 2015 by Vitalik Buterin and a team of co-founders, Ethereum allows developers to build decentralized applications that run exactly as programmed without any possibility of censorship, downtime, or third-party interference. After its historic shift to Proof of Stake in September 2022 known as 'The Merge,' Ethereum cut its energy consumption by over 99% and introduced a deflationary supply mechanism that burns ETH with every transaction.",
@@ -162,6 +164,18 @@ extension CryptoDetailData {
         ),
         relatedCryptos: CryptoRelatedTicker.sampleData
     )
+}
+
+// MARK: - Crypto Performance Sample Data
+enum CryptoPerformance {
+    static let sampleETH: [PerformancePeriod] = [
+        PerformancePeriod(label: "1 Month", changePercent: 12.34),
+        PerformancePeriod(label: "3 Months", changePercent: -5.21),
+        PerformancePeriod(label: "6 Months", changePercent: 28.76),
+        PerformancePeriod(label: "YTD", changePercent: 45.12),
+        PerformancePeriod(label: "1 Year", changePercent: 62.89),
+        PerformancePeriod(label: "5 Years", changePercent: 412.55)
+    ]
 }
 
 // MARK: - Crypto Key Statistics Sample Data (FMP-based)

@@ -20,6 +20,9 @@ struct CryptoDetailOverviewContent: View {
             // Key Statistics (FMP data)
             CryptoDetailKeyStatsSection(statisticsGroups: cryptoData.keyStatisticsGroups)
 
+            // Performance
+            TickerDetailPerformanceSection(periods: cryptoData.performancePeriods)
+
             // Snapshots (Origin and Technology, Tokenomics, Next Big Moves, Risks)
             CryptoDetailSnapshotsSection(
                 snapshots: cryptoData.snapshots,

@@ -172,17 +172,17 @@ struct IndexSectorPerformanceSnapshot {
     }
 }
 
-// MARK: - Risk Severity
-enum RiskSeverity: String {
-    case elevated = "Elevated"
-    case high = "High"
-    case critical = "Critical"
+// MARK: - Macro Signal
+enum MacroSignal: String {
+    case positive = "Positive"
+    case neutral = "Neutral"
+    case cautious = "Cautious"
 
     var color: Color {
         switch self {
-        case .elevated: return AppColors.alertOrange
-        case .high: return Color(hex: "EF4444")
-        case .critical: return AppColors.bearish
+        case .positive: return AppColors.bullish
+        case .neutral: return AppColors.alertOrange
+        case .cautious: return AppColors.bearish
         }
     }
 
@@ -192,33 +192,33 @@ enum RiskSeverity: String {
 
     var iconName: String {
         switch self {
-        case .elevated: return "exclamationmark.circle.fill"
-        case .high: return "exclamationmark.triangle.fill"
-        case .critical: return "xmark.octagon.fill"
+        case .positive: return "arrow.up.circle.fill"
+        case .neutral: return "equal.circle.fill"
+        case .cautious: return "exclamationmark.triangle.fill"
         }
     }
 }
 
-// MARK: - Systemic Risk Item
-struct SystemicRiskItem: Identifiable {
+// MARK: - Macro Forecast Item
+struct MacroForecastItem: Identifiable {
     let id = UUID()
     let title: String
     let description: String
-    let severity: RiskSeverity
+    let signal: MacroSignal
 }
 
-// MARK: - Index Systemic Risk Snapshot
-struct IndexSystemicRiskSnapshot {
-    let risks: [SystemicRiskItem]
+// MARK: - Index Macro Forecast Snapshot
+struct IndexMacroForecastSnapshot {
+    let indicators: [MacroForecastItem]
     let storyTemplate: String
 
     /// Resolves the template by replacing placeholders with live data
     var resolvedStory: String {
-        let topRisk = risks.first
+        let topIndicator = indicators.first
         return storyTemplate
-            .replacingOccurrences(of: "{TOP_RISK}", with: topRisk?.title ?? "N/A")
-            .replacingOccurrences(of: "{TOP_RISK_SEVERITY}", with: topRisk?.severity.rawValue ?? "N/A")
-            .replacingOccurrences(of: "{RISK_COUNT}", with: "\(risks.count)")
+            .replacingOccurrences(of: "{TOP_INDICATOR}", with: topIndicator?.title ?? "N/A")
+            .replacingOccurrences(of: "{TOP_SIGNAL}", with: topIndicator?.signal.rawValue ?? "N/A")
+            .replacingOccurrences(of: "{INDICATOR_COUNT}", with: "\(indicators.count)")
     }
 }
 
@@ -226,7 +226,7 @@ struct IndexSystemicRiskSnapshot {
 struct IndexSnapshotsData {
     let valuation: IndexValuationSnapshot
     let sectorPerformance: IndexSectorPerformanceSnapshot
-    let systemicRisk: IndexSystemicRiskSnapshot
+    let macroForecast: IndexMacroForecastSnapshot
     let generatedDate: Date
     let generatedBy: String  // e.g. "Gemini 2.0 Flash"
 
@@ -339,26 +339,31 @@ extension IndexSectorPerformanceSnapshot {
     )
 }
 
-extension IndexSystemicRiskSnapshot {
-    static let sampleData = IndexSystemicRiskSnapshot(
-        risks: [
-            SystemicRiskItem(
-                title: "Sticky Inflation",
-                description: "Core CPI remains above the Fed's 2% target. A resurgence could force the Fed to hold rates higher for longer, squeezing valuations and slowing consumer spending.",
-                severity: .high
+extension IndexMacroForecastSnapshot {
+    static let sampleData = IndexMacroForecastSnapshot(
+        indicators: [
+            MacroForecastItem(
+                title: "GDP Growth",
+                description: "The U.S. economy is expanding at a 2.3% annualized rate. Consumer spending remains resilient, and business investment is picking up — a solid backdrop for equities.",
+                signal: .positive
             ),
-            SystemicRiskItem(
-                title: "Concentration Risk",
-                description: "The top 10 stocks now represent ~35% of the index. A selloff in mega-cap tech could drag the entire market — the \"Magnificent 7\" effect cuts both ways.",
-                severity: .elevated
+            MacroForecastItem(
+                title: "Inflation & Fed Policy",
+                description: "Core CPI is cooling but still above the Fed's 2% target at 2.8%. The Fed is expected to hold rates steady near-term, with 1–2 cuts priced in for late 2026.",
+                signal: .neutral
             ),
-            SystemicRiskItem(
-                title: "Geopolitical Tensions",
-                description: "Ongoing conflicts and trade policy uncertainty could disrupt supply chains and trigger risk-off sentiment in global markets.",
-                severity: .elevated
+            MacroForecastItem(
+                title: "Labor Market",
+                description: "Unemployment holds at 3.9% with 180K jobs added monthly. Wage growth is moderating but still above inflation — the Goldilocks scenario continues for now.",
+                signal: .positive
+            ),
+            MacroForecastItem(
+                title: "Global Trade & Geopolitics",
+                description: "Ongoing tariff uncertainty and supply chain shifts could weigh on margins for globally exposed companies. Trade policy remains the key wildcard for H2 2026.",
+                signal: .cautious
             )
         ],
-        storyTemplate: "The biggest wildcard right now is {TOP_RISK}. We're tracking {RISK_COUNT} key risks that could derail the current rally. None are flashing red yet, but the market is priced for perfection — any negative surprise gets amplified."
+        storyTemplate: "The macro picture is mixed but leaning constructive. {TOP_INDICATOR} is flashing {TOP_SIGNAL}, and we're tracking {INDICATOR_COUNT} key indicators shaping the outlook. Growth is holding up, but the Fed's next move and trade policy remain the swing factors."
     )
 }
 
@@ -366,7 +371,7 @@ extension IndexSnapshotsData {
     static let sampleData = IndexSnapshotsData(
         valuation: IndexValuationSnapshot.sampleData,
         sectorPerformance: IndexSectorPerformanceSnapshot.sampleData,
-        systemicRisk: IndexSystemicRiskSnapshot.sampleData,
+        macroForecast: IndexMacroForecastSnapshot.sampleData,
         generatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 2, day: 10))!,
         generatedBy: "Gemini 2.0 Flash"
     )

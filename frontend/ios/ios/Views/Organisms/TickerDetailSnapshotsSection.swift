@@ -41,7 +41,7 @@ struct TickerDetailSnapshotsSection: View {
             }
 
             // AI Deep Research button
-            AIDeepResearchButton {
+            AIDeepResearchButton(title: "AI Deep Research") {
                 onDeepResearchTap?()
             }
         }

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct IndexDetailOverviewContent: View {
     let indexData: IndexDetailData
+    var onAIAnalystTap: (() -> Void)?
     var onWebsiteTap: (() -> Void)?
 
     var body: some View {
@@ -20,7 +21,10 @@ struct IndexDetailOverviewContent: View {
             TickerDetailPerformanceSection(periods: indexData.performancePeriods)
 
             // Snapshots (Valuation, Sector Performance, Systemic Risk)
-            IndexDetailSnapshotsSection(snapshotsData: indexData.snapshotsData)
+            IndexDetailSnapshotsSection(
+                snapshotsData: indexData.snapshotsData,
+                onAIAnalystTap: onAIAnalystTap
+            )
 
             // Index Profile
             IndexDetailProfileSection(

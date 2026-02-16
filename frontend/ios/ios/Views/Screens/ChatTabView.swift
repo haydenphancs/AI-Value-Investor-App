@@ -16,6 +16,7 @@ struct ChatTabView: View {
     @State private var isInConversation: Bool = false
     @State private var dragOffset: CGFloat = 0
 
+    var initialPrompt: String?
     var onHistoryTap: (() -> Void)?
 
     var body: some View {
@@ -60,6 +61,10 @@ struct ChatTabView: View {
         .onAppear {
             // Move audio player to Dynamic Island when entering chat
             audioManager.enterCompactMode()
+            // Pre-fill prompt if provided (e.g., from AI Analyst button)
+            if let prompt = initialPrompt, inputText.isEmpty {
+                inputText = prompt
+            }
         }
         .onDisappear {
             // Move audio player back to bottom when leaving chat

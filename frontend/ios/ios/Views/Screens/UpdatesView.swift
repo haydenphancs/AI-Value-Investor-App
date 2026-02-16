@@ -88,7 +88,8 @@ struct UpdatesView: View {
             .sheet(isPresented: $showManageAssetsSheet) {
                 ManageAssetsSheet(
                     tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
-                    onDismiss: { showManageAssetsSheet = false }
+                    onDismiss: { showManageAssetsSheet = false },
+                    onAddTicker: { ticker in viewModel.addTicker(ticker) }
                 )
             }
         }
@@ -120,52 +121,210 @@ struct UpdatesView: View {
 struct ManageAssetsSheet: View {
     let tickers: [NewsFilterTab]
     var onDismiss: (() -> Void)?
+    var onAddTicker: ((String) -> Void)?
+
+    @State private var showTickerSearch = false
 
     var body: some View {
         NavigationView {
-            List {
-                Section("Your Tickers") {
-                    ForEach(tickers) { ticker in
-                        HStack {
-                            Text(ticker.title)
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textPrimary)
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
 
-                            Spacer()
+                List {
+                    Section {
+                        ForEach(tickers) { ticker in
+                            HStack {
+                                Text(ticker.title)
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textPrimary)
 
-                            if let change = ticker.formattedChange {
-                                Text(change)
-                                    .font(AppTypography.callout)
-                                    .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
+                                Spacer()
+
+                                if let change = ticker.formattedChange {
+                                    Text(change)
+                                        .font(AppTypography.callout)
+                                        .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
+                                }
                             }
+                            .listRowBackground(AppColors.cardBackground)
+                        }
+                        .onDelete { _ in
+                            // Handle delete
+                            print("Delete ticker")
                         }
                     }
-                    .onDelete { _ in
-                        // Handle delete
-                        print("Delete ticker")
+
+                    Section {
+                        Button(action: { showTickerSearch = true }) {
+                            HStack {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(AppColors.primaryBlue)
+                                Text("Add Ticker")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.primaryBlue)
+                            }
+                        }
+                        .listRowBackground(AppColors.cardBackground)
+                    }
+
+                    Section {
+                        Text("Swipe left to remove a ticker from your watchlist.")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .listRowBackground(Color.clear)
                     }
                 }
-
-                Section {
-                    Text("Swipe left to remove a ticker from your watchlist.")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
+                .listStyle(InsetGroupedListStyle())
+                .scrollContentBackground(.hidden)
             }
-            .listStyle(InsetGroupedListStyle())
-            .navigationTitle("Manage Assets")
+            .navigationTitle("Your Tickers")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         onDismiss?()
                     }
                     .fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryBlue)
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showTickerSearch) {
+            TickerSearchSheet { ticker in
+                onAddTicker?(ticker)
+                showTickerSearch = false
+            }
+        }
     }
+}
+
+// MARK: - Ticker Search Sheet
+struct TickerSearchSheet: View {
+    var onSelectTicker: ((String) -> Void)?
+
+    @State private var searchText = ""
+    @State private var searchResults: [TickerSearchItem] = []
+    @Environment(\.dismiss) private var dismiss
+
+    private let popularTickers: [TickerSearchItem] = [
+        TickerSearchItem(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "GOOGL", companyName: "Alphabet Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "AMZN", companyName: "Amazon.com Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "TSLA", companyName: "Tesla Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "NVDA", companyName: "NVIDIA Corp.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "META", companyName: "Meta Platforms Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "JPM", companyName: "JPMorgan Chase & Co.", exchange: "NYSE"),
+        TickerSearchItem(ticker: "V", companyName: "Visa Inc.", exchange: "NYSE"),
+        TickerSearchItem(ticker: "BRK.B", companyName: "Berkshire Hathaway", exchange: "NYSE"),
+        TickerSearchItem(ticker: "WMT", companyName: "Walmart Inc.", exchange: "NYSE"),
+        TickerSearchItem(ticker: "DIS", companyName: "Walt Disney Co.", exchange: "NYSE"),
+        TickerSearchItem(ticker: "NFLX", companyName: "Netflix Inc.", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "AMD", companyName: "Advanced Micro Devices", exchange: "NASDAQ"),
+        TickerSearchItem(ticker: "INTC", companyName: "Intel Corp.", exchange: "NASDAQ"),
+    ]
+
+    private var filteredResults: [TickerSearchItem] {
+        if searchText.isEmpty {
+            return popularTickers
+        }
+        let query = searchText.lowercased()
+        return popularTickers.filter {
+            $0.ticker.lowercased().contains(query) ||
+            $0.companyName.lowercased().contains(query)
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    // Search bar
+                    HStack(spacing: AppSpacing.sm) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(AppColors.textMuted)
+                        TextField("Search ticker or company", text: $searchText)
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textPrimary)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.characters)
+                    }
+                    .padding(AppSpacing.md)
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.medium)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.sm)
+
+                    if !searchText.isEmpty && filteredResults.isEmpty {
+                        Spacer()
+                        Text("No results found")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textMuted)
+                        Spacer()
+                    } else {
+                        List {
+                            Section(header: Text(searchText.isEmpty ? "Popular" : "Results")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                            ) {
+                                ForEach(filteredResults) { item in
+                                    Button {
+                                        onSelectTicker?(item.ticker)
+                                    } label: {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(item.ticker)
+                                                    .font(AppTypography.bodyBold)
+                                                    .foregroundColor(AppColors.textPrimary)
+                                                Text(item.companyName)
+                                                    .font(AppTypography.caption)
+                                                    .foregroundColor(AppColors.textSecondary)
+                                            }
+                                            Spacer()
+                                            Text(item.exchange)
+                                                .font(AppTypography.caption)
+                                                .foregroundColor(AppColors.textMuted)
+                                        }
+                                    }
+                                    .listRowBackground(AppColors.cardBackground)
+                                }
+                            }
+                        }
+                        .listStyle(InsetGroupedListStyle())
+                        .scrollContentBackground(.hidden)
+                    }
+                }
+            }
+            .navigationTitle("Add Ticker")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+// MARK: - Ticker Search Item Model
+struct TickerSearchItem: Identifiable {
+    let id = UUID()
+    let ticker: String
+    let companyName: String
+    let exchange: String
 }
 
 // MARK: - News Filter Sheet

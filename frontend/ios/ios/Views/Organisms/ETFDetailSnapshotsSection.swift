@@ -267,7 +267,11 @@ struct ETFNetYieldCard: View {
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.bearish.opacity(0.08))
+                                .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
                         )
 
                         // Dividend side
@@ -296,13 +300,17 @@ struct ETFNetYieldCard: View {
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.bullish.opacity(0.08))
+                                .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
                         )
                     }
                     .fixedSize(horizontal: false, vertical: true)
 
                     // The verdict
-                    HStack(alignment: .top, spacing: AppSpacing.sm) {
+                    HStack(alignment: .top, spacing:0) {
                         Image(systemName: "lightbulb.fill")
                             .font(.system(size: 14))
                             .foregroundColor(AppColors.neutral)
@@ -310,15 +318,11 @@ struct ETFNetYieldCard: View {
                         Text(netYield.verdict)
                             .font(AppTypography.footnote)
                             .fontWeight(.medium)
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(AppSpacing.md)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(AppColors.neutral.opacity(0.1))
-                    )
 
                     // Dividend History row
                     ETFDividendHistoryRow(lastPayment: netYield.lastDividendPayment)
@@ -365,7 +369,7 @@ struct ETFDividendHistoryRow: View {
                 }
 
                 // Last payment details
-                HStack(spacing: 0) {
+                HStack(spacing: AppSpacing.sm) {
                     // Dividend Per Share
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text("Per Share")
@@ -376,10 +380,11 @@ struct ETFDividendHistoryRow: View {
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.bullish)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Spacer()
 
                     // Ex-Dividend Date
-                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    VStack(alignment: .center, spacing: AppSpacing.xxs) {
                         Text("Ex-Div Date")
                             .font(.system(size: 10))
                             .foregroundColor(AppColors.textMuted)
@@ -388,10 +393,11 @@ struct ETFDividendHistoryRow: View {
                             .fontWeight(.medium)
                             .foregroundColor(AppColors.textSecondary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    Spacer()
 
                     // Pay Date
-                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                         Text("Pay Date")
                             .font(.system(size: 10))
                             .foregroundColor(AppColors.textMuted)
@@ -400,7 +406,6 @@ struct ETFDividendHistoryRow: View {
                             .fontWeight(.medium)
                             .foregroundColor(AppColors.textSecondary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(AppSpacing.md)
@@ -507,6 +512,7 @@ struct ETFAssetAllocationBar: View {
 
             // Legend
             HStack(spacing: AppSpacing.md) {
+                Spacer()
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                     HStack(spacing: AppSpacing.xxs) {
                         Circle()
@@ -517,6 +523,7 @@ struct ETFAssetAllocationBar: View {
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
+                Spacer()
             }
         }
     }
@@ -696,9 +703,9 @@ struct ETFConcentrationMeter: View {
 
             // Insight
             HStack(alignment: .top, spacing: AppSpacing.sm) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(concentration.level.color)
+                Image(systemName: "lightbulb.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(AppColors.neutral)
 
                 Text(concentration.insight)
                     .font(AppTypography.caption)

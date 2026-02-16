@@ -310,7 +310,7 @@ struct ETFNetYieldCard: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                     // The verdict
-                    HStack(alignment: .top, spacing:0) {
+                    HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Image(systemName: "lightbulb.fill")
                             .font(.system(size: 14))
                             .foregroundColor(AppColors.neutral)
@@ -321,7 +321,7 @@ struct ETFNetYieldCard: View {
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(AppSpacing.md)
+                    
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     // Dividend History row

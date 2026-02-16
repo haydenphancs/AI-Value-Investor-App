@@ -243,7 +243,7 @@ struct ETFNetYieldCard: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                    // Cost vs Dividend side-by-side
+                    // Cost vs Dividend side-by-side (equal height)
                     HStack(alignment: .top, spacing: AppSpacing.md) {
                         // Cost side
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -260,8 +260,10 @@ struct ETFNetYieldCard: View {
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
+
+                            Spacer(minLength: 0)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
@@ -275,11 +277,9 @@ struct ETFNetYieldCard: View {
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.bullish)
 
-                            HStack(spacing: AppSpacing.xs) {
-                                Text("Yield: \(netYield.formattedDividendYield)")
-                                    .font(AppTypography.calloutBold)
-                                    .foregroundColor(AppColors.textPrimary)
-                            }
+                            Text("Yield: \(netYield.formattedDividendYield)")
+                                .font(AppTypography.calloutBold)
+                                .foregroundColor(AppColors.textPrimary)
 
                             Text("Pays \(netYield.payFrequency)")
                                 .font(AppTypography.caption)
@@ -289,29 +289,17 @@ struct ETFNetYieldCard: View {
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
+
+                            Spacer(minLength: 0)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                                 .fill(AppColors.bullish.opacity(0.08))
                         )
                     }
-
-                    // Show paid history link
-                    Button(action: {
-                        // Future: navigate to dividend history
-                    }) {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 12))
-                            Text("Show paid history")
-                                .font(AppTypography.caption)
-                                .fontWeight(.medium)
-                        }
-                        .foregroundColor(AppColors.primaryBlue)
-                    }
-                    .buttonStyle(PlainButtonStyle())
+                    .fixedSize(horizontal: false, vertical: true)
 
                     // The verdict
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
@@ -331,6 +319,9 @@ struct ETFNetYieldCard: View {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                             .fill(AppColors.neutral.opacity(0.1))
                     )
+
+                    // Dividend History row
+                    ETFDividendHistoryRow(lastPayment: netYield.lastDividendPayment)
                 }
                 .padding(.bottom, AppSpacing.md)
             }
@@ -340,6 +331,89 @@ struct ETFNetYieldCard: View {
                 .fill(AppColors.cardBackgroundLight)
                 .frame(height: 1)
         }
+    }
+}
+
+// MARK: - Dividend History Row
+
+struct ETFDividendHistoryRow: View {
+    let lastPayment: ETFDividendPayment
+
+    var body: some View {
+        Button(action: {
+            // Future: navigate to full dividend history
+        }) {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Title row with chevron
+                HStack {
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: "calendar.badge.clock")
+                            .font(.system(size: 14))
+                            .foregroundColor(AppColors.primaryBlue)
+
+                        Text("Dividend History")
+                            .font(AppTypography.footnote)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppColors.textPrimary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(AppColors.textMuted)
+                }
+
+                // Last payment details
+                HStack(spacing: 0) {
+                    // Dividend Per Share
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text("Per Share")
+                            .font(.system(size: 10))
+                            .foregroundColor(AppColors.textMuted)
+                        Text(lastPayment.dividendPerShare)
+                            .font(AppTypography.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppColors.bullish)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Ex-Dividend Date
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text("Ex-Div Date")
+                            .font(.system(size: 10))
+                            .foregroundColor(AppColors.textMuted)
+                        Text(lastPayment.exDividendDate)
+                            .font(AppTypography.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Pay Date
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text("Pay Date")
+                            .font(.system(size: 10))
+                            .foregroundColor(AppColors.textMuted)
+                        Text(lastPayment.payDate)
+                            .font(AppTypography.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight.opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -402,10 +476,20 @@ struct ETFAssetAllocationBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Asset Allocation")
-                .font(AppTypography.footnote)
-                .fontWeight(.semibold)
-                .foregroundColor(AppColors.textPrimary)
+            // Title with total assets
+            HStack {
+                Text("Asset Allocation")
+                    .font(AppTypography.footnote)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Text(allocation.totalAssets)
+                    .font(AppTypography.footnote)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textSecondary)
+            }
 
             // Stacked bar
             GeometryReader { geometry in
@@ -443,42 +527,55 @@ struct ETFAssetAllocationBar: View {
 struct ETFSectorsView: View {
     let sectors: [ETFSectorWeight]
 
-    private var maxWeight: Double {
-        sectors.first?.weight ?? 1
+    // "Others" = 100% minus the sum of the visible sectors
+    private var othersWeight: Double {
+        let sum = sectors.reduce(0) { $0 + $1.weight }
+        return max(100.0 - sum, 0)
+    }
+
+    private var allRows: [(name: String, weight: Double, isOther: Bool)] {
+        var rows: [(name: String, weight: Double, isOther: Bool)] = sectors.map {
+            ($0.name, $0.weight, false)
+        }
+        if othersWeight > 0.1 {
+            rows.append(("Others", othersWeight, true))
+        }
+        return rows
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Top 5 Sectors")
+            Text("Sectors")
                 .font(AppTypography.footnote)
                 .fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.xs) {
-                ForEach(sectors) { sector in
+                ForEach(Array(allRows.enumerated()), id: \.offset) { _, row in
                     HStack(spacing: AppSpacing.sm) {
-                        Text(sector.name)
+                        Text(row.name)
                             .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
+                            .foregroundColor(row.isOther ? AppColors.textMuted : AppColors.textSecondary)
                             .frame(width: 110, alignment: .leading)
 
+                        // Bar scaled to 100% of portfolio
                         GeometryReader { geometry in
-                            let barWidth = (sector.weight / maxWeight) * geometry.size.width
+                            let barWidth = (row.weight / 100.0) * geometry.size.width
                             ZStack(alignment: .leading) {
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(AppColors.cardBackgroundLight)
                                     .frame(height: 6)
 
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(AppColors.primaryBlue.opacity(0.7))
+                                    .fill(row.isOther ? AppColors.textMuted.opacity(0.5) : AppColors.primaryBlue.opacity(0.7))
                                     .frame(width: max(barWidth, 4), height: 6)
                             }
                         }
                         .frame(height: 6)
 
-                        Text(sector.formattedWeight)
+                        Text(String(format: "%.1f%%", row.weight))
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(row.isOther ? AppColors.textMuted : AppColors.textPrimary)
                             .frame(width: 44, alignment: .trailing)
                     }
                 }

@@ -61,6 +61,19 @@ class UpdatesViewModel: ObservableObject {
         print("Add new ticker tapped")
     }
 
+    func addTicker(_ symbol: String) {
+        // Avoid duplicates
+        guard !filterTabs.contains(where: { $0.ticker == symbol }) else { return }
+
+        let newTab = NewsFilterTab(
+            title: symbol,
+            ticker: symbol,
+            changePercent: 0.0,
+            isMarketTab: false
+        )
+        filterTabs.append(newTab)
+    }
+
     func openFilterOptions() {
         showFilterSheet = true
     }

@@ -18,12 +18,14 @@ enum ETFDetailTab: String, CaseIterable {
 // MARK: - ETF Snapshot Category
 enum ETFSnapshotCategory: String, CaseIterable {
     case identityAndRating = "Identity & Rating"
+    case strategy = "Strategy"
     case netYield = "Net Yield"
     case holdingsAndRisk = "Holdings & Risk"
 
     var iconName: String {
         switch self {
         case .identityAndRating: return "shield.checkered"
+        case .strategy: return "scope"
         case .netYield: return "percent"
         case .holdingsAndRisk: return "chart.bar.doc.horizontal.fill"
         }
@@ -32,17 +34,124 @@ enum ETFSnapshotCategory: String, CaseIterable {
     var iconColor: Color {
         switch self {
         case .identityAndRating: return AppColors.primaryBlue
+        case .strategy: return AppColors.accentCyan
         case .netYield: return AppColors.bullish
         case .holdingsAndRisk: return AppColors.neutral
         }
     }
 }
 
-// MARK: - ETF Snapshot Item
-struct ETFSnapshotItem: Identifiable {
+// MARK: - ETF Identity & Rating
+struct ETFIdentityRating {
+    let score: Int
+    let maxScore: Int
+    let esgRating: String
+    let volatilityLabel: String
+}
+
+// MARK: - ETF Strategy
+struct ETFStrategy {
+    let hook: String
+    let tags: [String]
+}
+
+// MARK: - ETF Net Yield
+struct ETFNetYield {
+    let expenseRatio: Double
+    let feeContext: String
+    let dividendYield: Double
+    let payFrequency: String
+    let yieldContext: String
+    let verdict: String
+
+    var formattedExpenseRatio: String {
+        "\(String(format: "%g", expenseRatio))%"
+    }
+
+    var formattedDividendYield: String {
+        String(format: "%.2f%%", dividendYield)
+    }
+}
+
+// MARK: - ETF Asset Allocation
+struct ETFAssetAllocation {
+    let equities: Double
+    let bonds: Double
+    let crypto: Double
+    let cash: Double
+}
+
+// MARK: - ETF Sector Weight
+struct ETFSectorWeight: Identifiable {
     let id = UUID()
-    let category: ETFSnapshotCategory
-    let paragraphs: [String]
+    let name: String
+    let weight: Double
+
+    var formattedWeight: String {
+        String(format: "%.1f%%", weight)
+    }
+}
+
+// MARK: - ETF Top Holding
+struct ETFTopHolding: Identifiable {
+    let id = UUID()
+    let symbol: String
+    let name: String
+    let weight: Double
+
+    var formattedWeight: String {
+        String(format: "%.1f%%", weight)
+    }
+}
+
+// MARK: - ETF Concentration Level
+enum ETFConcentrationLevel {
+    case low
+    case moderate
+    case high
+
+    var color: Color {
+        switch self {
+        case .low: return AppColors.bullish
+        case .moderate: return AppColors.neutral
+        case .high: return AppColors.bearish
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .low: return "Well Diversified"
+        case .moderate: return "Moderate"
+        case .high: return "Concentrated"
+        }
+    }
+}
+
+// MARK: - ETF Concentration
+struct ETFConcentration {
+    let topN: Int
+    let weight: Double
+    let insight: String
+
+    var formattedWeight: String {
+        String(format: "%.0f%%", weight)
+    }
+
+    var level: ETFConcentrationLevel {
+        switch weight {
+        case ..<20: return .low
+        case 20..<35: return .moderate
+        default: return .high
+        }
+    }
+}
+
+// MARK: - ETF Holdings & Risk
+struct ETFHoldingsRisk {
+    let assetAllocation: ETFAssetAllocation
+    let topSectors: [ETFSectorWeight]
+    let topHoldings: [ETFTopHolding]
+    let concentration: ETFConcentration
 }
 
 // MARK: - ETF Profile (FMP-based)
@@ -71,7 +180,10 @@ struct ETFDetailData: Identifiable {
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
-    let snapshots: [ETFSnapshotItem]
+    let identityRating: ETFIdentityRating
+    let strategy: ETFStrategy
+    let netYield: ETFNetYield
+    let holdingsRisk: ETFHoldingsRisk
     let etfProfile: ETFProfile
     let relatedETFs: [RelatedTicker]
 
@@ -91,6 +203,11 @@ struct ETFDetailData: Identifiable {
     var formattedChangePercent: String {
         let sign = priceChangePercent >= 0 ? "+" : ""
         return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+    }
+
+    var formattedChangePill: String {
+        let sign = priceChangePercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", priceChangePercent))%"
     }
 }
 
@@ -125,7 +242,56 @@ extension ETFDetailData {
         keyStatistics: ETFKeyStatistic.sampleSPY,
         keyStatisticsGroups: ETFKeyStatisticsGroup.sampleSPY,
         performancePeriods: ETFPerformance.sampleSPY,
-        snapshots: ETFSnapshotItem.sampleSPY,
+        identityRating: ETFIdentityRating(
+            score: 5,
+            maxScore: 5,
+            esgRating: "A",
+            volatilityLabel: "Low Volatility"
+        ),
+        strategy: ETFStrategy(
+            hook: "Tracks the 500 largest U.S. companies. A single bet on the American economy.",
+            tags: ["Passive", "Large Cap Blend", "Index"]
+        ),
+        netYield: ETFNetYield(
+            expenseRatio: 0.0945,
+            feeContext: "You pay $9.45 per year on a $10,000 investment.",
+            dividendYield: 1.22,
+            payFrequency: "Quarterly",
+            yieldContext: "You earn ~$122 per year on a $10,000 investment.",
+            verdict: "This fund pays you 13x more in dividends than it charges in fees."
+        ),
+        holdingsRisk: ETFHoldingsRisk(
+            assetAllocation: ETFAssetAllocation(
+                equities: 99.5,
+                bonds: 0.0,
+                crypto: 0.0,
+                cash: 0.5
+            ),
+            topSectors: [
+                ETFSectorWeight(name: "Technology", weight: 31.7),
+                ETFSectorWeight(name: "Financials", weight: 13.5),
+                ETFSectorWeight(name: "Healthcare", weight: 12.2),
+                ETFSectorWeight(name: "Consumer Disc.", weight: 10.1),
+                ETFSectorWeight(name: "Communication", weight: 9.2)
+            ],
+            topHoldings: [
+                ETFTopHolding(symbol: "MSFT", name: "Microsoft", weight: 7.2),
+                ETFTopHolding(symbol: "AAPL", name: "Apple", weight: 6.8),
+                ETFTopHolding(symbol: "NVDA", name: "NVIDIA", weight: 6.1),
+                ETFTopHolding(symbol: "AMZN", name: "Amazon", weight: 3.7),
+                ETFTopHolding(symbol: "META", name: "Meta", weight: 2.5),
+                ETFTopHolding(symbol: "GOOGL", name: "Alphabet A", weight: 2.1),
+                ETFTopHolding(symbol: "GOOG", name: "Alphabet C", weight: 1.8),
+                ETFTopHolding(symbol: "BRK.B", name: "Berkshire", weight: 1.7),
+                ETFTopHolding(symbol: "AVGO", name: "Broadcom", weight: 1.7),
+                ETFTopHolding(symbol: "JPM", name: "JPMorgan", weight: 1.4)
+            ],
+            concentration: ETFConcentration(
+                topN: 10,
+                weight: 35,
+                insight: "Over a third of your money is in just 10 companies. If Big Tech stumbles, this fund feels it."
+            )
+        ),
         etfProfile: ETFProfile(
             description: "The SPDR S&P 500 ETF Trust is the oldest and most well-known exchange-traded fund in the world. Launched in 1993 by State Street Global Advisors, SPY tracks the S&P 500 Index, providing broad exposure to 500 of the largest U.S. companies across all major sectors. It is the most liquid ETF on the market, widely used by institutional and retail investors alike for core portfolio allocation, hedging, and tactical trading.",
             symbol: "SPY",
@@ -201,24 +367,6 @@ enum ETFKeyStatisticsGroup {
     ]
 }
 
-// MARK: - ETF Snapshot Sample Data
-extension ETFSnapshotItem {
-    static let sampleSPY: [ETFSnapshotItem] = [
-        ETFSnapshotItem(
-            category: .identityAndRating,
-            paragraphs: []
-        ),
-        ETFSnapshotItem(
-            category: .netYield,
-            paragraphs: []
-        ),
-        ETFSnapshotItem(
-            category: .holdingsAndRisk,
-            paragraphs: []
-        )
-    ]
-}
-
 // MARK: - Related ETF Sample Data
 enum ETFRelatedTicker {
     static let sampleData: [RelatedTicker] = [
@@ -229,4 +377,82 @@ enum ETFRelatedTicker {
         RelatedTicker(symbol: "IWM", name: "iShares Russell 2000", price: 212.78, changePercent: -0.45),
         RelatedTicker(symbol: "VTI", name: "Vanguard Total Stock", price: 274.93, changePercent: 0.58)
     ]
+}
+
+// MARK: - Gemini System Prompt for Weekly Snapshot Generation
+
+enum ETFSnapshotPrompts {
+    /// System prompt for Gemini AI agent to generate weekly ETF Snapshot content.
+    /// Feed this as the system instruction along with FMP API data for the target ETF.
+    static let geminiSystemPrompt: String = """
+    You are an ETF Analyst AI writing for novice investors who may have never bought a stock before.
+    Your job is to generate weekly ETF Snapshot reports. Given an ETF symbol and its data from Financial
+    Modeling Prep (FMP), produce the following structured JSON.
+
+    VOICE & TONE:
+    - Write like you are explaining to a smart friend over coffee. Zero jargon without explanation.
+    - Be honest about risks. Never sugarcoat.
+    - Use concrete dollar amounts based on a $10,000 investment to make costs and returns tangible.
+    - Keep insights quotable and memorable — one punchy sentence that sticks.
+
+    OUTPUT SCHEMA:
+    {
+      "symbol": "SPY",
+      "generatedDate": "2026-02-16",
+
+      "identityRating": {
+        "score": <int 1-5>,           // Overall fund quality: AUM, tracking error, liquidity, longevity
+        "maxScore": 5,
+        "esgRating": "<A-F>",         // ESG letter grade based on underlying holdings
+        "volatilityLabel": "<string>" // "Low Volatility" | "Moderate Volatility" | "High Volatility"
+      },
+
+      "strategy": {
+        "hook": "<string max 120 chars>",  // One punchy sentence: what this fund does in plain English
+        "tags": ["<string>", ...]          // 2-4 from: Passive, Active, Index, Large Cap, Mid Cap,
+                                           // Small Cap, Blend, Growth, Value, Sector, Thematic,
+                                           // Bond, International, Dividend, ESG
+      },
+
+      "netYield": {
+        "expenseRatio": <double>,          // e.g. 0.03 means 0.03%
+        "feeContext": "<string>",          // "You pay $X per year on a $10,000 investment."
+        "dividendYield": <double>,         // e.g. 1.42 means 1.42%
+        "payFrequency": "<string>",        // Monthly | Quarterly | Semi-Annually | Annually
+        "yieldContext": "<string>",        // "You earn ~$X per year on a $10,000 investment."
+        "verdict": "<string>"             // "This fund pays you Nx more in dividends than it charges
+                                          //  in fees." (N = dividendYield / expenseRatio, rounded)
+      },
+
+      "holdingsRisk": {
+        "assetAllocation": {
+          "equities": <double>,  // percentage, all four should sum to ~100
+          "bonds": <double>,
+          "crypto": <double>,
+          "cash": <double>
+        },
+        "topSectors": [                    // Top 5, sorted largest → smallest
+          { "name": "<string>", "weight": <double> }
+        ],
+        "topHoldings": [                   // Top 10, sorted largest → smallest
+          { "symbol": "<string>", "name": "<string>", "weight": <double> }
+        ],
+        "concentration": {
+          "topN": 10,
+          "weight": <double>,              // Sum of top 10 weights
+          "insight": "<string>"            // If >30% warn about concentration. If <20% praise
+                                           // diversification. One punchy memorable sentence.
+        }
+      }
+    }
+
+    RULES:
+    1. score: 5 = institutional-grade blue chip ETF, 4 = strong, 3 = average, 2 = niche/risky, 1 = speculative
+    2. For the hook, never exceed 120 characters. Think tweet-sized.
+    3. Fee context and yield context MUST use $10,000 as the base investment amount.
+    4. The verdict multiplier = dividendYield / expenseRatio, rounded to nearest integer.
+       If expenseRatio is 0, say "This fund charges nothing in fees."
+    5. Concentration insight: be direct. Use "your money" language to make it personal.
+    6. Output ONLY valid JSON. No markdown, no commentary.
+    """
 }

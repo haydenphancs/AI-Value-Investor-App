@@ -2,15 +2,14 @@
 //  ETFDetailSnapshotsSection.swift
 //  ios
 //
-//  Organism: Snapshots section for ETF Detail with expandable cards
-//  Categories: Identity & Rating, Net Yield, Holdings & Risk
-//  No ranking - content-driven snapshots to be populated later
+//  Organism: Snapshots section for ETF Detail with rich expandable cards
+//  Categories: Identity & Rating, Strategy, Net Yield, Holdings & Risk
 //
 
 import SwiftUI
 
 struct ETFDetailSnapshotsSection: View {
-    let snapshots: [ETFSnapshotItem]
+    let etfData: ETFDetailData
     var onDeepResearchTap: (() -> Void)?
     @State private var showInfoSheet: Bool = false
 
@@ -36,9 +35,10 @@ struct ETFDetailSnapshotsSection: View {
 
             // Snapshot cards
             VStack(spacing: 0) {
-                ForEach(snapshots) { snapshot in
-                    ETFSnapshotCard(snapshot: snapshot)
-                }
+                ETFIdentityRatingCard(etfData: etfData)
+                ETFStrategyCard(strategy: etfData.strategy)
+                ETFNetYieldCard(netYield: etfData.netYield)
+                ETFHoldingsRiskCard(holdingsRisk: etfData.holdingsRisk)
             }
 
             // AI Deep Research button
@@ -59,70 +59,156 @@ struct ETFDetailSnapshotsSection: View {
     }
 }
 
-// MARK: - ETF Snapshot Card (no ranking, expandable)
-struct ETFSnapshotCard: View {
-    let snapshot: ETFSnapshotItem
+// MARK: - Snapshot Card Header (shared expandable header)
+
+struct ETFSnapshotCardHeader: View {
+    let category: ETFSnapshotCategory
+    let isExpanded: Bool
+    var onTap: (() -> Void)?
+
+    var body: some View {
+        Button(action: {
+            onTap?()
+        }) {
+            HStack(spacing: AppSpacing.md) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .fill(category.iconColor.opacity(0.15))
+                        .frame(width: 36, height: 36)
+
+                    Image(systemName: category.iconName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(category.iconColor)
+                }
+
+                Text(category.rawValue)
+                    .font(AppTypography.calloutBold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .padding(.vertical, AppSpacing.md)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+// MARK: - 1. Identity & Rating Card
+
+struct ETFIdentityRatingCard: View {
+    let etfData: ETFDetailData
     @State private var isExpanded: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header row
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
-                }
-            }) {
-                HStack(spacing: AppSpacing.md) {
-                    // Category icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(snapshot.category.iconColor.opacity(0.15))
-                            .frame(width: 36, height: 36)
-
-                        Image(systemName: snapshot.category.iconName)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(snapshot.category.iconColor)
+            ETFSnapshotCardHeader(
+                category: .identityAndRating,
+                isExpanded: isExpanded,
+                onTap: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
                     }
-
-                    // Category name
-                    Text(snapshot.category.rawValue)
-                        .font(AppTypography.calloutBold)
-                        .foregroundColor(AppColors.textPrimary)
-
-                    Spacer()
-
-                    // Expand/collapse chevron
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(AppColors.textMuted)
                 }
-                .padding(.vertical, AppSpacing.md)
-            }
-            .buttonStyle(PlainButtonStyle())
+            )
 
-            // Content area (when expanded)
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
-                    if snapshot.paragraphs.isEmpty {
-                        // Placeholder for future content
-                        HStack(spacing: AppSpacing.sm) {
-                            Image(systemName: "text.alignleft")
-                                .font(.system(size: 14))
-                                .foregroundColor(AppColors.textMuted)
-
-                            Text("Content coming soon")
-                                .font(AppTypography.footnote)
-                                .foregroundColor(AppColors.textMuted)
-                                .italic()
-                        }
-                        .padding(.vertical, AppSpacing.sm)
-                    } else {
-                        ForEach(Array(snapshot.paragraphs.enumerated()), id: \.offset) { _, paragraph in
-                            Text(paragraph)
-                                .font(AppTypography.footnote)
+                    // Top row: Symbol + Name | Price + Change
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                            Text(etfData.symbol)
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundColor(AppColors.textPrimary)
+                            Text(etfData.name)
+                                .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textSecondary)
-                                .lineSpacing(4)
-                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(2)
+                        }
+
+                        Spacer()
+
+                        VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                            Text(etfData.formattedPrice)
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(AppColors.textPrimary)
+
+                            // Change pill
+                            Text(etfData.formattedChangePill)
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, AppSpacing.sm)
+                                .padding(.vertical, AppSpacing.xxs)
+                                .background(
+                                    Capsule()
+                                        .fill(etfData.isPositive ? AppColors.bullish : AppColors.bearish)
+                                )
+                        }
+                    }
+
+                    // Badges row
+                    HStack(spacing: AppSpacing.sm) {
+                        ETFSnapshotBadge(
+                            text: "Score: \(etfData.identityRating.score)/\(etfData.identityRating.maxScore)",
+                            color: AppColors.primaryBlue
+                        )
+                        ETFSnapshotBadge(
+                            text: "ESG: \(etfData.identityRating.esgRating)",
+                            color: AppColors.bullish
+                        )
+                        ETFSnapshotBadge(
+                            text: etfData.identityRating.volatilityLabel,
+                            color: AppColors.accentCyan
+                        )
+                    }
+                }
+                .padding(.bottom, AppSpacing.md)
+            }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - 2. Strategy Card
+
+struct ETFStrategyCard: View {
+    let strategy: ETFStrategy
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ETFSnapshotCardHeader(
+                category: .strategy,
+                isExpanded: isExpanded,
+                onTap: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                }
+            )
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    // The hook
+                    Text("\"\(strategy.hook)\"")
+                        .font(AppTypography.footnote)
+                        .foregroundColor(AppColors.textSecondary)
+                        .italic()
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    // Tags
+                    HStack(spacing: AppSpacing.sm) {
+                        ForEach(strategy.tags, id: \.self) { tag in
+                            ETFSnapshotTag(text: tag)
                         }
                     }
                 }
@@ -137,7 +223,436 @@ struct ETFSnapshotCard: View {
     }
 }
 
+// MARK: - 3. Net Yield Card
+
+struct ETFNetYieldCard: View {
+    let netYield: ETFNetYield
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ETFSnapshotCardHeader(
+                category: .netYield,
+                isExpanded: isExpanded,
+                onTap: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                }
+            )
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // Cost vs Dividend side-by-side
+                    HStack(alignment: .top, spacing: AppSpacing.md) {
+                        // Cost side
+                        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                            Text("Cost")
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(AppColors.bearish)
+
+                            Text("Fee: \(netYield.formattedExpenseRatio)")
+                                .font(AppTypography.calloutBold)
+                                .foregroundColor(AppColors.textPrimary)
+
+                            Text(netYield.feeContext)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(AppSpacing.md)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .fill(AppColors.bearish.opacity(0.08))
+                        )
+
+                        // Dividend side
+                        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                            Text("Dividend")
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(AppColors.bullish)
+
+                            HStack(spacing: AppSpacing.xs) {
+                                Text("Yield: \(netYield.formattedDividendYield)")
+                                    .font(AppTypography.calloutBold)
+                                    .foregroundColor(AppColors.textPrimary)
+                            }
+
+                            Text("Pays \(netYield.payFrequency)")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+
+                            Text(netYield.yieldContext)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(AppSpacing.md)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .fill(AppColors.bullish.opacity(0.08))
+                        )
+                    }
+
+                    // Show paid history link
+                    Button(action: {
+                        // Future: navigate to dividend history
+                    }) {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.system(size: 12))
+                            Text("Show paid history")
+                                .font(AppTypography.caption)
+                                .fontWeight(.medium)
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+
+                    // The verdict
+                    HStack(alignment: .top, spacing: AppSpacing.sm) {
+                        Image(systemName: "lightbulb.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(AppColors.neutral)
+
+                        Text(netYield.verdict)
+                            .font(AppTypography.footnote)
+                            .fontWeight(.medium)
+                            .foregroundColor(AppColors.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(AppSpacing.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.neutral.opacity(0.1))
+                    )
+                }
+                .padding(.bottom, AppSpacing.md)
+            }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - 4. Holdings & Risk Card
+
+struct ETFHoldingsRiskCard: View {
+    let holdingsRisk: ETFHoldingsRisk
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ETFSnapshotCardHeader(
+                category: .holdingsAndRisk,
+                isExpanded: isExpanded,
+                onTap: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                }
+            )
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // Asset Allocation
+                    ETFAssetAllocationBar(allocation: holdingsRisk.assetAllocation)
+
+                    // Top Sectors
+                    ETFSectorsView(sectors: holdingsRisk.topSectors)
+
+                    // Top Holdings (scrollable row)
+                    ETFTopHoldingsRow(holdings: holdingsRisk.topHoldings)
+
+                    // Concentration Meter
+                    ETFConcentrationMeter(concentration: holdingsRisk.concentration)
+                }
+                .padding(.bottom, AppSpacing.md)
+            }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Asset Allocation Stacked Bar
+
+struct ETFAssetAllocationBar: View {
+    let allocation: ETFAssetAllocation
+
+    private var segments: [(label: String, value: Double, color: Color)] {
+        [
+            ("Stocks", allocation.equities, AppColors.bullish),
+            ("Bonds", allocation.bonds, AppColors.primaryBlue),
+            ("Crypto", allocation.crypto, Color.purple),
+            ("Cash", allocation.cash, AppColors.textMuted)
+        ].filter { $0.value > 0 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Asset Allocation")
+                .font(AppTypography.footnote)
+                .fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            // Stacked bar
+            GeometryReader { geometry in
+                HStack(spacing: 1) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                        let width = (segment.value / 100.0) * geometry.size.width
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(segment.color)
+                            .frame(width: max(width, 2))
+                    }
+                }
+            }
+            .frame(height: 8)
+            .clipShape(Capsule())
+
+            // Legend
+            HStack(spacing: AppSpacing.md) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                    HStack(spacing: AppSpacing.xxs) {
+                        Circle()
+                            .fill(segment.color)
+                            .frame(width: 8, height: 8)
+                        Text("\(segment.label) \(String(format: "%.1f", segment.value))%")
+                            .font(.system(size: 10))
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Sectors View
+
+struct ETFSectorsView: View {
+    let sectors: [ETFSectorWeight]
+
+    private var maxWeight: Double {
+        sectors.first?.weight ?? 1
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Top 5 Sectors")
+                .font(AppTypography.footnote)
+                .fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            VStack(spacing: AppSpacing.xs) {
+                ForEach(sectors) { sector in
+                    HStack(spacing: AppSpacing.sm) {
+                        Text(sector.name)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                            .frame(width: 110, alignment: .leading)
+
+                        GeometryReader { geometry in
+                            let barWidth = (sector.weight / maxWeight) * geometry.size.width
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(AppColors.cardBackgroundLight)
+                                    .frame(height: 6)
+
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(AppColors.primaryBlue.opacity(0.7))
+                                    .frame(width: max(barWidth, 4), height: 6)
+                            }
+                        }
+                        .frame(height: 6)
+
+                        Text(sector.formattedWeight)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(AppColors.textPrimary)
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Top Holdings Scrollable Row
+
+struct ETFTopHoldingsRow: View {
+    let holdings: [ETFTopHolding]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("The Ingredients")
+                .font(AppTypography.footnote)
+                .fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: AppSpacing.sm) {
+                    ForEach(holdings) { holding in
+                        ETFHoldingSquare(holding: holding)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ETFHoldingSquare: View {
+    let holding: ETFTopHolding
+
+    var body: some View {
+        VStack(spacing: AppSpacing.xs) {
+            // Logo placeholder
+            ZStack {
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(width: 48, height: 48)
+
+                Text(String(holding.symbol.prefix(2)))
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(AppColors.textPrimary)
+            }
+
+            Text(holding.symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(holding.formattedWeight)
+                .font(.system(size: 10))
+                .foregroundColor(AppColors.textMuted)
+        }
+        .frame(width: 60)
+    }
+}
+
+// MARK: - Concentration Meter
+
+struct ETFConcentrationMeter: View {
+    let concentration: ETFConcentration
+
+    // Normalized position (0 to 1) for the meter
+    private var meterPosition: Double {
+        min(max(concentration.weight / 50.0, 0), 1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            // Label row
+            HStack {
+                Text("Top \(concentration.topN) Weight: \(concentration.formattedWeight)")
+                    .font(AppTypography.footnote)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                Text(concentration.level.label)
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(concentration.level.color)
+            }
+
+            // Meter bar
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    // Background gradient (green -> yellow -> red)
+                    LinearGradient(
+                        colors: [AppColors.bullish, AppColors.neutral, AppColors.bearish],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(height: 8)
+                    .clipShape(Capsule())
+                    .opacity(0.3)
+
+                    // Filled portion
+                    LinearGradient(
+                        colors: [AppColors.bullish, concentration.level.color],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: meterPosition * geometry.size.width, height: 8)
+                    .clipShape(Capsule())
+
+                    // Indicator
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 14, height: 14)
+                        .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
+                        .offset(x: (meterPosition * geometry.size.width) - 7)
+                }
+            }
+            .frame(height: 14)
+
+            // Insight
+            HStack(alignment: .top, spacing: AppSpacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(concentration.level.color)
+
+                Text(concentration.insight)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+// MARK: - Reusable Badge & Tag Components
+
+struct ETFSnapshotBadge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, AppSpacing.sm)
+            .padding(.vertical, AppSpacing.xxs)
+            .background(
+                Capsule()
+                    .fill(color.opacity(0.15))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(color.opacity(0.3), lineWidth: 1)
+            )
+    }
+}
+
+struct ETFSnapshotTag: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(AppColors.textSecondary)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.xs)
+            .background(
+                Capsule()
+                    .fill(AppColors.cardBackgroundLight)
+            )
+    }
+}
+
 // MARK: - ETF Snapshots Info Sheet
+
 struct ETFSnapshotsInfoSheet: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -156,7 +671,7 @@ struct ETFSnapshotsInfoSheet: View {
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
-                        Text("Snapshots provide a quick, comprehensive view of an ETF's key dimensions. Each snapshot covers a different aspect of the fund, giving you an instant understanding of its structure, yield, and risk profile.")
+                        Text("Snapshots provide a quick, comprehensive view of an ETF's key dimensions. Each snapshot covers a different aspect of the fund, giving you an instant understanding of its identity, strategy, yield, and risk profile.")
                             .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -177,19 +692,25 @@ struct ETFSnapshotsInfoSheet: View {
                             SnapshotBulletPoint(
                                 icon: "shield.checkered",
                                 title: "Identity & Rating",
-                                description: "The ETF's issuer, tracking index, fund structure, and analyst or agency ratings."
+                                description: "Who is this fund? The issuer, quality score, ESG rating, and volatility classification at a glance."
+                            )
+
+                            SnapshotBulletPoint(
+                                icon: "scope",
+                                title: "Strategy",
+                                description: "What does this fund do? A plain-English explanation of the fund's goal and investment approach."
                             )
 
                             SnapshotBulletPoint(
                                 icon: "percent",
                                 title: "Net Yield",
-                                description: "Dividend yield, distribution frequency, expense ratio impact, and net income returned to investors."
+                                description: "What you pay vs. what you earn. Expense ratio, dividend yield, and the bottom-line verdict."
                             )
 
                             SnapshotBulletPoint(
                                 icon: "chart.bar.doc.horizontal.fill",
                                 title: "Holdings & Risk",
-                                description: "Top holdings concentration, sector allocation, portfolio diversification, and key risk metrics."
+                                description: "What's inside the box? Asset allocation, sector exposure, top holdings, and concentration risk."
                             )
                         }
                     }
@@ -241,9 +762,11 @@ struct ETFSnapshotsInfoSheet: View {
     }
 }
 
+// MARK: - Previews
+
 #Preview {
     ScrollView {
-        ETFDetailSnapshotsSection(snapshots: ETFSnapshotItem.sampleSPY)
+        ETFDetailSnapshotsSection(etfData: ETFDetailData.sampleSPY)
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)

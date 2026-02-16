@@ -22,9 +22,9 @@ struct ETFDetailOverviewContent: View {
             // Performance
             TickerDetailPerformanceSection(periods: etfData.performancePeriods)
 
-            // Snapshots (Identity & Rating, Net Yield, Holdings & Risk)
+            // Snapshots (Identity & Rating, Strategy, Net Yield, Holdings & Risk)
             ETFDetailSnapshotsSection(
-                snapshots: etfData.snapshots,
+                etfData: etfData,
                 onDeepResearchTap: onDeepResearchTap
             )
 

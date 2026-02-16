@@ -9,6 +9,7 @@ import SwiftUI
 
 struct IndexDetailSnapshotsSection: View {
     let snapshotsData: IndexSnapshotsData
+    var onAIAnalystTap: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -20,6 +21,11 @@ struct IndexDetailSnapshotsSection: View {
 
             // 3. Macro Forecast
             MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
+
+            // AI Analyst button
+            AIDeepResearchButton {
+                onAIAnalystTap?()
+            }
 
             // Footer: AI generation info
             HStack(spacing: AppSpacing.xs) {

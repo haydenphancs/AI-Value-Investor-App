@@ -15,6 +15,7 @@ struct CryptoDetailView: View {
     @State private var showTechnicalAnalysisDetail = false
     @State private var showSearch = false
     @State private var showShareSheet = false
+    @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
 
     let cryptoSymbol: String
@@ -183,6 +184,26 @@ struct CryptoDetailView: View {
             SearchView()
                 .preferredColorScheme(.dark)
         }
+        .fullScreenCover(isPresented: $showAIChat) {
+            NavigationView {
+                ZStack {
+                    AppColors.background
+                        .ignoresSafeArea()
+                    ChatTabView(initialPrompt: "Deep Analysis \(cryptoSymbol)")
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            showAIChat = false
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                    }
+                }
+            }
+            .environmentObject(AudioManager.shared)
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Tab Content
@@ -259,10 +280,7 @@ struct CryptoDetailView: View {
     }
 
     private func handleDeepResearchTap() {
-        if let onNavigateToResearch = onNavigateToResearch {
-            dismiss()
-            onNavigateToResearch()
-        }
+        showAIChat = true
     }
 
     private func handleSearchTapped() {

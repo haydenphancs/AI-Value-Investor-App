@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct AIDeepResearchButton: View {
+    var title: String = "AI Analyst"
     var onTap: (() -> Void)?
 
     var body: some View {
@@ -19,7 +20,7 @@ struct AIDeepResearchButton: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 16, weight: .semibold))
 
-                Text("AI Analyst")
+                Text(title)
                     .font(AppTypography.bodyBold)
             }
             .foregroundColor(AppColors.textPrimary)

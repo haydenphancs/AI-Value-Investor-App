@@ -14,6 +14,7 @@ struct IndexDetailView: View {
     @State private var showShareSheet = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
+    @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
 
     let indexSymbol: String
@@ -170,6 +171,26 @@ struct IndexDetailView: View {
             SearchView()
                 .preferredColorScheme(.dark)
         }
+        .fullScreenCover(isPresented: $showAIChat) {
+            NavigationView {
+                ZStack {
+                    AppColors.background
+                        .ignoresSafeArea()
+                    ChatTabView(initialPrompt: "Deep Analysis \(indexSymbol)")
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            showAIChat = false
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                    }
+                }
+            }
+            .environmentObject(AudioManager.shared)
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Tab Content
@@ -181,6 +202,7 @@ struct IndexDetailView: View {
             if let indexData = viewModel.indexData {
                 IndexDetailOverviewContent(
                     indexData: indexData,
+                    onAIAnalystTap: { showAIChat = true },
                     onWebsiteTap: viewModel.handleWebsiteTap
                 )
             }

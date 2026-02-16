@@ -140,7 +140,8 @@ struct UpdatesViewForTabView: View {
         .sheet(isPresented: $showManageAssetsSheet) {
             ManageAssetsSheet(
                 tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
-                onDismiss: { showManageAssetsSheet = false }
+                onDismiss: { showManageAssetsSheet = false },
+                onAddTicker: { ticker in viewModel.addTicker(ticker) }
             )
         }
         .fullScreenCover(item: $selectedNewsArticle) { article in

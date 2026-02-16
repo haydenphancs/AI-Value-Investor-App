@@ -55,6 +55,14 @@ struct ETFStrategy {
     let tags: [String]
 }
 
+// MARK: - ETF Dividend Payment
+struct ETFDividendPayment: Identifiable {
+    let id = UUID()
+    let dividendPerShare: String
+    let exDividendDate: String
+    let payDate: String
+}
+
 // MARK: - ETF Net Yield
 struct ETFNetYield {
     let expenseRatio: Double
@@ -63,6 +71,7 @@ struct ETFNetYield {
     let payFrequency: String
     let yieldContext: String
     let verdict: String
+    let lastDividendPayment: ETFDividendPayment
 
     var formattedExpenseRatio: String {
         "\(String(format: "%g", expenseRatio))%"
@@ -79,6 +88,7 @@ struct ETFAssetAllocation {
     let bonds: Double
     let crypto: Double
     let cash: Double
+    let totalAssets: String
 }
 
 // MARK: - ETF Sector Weight
@@ -258,14 +268,20 @@ extension ETFDetailData {
             dividendYield: 1.22,
             payFrequency: "Quarterly",
             yieldContext: "You earn ~$122 per year on a $10,000 investment.",
-            verdict: "This fund pays you 13x more in dividends than it charges in fees."
+            verdict: "This fund pays you 13x more in dividends than it charges in fees.",
+            lastDividendPayment: ETFDividendPayment(
+                dividendPerShare: "$1.7742",
+                exDividendDate: "Dec 20, 2025",
+                payDate: "Jan 31, 2026"
+            )
         ),
         holdingsRisk: ETFHoldingsRisk(
             assetAllocation: ETFAssetAllocation(
                 equities: 99.5,
                 bonds: 0.0,
                 crypto: 0.0,
-                cash: 0.5
+                cash: 0.5,
+                totalAssets: "$562.3B"
             ),
             topSectors: [
                 ETFSectorWeight(name: "Technology", weight: 31.7),
@@ -420,16 +436,22 @@ enum ETFSnapshotPrompts {
         "dividendYield": <double>,         // e.g. 1.42 means 1.42%
         "payFrequency": "<string>",        // Monthly | Quarterly | Semi-Annually | Annually
         "yieldContext": "<string>",        // "You earn ~$X per year on a $10,000 investment."
-        "verdict": "<string>"             // "This fund pays you Nx more in dividends than it charges
+        "verdict": "<string>",            // "This fund pays you Nx more in dividends than it charges
                                           //  in fees." (N = dividendYield / expenseRatio, rounded)
+        "lastDividendPayment": {
+          "dividendPerShare": "<string>",  // e.g. "$1.7742"
+          "exDividendDate": "<string>",    // e.g. "Dec 20, 2025"
+          "payDate": "<string>"            // e.g. "Jan 31, 2026"
+        }
       },
 
       "holdingsRisk": {
         "assetAllocation": {
-          "equities": <double>,  // percentage, all four should sum to ~100
+          "equities": <double>,    // percentage, all four should sum to ~100
           "bonds": <double>,
           "crypto": <double>,
-          "cash": <double>
+          "cash": <double>,
+          "totalAssets": "<string>" // e.g. "$562.3B"
         },
         "topSectors": [                    // Top 5, sorted largest → smallest
           { "name": "<string>", "weight": <double> }

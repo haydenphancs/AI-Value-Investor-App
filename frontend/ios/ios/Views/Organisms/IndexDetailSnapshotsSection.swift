@@ -10,17 +10,49 @@ import SwiftUI
 struct IndexDetailSnapshotsSection: View {
     let snapshotsData: IndexSnapshotsData
     var onAIAnalystTap: (() -> Void)?
+    @State private var showInfoSheet: Bool = false
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
-            // 1. Valuation
-            ValuationSnapshotCard(valuation: snapshotsData.valuation)
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Section title with info button
+            HStack {
+                Text("Snapshots")
+                    .font(AppTypography.title3)
+                    .foregroundColor(AppColors.textPrimary)
 
-            // 2. Sector Performance
-            SectorPerformanceSnapshotCard(sectorPerformance: snapshotsData.sectorPerformance)
+                Spacer()
 
-            // 3. Macro Forecast
-            MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
+                Button(action: {
+                    showInfoSheet = true
+                }) {
+                    Text("What's Snapshots?")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            // Snapshot cards stacked inside one container
+            VStack(spacing: 0) {
+                // 1. Valuation
+                ValuationSnapshotCard(valuation: snapshotsData.valuation)
+
+                // Divider
+                Rectangle()
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(height: 1)
+
+                // 2. Sector Performance
+                SectorPerformanceSnapshotCard(sectorPerformance: snapshotsData.sectorPerformance)
+
+                // Divider
+                Rectangle()
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(height: 1)
+
+                // 3. Macro Forecast
+                MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
+            }
 
             // AI Analyst button
             AIDeepResearchButton {
@@ -37,6 +69,16 @@ struct IndexDetailSnapshotsSection: View {
                     .foregroundColor(AppColors.textMuted)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+        )
+        .sheet(isPresented: $showInfoSheet) {
+            SnapshotsInfoSheet()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 }
@@ -117,11 +159,7 @@ struct ValuationSnapshotCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
+        .padding(.vertical, AppSpacing.md)
     }
 }
 
@@ -269,11 +307,7 @@ struct SectorPerformanceSnapshotCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
+        .padding(.vertical, AppSpacing.md)
     }
 }
 
@@ -372,11 +406,7 @@ struct MacroForecastSnapshotCard: View {
                 }
             }
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
+        .padding(.vertical, AppSpacing.md)
     }
 }
 

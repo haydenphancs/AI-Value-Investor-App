@@ -30,14 +30,12 @@ struct PerformanceItem: View {
                 .font(AppTypography.calloutBold)
                 .foregroundColor(color)
 
-            // vs S&P 500 comparison (only shown when data exists)
-            if let vsText = period.formattedVsMarket {
-                Text(vsText)
-                    .font(AppTypography.caption)
-                    .foregroundColor(vsMarketColor)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
+            // vs S&P 500 comparison (always shown to keep consistent height)
+            Text(period.formattedVsMarket ?? " ")
+                .font(AppTypography.caption)
+                .foregroundColor(vsMarketColor.opacity(period.formattedVsMarket != nil ? 0.9 : 0))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, AppSpacing.sm)

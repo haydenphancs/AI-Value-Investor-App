@@ -14,10 +14,6 @@ struct PerformanceItem: View {
         period.isPositive ? AppColors.bullish : AppColors.bearish
     }
 
-    private var vsMarketColor: Color {
-        period.isBeatingMarket ? AppColors.bullish : AppColors.bearish
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             // Period label
@@ -30,12 +26,12 @@ struct PerformanceItem: View {
                 .font(AppTypography.calloutBold)
                 .foregroundColor(color)
 
-            // vs S&P 500 comparison (always shown to keep consistent height)
-            Text(period.formattedVsMarket ?? " ")
-                .font(AppTypography.caption)
-                .foregroundColor(vsMarketColor.opacity(period.formattedVsMarket != nil ? 0.9 : 0))
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            // S&P comparison (only shown when data exists)
+            if let vsText = period.formattedVsMarket {
+                Text(vsText)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, AppSpacing.sm)

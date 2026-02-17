@@ -94,13 +94,25 @@ struct PerformancePeriod: Identifiable {
 
     var formattedChange: String {
         let sign = changePercent >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", changePercent))%"
+        return "\(sign)\(Self.formatLargePercent(changePercent, defaultFormat: "%.2f"))%"
     }
 
     var formattedVsMarket: String? {
         guard let vs = vsMarketPercent else { return nil }
         let sign = vs >= 0 ? "+" : ""
-        return "\(benchmarkLabel): \(sign)\(String(format: "%.1f", vs))%"
+        return "\(benchmarkLabel): \(sign)\(Self.formatLargePercent(vs, defaultFormat: "%.1f"))%"
+    }
+
+    /// Formats large percentages cleanly: 1,000%+ drops decimals and adds commas
+    private static func formatLargePercent(_ value: Double, defaultFormat: String) -> String {
+        if abs(value) >= 1000 {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 0
+            formatter.groupingSeparator = ","
+            return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+        }
+        return String(format: defaultFormat, value)
     }
 
     var isBeatingMarket: Bool {

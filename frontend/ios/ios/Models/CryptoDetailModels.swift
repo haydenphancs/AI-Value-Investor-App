@@ -167,7 +167,10 @@ extension CryptoDetailData {
         benchmarkSummary: PerformanceBenchmarkSummary(
             avgAnnualReturn: 52.3,
             spBenchmark: 68.4,
-            benchmarkName: "Bitcoin (BTC) Benchmark"
+            benchmarkName: "Bitcoin (BTC)",
+            sinceDate: "Jul 2015",
+            benchmarkSinceDate: "Jan 2009",
+            badgeThreshold: 5
         )
     )
 }
@@ -180,7 +183,7 @@ enum CryptoPerformance {
         PerformancePeriod(label: "YTD", changePercent: 45.12, vsMarketPercent: 32.50, benchmarkLabel: "BTC"),
         PerformancePeriod(label: "1 Year", changePercent: 62.89, vsMarketPercent: 85.24, benchmarkLabel: "BTC"),
         PerformancePeriod(label: "3 Years", changePercent: 148.60, vsMarketPercent: 210.35, benchmarkLabel: "BTC"),
-        PerformancePeriod(label: "Max", changePercent: 8542.30, vsMarketPercent: 12450.00, benchmarkLabel: "BTC")
+        PerformancePeriod(label: "All Time", changePercent: 8542.30, vsMarketPercent: 12450.00, benchmarkLabel: "BTC")
     ]
 }
 

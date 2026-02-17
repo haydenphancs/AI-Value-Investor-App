@@ -35,6 +35,8 @@ struct PerformanceItem: View {
                 Text(vsText)
                     .font(AppTypography.caption)
                     .foregroundColor(vsMarketColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

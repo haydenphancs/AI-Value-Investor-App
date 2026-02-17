@@ -28,7 +28,7 @@ struct TickerDetailPerformanceSection: View {
                 }
             }
 
-            // Benchmark summary (ETF-specific)
+            // Benchmark summary
             if let summary = benchmarkSummary {
                 PerformanceBenchmarkRow(summary: summary)
             }
@@ -46,6 +46,13 @@ struct TickerDetailPerformanceSection: View {
 struct PerformanceBenchmarkSummary {
     let avgAnnualReturn: Double
     let spBenchmark: Double
+    let benchmarkName: String
+
+    init(avgAnnualReturn: Double, spBenchmark: Double, benchmarkName: String = "S&P 500 Benchmark") {
+        self.avgAnnualReturn = avgAnnualReturn
+        self.spBenchmark = spBenchmark
+        self.benchmarkName = benchmarkName
+    }
 
     var isOutperforming: Bool {
         avgAnnualReturn >= spBenchmark
@@ -86,7 +93,7 @@ struct PerformanceBenchmarkRow: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                    Text("S&P 500 Benchmark")
+                    Text(summary.benchmarkName)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text(summary.formattedBenchmark)

@@ -97,6 +97,7 @@ struct CryptoDetailData: Identifiable {
     let snapshots: [CryptoSnapshotItem]
     let cryptoProfile: CryptoProfile
     let relatedCryptos: [RelatedTicker]
+    let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
         priceChange >= 0
@@ -162,19 +163,24 @@ extension CryptoDetailData {
             website: "ethereum.org",
             whitepaper: "ethereum.org/en/whitepaper"
         ),
-        relatedCryptos: CryptoRelatedTicker.sampleData
+        relatedCryptos: CryptoRelatedTicker.sampleData,
+        benchmarkSummary: PerformanceBenchmarkSummary(
+            avgAnnualReturn: 52.3,
+            spBenchmark: 68.4,
+            benchmarkName: "Bitcoin (BTC) Benchmark"
+        )
     )
 }
 
 // MARK: - Crypto Performance Sample Data
 enum CryptoPerformance {
     static let sampleETH: [PerformancePeriod] = [
-        PerformancePeriod(label: "1 Month", changePercent: 12.34),
-        PerformancePeriod(label: "3 Months", changePercent: -5.21),
-        PerformancePeriod(label: "6 Months", changePercent: 28.76),
-        PerformancePeriod(label: "YTD", changePercent: 45.12),
-        PerformancePeriod(label: "1 Year", changePercent: 62.89),
-        PerformancePeriod(label: "5 Years", changePercent: 412.55)
+        PerformancePeriod(label: "7 Days", changePercent: 5.42, vsMarketPercent: 3.18, benchmarkLabel: "BTC"),
+        PerformancePeriod(label: "1 Month", changePercent: 12.34, vsMarketPercent: 8.71, benchmarkLabel: "BTC"),
+        PerformancePeriod(label: "YTD", changePercent: 45.12, vsMarketPercent: 32.50, benchmarkLabel: "BTC"),
+        PerformancePeriod(label: "1 Year", changePercent: 62.89, vsMarketPercent: 85.24, benchmarkLabel: "BTC"),
+        PerformancePeriod(label: "3 Years", changePercent: 148.60, vsMarketPercent: 210.35, benchmarkLabel: "BTC"),
+        PerformancePeriod(label: "Max", changePercent: 8542.30, vsMarketPercent: 12450.00, benchmarkLabel: "BTC")
     ]
 }
 

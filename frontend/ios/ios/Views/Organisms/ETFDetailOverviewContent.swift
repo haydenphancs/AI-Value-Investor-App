@@ -20,7 +20,10 @@ struct ETFDetailOverviewContent: View {
             ETFDetailKeyStatsSection(statisticsGroups: etfData.keyStatisticsGroups)
 
             // Performance
-            TickerDetailPerformanceSection(periods: etfData.performancePeriods)
+            TickerDetailPerformanceSection(
+                periods: etfData.performancePeriods,
+                benchmarkSummary: etfData.benchmarkSummary
+            )
 
             // Snapshots (Identity & Rating, Strategy, Net Yield, Holdings & Risk)
             ETFDetailSnapshotsSection(

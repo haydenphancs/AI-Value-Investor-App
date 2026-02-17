@@ -98,7 +98,7 @@ struct PerformancePeriod: Identifiable {
     var formattedVsMarket: String? {
         guard let vs = vsMarketPercent else { return nil }
         let sign = vs >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", vs))% vs S&P"
+        return "S&P: \(sign)\(String(format: "%.1f", vs))%"
     }
 
     var isBeatingMarket: Bool {

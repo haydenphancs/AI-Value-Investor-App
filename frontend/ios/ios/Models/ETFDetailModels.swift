@@ -347,12 +347,12 @@ extension ETFDetailData {
 // MARK: - ETF Performance Sample Data
 enum ETFPerformance {
     static let sampleSPY: [PerformancePeriod] = [
-        PerformancePeriod(label: "1 Month", changePercent: 2.14, vsMarketPercent: -0.1),
-        PerformancePeriod(label: "YTD", changePercent: 4.56, vsMarketPercent: 0.0),
-        PerformancePeriod(label: "1 Year", changePercent: 22.18, vsMarketPercent: -0.1),
-        PerformancePeriod(label: "3 Years", changePercent: 38.72, vsMarketPercent: -0.2),
-        PerformancePeriod(label: "5 Years", changePercent: 82.47, vsMarketPercent: -0.5),
-        PerformancePeriod(label: "10 Years", changePercent: 192.34, vsMarketPercent: -0.9)
+        PerformancePeriod(label: "1 Month", changePercent: 2.14, vsMarketPercent: 2.24),
+        PerformancePeriod(label: "YTD", changePercent: 4.56, vsMarketPercent: 4.56),
+        PerformancePeriod(label: "1 Year", changePercent: 22.18, vsMarketPercent: 22.28),
+        PerformancePeriod(label: "3 Years", changePercent: 38.72, vsMarketPercent: 38.92),
+        PerformancePeriod(label: "5 Years", changePercent: 82.47, vsMarketPercent: 82.97),
+        PerformancePeriod(label: "10 Years", changePercent: 192.34, vsMarketPercent: 193.24)
     ]
 }
 

@@ -18,6 +18,14 @@ struct PerformanceBadge: View {
 
     private var formattedChange: String {
         let sign = changePercent >= 0 ? "+" : ""
+        if abs(changePercent) >= 1000 {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 0
+            formatter.groupingSeparator = ","
+            let formatted = formatter.string(from: NSNumber(value: changePercent)) ?? String(format: "%.0f", changePercent)
+            return "\(sign)\(formatted)%"
+        }
         return "\(sign)\(String(format: "%.2f", changePercent))%"
     }
 

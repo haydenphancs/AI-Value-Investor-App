@@ -9,6 +9,7 @@ import SwiftUI
 
 struct TickerDetailPerformanceSection: View {
     let periods: [PerformancePeriod]
+    var benchmarkSummary: PerformanceBenchmarkSummary?
 
     // Grid columns - 3 columns layout
     private let columns = Array(repeating: GridItem(.flexible(), spacing: AppSpacing.sm), count: 3)
@@ -26,11 +27,94 @@ struct TickerDetailPerformanceSection: View {
                     PerformanceItem(period: period)
                 }
             }
+
+            // Benchmark summary (ETF-specific)
+            if let summary = benchmarkSummary {
+                PerformanceBenchmarkRow(summary: summary)
+            }
         }
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                 .fill(AppColors.cardBackground)
+        )
+    }
+}
+
+// MARK: - Performance Benchmark Summary
+
+struct PerformanceBenchmarkSummary {
+    let avgAnnualReturn: Double
+    let spBenchmark: Double
+
+    var isOutperforming: Bool {
+        avgAnnualReturn >= spBenchmark
+    }
+
+    var formattedAvgReturn: String {
+        String(format: "%.1f%%", avgAnnualReturn)
+    }
+
+    var formattedBenchmark: String {
+        String(format: "%.1f%%", spBenchmark)
+    }
+
+    var badgeLabel: String {
+        isOutperforming ? "Outperforming" : "Underperforming"
+    }
+}
+
+struct PerformanceBenchmarkRow: View {
+    let summary: PerformanceBenchmarkSummary
+
+    private var badgeColor: Color {
+        summary.isOutperforming ? AppColors.bullish : AppColors.bearish
+    }
+
+    var body: some View {
+        VStack(spacing: AppSpacing.md) {
+            HStack {
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    Text("Average Annual Return")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                    Text(summary.formattedAvgReturn)
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(AppColors.textPrimary)
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                    Text("S&P 500 Benchmark")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                    Text(summary.formattedBenchmark)
+                        .font(AppTypography.calloutBold)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+            }
+
+            // Badge
+            HStack {
+                Text(summary.badgeLabel)
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(badgeColor)
+                    .padding(.horizontal, AppSpacing.md)
+                    .padding(.vertical, AppSpacing.xs)
+                    .background(
+                        Capsule()
+                            .fill(badgeColor.opacity(0.15))
+                    )
+
+                Spacer()
+            }
+        }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.cardBackgroundLight.opacity(0.5))
         )
     }
 }

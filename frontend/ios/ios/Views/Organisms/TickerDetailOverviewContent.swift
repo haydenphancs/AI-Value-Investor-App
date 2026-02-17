@@ -19,7 +19,10 @@ struct TickerDetailOverviewContent: View {
             TickerDetailKeyStatsSection(statisticsGroups: tickerData.keyStatisticsGroups)
 
             // Performance
-            TickerDetailPerformanceSection(periods: tickerData.performancePeriods)
+            TickerDetailPerformanceSection(
+                periods: tickerData.performancePeriods,
+                benchmarkSummary: tickerData.benchmarkSummary
+            )
 
             // Snapshots
             TickerDetailSnapshotsSection(

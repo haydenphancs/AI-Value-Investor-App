@@ -254,6 +254,7 @@ struct TickerDetailData: Identifiable {
     let sectorIndustry: SectorIndustryInfo
     let companyProfile: CompanyProfile
     let relatedTickers: [RelatedTicker]
+    let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
         priceChange >= 0
@@ -319,7 +320,8 @@ extension TickerDetailData {
             headquarters: "Cupertino, CA",
             website: "www.apple.com"
         ),
-        relatedTickers: RelatedTicker.sampleData
+        relatedTickers: RelatedTicker.sampleData,
+        benchmarkSummary: PerformanceBenchmarkSummary(avgAnnualReturn: 28.6, spBenchmark: 10.5)
     )
 }
 
@@ -387,12 +389,12 @@ extension KeyStatisticsGroup {
 
 extension PerformancePeriod {
     static let sampleData: [PerformancePeriod] = [
-        PerformancePeriod(label: "1 Month", changePercent: 8.42),
-        PerformancePeriod(label: "3 Months", changePercent: -3.15),
-        PerformancePeriod(label: "6 Months", changePercent: 18.67),
-        PerformancePeriod(label: "YTD", changePercent: 42.89),
-        PerformancePeriod(label: "1 Year", changePercent: 38.24),
-        PerformancePeriod(label: "5 Years", changePercent: 287.45)
+        PerformancePeriod(label: "1 Month", changePercent: 8.42, vsMarketPercent: 6.3),
+        PerformancePeriod(label: "YTD", changePercent: 42.89, vsMarketPercent: 38.3),
+        PerformancePeriod(label: "1 Year", changePercent: 38.24, vsMarketPercent: 16.1),
+        PerformancePeriod(label: "3 Years", changePercent: 52.18, vsMarketPercent: 13.5),
+        PerformancePeriod(label: "5 Years", changePercent: 287.45, vsMarketPercent: 205.0),
+        PerformancePeriod(label: "10 Years", changePercent: 842.31, vsMarketPercent: 649.9)
     ]
 }
 

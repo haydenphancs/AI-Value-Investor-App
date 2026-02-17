@@ -197,6 +197,7 @@ struct ETFDetailData: Identifiable {
     let holdingsRisk: ETFHoldingsRisk
     let etfProfile: ETFProfile
     let relatedETFs: [RelatedTicker]
+    let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
         priceChange >= 0
@@ -338,7 +339,8 @@ extension ETFDetailData {
             indexTracked: "S&P 500",
             website: "ssga.com"
         ),
-        relatedETFs: ETFRelatedTicker.sampleData
+        relatedETFs: ETFRelatedTicker.sampleData,
+        benchmarkSummary: PerformanceBenchmarkSummary(avgAnnualReturn: 11.4, spBenchmark: 10.5)
     )
 }
 

@@ -51,15 +51,32 @@ struct PerformanceBenchmarkSummary {
     let avgAnnualReturn: Double
     let spBenchmark: Double
     let benchmarkName: String
+    let sinceDate: String?
+    let benchmarkSinceDate: String?
+    let badgeThreshold: Double
 
-    init(avgAnnualReturn: Double, spBenchmark: Double, benchmarkName: String = "S&P 500 Benchmark") {
+    init(
+        avgAnnualReturn: Double,
+        spBenchmark: Double,
+        benchmarkName: String = "S&P 500 Benchmark",
+        sinceDate: String? = nil,
+        benchmarkSinceDate: String? = nil,
+        badgeThreshold: Double = 0
+    ) {
         self.avgAnnualReturn = avgAnnualReturn
         self.spBenchmark = spBenchmark
         self.benchmarkName = benchmarkName
+        self.sinceDate = sinceDate
+        self.benchmarkSinceDate = benchmarkSinceDate
+        self.badgeThreshold = badgeThreshold
     }
 
     var isOutperforming: Bool {
         avgAnnualReturn >= spBenchmark
+    }
+
+    var shouldShowBadge: Bool {
+        abs(avgAnnualReturn - spBenchmark) > badgeThreshold
     }
 
     var formattedAvgReturn: String {
@@ -92,6 +109,11 @@ struct PerformanceBenchmarkRow: View {
                     Text(summary.formattedAvgReturn)
                         .font(AppTypography.calloutBold)
                         .foregroundColor(AppColors.textPrimary)
+                    if let sinceDate = summary.sinceDate {
+                        Text("Since \(sinceDate)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
                 }
 
                 Spacer()
@@ -103,23 +125,30 @@ struct PerformanceBenchmarkRow: View {
                     Text(summary.formattedBenchmark)
                         .font(AppTypography.calloutBold)
                         .foregroundColor(AppColors.textSecondary)
+                    if let benchmarkSinceDate = summary.benchmarkSinceDate {
+                        Text("Since \(benchmarkSinceDate)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
                 }
             }
 
-            // Badge
-            HStack {
-                Text(summary.badgeLabel)
-                    .font(AppTypography.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(badgeColor)
-                    .padding(.horizontal, AppSpacing.md)
-                    .padding(.vertical, AppSpacing.xs)
-                    .background(
-                        Capsule()
-                            .fill(badgeColor.opacity(0.15))
-                    )
+            // Badge - only show when difference exceeds threshold
+            if summary.shouldShowBadge {
+                HStack {
+                    Text(summary.badgeLabel)
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(badgeColor)
+                        .padding(.horizontal, AppSpacing.md)
+                        .padding(.vertical, AppSpacing.xs)
+                        .background(
+                            Capsule()
+                                .fill(badgeColor.opacity(0.15))
+                        )
 
-                Spacer()
+                    Spacer()
+                }
             }
         }
     }

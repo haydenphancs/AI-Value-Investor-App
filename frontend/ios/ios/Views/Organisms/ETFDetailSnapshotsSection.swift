@@ -37,7 +37,7 @@ struct ETFDetailSnapshotsSection: View {
             VStack(spacing: 0) {
                 ETFIdentityRatingCard(etfData: etfData)
                 ETFStrategyCard(strategy: etfData.strategy)
-                ETFNetYieldCard(netYield: etfData.netYield)
+                ETFNetYieldCard(netYield: etfData.netYield, symbol: etfData.symbol)
                 ETFHoldingsRiskCard(holdingsRisk: etfData.holdingsRisk)
             }
 
@@ -227,6 +227,7 @@ struct ETFStrategyCard: View {
 
 struct ETFNetYieldCard: View {
     let netYield: ETFNetYield
+    let symbol: String
     @State private var isExpanded: Bool = false
 
     var body: some View {
@@ -325,7 +326,11 @@ struct ETFNetYieldCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     // Dividend History row
-                    ETFDividendHistoryRow(lastPayment: netYield.lastDividendPayment)
+                    ETFDividendHistoryRow(
+                        lastPayment: netYield.lastDividendPayment,
+                        symbol: symbol,
+                        dividendHistory: netYield.dividendHistory
+                    )
                 }
                 .padding(.bottom, AppSpacing.md)
             }
@@ -342,10 +347,13 @@ struct ETFNetYieldCard: View {
 
 struct ETFDividendHistoryRow: View {
     let lastPayment: ETFDividendPayment
+    let symbol: String
+    let dividendHistory: [ETFDividendPayment]
+    @State private var showDividendHistory = false
 
     var body: some View {
         Button(action: {
-            // Future: navigate to full dividend history
+            showDividendHistory = true
         }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 // Title row with chevron
@@ -419,6 +427,12 @@ struct ETFDividendHistoryRow: View {
             )
         }
         .buttonStyle(PlainButtonStyle())
+        .sheet(isPresented: $showDividendHistory) {
+            ETFDividendHistoryView(
+                symbol: symbol,
+                dividendHistory: dividendHistory
+            )
+        }
     }
 }
 

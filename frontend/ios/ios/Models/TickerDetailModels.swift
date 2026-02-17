@@ -78,6 +78,13 @@ struct PerformancePeriod: Identifiable {
     let id = UUID()
     let label: String
     let changePercent: Double
+    let vsMarketPercent: Double?
+
+    init(label: String, changePercent: Double, vsMarketPercent: Double? = nil) {
+        self.label = label
+        self.changePercent = changePercent
+        self.vsMarketPercent = vsMarketPercent
+    }
 
     var isPositive: Bool {
         changePercent >= 0
@@ -86,6 +93,16 @@ struct PerformancePeriod: Identifiable {
     var formattedChange: String {
         let sign = changePercent >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", changePercent))%"
+    }
+
+    var formattedVsMarket: String? {
+        guard let vs = vsMarketPercent else { return nil }
+        let sign = vs >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", vs))% vs S&P 500"
+    }
+
+    var isBeatingMarket: Bool {
+        (vsMarketPercent ?? 0) >= 0
     }
 }
 

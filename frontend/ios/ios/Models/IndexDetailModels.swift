@@ -272,6 +272,7 @@ struct IndexDetailData: Identifiable {
     let performancePeriods: [PerformancePeriod]
     let snapshotsData: IndexSnapshotsData
     let indexProfile: IndexProfile
+    let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
         priceChange >= 0
@@ -401,7 +402,8 @@ extension IndexDetailData {
             inceptionDate: "March 4, 1957",
             indexProvider: "S&P Dow Jones Indices",
             website: "www.spglobal.com"
-        )
+        ),
+        benchmarkSummary: PerformanceBenchmarkSummary(avgAnnualReturn: 10.5, spBenchmark: 10.5)
     )
 }
 
@@ -444,11 +446,11 @@ extension KeyStatisticsGroup {
 
 extension PerformancePeriod {
     static let indexSampleData: [PerformancePeriod] = [
-        PerformancePeriod(label: "1 Month", changePercent: 3.12),
-        PerformancePeriod(label: "3 Months", changePercent: 7.45),
-        PerformancePeriod(label: "6 Months", changePercent: 12.38),
-        PerformancePeriod(label: "YTD", changePercent: 4.82),
-        PerformancePeriod(label: "1 Year", changePercent: 24.31),
-        PerformancePeriod(label: "5 Years", changePercent: 82.67)
+        PerformancePeriod(label: "1 Month", changePercent: 3.12, vsMarketPercent: 3.12),
+        PerformancePeriod(label: "YTD", changePercent: 4.82, vsMarketPercent: 4.82),
+        PerformancePeriod(label: "1 Year", changePercent: 24.31, vsMarketPercent: 24.31),
+        PerformancePeriod(label: "3 Years", changePercent: 38.92, vsMarketPercent: 38.92),
+        PerformancePeriod(label: "5 Years", changePercent: 82.67, vsMarketPercent: 82.67),
+        PerformancePeriod(label: "10 Years", changePercent: 193.24, vsMarketPercent: 193.24)
     ]
 }

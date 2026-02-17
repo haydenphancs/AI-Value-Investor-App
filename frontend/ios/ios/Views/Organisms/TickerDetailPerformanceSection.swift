@@ -30,6 +30,10 @@ struct TickerDetailPerformanceSection: View {
 
             // Benchmark summary (ETF-specific)
             if let summary = benchmarkSummary {
+                Rectangle()
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(height: 1)
+
                 PerformanceBenchmarkRow(summary: summary)
             }
         }
@@ -111,11 +115,6 @@ struct PerformanceBenchmarkRow: View {
                 Spacer()
             }
         }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight.opacity(0.5))
-        )
     }
 }
 

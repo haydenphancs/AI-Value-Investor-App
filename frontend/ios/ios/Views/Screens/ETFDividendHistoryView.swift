@@ -18,7 +18,7 @@ struct ETFDividendHistoryView: View {
             // Navigation header
             HStack {
                 Button(action: { dismiss() }) {
-                    Image(systemName: "chevron.left")
+                    Image(systemName: "chevron.down")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(AppColors.textPrimary)
                 }
@@ -32,7 +32,7 @@ struct ETFDividendHistoryView: View {
                 Spacer()
 
                 // Invisible spacer to center title
-                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.down")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.clear)
             }
@@ -80,7 +80,7 @@ struct ETFDividendHistoryView: View {
                             Text(payment.dividendPerShare)
                                 .font(AppTypography.footnote)
                                 .fontWeight(.semibold)
-                                .foregroundColor(AppColors.bullish)
+                                .foregroundColor(AppColors.textSecondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                         .padding(.horizontal, AppSpacing.lg)

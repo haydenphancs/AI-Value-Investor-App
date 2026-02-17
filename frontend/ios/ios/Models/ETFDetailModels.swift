@@ -72,6 +72,7 @@ struct ETFNetYield {
     let yieldContext: String
     let verdict: String
     let lastDividendPayment: ETFDividendPayment
+    let dividendHistory: [ETFDividendPayment]
 
     var formattedExpenseRatio: String {
         "\(String(format: "%g", expenseRatio))%"
@@ -273,7 +274,25 @@ extension ETFDetailData {
                 dividendPerShare: "$1.7742",
                 exDividendDate: "Dec 20, 2025",
                 payDate: "Jan 31, 2026"
-            )
+            ),
+            dividendHistory: [
+                ETFDividendPayment(dividendPerShare: "$1.7742", exDividendDate: "Dec 20, 2025", payDate: "Jan 31, 2026"),
+                ETFDividendPayment(dividendPerShare: "$1.7434", exDividendDate: "Sep 20, 2025", payDate: "Oct 31, 2025"),
+                ETFDividendPayment(dividendPerShare: "$1.6358", exDividendDate: "Jun 20, 2025", payDate: "Jul 31, 2025"),
+                ETFDividendPayment(dividendPerShare: "$1.5944", exDividendDate: "Mar 21, 2025", payDate: "Apr 30, 2025"),
+                ETFDividendPayment(dividendPerShare: "$1.8282", exDividendDate: "Dec 20, 2024", payDate: "Jan 31, 2025"),
+                ETFDividendPayment(dividendPerShare: "$1.7745", exDividendDate: "Sep 20, 2024", payDate: "Oct 31, 2024"),
+                ETFDividendPayment(dividendPerShare: "$1.6323", exDividendDate: "Jun 21, 2024", payDate: "Jul 31, 2024"),
+                ETFDividendPayment(dividendPerShare: "$1.5927", exDividendDate: "Mar 15, 2024", payDate: "Apr 30, 2024"),
+                ETFDividendPayment(dividendPerShare: "$1.8532", exDividendDate: "Dec 15, 2023", payDate: "Jan 31, 2024"),
+                ETFDividendPayment(dividendPerShare: "$1.5832", exDividendDate: "Sep 15, 2023", payDate: "Oct 31, 2023"),
+                ETFDividendPayment(dividendPerShare: "$1.5789", exDividendDate: "Jun 16, 2023", payDate: "Jul 31, 2023"),
+                ETFDividendPayment(dividendPerShare: "$1.5060", exDividendDate: "Mar 17, 2023", payDate: "Apr 28, 2023"),
+                ETFDividendPayment(dividendPerShare: "$1.7823", exDividendDate: "Dec 16, 2022", payDate: "Jan 31, 2023"),
+                ETFDividendPayment(dividendPerShare: "$1.5963", exDividendDate: "Sep 16, 2022", payDate: "Oct 31, 2022"),
+                ETFDividendPayment(dividendPerShare: "$1.5769", exDividendDate: "Jun 17, 2022", payDate: "Jul 29, 2022"),
+                ETFDividendPayment(dividendPerShare: "$1.3668", exDividendDate: "Mar 18, 2022", payDate: "Apr 29, 2022")
+            ]
         ),
         holdingsRisk: ETFHoldingsRisk(
             assetAllocation: ETFAssetAllocation(

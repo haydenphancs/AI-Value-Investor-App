@@ -79,11 +79,13 @@ struct PerformancePeriod: Identifiable {
     let label: String
     let changePercent: Double
     let vsMarketPercent: Double?
+    let benchmarkLabel: String
 
-    init(label: String, changePercent: Double, vsMarketPercent: Double? = nil) {
+    init(label: String, changePercent: Double, vsMarketPercent: Double? = nil, benchmarkLabel: String = "S&P") {
         self.label = label
         self.changePercent = changePercent
         self.vsMarketPercent = vsMarketPercent
+        self.benchmarkLabel = benchmarkLabel
     }
 
     var isPositive: Bool {
@@ -98,7 +100,7 @@ struct PerformancePeriod: Identifiable {
     var formattedVsMarket: String? {
         guard let vs = vsMarketPercent else { return nil }
         let sign = vs >= 0 ? "+" : ""
-        return "S&P: \(sign)\(String(format: "%.1f", vs))%"
+        return "\(benchmarkLabel): \(sign)\(String(format: "%.1f", vs))%"
     }
 
     var isBeatingMarket: Bool {

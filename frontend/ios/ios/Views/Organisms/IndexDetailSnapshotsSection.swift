@@ -27,16 +27,7 @@ struct IndexDetailSnapshotsSection: View {
                 onAIAnalystTap?()
             }
 
-            // Footer: AI generation info
-            HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 10))
-                    .foregroundColor(AppColors.textMuted)
-                Text("Analysis by \(snapshotsData.generatedBy) \u{00B7} \(snapshotsData.formattedGeneratedDate)")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+
         }
     }
 }
@@ -357,6 +348,11 @@ struct MacroForecastSnapshotCard: View {
             .buttonStyle(PlainButtonStyle())
 
             if isExpanded {
+                // Updated date
+                Text("Updated on 02/17/2026 ET")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+
                 // Story
                 Text(macroForecast.resolvedStory)
                     .font(AppTypography.footnote)

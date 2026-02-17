@@ -21,7 +21,10 @@ struct CryptoDetailOverviewContent: View {
             CryptoDetailKeyStatsSection(statisticsGroups: cryptoData.keyStatisticsGroups)
 
             // Performance
-            TickerDetailPerformanceSection(periods: cryptoData.performancePeriods)
+            TickerDetailPerformanceSection(
+                periods: cryptoData.performancePeriods,
+                benchmarkSummary: cryptoData.benchmarkSummary
+            )
 
             // Snapshots (Origin and Technology, Tokenomics, Next Big Moves, Risks)
             CryptoDetailSnapshotsSection(

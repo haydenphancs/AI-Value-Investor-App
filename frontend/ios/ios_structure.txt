@@ -1,0 +1,258 @@
+================================================================================
+AI VALUE INVESTOR - iOS APP STRUCTURE
+================================================================================
+
+WHAT THIS APP DOES:
+A dark-themed iOS investment research app that uses AI to generate stock
+analysis reports in the style of famous investors (Warren Buffett, Peter Lynch,
+Charlie Munger, Cathie Wood, Benjamin Graham). Users can track stocks, read
+market news, chat with AI about investments, listen to audio content about
+investing books, and learn investing concepts.
+
+TECH STACK:
+- SwiftUI (iOS 17+, uses @Observable)
+- MVVM architecture
+- Connects to a Python FastAPI backend via REST API
+- Keychain for auth token storage
+- Dark mode only
+
+================================================================================
+APP ENTRY & NAVIGATION
+================================================================================
+
+iosApp.swift                    -> App entry point. Inits AppState, configures
+                                   APIClient + AuthService, injects via .environment()
+
+RootContainerView.swift         -> Root container. Layers: MainTabView + global
+                                   audio mini-player + full-screen audio player
+
+MainTabView.swift               -> Native TabView with 5 tabs:
+                                   1. Home
+                                   2. Updates
+                                   3. Research
+                                   4. Tracking
+                                   5. Wiser (Learn)
+
+ContentView.swift               -> Alternative tab container (custom tab bar version)
+
+================================================================================
+5 MAIN TABS (SCREENS)
+================================================================================
+
+HOME TAB:
+  HomeView.swift                -> Market tickers row, AI market insights card,
+                                   daily briefing alerts, recent research reports,
+                                   "New Analysis" button
+
+UPDATES TAB:
+  UpdatesView.swift             -> Live news timeline, filterable by ticker/market,
+                                   insight summary cards, news sentiment analysis
+
+RESEARCH TAB:
+  ResearchView.swift            -> Pick a stock ticker, choose an investor persona
+                                   (Buffett, Lynch, etc.), spend credits to generate
+                                   an AI analysis report. Shows trending analyses
+                                   and past reports list.
+
+  TickerReportView.swift        -> Full AI-generated research report with sections:
+                                   executive summary, core thesis, key vitals,
+                                   fundamentals, revenue engine, moat/competition,
+                                   insider activity, Wall Street consensus,
+                                   future forecast, macro/geopolitical risks,
+                                   price movement analysis
+
+TRACKING TAB:
+  TrackingView.swift            -> User's watchlist of tracked stocks with prices,
+                                   change %, portfolio insights, diversification
+
+WISER (LEARN) TAB:
+  LearnView.swift               -> Investment education: lessons, investor journey
+                                   path, book library, study schedule, AI books
+  InvestorJourneyView.swift     -> Gamified learning path with levels and progress
+  BookDetailView.swift          -> Book summaries with chapters
+  BookCoreDetailView.swift      -> Detailed book content with audio playback
+
+================================================================================
+OTHER SCREENS
+================================================================================
+
+SearchView.swift                -> Global search for stocks, news, books
+TickerDetailView.swift          -> Full stock detail: price chart, key stats,
+                                   company profile, financials, earnings, growth,
+                                   health check, profit power, revenue breakdown,
+                                   holders, news, technical analysis, AI analysis
+CryptoDetailView.swift          -> Crypto asset detail (overview, stats, snapshots)
+ETFDetailView.swift             -> ETF detail (overview, dividends, stats)
+IndexDetailView.swift           -> Market index detail (overview, profile)
+NewsDetailView.swift            -> Full news article view
+MoneyMoveArticleDetailView.swift -> "Money Moves" educational article detail
+ChatTabView.swift               -> AI chat interface for investment questions
+ChatConversationView.swift      -> Individual chat conversation with AI
+ChatHistoryView.swift           -> Past chat conversations list
+WhaleProfileView.swift          -> Institutional investor ("whale") profile
+TradeGroupDetailView.swift      -> Group of trades detail view
+TechnicalAnalysisDetailView.swift -> Detailed technical analysis (indicators, signals)
+FullScreenAudioPlayer.swift     -> Full-screen audio player for book content
+
+================================================================================
+CORE ARCHITECTURE
+================================================================================
+
+Core/State/AppState.swift       -> Global @Observable state container with sub-states:
+                                   - AuthState (unknown/loading/authenticated/unauth)
+                                   - UserState (profile, credits, tier: free/pro/premium)
+                                   - WatchlistState (tracked stocks)
+                                   - ResearchState (reports, generating status, persona)
+
+Core/Services/APIClient.swift   -> Networking layer (actor-based). Features:
+                                   - Type-safe endpoint requests
+                                   - JSON encode/decode (snake_case <-> camelCase)
+                                   - Bearer token auth injection
+                                   - Retry with backoff on server errors
+                                   - Debug logging
+
+Core/Services/APIEndpoint.swift -> All API endpoint definitions:
+                                   Auth: signIn, signUp, refreshToken, signOut
+                                   User: getCurrentUser, getUserCredits, updateProfile
+                                   Stocks: search, getStock, getQuote, getFundamentals
+                                   Watchlist: get, add, remove
+                                   Research: generate, getStatus, getReport, rate
+                                   News: getFeed, getArticle
+                                   Chat: createSession, sendMessage, getHistory
+                                   Personas: getPersonas
+
+Core/Services/APIConfig.swift   -> Base URL configuration
+Core/Services/AuthService.swift -> Auth flow + Keychain token storage
+Core/Services/TaskPollingManager.swift -> Polls backend for report generation status
+
+Core/Repositories/StockRepository.swift -> Stock data access layer
+Core/Utilities/AppError.swift   -> Unified error types (network, API, business logic)
+Core/ViewModels/BaseViewModel.swift -> Shared ViewModel base class
+
+================================================================================
+VIEW MODELS (Business Logic)
+================================================================================
+
+HomeViewModel.swift             -> Market tickers, insights, briefings, recent research
+UpdatesViewModel.swift          -> News feed, filters, grouped news by time
+ResearchViewModel.swift         -> Ticker search, persona selection, report generation
+TickerDetailViewModel.swift     -> Stock detail data loading
+TickerReportViewModel.swift     -> Full report data + sections
+SearchViewModel.swift           -> Search across stocks/news/books
+TrackingViewModel.swift         -> Watchlist management, portfolio data
+LearnViewModel.swift            -> Lessons, journey, books
+InvestorPathViewModel.swift     -> Investor learning journey progress
+NewsDetailViewModel.swift       -> Single article data
+CryptoDetailViewModel.swift     -> Crypto asset data
+ETFDetailViewModel.swift        -> ETF data
+IndexDetailViewModel.swift      -> Index data
+WhaleProfileViewModel.swift     -> Institutional investor data
+TradeGroupDetailViewModel.swift -> Trade group data
+PriceActionViewModel.swift      -> Price/technical data
+
+================================================================================
+DATA MODELS (28 model files)
+================================================================================
+
+HomeModels.swift                -> MarketTicker, MarketInsight, DailyBriefingItem,
+                                   HomeTab, InvestorPersona, ResearchReport
+TickerDetailModels.swift        -> Stock detail, key stats, company profile
+TickerReportModels.swift        -> Full AI report structure (thesis, vitals, etc.)
+TickerNewsModels.swift          -> News for a specific ticker
+SearchModels.swift              -> Search results, recent searches
+ResearchModels.swift            -> Analysis reports, personas, credits, trending
+TrackingModels.swift            -> Watchlist, portfolio, diversification
+UpdatesModels.swift             -> News feed, filters, insight summary
+LearnModels.swift               -> Lessons, topics, journey, books, schedule
+ChatModels.swift                -> Chat messages, AI responses
+ChatConversationModels.swift    -> Chat session, history
+NewsDetailModels.swift          -> Full article content
+MoneyMoveArticleModels.swift    -> Educational article content
+BookCoreDetailModels.swift      -> Book chapters, audio episodes
+AudioPlayerModels.swift         -> Audio playback state
+CryptoDetailModels.swift        -> Crypto asset data
+ETFDetailModels.swift           -> ETF data
+IndexDetailModels.swift         -> Market index data
+GrowthModels.swift              -> Revenue/earnings growth data
+HealthCheckModels.swift         -> Financial health metrics
+HoldersModels.swift             -> Institutional/insider holders
+ProfitPowerModels.swift         -> Margin analysis data
+RevenueBreakdownModels.swift    -> Revenue by segment
+RevenueEngineModels.swift       -> Revenue driver analysis
+SignalOfConfidenceModels.swift  -> Dividends, buybacks, shares outstanding
+WhaleProfileModels.swift        -> Institutional investor profiles
+VitalRulesEngine.swift          -> Rules engine for financial vital signs
+InvestorPathModels.swift        -> Learning journey progression
+
+================================================================================
+SERVICES
+================================================================================
+
+AudioManager.swift              -> Global audio player (AVFoundation). Manages
+                                   playback, mini-player, full-screen player,
+                                   compact mode (status island)
+AIVoiceManager.swift            -> AI voice interaction management
+
+================================================================================
+THEME
+================================================================================
+
+AppTheme.swift                  -> Dark theme constants:
+                                   Colors: background #171B26, card #1E2330,
+                                           blue #3B82F6, bullish green, bearish red
+                                   Typography: system font, sizes 11-28
+                                   Spacing: xxs(2) to xxxl(32)
+                                   Corner radius: small(6) to pill(20)
+
+================================================================================
+UI COMPONENTS (Atomic Design)
+================================================================================
+
+Views/Atoms/ (128 files)        -> Smallest UI pieces:
+                                   Badges, labels, buttons, toggles, charts,
+                                   indicators, icons, progress bars
+                                   Examples: AIBadge, PriceChangeLabel, SparklineView,
+                                   SentimentBadge, DonutChartView, SemiCircleGauge
+
+Views/Molecules/ (176 files)    -> Composed components:
+                                   Cards, rows, bars, headers, sheets, selectors
+                                   Examples: TickerCard, ChatInputBar, EarningsChartView,
+                                   SearchBar, ReportCard, SmartMoneyFlowChart
+
+Views/Organisms/ (99 files)     -> Full sections/panels:
+                                   Tab bars, section cards, content sections, lists
+                                   Examples: CustomTabBar, LiveNewsTimeline,
+                                   TickerFinancialsContent, SmartMoneySection,
+                                   EarningsSectionCard, HealthCheckSectionCard
+
+Views/Screens/ (30 files)       -> Full-page views (listed above in MAIN TABS)
+
+================================================================================
+KEY FEATURES SUMMARY
+================================================================================
+
+1. AI RESEARCH REPORTS    - Generate stock analysis in famous investor styles
+2. STOCK TRACKING         - Watchlist with live prices and portfolio view
+3. LIVE NEWS FEED         - Filterable market news with sentiment analysis
+4. TICKER DEEP DIVE       - Financials, earnings, growth, health, holders,
+                            technical analysis, revenue breakdown, profit margins
+5. AI CHAT                - Chat with AI about investments
+6. LEARNING PLATFORM      - Lessons, books, audio content, gamified journey
+7. WHALE TRACKING         - Follow institutional investor moves
+8. CRYPTO + ETF + INDEX   - Detail views for non-stock assets
+9. AUDIO PLAYER           - Global persistent player for book audio content
+10. CREDITS SYSTEM        - Credit-based usage for AI features (free/pro/premium)
+
+================================================================================
+DATA FLOW
+================================================================================
+
+Backend (FastAPI) <--REST API--> APIClient (actor) <--> ViewModels <--> Views
+                                      |
+                                 AppState (@Observable, injected via .environment)
+                                      |
+                                 AuthService + KeychainService (token storage)
+
+================================================================================
+FILE COUNT: ~493 Swift files
+================================================================================

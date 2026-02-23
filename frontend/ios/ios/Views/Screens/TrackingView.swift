@@ -44,10 +44,9 @@ struct TrackingContentView: View {
                 VStack(spacing: 0) {
                     // Header with Search and Tab Control
                     TrackingHeader(
-                        searchText: $viewModel.searchText,
                         selectedTab: $viewModel.selectedTab,
-                        onProfileTapped: handleProfileTapped,
-                        onSearchSubmit: handleSearchSubmit
+                        onSearchTapped: handleSearchTapped,
+                        onProfileTapped: handleProfileTapped
                     )
 
                     // Tab Content
@@ -101,12 +100,12 @@ struct TrackingContentView: View {
     }
 
     // MARK: - Action Handlers
-    private func handleProfileTapped() {
-        print("Profile tapped")
+    private func handleSearchTapped() {
+        print("Search tapped")
     }
 
-    private func handleSearchSubmit() {
-        print("Search submitted: \(viewModel.searchText)")
+    private func handleProfileTapped() {
+        print("Profile tapped")
     }
 }
 
@@ -127,10 +126,9 @@ struct TrackingContentViewWithBinding: View {
                 VStack(spacing: 0) {
                     // Header with Search and Tab Control
                     TrackingHeader(
-                        searchText: $viewModel.searchText,
                         selectedTab: $viewModel.selectedTab,
-                        onProfileTapped: handleProfileTapped,
-                        onSearchSubmit: handleSearchSubmit
+                        onSearchTapped: handleSearchTapped,
+                        onProfileTapped: handleProfileTapped
                     )
 
                     // Tab Content
@@ -187,12 +185,12 @@ struct TrackingContentViewWithBinding: View {
     }
 
     // MARK: - Action Handlers
-    private func handleProfileTapped() {
-        print("Profile tapped")
+    private func handleSearchTapped() {
+        print("Search tapped")
     }
 
-    private func handleSearchSubmit() {
-        print("Search submitted: \(viewModel.searchText)")
+    private func handleProfileTapped() {
+        print("Profile tapped")
     }
 }
 

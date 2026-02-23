@@ -24,6 +24,7 @@ struct UpdatesView: View {
                 VStack(spacing: 0) {
                     // Header
                     UpdatesHeader(
+                        onSearchTapped: handleSearchTapped,
                         onProfileTapped: handleProfileTapped
                     )
 
@@ -96,6 +97,10 @@ struct UpdatesView: View {
     }
 
     // MARK: - Action Handlers
+    private func handleSearchTapped() {
+        print("Search tapped")
+    }
+
     private func handleProfileTapped() {
         print("Profile tapped")
     }

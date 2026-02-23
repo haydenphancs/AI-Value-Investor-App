@@ -283,6 +283,109 @@ struct WhaleAlertBanner: Identifiable {
     let actionTitle: String
 }
 
+// MARK: - App Alert (Unified Alert Enum)
+
+/// Data for an earnings-related alert (blue bell icon + date badge)
+struct EarningsAlertData: Identifiable {
+    let id = UUID()
+    let tickerSymbol: String
+    let title: String
+    let description: String
+    let day: Int
+    let month: String
+}
+
+/// Data for a market event alert (blue bell icon + date badge)
+struct MarketAlertData: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let day: Int
+    let month: String
+}
+
+/// Data for a smart money alert (orange lightbulb icon + chevron)
+struct SmartMoneyAlertData: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let fundCount: Int
+    let ticker: String
+    let positionSize: String
+}
+
+/// Unified enum representing all alert types in the Alerts & Upcoming Events section.
+/// Each case carries its own strongly-typed data payload.
+enum AppAlert: Identifiable {
+    case earnings(EarningsAlertData)
+    case market(MarketAlertData)
+    case smartMoney(SmartMoneyAlertData)
+
+    var id: UUID {
+        switch self {
+        case .earnings(let data): return data.id
+        case .market(let data): return data.id
+        case .smartMoney(let data): return data.id
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .earnings(let data): return data.title
+        case .market(let data): return data.title
+        case .smartMoney(let data): return data.title
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .earnings(let data): return data.description
+        case .market(let data): return data.description
+        case .smartMoney(let data): return data.description
+        }
+    }
+
+    var iconBackgroundColor: Color {
+        switch self {
+        case .earnings, .market: return AppColors.primaryBlue
+        case .smartMoney: return AppColors.alertOrange
+        }
+    }
+
+    var systemIconName: String {
+        switch self {
+        case .earnings, .market: return "bell.fill"
+        case .smartMoney: return "lightbulb.fill"
+        }
+    }
+}
+
+// MARK: - AppAlert Sample Data
+extension AppAlert {
+    static let sampleData: [AppAlert] = [
+        .earnings(EarningsAlertData(
+            tickerSymbol: "NVDA",
+            title: "Earnings Alert",
+            description: "NVDA reports earnings tomorrow after market close. Analyst consensus: Beat expected",
+            day: 22,
+            month: "FEB"
+        )),
+        .market(MarketAlertData(
+            title: "Market",
+            description: "Fed interest rate decision. FOMC meeting announcement",
+            day: 24,
+            month: "FEB"
+        )),
+        .smartMoney(SmartMoneyAlertData(
+            title: "Smart Money Following",
+            description: "3 hedge funds you follow bought GOOGL this week. Avg. position size: $1.2B",
+            fundCount: 3,
+            ticker: "GOOGL",
+            positionSize: "$1.2B"
+        ))
+    ]
+}
+
 // MARK: - Sample Data
 extension TrackedAsset {
     static let sampleData: [TrackedAsset] = [

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct EducationBookCard: View {
     let book: EducationBook
+    var onTap: (() -> Void)?
     var onChatWithBook: (() -> Void)?
     var onReadKeyIdeas: (() -> Void)?
 
@@ -93,6 +94,10 @@ struct EducationBookCard: View {
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onTap?()
             }
 
             // Action buttons

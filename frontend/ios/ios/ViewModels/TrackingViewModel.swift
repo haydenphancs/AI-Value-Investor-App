@@ -56,6 +56,7 @@ class TrackingViewModel: ObservableObject {
     @Published var selectedTickerSymbol: String?
     @Published var selectedWhaleId: String?
     @Published var selectedTradeGroup: TradeGroupNavigation?
+    @Published var selectedAlert: AppAlert?
 
     // MARK: - Init
 
@@ -267,7 +268,7 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewAlertDetail(_ alert: AppAlert) {
-        print("View alert detail: \(alert.title)")
+        selectedAlert = alert
     }
 
     func viewWhaleDetail(_ activity: WhaleActivity) {

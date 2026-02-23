@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct GlobalHeaderView: View {
-    @Environment(AppState.self) private var appState
+    @Environment(\.appState) private var appState
 
     var searchPlaceholder: String = "Search ticker or ask AI..."
     var onSearchTapped: (() -> Void)?

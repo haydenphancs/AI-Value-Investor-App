@@ -2,63 +2,21 @@
 //  UpdatesHeader.swift
 //  ios
 //
-//  Organism: Header for Updates screen with logo, title, and profile
+//  Organism: Updates screen header — uses the standardized GlobalHeaderView
 //
 
 import SwiftUI
 
 struct UpdatesHeader: View {
+    var onSearchTapped: (() -> Void)?
     var onProfileTapped: (() -> Void)?
 
     var body: some View {
-        ZStack {
-            // Centered Title (ignores surrounding elements)
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(AppColors.primaryBlue)
-
-                Text("News Updates")
-                    .font(AppTypography.headline)
-                    .foregroundColor(AppColors.textPrimary)
-            }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.vertical, AppSpacing.sm)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.pill)
-
-            // Left and Right buttons
-            HStack {
-                // Logo placeholder
-                ZStack {
-                    Circle()
-                        .fill(AppColors.cardBackgroundLight)
-                        .frame(width: 36, height: 36)
-
-                    Text("logo")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(AppColors.textMuted)
-                }
-
-                Spacer()
-
-                // Profile Button
-                Button(action: { onProfileTapped?() }) {
-                    ZStack {
-                        Circle()
-                            .stroke(AppColors.textMuted.opacity(0.5), lineWidth: 1)
-                            .frame(width: 36, height: 36)
-
-                        Image(systemName: "person.circle")
-                            .font(.system(size: 24, weight: .light))
-                            .foregroundColor(AppColors.textSecondary)
-                    }
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
+        GlobalHeaderView(
+            searchPlaceholder: "Search market news...",
+            onSearchTapped: onSearchTapped,
+            onProfileTapped: onProfileTapped
+        )
     }
 }
 
@@ -68,4 +26,5 @@ struct UpdatesHeader: View {
         Spacer()
     }
     .background(AppColors.background)
+    .preferredColorScheme(.dark)
 }

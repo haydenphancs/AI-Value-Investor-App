@@ -2,7 +2,7 @@
 //  HomeHeader.swift
 //  ios
 //
-//  Organism: Home screen header with logo, search, and profile
+//  Organism: Home screen header — uses the standardized GlobalHeaderView
 //
 
 import SwiftUI
@@ -12,27 +12,11 @@ struct HomeHeader: View {
     var onSearchTapped: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // Logo placeholder
-            LogoView()
-
-            // Tappable Search Bar - navigates to SearchView
-            TappableSearchBar(
-                placeholder: "Search ticker or ask AI...",
-                onTap: onSearchTapped
-            )
-
-            // Profile Button
-            Button(action: {
-                onProfileTapped?()
-            }) {
-                Image(systemName: "person.crop.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(AppColors.primaryBlue)
-            }
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.sm)
+        GlobalHeaderView(
+            searchPlaceholder: "Search ticker or ask AI...",
+            onSearchTapped: onSearchTapped,
+            onProfileTapped: onProfileTapped
+        )
     }
 }
 

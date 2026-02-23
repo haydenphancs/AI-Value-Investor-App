@@ -29,9 +29,9 @@ struct LearnContentView: View {
             VStack(spacing: 0) {
                 // Header with search and tabs
                 LearnHeader(
-                    searchText: $viewModel.searchText,
                     selectedTab: $viewModel.selectedTab,
-                    onSearchSubmit: handleSearchSubmit
+                    onSearchTapped: handleSearchTapped,
+                    onProfileTapped: handleProfileTapped
                 )
 
                 // Tab content - no swipe gesture between tabs
@@ -148,8 +148,12 @@ struct LearnContentView: View {
     }
 
     // MARK: - Action Handlers
-    private func handleSearchSubmit() {
-        print("Search submitted: \(viewModel.searchText)")
+    private func handleSearchTapped() {
+        print("Search tapped")
+    }
+
+    private func handleProfileTapped() {
+        print("Profile tapped")
     }
 
     private func handleSeeAllJourney() {

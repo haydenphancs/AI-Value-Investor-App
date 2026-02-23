@@ -26,8 +26,7 @@ class TrackingViewModel: ObservableObject {
     @Published var sortAscending: Bool = true
 
     // Alerts & Events
-    @Published var alertEvents: [AlertEvent] = AlertEvent.sampleData
-    @Published var smartMoneyAlert: SmartMoneyAlert? = SmartMoneyAlert.sampleData
+    @Published var alerts: [AppAlert] = AppAlert.sampleData
 
     // Portfolio Insights
     @Published var diversificationScore: DiversificationScore? = DiversificationScore.sampleData
@@ -267,7 +266,7 @@ class TrackingViewModel: ObservableObject {
         selectedTickerSymbol = asset.ticker
     }
 
-    func viewAlertDetail(_ alert: AlertEvent) {
+    func viewAlertDetail(_ alert: AppAlert) {
         print("View alert detail: \(alert.title)")
     }
 

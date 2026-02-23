@@ -57,8 +57,112 @@ struct TrackedAsset: Identifiable {
     }
 }
 
-// MARK: - Alert Event Type
-enum AlertEventType: String, CaseIterable {
+// MARK: - App Alert (Unified Alert Enum)
+/// Each case carries exactly the data its card needs.
+enum AppAlert: Identifiable {
+    case earnings(EarningsAlertData)
+    case market(MarketAlertData)
+    case smartMoney(SmartMoneyAlertData)
+
+    var id: UUID {
+        switch self {
+        case .earnings(let d): return d.id
+        case .market(let d): return d.id
+        case .smartMoney(let d): return d.id
+        }
+    }
+
+    // MARK: - Shared display properties
+
+    var title: String {
+        switch self {
+        case .earnings(let d): return d.title
+        case .market(let d): return d.title
+        case .smartMoney(let d): return d.title
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .earnings(let d): return d.description
+        case .market(let d): return d.description
+        case .smartMoney(let d): return d.description
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .earnings, .market: return "bell.fill"
+        case .smartMoney: return "lightbulb.fill"
+        }
+    }
+
+    var iconColor: Color {
+        switch self {
+        case .earnings, .market: return AppColors.primaryBlue
+        case .smartMoney: return AppColors.alertOrange
+        }
+    }
+}
+
+// MARK: - Earnings Alert Data
+struct EarningsAlertData: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let ticker: String
+    let day: Int
+    let month: String
+    let expectedResult: String          // e.g. "Beat expected"
+
+    var formattedDay: String { String(day) }
+    var formattedMonth: String { month.uppercased() }
+}
+
+// MARK: - Market Alert Data
+struct MarketAlertData: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let day: Int
+    let month: String
+    let eventType: String               // e.g. "FOMC", "CPI", "Jobs Report"
+
+    var formattedDay: String { String(day) }
+    var formattedMonth: String { month.uppercased() }
+}
+
+// MARK: - Smart Money Alert Data
+struct SmartMoneyAlertData: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let fundCount: Int
+    let ticker: String
+    let positionSize: String
+}
+
+// MARK: - Legacy type aliases (keeps existing code compiling during migration)
+typealias SmartMoneyAlert = SmartMoneyAlertData
+typealias AlertEvent = _AlertEvent
+
+/// Legacy AlertEvent kept for backward-compat with AlertCategoryIcon and any remaining callers
+struct _AlertEvent: Identifiable {
+    let id = UUID()
+    let type: AlertEventType
+    let title: String
+    let description: String
+    let date: Date?
+    let day: Int?
+    let month: String?
+
+    var hasDate: Bool { day != nil && month != nil }
+    var formattedDay: String { day.map(String.init) ?? "" }
+    var formattedMonth: String { month?.uppercased() ?? "" }
+}
+
+typealias AlertEventType = _AlertEventType
+enum _AlertEventType: String, CaseIterable {
     case earnings = "earnings"
     case market = "market"
     case smartMoney = "smart_money"
@@ -78,40 +182,6 @@ enum AlertEventType: String, CaseIterable {
         case .smartMoney: return "lightbulb.fill"
         }
     }
-}
-
-// MARK: - Alert Event
-struct AlertEvent: Identifiable {
-    let id = UUID()
-    let type: AlertEventType
-    let title: String
-    let description: String
-    let date: Date?
-    let day: Int?
-    let month: String?
-
-    var hasDate: Bool {
-        day != nil && month != nil
-    }
-
-    var formattedDay: String {
-        guard let day = day else { return "" }
-        return String(day)
-    }
-
-    var formattedMonth: String {
-        month?.uppercased() ?? ""
-    }
-}
-
-// MARK: - Smart Money Alert
-struct SmartMoneyAlert: Identifiable {
-    let id = UUID()
-    let title: String
-    let description: String
-    let fundCount: Int
-    let ticker: String
-    let positionSize: String
 }
 
 // MARK: - Sector Allocation
@@ -317,35 +387,41 @@ extension TrackedAsset {
     ]
 }
 
-extension AlertEvent {
-    static let sampleData: [AlertEvent] = [
-        AlertEvent(
-            type: .earnings,
-            title: "Earnings Alert",
-            description: "NVDA reports earnings tomorrow after market close. Analyst consensus: Beat expected",
-            date: Calendar.current.date(byAdding: .day, value: 1, to: Date()),
-            day: 22,
-            month: "FEB"
-        ),
-        AlertEvent(
-            type: .market,
-            title: "Market",
-            description: "Fed interest rate decision. FOMC meeting announcement",
-            date: Calendar.current.date(byAdding: .day, value: 3, to: Date()),
-            day: 24,
-            month: "FEB"
-        )
-    ]
-}
-
-extension SmartMoneyAlert {
-    static let sampleData: SmartMoneyAlert = SmartMoneyAlert(
+extension SmartMoneyAlertData {
+    static let sampleData = SmartMoneyAlertData(
         title: "Smart Money Following",
         description: "3 hedge funds you follow bought GOOGL this week. Avg. position size: $1.2B",
         fundCount: 3,
         ticker: "GOOGL",
         positionSize: "$1.2B"
     )
+}
+
+extension AppAlert {
+    static let sampleData: [AppAlert] = [
+        .earnings(EarningsAlertData(
+            title: "Earnings Alert",
+            description: "NVDA reports earnings tomorrow after market close. Analyst consensus: Beat expected",
+            ticker: "NVDA",
+            day: 22,
+            month: "FEB",
+            expectedResult: "Beat expected"
+        )),
+        .market(MarketAlertData(
+            title: "Market",
+            description: "Fed interest rate decision. FOMC meeting announcement",
+            day: 24,
+            month: "FEB",
+            eventType: "FOMC"
+        )),
+        .smartMoney(SmartMoneyAlertData(
+            title: "Smart Money Following",
+            description: "3 hedge funds you follow bought GOOGL this week. Avg. position size: $1.2B",
+            fundCount: 3,
+            ticker: "GOOGL",
+            positionSize: "$1.2B"
+        ))
+    ]
 }
 
 extension DiversificationScore {

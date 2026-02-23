@@ -2,13 +2,14 @@
 //  AlertEventCard.swift
 //  ios
 //
-//  Molecule: Alert/Event card with icon, description and date
+//  Molecule: Unified alert card that renders differently per AppAlert case
 //
 
 import SwiftUI
 
-struct AlertEventCard: View {
-    let alert: AlertEvent
+// MARK: - AlertCardView (switches on AppAlert enum)
+struct AlertCardView: View {
+    let alert: AppAlert
     var onTap: (() -> Void)?
 
     var body: some View {
@@ -16,8 +17,16 @@ struct AlertEventCard: View {
             onTap?()
         } label: {
             HStack(spacing: AppSpacing.md) {
-                // Icon
-                AlertCategoryIcon(type: alert.type)
+                // Icon (color depends on case)
+                ZStack {
+                    Circle()
+                        .fill(alert.iconColor.opacity(0.15))
+                        .frame(width: 40, height: 40)
+
+                    Image(systemName: alert.iconName)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(alert.iconColor)
+                }
 
                 // Content
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
@@ -34,13 +43,8 @@ struct AlertEventCard: View {
 
                 Spacer()
 
-                // Date Badge (if available)
-                if alert.hasDate {
-                    EventDateBadge(
-                        day: alert.formattedDay,
-                        month: alert.formattedMonth
-                    )
-                }
+                // Trailing accessory — date badge for earnings/market, chevron for smartMoney
+                trailingAccessory
             }
             .padding(AppSpacing.lg)
             .background(AppColors.cardBackground)
@@ -48,14 +52,35 @@ struct AlertEventCard: View {
         }
         .buttonStyle(.plain)
     }
+
+    @ViewBuilder
+    private var trailingAccessory: some View {
+        switch alert {
+        case .earnings(let data):
+            EventDateBadge(
+                day: data.formattedDay,
+                month: data.formattedMonth
+            )
+        case .market(let data):
+            EventDateBadge(
+                day: data.formattedDay,
+                month: data.formattedMonth
+            )
+        case .smartMoney:
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(AppColors.textMuted)
+        }
+    }
 }
 
 #Preview {
     VStack(spacing: AppSpacing.md) {
-        ForEach(AlertEvent.sampleData) { alert in
-            AlertEventCard(alert: alert)
+        ForEach(AppAlert.sampleData) { alert in
+            AlertCardView(alert: alert)
         }
     }
     .padding()
     .background(AppColors.background)
+    .preferredColorScheme(.dark)
 }

@@ -15,6 +15,8 @@ struct LearnContentView: View {
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
     @State private var showingBookLibrary = false
+    @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
+    @State private var selectedLibraryBook: LibraryBook?
 
     var body: some View {
         NavigationStack {
@@ -61,6 +63,14 @@ struct LearnContentView: View {
             BookLibraryView()
                 .environmentObject(audioManager)
         }
+        .fullScreenCover(item: $selectedMoneyMoveArticle) { article in
+            MoneyMoveArticleDetailView(article: article)
+                .environmentObject(audioManager)
+        }
+        .fullScreenCover(item: $selectedLibraryBook) { book in
+            BookDetailView(book: book)
+                .environmentObject(audioManager)
+        }
         .navigationBarHidden(true)
         }
     }
@@ -94,6 +104,7 @@ struct LearnContentView: View {
                     AIBooksSection(
                         books: viewModel.books,
                         onSeeAll: handleSeeAllBooks,
+                        onBookTap: handleBookTap,
                         onChatWithBook: handleChatWithBook,
                         onReadKeyIdeas: handleReadKeyIdeas
                     )
@@ -160,7 +171,7 @@ struct LearnContentView: View {
     }
 
     private func handleMoneyMoveTap(_ moneyMove: MoneyMove) {
-        viewModel.openMoneyMove(moneyMove)
+        selectedMoneyMoveArticle = createArticleFromMove(moneyMove)
     }
 
     private func handleBookmarkMoneyMove(_ moneyMove: MoneyMove) {
@@ -169,6 +180,13 @@ struct LearnContentView: View {
 
     private func handleSeeAllBooks() {
         showingBookLibrary = true
+    }
+
+    private func handleBookTap(_ book: EducationBook) {
+        // Find matching LibraryBook by title
+        if let libraryBook = LibraryBook.sampleData.first(where: { $0.title == book.title }) {
+            selectedLibraryBook = libraryBook
+        }
     }
 
     private func handleChatWithBook(_ book: EducationBook) {
@@ -189,6 +207,142 @@ struct LearnContentView: View {
 
     private func handleAddCredits() {
         viewModel.addCredits()
+    }
+
+    // MARK: - Helpers
+
+    /// Creates a full MoneyMoveArticle from a MoneyMove card data
+    private func createArticleFromMove(_ move: MoneyMove) -> MoneyMoveArticle {
+        let gradientColors: [String]
+        switch move.category {
+        case .blueprints:
+            gradientColors = ["059669", "047857", "064E3B"]
+        case .valueTraps:
+            gradientColors = ["DC2626", "991B1B", "7F1D1D"]
+        case .battles:
+            gradientColors = ["7C3AED", "5B21B6", "4C1D95"]
+        }
+
+        return MoneyMoveArticle(
+            title: move.title,
+            subtitle: move.subtitle,
+            category: move.category,
+            author: ArticleAuthor(
+                name: "The Alpha",
+                avatarName: nil,
+                title: "Investment Research",
+                isVerified: true,
+                followerCount: "45.2k"
+            ),
+            publishedAt: Date(),
+            readTimeMinutes: move.estimatedMinutes,
+            viewCount: move.learnerCount,
+            commentCount: Int.random(in: 20...200),
+            isBookmarked: move.isBookmarked,
+            hasAudioVersion: true,
+            heroGradientColors: gradientColors,
+            tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),
+            isFeatured: false,
+            keyHighlights: [
+                ArticleHighlight(
+                    icon: "lightbulb.fill",
+                    title: "Key Insight",
+                    description: "Understanding the core principles behind this investment case study."
+                ),
+                ArticleHighlight(
+                    icon: "chart.line.uptrend.xyaxis",
+                    title: "Market Impact",
+                    description: "How this story influenced market dynamics and investor behavior."
+                ),
+                ArticleHighlight(
+                    icon: "exclamationmark.triangle.fill",
+                    title: "Lessons Learned",
+                    description: "Critical takeaways for modern investors and portfolio managers."
+                )
+            ],
+            sections: [
+                ArticleSection(
+                    title: "Overview",
+                    icon: "doc.text.fill",
+                    content: [
+                        .paragraph("This case study explores the key factors that led to this notable investment story. Understanding these dynamics is crucial for making informed investment decisions in today's complex market environment."),
+                        .paragraph("By analyzing the events, decisions, and market reactions, we can extract valuable lessons applicable to future investment opportunities and risk management strategies.")
+                    ],
+                    hasGlowEffect: true
+                ),
+                ArticleSection(
+                    title: "Background & Context",
+                    icon: "clock.fill",
+                    content: [
+                        .paragraph("To fully appreciate this case study, we must understand the market conditions and competitive landscape that shaped its trajectory."),
+                        .callout(
+                            icon: "info.circle.fill",
+                            text: "The events discussed here occurred during a period of significant market transformation, making them particularly relevant for today's investors.",
+                            style: .info
+                        ),
+                        .bulletList([
+                            "Market conditions at the time",
+                            "Key players and their motivations",
+                            "Regulatory environment",
+                            "Technological factors"
+                        ])
+                    ]
+                ),
+                ArticleSection(
+                    title: "Key Takeaways",
+                    icon: "star.fill",
+                    content: [
+                        .subheading("For Value Investors"),
+                        .bulletList([
+                            "Understanding market dynamics is essential for long-term success",
+                            "Due diligence prevents costly mistakes and protects capital",
+                            "Long-term thinking creates lasting value for shareholders",
+                            "Risk management is non-negotiable in volatile markets"
+                        ]),
+                        .subheading("Practical Applications"),
+                        .paragraph("These lessons can be directly applied to your investment process. Consider how each principle might have changed outcomes in your own portfolio decisions.")
+                    ]
+                ),
+                ArticleSection(
+                    title: "Conclusion",
+                    icon: "checkmark.seal.fill",
+                    content: [
+                        .paragraph("This case study demonstrates the importance of fundamental analysis, proper due diligence, and maintaining a long-term perspective in investing."),
+                        .callout(
+                            icon: "quote.opening",
+                            text: "The best investment you can make is in your own education and understanding of what drives business value.",
+                            style: .highlight
+                        )
+                    ]
+                )
+            ],
+            statistics: [
+                ArticleStatistic(value: move.learnerCount, label: "Investors Learning", trend: .up, trendValue: "12%"),
+                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time"),
+                ArticleStatistic(value: "4.8", label: "Rating", trend: .up, trendValue: "0.3")
+            ],
+            comments: [
+                ArticleComment(
+                    authorName: "Michael Chen",
+                    authorAvatar: nil,
+                    content: "Excellent analysis! This really helped me understand the key factors at play.",
+                    postedAt: Calendar.current.date(byAdding: .hour, value: -3, to: Date())!,
+                    likeCount: 24,
+                    replyCount: 5,
+                    isVerified: false
+                ),
+                ArticleComment(
+                    authorName: "Sarah Williams",
+                    authorAvatar: nil,
+                    content: "The section on risk management was particularly valuable. Would love to see more case studies like this.",
+                    postedAt: Calendar.current.date(byAdding: .hour, value: -8, to: Date())!,
+                    likeCount: 18,
+                    replyCount: 2,
+                    isVerified: true
+                )
+            ],
+            relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
+        )
     }
 }
 

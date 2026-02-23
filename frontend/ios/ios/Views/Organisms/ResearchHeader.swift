@@ -2,12 +2,13 @@
 //  ResearchHeader.swift
 //  ios
 //
-//  Organism: Research screen header with logo, title, and tab selector
+//  Organism: Research screen header with standardized logo, title, profile, and tab selector
 //
 
 import SwiftUI
 
 struct ResearchHeader: View {
+    @Environment(\.appState) private var appState
     @Binding var selectedTab: ResearchTab
     var onProfileTapped: (() -> Void)?
 
@@ -34,30 +35,19 @@ struct ResearchHeader: View {
 
                 // Side elements
                 HStack {
-                    // Logo placeholder
-                    Circle()
-                        .fill(AppColors.cardBackgroundLight)
-                        .frame(width: 32, height: 32)
-                        .overlay(
-                            Text("L")
-                                .font(AppTypography.footnoteBold)
-                                .foregroundColor(AppColors.textSecondary)
-                        )
+                    // App Logo (standardized)
+                    LogoView()
 
                     Spacer()
 
-                    // Profile button
+                    // Profile Avatar (standardized, with avatar URL from AppState)
                     Button(action: {
                         onProfileTapped?()
                     }) {
-                        Circle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(width: 36, height: 36)
-                            .overlay(
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(AppColors.textSecondary)
-                            )
+                        ProfileAvatarView(
+                            avatarUrl: appState.user.profile?.avatarUrl,
+                            size: 36
+                        )
                     }
                     .buttonStyle(PlainButtonStyle())
                 }

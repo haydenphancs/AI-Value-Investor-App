@@ -57,61 +57,107 @@ struct TrackedAsset: Identifiable {
     }
 }
 
-// MARK: - Alert Event Type
-enum AlertEventType: String, CaseIterable {
-    case earnings = "earnings"
-    case market = "market"
-    case smartMoney = "smart_money"
+// MARK: - App Alert
 
-    var iconBackgroundColor: Color {
+/// Unified alert model for the Alerts & Upcoming Events section.
+/// Each case carries its own specific data fields.
+enum AppAlert: Identifiable {
+    case earnings(EarningsData)
+    case market(MarketData)
+    case smartMoney(SmartMoneyData)
+
+    var id: UUID {
         switch self {
-        case .earnings: return AppColors.primaryBlue
-        case .market: return AppColors.primaryBlue
-        case .smartMoney: return AppColors.alertOrange
+        case .earnings(let data): return data.id
+        case .market(let data): return data.id
+        case .smartMoney(let data): return data.id
         }
     }
 
-    var systemIconName: String {
+    // MARK: - Associated Data Types
+
+    struct EarningsData: Identifiable {
+        let id = UUID()
+        let ticker: String
+        let companyName: String
+        let reportTime: EarningsReportTime
+        let consensus: String
+        let day: Int
+        let month: String
+
+        var formattedDay: String { String(day) }
+        var formattedMonth: String { month.uppercased() }
+    }
+
+    struct MarketData: Identifiable {
+        let id = UUID()
+        let eventName: String
+        let description: String
+        let day: Int
+        let month: String
+
+        var formattedDay: String { String(day) }
+        var formattedMonth: String { month.uppercased() }
+    }
+
+    struct SmartMoneyData: Identifiable {
+        let id = UUID()
+        let ticker: String
+        let fundCount: Int
+        let positionSize: String
+
+        var title: String { "Smart Money Following" }
+        var description: String {
+            "\(fundCount) hedge funds you follow bought \(ticker) this week. Avg. position size: \(positionSize)"
+        }
+    }
+
+    enum EarningsReportTime: String {
+        case beforeOpen = "before_open"
+        case afterClose = "after_close"
+
+        var displayText: String {
+            switch self {
+            case .beforeOpen: return "before market open"
+            case .afterClose: return "after market close"
+            }
+        }
+    }
+
+    // MARK: - Display Properties
+
+    var title: String {
         switch self {
-        case .earnings: return "bell.fill"
-        case .market: return "bell.fill"
+        case .earnings: return "Earnings Alert"
+        case .market: return "Market"
+        case .smartMoney(let data): return data.title
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .earnings(let data):
+            return "\(data.ticker) reports earnings tomorrow \(data.reportTime.displayText). Analyst consensus: \(data.consensus)"
+        case .market(let data):
+            return data.description
+        case .smartMoney(let data):
+            return data.description
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .earnings, .market: return "bell.fill"
         case .smartMoney: return "lightbulb.fill"
         }
     }
-}
 
-// MARK: - Alert Event
-struct AlertEvent: Identifiable {
-    let id = UUID()
-    let type: AlertEventType
-    let title: String
-    let description: String
-    let date: Date?
-    let day: Int?
-    let month: String?
-
-    var hasDate: Bool {
-        day != nil && month != nil
+    var iconColor: Color {
+        switch self {
+        case .earnings, .market: return AppColors.primaryBlue
+        case .smartMoney: return AppColors.alertOrange
+        }
     }
-
-    var formattedDay: String {
-        guard let day = day else { return "" }
-        return String(day)
-    }
-
-    var formattedMonth: String {
-        month?.uppercased() ?? ""
-    }
-}
-
-// MARK: - Smart Money Alert
-struct SmartMoneyAlert: Identifiable {
-    let id = UUID()
-    let title: String
-    let description: String
-    let fundCount: Int
-    let ticker: String
-    let positionSize: String
 }
 
 // MARK: - Sector Allocation
@@ -317,35 +363,28 @@ extension TrackedAsset {
     ]
 }
 
-extension AlertEvent {
-    static let sampleData: [AlertEvent] = [
-        AlertEvent(
-            type: .earnings,
-            title: "Earnings Alert",
-            description: "NVDA reports earnings tomorrow after market close. Analyst consensus: Beat expected",
-            date: Calendar.current.date(byAdding: .day, value: 1, to: Date()),
+extension AppAlert {
+    static let sampleData: [AppAlert] = [
+        .earnings(EarningsData(
+            ticker: "NVDA",
+            companyName: "NVIDIA Corp.",
+            reportTime: .afterClose,
+            consensus: "Beat expected",
             day: 22,
             month: "FEB"
-        ),
-        AlertEvent(
-            type: .market,
-            title: "Market",
+        )),
+        .market(MarketData(
+            eventName: "Fed Interest Rate Decision",
             description: "Fed interest rate decision. FOMC meeting announcement",
-            date: Calendar.current.date(byAdding: .day, value: 3, to: Date()),
             day: 24,
             month: "FEB"
-        )
+        )),
+        .smartMoney(SmartMoneyData(
+            ticker: "GOOGL",
+            fundCount: 3,
+            positionSize: "$1.2B"
+        ))
     ]
-}
-
-extension SmartMoneyAlert {
-    static let sampleData: SmartMoneyAlert = SmartMoneyAlert(
-        title: "Smart Money Following",
-        description: "3 hedge funds you follow bought GOOGL this week. Avg. position size: $1.2B",
-        fundCount: 3,
-        ticker: "GOOGL",
-        positionSize: "$1.2B"
-    )
 }
 
 extension DiversificationScore {

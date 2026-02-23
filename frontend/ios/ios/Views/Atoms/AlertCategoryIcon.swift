@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct AlertCategoryIcon: View {
-    let type: AlertEventType
+    let alert: AppAlert
     var size: CGFloat = 40
 
     private var iconSize: CGFloat {
@@ -18,21 +18,21 @@ struct AlertCategoryIcon: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(type.iconBackgroundColor.opacity(0.15))
+                .fill(alert.iconColor.opacity(0.15))
                 .frame(width: size, height: size)
 
-            Image(systemName: type.systemIconName)
+            Image(systemName: alert.iconName)
                 .font(.system(size: iconSize, weight: .semibold))
-                .foregroundColor(type.iconBackgroundColor)
+                .foregroundColor(alert.iconColor)
         }
     }
 }
 
 #Preview {
     HStack(spacing: 20) {
-        AlertCategoryIcon(type: .earnings)
-        AlertCategoryIcon(type: .market)
-        AlertCategoryIcon(type: .smartMoney)
+        ForEach(AppAlert.sampleData) { alert in
+            AlertCategoryIcon(alert: alert)
+        }
     }
     .padding()
     .background(AppColors.background)

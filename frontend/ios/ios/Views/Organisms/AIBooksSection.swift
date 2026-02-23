@@ -10,6 +10,7 @@ import SwiftUI
 struct AIBooksSection: View {
     let books: [EducationBook]
     var onSeeAll: (() -> Void)?
+    var onBookTap: ((EducationBook) -> Void)?
     var onChatWithBook: ((EducationBook) -> Void)?
     var onReadKeyIdeas: ((EducationBook) -> Void)?
 
@@ -44,6 +45,7 @@ struct AIBooksSection: View {
                 ForEach(books) { book in
                     EducationBookCard(
                         book: book,
+                        onTap: { onBookTap?(book) },
                         onChatWithBook: { onChatWithBook?(book) },
                         onReadKeyIdeas: { onReadKeyIdeas?(book) }
                     )

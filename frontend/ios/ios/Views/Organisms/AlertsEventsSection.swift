@@ -8,10 +8,8 @@
 import SwiftUI
 
 struct AlertsEventsSection: View {
-    let alerts: [AlertEvent]
-    let smartMoneyAlert: SmartMoneyAlert?
-    var onAlertTapped: ((AlertEvent) -> Void)?
-    var onSmartMoneyTapped: (() -> Void)?
+    let alerts: [AppAlert]
+    var onAlertTapped: ((AppAlert) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -24,15 +22,8 @@ struct AlertsEventsSection: View {
             // Alert Cards
             VStack(spacing: AppSpacing.md) {
                 ForEach(alerts) { alert in
-                    AlertEventCard(alert: alert) {
+                    AlertCardView(alert: alert) {
                         onAlertTapped?(alert)
-                    }
-                }
-
-                // Smart Money Card
-                if let smartMoney = smartMoneyAlert {
-                    SmartMoneyCard(alert: smartMoney) {
-                        onSmartMoneyTapped?()
                     }
                 }
             }
@@ -44,8 +35,7 @@ struct AlertsEventsSection: View {
 #Preview {
     ScrollView {
         AlertsEventsSection(
-            alerts: AlertEvent.sampleData,
-            smartMoneyAlert: SmartMoneyAlert.sampleData
+            alerts: AppAlert.sampleData
         )
         .padding(.top, AppSpacing.lg)
     }

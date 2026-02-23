@@ -96,6 +96,11 @@ struct TrackingContentView: View {
                     whaleName: tradeData.whaleName
                 )
             }
+            .sheet(item: $viewModel.selectedAlert) { alert in
+                NavigationStack {
+                    AlertDetailView(alert: alert)
+                }
+            }
         }
     }
 
@@ -180,6 +185,11 @@ struct TrackingContentViewWithBinding: View {
                     tradeGroup: tradeData.tradeGroup,
                     whaleName: tradeData.whaleName
                 )
+            }
+            .sheet(item: $viewModel.selectedAlert) { alert in
+                NavigationStack {
+                    AlertDetailView(alert: alert)
+                }
             }
         }
     }

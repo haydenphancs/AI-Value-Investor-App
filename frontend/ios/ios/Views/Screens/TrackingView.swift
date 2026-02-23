@@ -214,10 +214,8 @@ struct AssetsTabContent: View {
 
                 // Alerts & Upcoming Events Section
                 AlertsEventsSection(
-                    alerts: viewModel.alertEvents,
-                    smartMoneyAlert: viewModel.smartMoneyAlert,
-                    onAlertTapped: { alert in viewModel.viewAlertDetail(alert) },
-                    onSmartMoneyTapped: { print("Smart money tapped") }
+                    alerts: viewModel.appAlerts,
+                    onAlertTapped: { alert in viewModel.viewAlertDetail(alert) }
                 )
 
                 // Portfolio Insights Section

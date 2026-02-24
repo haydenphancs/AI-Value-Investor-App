@@ -8,6 +8,15 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Cached Formatters
+private enum ResearchFormatters {
+    static let mediumDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+}
+
 // MARK: - Research Tab
 enum ResearchTab: String, CaseIterable {
     case research = "Research"
@@ -147,9 +156,7 @@ struct CreditBalance {
     let renewalDate: Date
 
     var formattedRenewalDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return "Renews \(formatter.string(from: renewalDate))"
+        "Renews \(ResearchFormatters.mediumDateFormatter.string(from: renewalDate))"
     }
 
     static let mock = CreditBalance(
@@ -249,9 +256,7 @@ struct AnalysisReport: Identifiable {
     let isRefunded: Bool
 
     var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: date)
+        ResearchFormatters.mediumDateFormatter.string(from: date)
     }
 
     var tickerAndIndustry: String {

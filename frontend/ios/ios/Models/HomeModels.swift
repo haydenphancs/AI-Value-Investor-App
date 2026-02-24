@@ -7,6 +7,30 @@
 
 import Foundation
 
+// MARK: - Shared Formatters (avoid re-allocating on every computed property access)
+private enum SharedFormatters {
+    static let priceFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        f.groupingSeparator = ","
+        return f
+    }()
+
+    static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f
+    }()
+
+    static let reportDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+}
+
 // MARK: - Market Ticker
 struct MarketTicker: Identifiable {
     let id = UUID()
@@ -20,12 +44,7 @@ struct MarketTicker: Identifiable {
     }
 
     var formattedPrice: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.minimumFractionDigits = 2
-        formatter.maximumFractionDigits = 2
-        formatter.groupingSeparator = ","
-        return formatter.string(from: NSNumber(value: price)) ?? String(format: "%.2f", price)
+        SharedFormatters.priceFormatter.string(from: NSNumber(value: price)) ?? String(format: "%.2f", price)
     }
 
     var formattedChange: String {
@@ -50,9 +69,7 @@ struct MarketInsight: Identifiable {
     let updatedAt: Date
 
     var timeAgo: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: updatedAt, relativeTo: Date())
+        SharedFormatters.relativeDateFormatter.localizedString(for: updatedAt, relativeTo: Date())
     }
 }
 
@@ -142,9 +159,7 @@ struct ResearchReport: Identifiable {
     }
 
     var timeAgo: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: createdAt)
+        SharedFormatters.reportDateFormatter.string(from: createdAt)
     }
 }
 

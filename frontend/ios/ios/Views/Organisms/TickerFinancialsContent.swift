@@ -22,7 +22,7 @@ struct TickerFinancialsContent: View {
     var onHealthCheckDetailTap: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Earnings Section
             EarningsSectionCard(
                 earningsData: earningsData,

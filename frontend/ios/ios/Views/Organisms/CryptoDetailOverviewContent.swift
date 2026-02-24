@@ -16,7 +16,7 @@ struct CryptoDetailOverviewContent: View {
     var onRelatedCryptoTap: ((RelatedTicker) -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Key Statistics (FMP data)
             CryptoDetailKeyStatsSection(statisticsGroups: cryptoData.keyStatisticsGroups)
 

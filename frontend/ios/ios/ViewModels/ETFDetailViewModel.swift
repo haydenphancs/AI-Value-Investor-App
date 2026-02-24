@@ -38,13 +38,16 @@ class ETFDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Simulate API call with sample data
         // In production, this would fetch from FMP API
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
 
-            self.etfData = ETFDetailData.sampleSPY
-            self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.etfSymbol)
+            let symbol = self.etfSymbol
+            let etfData = ETFDetailData.sampleSPY
+            let news = TickerNewsArticle.sampleDataForTicker(symbol)
+
+            self.etfData = etfData
+            self.newsArticles = news
             self.isLoading = false
         }
     }

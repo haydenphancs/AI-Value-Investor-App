@@ -34,7 +34,7 @@ struct TickerChartView: View {
                 if chartData.count > 1 {
                     let minValue = chartData.min() ?? 0
                     let maxValue = chartData.max() ?? 1
-                    let range = max(maxValue - minValue, 0.01)
+                    let range = max(maxValue - minValue, Double.ulpOfOne)
                     let stepX = width / CGFloat(chartData.count - 1)
 
                     ZStack {
@@ -91,6 +91,7 @@ struct TickerChartView: View {
                                 .position(x: x, y: y)
                         }
                     }
+                    .drawingGroup()
                 }
             }
             .frame(height: 140)

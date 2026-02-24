@@ -40,21 +40,23 @@ struct UpdatesView: View {
 
                     // Scrollable Content with sticky section headers
                     ScrollView(showsIndicators: false) {
-                        // Insights Summary Card (scrollable)
-                        if let summary = viewModel.insightSummary {
-                            InsightsSummaryCard(summary: summary)
-                                .padding(.horizontal, AppSpacing.lg)
-                                .padding(.vertical, AppSpacing.sm)
+                        LazyVStack(spacing: 0) {
+                            // Insights Summary Card (scrollable)
+                            if let summary = viewModel.insightSummary {
+                                InsightsSummaryCard(summary: summary)
+                                    .padding(.horizontal, AppSpacing.lg)
+                                    .padding(.vertical, AppSpacing.sm)
+                            }
+
+                            LiveNewsTimeline(
+                                groupedNews: viewModel.groupedNews,
+                                onArticleTapped: handleArticleTapped
+                            )
+
+                            // Bottom spacing for tab bar
+                            Spacer()
+                                .frame(height: 100)
                         }
-
-                        LiveNewsTimeline(
-                            groupedNews: viewModel.groupedNews,
-                            onArticleTapped: handleArticleTapped
-                        )
-
-                        // Bottom spacing for tab bar
-                        Spacer()
-                            .frame(height: 100)
                     }
                     .refreshable {
                         await viewModel.refresh()

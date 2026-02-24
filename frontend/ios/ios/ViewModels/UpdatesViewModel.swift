@@ -25,29 +25,33 @@ class UpdatesViewModel: ObservableObject {
     // MARK: - Private Properties
     private var allNewsArticles: [NewsArticle] = []
     private var stockSummaries: [String: NewsInsightSummary] = [:]
+    private let generalMarketTickers: Set<String> = ["XOM", "CVX", "BP", "NVDA", "SPY", "QQQ", "MSFT"]
 
     // MARK: - Initialization
     init() {
-        loadMockData()
+        // Defer data loading to avoid blocking view init on tab switch
+        Task { [weak self] in
+            await self?.loadInitialData()
+        }
     }
 
     // MARK: - Data Loading
-    func loadMockData() {
+    private func loadInitialData() async {
         isLoading = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.loadFilterTabs()
-            self?.loadAllStockSummaries()
-            self?.loadAllNewsArticles()
-            self?.updateContentForSelectedTab()
-            self?.isLoading = false
-        }
+        loadFilterTabs()
+        loadAllStockSummaries()
+        loadAllNewsArticles()
+        updateContentForSelectedTab()
+        isLoading = false
     }
 
     func refresh() async {
         isRefreshing = true
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-        loadMockData()
+        loadFilterTabs()
+        loadAllStockSummaries()
+        loadAllNewsArticles()
+        updateContentForSelectedTab()
         isRefreshing = false
     }
 
@@ -301,12 +305,7 @@ class UpdatesViewModel: ObservableObject {
     }
 
     private func loadNewsForTab(_ tab: NewsFilterTab) {
-        isLoading = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.updateContentForSelectedTab()
-            self?.isLoading = false
-        }
+        updateContentForSelectedTab()
     }
 
     private func updateContentForSelectedTab() {
@@ -320,11 +319,8 @@ class UpdatesViewModel: ObservableObject {
 
         // Filter news articles based on selected tab
         if tab.isMarketTab {
-            // Market tab shows all general market news (excluding stock-specific)
             newsArticles = allNewsArticles.filter { article in
-                // Show articles that are general market news
-                let generalMarketTickers = ["XOM", "CVX", "BP", "NVDA", "SPY", "QQQ", "MSFT"]
-                return article.relatedTickers.contains { generalMarketTickers.contains($0) }
+                article.relatedTickers.contains { generalMarketTickers.contains($0) }
             }
         } else if let ticker = tab.ticker {
             // Stock-specific tab shows only news for that ticker

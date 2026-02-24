@@ -15,7 +15,7 @@ struct ETFDetailOverviewContent: View {
     var onRelatedETFTap: ((RelatedTicker) -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Key Statistics (FMP data)
             ETFDetailKeyStatsSection(statisticsGroups: etfData.keyStatisticsGroups)
 

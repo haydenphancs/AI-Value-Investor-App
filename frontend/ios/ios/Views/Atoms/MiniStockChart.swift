@@ -71,6 +71,8 @@ struct MiniStockChart: View {
                     style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                 )
             }
+            // Flatten path rendering into a single Metal texture
+            .drawingGroup()
         }
         .frame(height: height)
     }

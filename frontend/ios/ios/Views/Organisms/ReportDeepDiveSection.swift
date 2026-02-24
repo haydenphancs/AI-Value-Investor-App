@@ -44,14 +44,12 @@ struct ReportDeepDiveSection<Content: View>: View {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             Divider()
                 .background(AppColors.textMuted.opacity(0.15))
         }
         .background(AppColors.cardBackground)
-        .animation(.easeInOut(duration: 0.25), value: isExpanded)
     }
 }
 

@@ -106,21 +106,23 @@ struct UpdatesViewForTabView: View {
                 LiveNewsHeader(onFilterTapped: { viewModel.openFilterOptions() })
 
                 ScrollView(showsIndicators: false) {
-                    if let summary = viewModel.insightSummary {
-                        InsightsSummaryCard(summary: summary)
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.sm)
-                    }
-
-                    LiveNewsTimeline(
-                        groupedNews: viewModel.groupedNews,
-                        onArticleTapped: { article in
-                            selectedNewsArticle = article
+                    LazyVStack(spacing: 0) {
+                        if let summary = viewModel.insightSummary {
+                            InsightsSummaryCard(summary: summary)
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.sm)
                         }
-                    )
 
-                    Spacer()
-                        .frame(height: 100)
+                        LiveNewsTimeline(
+                            groupedNews: viewModel.groupedNews,
+                            onArticleTapped: { article in
+                                selectedNewsArticle = article
+                            }
+                        )
+
+                        Spacer()
+                            .frame(height: 100)
+                    }
                 }
                 .refreshable {
                     await viewModel.refresh()

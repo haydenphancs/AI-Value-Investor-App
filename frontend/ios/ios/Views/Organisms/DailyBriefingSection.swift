@@ -18,7 +18,7 @@ struct DailyBriefingSection: View {
                 .padding(.horizontal, AppSpacing.lg)
 
             // Alert Items
-            VStack(spacing: AppSpacing.sm) {
+            LazyVStack(spacing: AppSpacing.sm) {
                 ForEach(items) { item in
                     DailyBriefingRow(item: item) {
                         onItemTapped?(item)

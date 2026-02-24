@@ -12,7 +12,7 @@ struct IndexDetailSnapshotsSection: View {
     var onAIAnalystTap: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // 1. Valuation
             ValuationSnapshotCard(valuation: snapshotsData.valuation)
 

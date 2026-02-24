@@ -8,6 +8,22 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Cached Formatters
+private enum IndexDetailFormatters {
+    static let mediumDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+
+    static let decimalFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = ","
+        return f
+    }()
+}
+
 // MARK: - Index Detail Tab
 enum IndexDetailTab: String, CaseIterable {
     case overview = "Overview"
@@ -231,9 +247,7 @@ struct IndexSnapshotsData {
     let generatedBy: String  // e.g. "Gemini 2.0 Flash"
 
     var formattedGeneratedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: generatedDate)
+        IndexDetailFormatters.mediumDateFormatter.string(from: generatedDate)
     }
 }
 
@@ -248,10 +262,7 @@ struct IndexProfile {
     let website: String
 
     var formattedConstituents: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.groupingSeparator = ","
-        return formatter.string(from: NSNumber(value: numberOfConstituents)) ?? "\(numberOfConstituents)"
+        IndexDetailFormatters.decimalFormatter.string(from: NSNumber(value: numberOfConstituents)) ?? "\(numberOfConstituents)"
     }
 }
 

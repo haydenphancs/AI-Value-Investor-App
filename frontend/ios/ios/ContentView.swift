@@ -153,7 +153,13 @@ struct ResearchViewWithBinding: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Main Content
+                // Header (pinned outside scroll)
+                ResearchHeader(
+                    selectedTab: $viewModel.selectedTab,
+                    onProfileTapped: handleProfileTapped
+                )
+
+                // Tab Content
                 if viewModel.selectedTab == .research {
                     researchTabContent
                 } else {
@@ -179,12 +185,6 @@ struct ResearchViewWithBinding: View {
     private var researchTabContent: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xxl) {
-                // Header
-                ResearchHeader(
-                    selectedTab: $viewModel.selectedTab,
-                    onProfileTapped: handleProfileTapped
-                )
-
                 // Target Selection Section
                 TargetSelectionSection(
                     searchText: $viewModel.searchText,
@@ -192,7 +192,7 @@ struct ResearchViewWithBinding: View {
                     onTickerSelected: handleTickerSelected,
                     onSearchSubmit: handleSearchSubmit
                 )
-                .padding(.top, AppSpacing.sm)
+                .padding(.top, AppSpacing.md)
 
                 // Persona Selection Section
                 PersonaSelectionSection(
@@ -241,12 +241,6 @@ struct ResearchViewWithBinding: View {
     private var reportsTabContent: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xxl) {
-                // Header
-                ResearchHeader(
-                    selectedTab: $viewModel.selectedTab,
-                    onProfileTapped: handleProfileTapped
-                )
-
                 // Reports List Section
                 ReportsListSection(
                     reports: viewModel.reports,

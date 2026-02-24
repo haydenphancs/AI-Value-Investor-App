@@ -60,6 +60,7 @@ struct ResearchContentView: View {
                     onTickerSelected: handleTickerSelected,
                     onSearchSubmit: handleSearchSubmit
                 )
+                .padding(.top, AppSpacing.md)
 
                 // Persona Selection Section
                 PersonaSelectionSection(

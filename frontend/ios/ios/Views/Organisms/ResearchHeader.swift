@@ -53,37 +53,32 @@ struct ResearchHeader: View {
                 }
             }
 
-            // Tab selector - stretched to full width
+            // Tab selector — matches LearnTabControl sizing
             HStack(spacing: 0) {
                 ForEach(ResearchTab.allCases, id: \.rawValue) { tab in
-                    Button(action: {
+                    Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             selectedTab = tab
                         }
-                    }) {
+                    } label: {
                         Text(tab.rawValue)
-                            .font(AppTypography.callout)
-                            .fontWeight(selectedTab == tab ? .semibold : .regular)
-                            .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textSecondary)
+                            .font(AppTypography.bodyBold)
+                            .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, AppSpacing.sm)
+                            .padding(.vertical, AppSpacing.md)
                             .background(
-                                Group {
-                                    if selectedTab == tab {
-                                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                            .fill(AppColors.cardBackgroundLight)
-                                    }
-                                }
+                                selectedTab == tab
+                                    ? AppColors.cardBackgroundLight
+                                    : Color.clear
                             )
+                            .cornerRadius(AppCornerRadius.medium)
                     }
-                    .buttonStyle(PlainButtonStyle())
+                    .buttonStyle(.plain)
                 }
             }
             .padding(AppSpacing.xs)
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
-            )
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.large)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)

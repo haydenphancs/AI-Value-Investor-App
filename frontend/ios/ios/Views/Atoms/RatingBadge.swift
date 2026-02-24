@@ -29,8 +29,15 @@ struct RatingBadge: View {
         }
     }
 
+    private var formattedText: String {
+        if maxRating >= 100 {
+            return String(format: "%.0f/%.0f", rating, maxRating)
+        }
+        return String(format: "%.1f/%.0f", rating, maxRating)
+    }
+
     var body: some View {
-        Text(String(format: "%.1f/%.0f", rating, maxRating))
+        Text(formattedText)
             .font(AppTypography.captionBold)
             .foregroundColor(.white)
             .padding(.horizontal, AppSpacing.sm)

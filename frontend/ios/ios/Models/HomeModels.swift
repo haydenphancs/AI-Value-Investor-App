@@ -128,17 +128,17 @@ struct ResearchReport: Identifiable {
     let persona: InvestorPersona
     let headline: String
     let summary: String
-    let rating: Double
-    let targetPrice: Double
+    let rating: Double          // 0-100 scale, matches AnalysisReport
+    let fairValue: Double
     let createdAt: Date
     let gradientColors: [String]
 
     var formattedRating: String {
-        String(format: "%.1f/5", rating)
+        String(format: "%.0f/100", rating)
     }
 
-    var formattedTargetPrice: String {
-        "$\(Int(targetPrice))"
+    var formattedFairValue: String {
+        "$\(Int(fairValue))"
     }
 
     var timeAgo: String {

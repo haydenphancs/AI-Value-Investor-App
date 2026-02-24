@@ -63,9 +63,9 @@ struct ResearchCard: View {
 
                     // Footer
                     HStack {
-                        RatingBadge(rating: report.rating)
+                        RatingBadge(rating: report.rating, maxRating: 100)
 
-                        Text("Target: \(report.formattedTargetPrice)")
+                        Text("Fair Value: \(report.formattedFairValue)")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textSecondary)
 
@@ -93,16 +93,16 @@ struct ResearchCard: View {
     private var companyLogoPlaceholder: some View {
         // Using system symbols as placeholders for company logos
         switch report.stockTicker {
-        case "MSFT":
-            Image(systemName: "square.grid.2x2.fill")
+        case "ORCL":
+            Image(systemName: "server.rack")
                 .font(.system(size: 32, weight: .bold))
                 .foregroundColor(.white.opacity(0.9))
-        case "GOOGL":
-            Text("G")
-                .font(.system(size: 40, weight: .bold))
+        case "AAPL":
+            Image(systemName: "apple.logo")
+                .font(.system(size: 36, weight: .bold))
                 .foregroundColor(.white.opacity(0.9))
-        case "AMD":
-            Image(systemName: "cpu.fill")
+        case "NVDA":
+            Image(systemName: "gpu")
                 .font(.system(size: 32, weight: .bold))
                 .foregroundColor(.white.opacity(0.9))
         default:
@@ -117,29 +117,29 @@ struct ResearchCard: View {
     ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 16) {
             ResearchCard(report: ResearchReport(
-                stockTicker: "MSFT",
-                stockName: "Microsoft",
-                companyLogoName: "icon_microsoft",
+                stockTicker: "ORCL",
+                stockName: "Oracle Corporation",
+                companyLogoName: "icon_oracle",
                 persona: .warrenBuffett,
-                headline: "Microsoft: The AI Moat Deepens",
-                summary: "Azure's AI services and UX Pilot AI partnership position MSFT as a dominant force in enterprise AI.",
-                rating: 4.6,
-                targetPrice: 425,
-                createdAt: Date().addingTimeInterval(-10800),
-                gradientColors: ["0078D4", "00BCF2"]
+                headline: "Oracle: Strong Quality Business",
+                summary: "Enterprise software giant with deep moat in cloud infrastructure and database services.",
+                rating: 82,
+                fairValue: 190,
+                createdAt: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 7)) ?? Date(),
+                gradientColors: ["C74634", "F80000"]
             ))
 
             ResearchCard(report: ResearchReport(
-                stockTicker: "GOOGL",
-                stockName: "Google",
-                companyLogoName: "icon_google",
-                persona: .peterLynch,
-                headline: "Google: Gemini's Market Impact",
-                summary: "Gemini AI integration across products shows promise. Search market share stable.",
-                rating: 4.2,
-                targetPrice: 155,
-                createdAt: Date().addingTimeInterval(-345600),
-                gradientColors: ["4285F4", "34A853"]
+                stockTicker: "AAPL",
+                stockName: "Apple Inc.",
+                companyLogoName: "icon_apple",
+                persona: .warrenBuffett,
+                headline: "Apple: Excellent Quality Business",
+                summary: "Unmatched ecosystem and brand loyalty create a powerful moat. Services revenue continues to grow.",
+                rating: 90,
+                fairValue: 213,
+                createdAt: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 24)) ?? Date(),
+                gradientColors: ["A2AAAD", "555555"]
             ))
         }
         .padding()

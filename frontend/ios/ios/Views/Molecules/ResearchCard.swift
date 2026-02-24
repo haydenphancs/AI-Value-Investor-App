@@ -21,72 +21,67 @@ struct ResearchCard: View {
     }
 
     var body: some View {
-        Button(action: {
-            onTap?()
-        }) {
-            VStack(alignment: .leading, spacing: 0) {
-                // Header with gradient and logo
-                ZStack {
-                    gradient
-                        .frame(height: 80)
+        VStack(alignment: .leading, spacing: 0) {
+            // Header with gradient and logo
+            ZStack {
+                gradient
+                    .frame(height: 80)
 
-                    // Company Logo Placeholder
-                    companyLogoPlaceholder
+                // Company Logo Placeholder
+                companyLogoPlaceholder
+            }
+
+            // Content
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Persona badge and time
+                HStack {
+                    PersonaBadge(persona: report.persona)
+                    Spacer()
+                    Text(report.timeAgo)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
                 }
 
-                // Content
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    // Persona badge and time
-                    HStack {
-                        PersonaBadge(persona: report.persona)
-                        Spacer()
-                        Text(report.timeAgo)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+                // Headline
+                Text(report.headline)
+                    .font(AppTypography.bodyBold)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
 
-                    // Headline
-                    Text(report.headline)
-                        .font(AppTypography.bodyBold)
-                        .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                // Summary
+                Text(report.summary)
+                    .font(AppTypography.callout)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
 
-                    // Summary
-                    Text(report.summary)
-                        .font(AppTypography.callout)
+                Spacer()
+
+                // Footer
+                HStack {
+                    RatingBadge(rating: report.rating, maxRating: 100)
+
+                    Text("Fair Value: \(report.formattedFairValue)")
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
 
                     Spacer()
 
-                    // Footer
-                    HStack {
-                        RatingBadge(rating: report.rating, maxRating: 100)
-
-                        Text("Fair Value: \(report.formattedFairValue)")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-
-                        Spacer()
-
-                        Button(action: {
-                            onAskOrRead?()
-                        }) {
-                            Text("Ask or Read")
-                                .font(AppTypography.calloutBold)
-                                .foregroundColor(AppColors.primaryBlue)
-                        }
+                    Button(action: {
+                        onAskOrRead?()
+                    }) {
+                        Text("Ask or Read")
+                            .font(AppTypography.calloutBold)
+                            .foregroundColor(AppColors.primaryBlue)
                     }
                 }
-                .padding(AppSpacing.md)
-                .background(AppColors.cardBackground)
             }
-            .frame(width: 260, height: 280)
-            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+            .padding(AppSpacing.md)
+            .background(AppColors.cardBackground)
         }
-        .buttonStyle(PlainButtonStyle())
+        .frame(width: 260, height: 280)
+        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
     }
 
     @ViewBuilder

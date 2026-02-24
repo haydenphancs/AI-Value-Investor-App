@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @State private var selectedTab: HomeTab = .home
     @State private var researchTickerSymbol: String? = nil
+    @State private var researchSubTab: ResearchTab = .research
 
     var body: some View {
         ZStack {
@@ -19,13 +20,17 @@ struct ContentView: View {
             Group {
                 switch selectedTab {
                 case .home:
-                    HomeViewWithBinding(selectedTab: $selectedTab)
+                    HomeViewWithBinding(
+                        selectedTab: $selectedTab,
+                        researchSubTab: $researchSubTab
+                    )
                 case .updates:
                     UpdatesView(selectedTab: $selectedTab)
                 case .research:
                     ResearchViewWithBinding(
                         selectedTab: $selectedTab,
-                        prefilledTicker: researchTickerSymbol
+                        prefilledTicker: researchTickerSymbol,
+                        initialSubTab: researchSubTab
                     )
                 case .tracking:
                     TrackingViewWithBinding(
@@ -42,6 +47,7 @@ struct ContentView: View {
             // Clear the research ticker when leaving research tab
             if oldValue == .research && newValue != .research {
                 researchTickerSymbol = nil
+                researchSubTab = .research
             }
         }
     }
@@ -51,8 +57,10 @@ struct ContentView: View {
 struct HomeViewWithBinding: View {
     @StateObject private var viewModel = HomeViewModel()
     @Binding var selectedTab: HomeTab
+    @Binding var researchSubTab: ResearchTab
     @State private var showSearch = false
     @State private var selectedNewsArticle: NewsArticle?
+    @State private var selectedReportTicker: ReportTickerNavigation?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -86,9 +94,14 @@ struct HomeViewWithBinding: View {
 
                         RecentResearchSection(
                             reports: viewModel.recentResearch,
-                            onSeeAllTapped: { selectedTab = .research },
-                            onReportTapped: { _ in selectedTab = .research },
-                            onAskOrReadTapped: { _ in selectedTab = .research }
+                            onSeeAllTapped: {
+                                researchSubTab = .reports
+                                selectedTab = .research
+                            },
+                            onReportTapped: { _ in },
+                            onAskOrReadTapped: { report in
+                                selectedReportTicker = ReportTickerNavigation(ticker: report.stockTicker)
+                            }
                         )
 
                         NewAnalysisButton {
@@ -117,6 +130,12 @@ struct HomeViewWithBinding: View {
             NewsDetailView(article: article)
                 .preferredColorScheme(.dark)
         }
+        .fullScreenCover(item: $selectedReportTicker) { nav in
+            NavigationStack {
+                TickerReportView(ticker: nav.ticker)
+            }
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Action Handlers
@@ -139,11 +158,13 @@ struct ResearchViewWithBinding: View {
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
+    let initialSubTab: ResearchTab
     @State private var selectedReportTicker: ReportTickerNavigation?
 
-    init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil) {
+    init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil, initialSubTab: ResearchTab = .research) {
         self._selectedTab = selectedTab
         self.prefilledTicker = prefilledTicker
+        self.initialSubTab = initialSubTab
         self._viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
     }
 
@@ -172,6 +193,9 @@ struct ResearchViewWithBinding: View {
             if viewModel.isLoading {
                 LoadingOverlay()
             }
+        }
+        .onAppear {
+            viewModel.selectedTab = initialSubTab
         }
         .fullScreenCover(item: $selectedReportTicker) { nav in
             NavigationStack {

@@ -17,6 +17,7 @@ struct MoneyMoveArticleDetailView: View {
     @State private var showShareSheet: Bool = false
     @State private var showMoreOptions: Bool = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var aiInputText: String = ""
 
     let article: MoneyMoveArticle
 
@@ -96,14 +97,16 @@ struct MoneyMoveArticleDetailView: View {
                 }
             }
 
-            // Global Mini Player (floating at bottom)
-            if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
-                VStack {
-                    Spacer()
+            // Bottom bar: Mini Player + AI Chat
+            VStack(spacing: 0) {
+                Spacer()
+
+                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
                     GlobalMiniPlayer()
-                        .padding(.bottom, AppSpacing.lg)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+
+                CaudexAIChatBar(inputText: $aiInputText)
             }
 
             // Full Screen Player (modal overlay)

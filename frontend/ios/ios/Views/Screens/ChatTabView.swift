@@ -89,20 +89,16 @@ struct ChatTabView: View {
             // Main content area (empty state for now)
             Spacer()
 
-            // Suggestions section
-            ChatSuggestionsSection(suggestions: suggestions) { chip in
-                handleSuggestionTap(chip)
-            }
-            .padding(.bottom, AppSpacing.lg)
-
-            // Input section
-            ChatInputSection(
+            // AI Chat Bar with suggestion pills
+            CaudexAIChatBar(
                 inputText: $inputText,
-                onAttachmentTap: handleAttachmentTap,
-                onSend: handleSend,
-                onVoiceTap: handleVoiceTap,
-                onImageTap: handleImageTap,
-                onFocusChange: handleInputFocusChange
+                suggestions: suggestions.map(\.text),
+                onSuggestionTap: { text in
+                    if let chip = suggestions.first(where: { $0.text == text }) {
+                        handleSuggestionTap(chip)
+                    }
+                },
+                onSend: handleSend
             )
         }
     }

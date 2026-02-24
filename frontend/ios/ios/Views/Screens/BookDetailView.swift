@@ -22,6 +22,7 @@ struct BookDetailView: View {
     @State private var isBookmarked: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var aiInputText: String = ""
 
     let book: LibraryBook
 
@@ -108,7 +109,7 @@ struct BookDetailView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                BookDetailAskAIBar()
+                CaudexAIChatBar(inputText: $aiInputText)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         }
@@ -910,60 +911,6 @@ private struct BookDetailMiniHeader: View {
             AppColors.background
                 .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
         )
-    }
-}
-
-// MARK: - Ask AI Bar
-private struct BookDetailAskAIBar: View {
-    @State private var inputText: String = ""
-
-    var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // AI icon
-            Image(systemName: "sparkles")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(AppColors.accentCyan)
-
-            // Text field
-            TextField("Ask Caudex AI...", text: $inputText)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-
-            Spacer()
-
-            // Send button
-            Button(action: handleSend) {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(inputText.isEmpty ? AppColors.textMuted : AppColors.primaryBlue)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(inputText.isEmpty)
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.extraLarge)
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.bottom, AppSpacing.lg)
-        .background(
-            LinearGradient(
-                colors: [
-                    AppColors.background.opacity(0),
-                    AppColors.background.opacity(0.9),
-                    AppColors.background
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-        )
-    }
-
-    private func handleSend() {
-        guard !inputText.isEmpty else { return }
-        print("Ask AI: \(inputText)")
-        inputText = ""
     }
 }
 

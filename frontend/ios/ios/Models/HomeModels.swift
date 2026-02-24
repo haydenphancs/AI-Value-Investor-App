@@ -134,7 +134,7 @@ struct ResearchReport: Identifiable {
     let gradientColors: [String]
 
     var formattedRating: String {
-        String(format: "%.0f/100", rating)
+        String(format: "%.0f", rating)
     }
 
     var formattedFairValue: String {

@@ -31,7 +31,7 @@ struct RatingBadge: View {
 
     private var formattedText: String {
         if maxRating >= 100 {
-            return String(format: "%.0f/%.0f", rating, maxRating)
+            return String(format: "%.0f", rating)
         }
         return String(format: "%.1f/%.0f", rating, maxRating)
     }

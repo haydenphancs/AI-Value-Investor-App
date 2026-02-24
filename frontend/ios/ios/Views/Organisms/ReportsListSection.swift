@@ -48,7 +48,7 @@ struct ReportsListSection: View {
             }
 
             // Reports list
-            VStack(spacing: AppSpacing.md) {
+            LazyVStack(spacing: AppSpacing.md) {
                 ForEach(reports) { report in
                     ReportCard(
                         report: report,

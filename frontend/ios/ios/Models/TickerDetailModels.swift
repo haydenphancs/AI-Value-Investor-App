@@ -8,6 +8,42 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Cached Formatters (avoid re-creating expensive formatters on every access)
+private enum TickerDetailFormatters {
+    static let shortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
+    static let slashDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM/dd/yyyy"
+        return f
+    }()
+
+    static let longDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMMM d, yyyy"
+        return f
+    }()
+
+    static let decimalFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = ","
+        return f
+    }()
+
+    static let largePercentFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.maximumFractionDigits = 0
+        f.groupingSeparator = ","
+        return f
+    }()
+}
+
 // MARK: - Ticker Detail Tab
 enum TickerDetailTab: String, CaseIterable {
     case overview = "Overview"
@@ -42,9 +78,7 @@ enum MarketStatus {
         case .open:
             return "Market Open"
         case .closed(let date, let time, let timezone):
-            let formatter = DateFormatter()
-            formatter.dateFormat = "MMM d"
-            return "Market Closed  \(formatter.string(from: date)), \(time) \(timezone)"
+            return "Market Closed  \(TickerDetailFormatters.shortDateFormatter.string(from: date)), \(time) \(timezone)"
         case .preMarket:
             return "Pre-Market"
         case .afterHours:
@@ -106,11 +140,7 @@ struct PerformancePeriod: Identifiable {
     /// Formats large percentages cleanly: 1,000%+ drops decimals and adds commas
     private static func formatLargePercent(_ value: Double, defaultFormat: String) -> String {
         if abs(value) >= 1000 {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.maximumFractionDigits = 0
-            formatter.groupingSeparator = ","
-            return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+            return TickerDetailFormatters.largePercentFormatter.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
         }
         return String(format: defaultFormat, value)
     }
@@ -222,10 +252,7 @@ struct CompanyProfile {
     let website: String
 
     var formattedEmployees: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.groupingSeparator = ","
-        return formatter.string(from: NSNumber(value: employees)) ?? "\(employees)"
+        TickerDetailFormatters.decimalFormatter.string(from: NSNumber(value: employees)) ?? "\(employees)"
     }
 }
 
@@ -710,9 +737,7 @@ struct AnalystAction: Identifiable {
     let newPriceTarget: Double?
 
     var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM/dd/yyyy"
-        return formatter.string(from: date)
+        TickerDetailFormatters.slashDateFormatter.string(from: date)
     }
 
     var formattedPreviousPrice: String? {
@@ -858,9 +883,7 @@ struct AnalystRatingsData {
     }
 
     var formattedUpdatedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM/dd/yyyy"
-        return formatter.string(from: updatedDate)
+        TickerDetailFormatters.slashDateFormatter.string(from: updatedDate)
     }
 }
 
@@ -1499,9 +1522,7 @@ struct NextEarningsDate {
     let timing: EarningsReportTiming
 
     var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM d, yyyy"
-        return formatter.string(from: date)
+        TickerDetailFormatters.longDateFormatter.string(from: date)
     }
 
     var statusText: String {

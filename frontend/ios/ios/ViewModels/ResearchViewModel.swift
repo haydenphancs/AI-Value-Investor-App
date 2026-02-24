@@ -46,20 +46,22 @@ class ResearchViewModel: ObservableObject {
     func loadMockData() {
         isLoading = true
 
-        // Simulate network delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.quickTickers = QuickTicker.defaults
-            self?.personas = AnalysisPersona.allCases
-            self?.features = AnalysisFeature.allFeatures
-            self?.trendingAnalyses = TrendingAnalysis.mockTrending
-            self?.isLoading = false
+        Task { [weak self] in
+            guard let self = self else { return }
+            let tickers = QuickTicker.defaults
+            let allPersonas = AnalysisPersona.allCases
+            let allFeatures = AnalysisFeature.allFeatures
+            let trending = TrendingAnalysis.mockTrending
+
+            self.quickTickers = tickers
+            self.personas = allPersonas
+            self.features = allFeatures
+            self.trendingAnalyses = trending
+            self.isLoading = false
         }
     }
 
     func refresh() async {
-        isLoading = true
-        // Simulate API call
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
         loadMockData()
     }
 
@@ -81,11 +83,12 @@ class ResearchViewModel: ObservableObject {
 
         isGeneratingAnalysis = true
 
-        // Simulate analysis generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.isGeneratingAnalysis = false
-            // In real app, navigate to results or update state
-            print("Analysis generated for \(self?.searchText ?? "") using \(self?.selectedPersona.rawValue ?? "") style")
+        Task { [weak self] in
+            // Simulate analysis generation delay
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self = self else { return }
+            self.isGeneratingAnalysis = false
+            print("Analysis generated for \(self.searchText) using \(self.selectedPersona.rawValue) style")
         }
     }
 

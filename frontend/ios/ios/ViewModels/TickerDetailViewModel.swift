@@ -50,22 +50,32 @@ class TickerDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Simulate API call with sample data
         // In production, this would fetch from your backend
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
 
-            // For demo, use sample data
-            self.tickerData = TickerDetailData.sampleApple
-            self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.tickerSymbol)
-            self.analysisData = TickerAnalysisData.sampleData
-            self.earningsData = EarningsData.sampleData
-            self.growthData = GrowthSectionData.sampleData
-            self.profitPowerData = ProfitPowerSectionData.sampleData
-            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
-            self.revenueBreakdownData = RevenueBreakdownData.sampleApple
-            self.healthCheckData = HealthCheckSectionData.sampleData
-            self.holdersData = HoldersData.sampleData
+            let ticker = self.tickerSymbol
+            let tickerData = TickerDetailData.sampleApple
+            let news = TickerNewsArticle.sampleDataForTicker(ticker)
+            let analysis = TickerAnalysisData.sampleData
+            let earnings = EarningsData.sampleData
+            let growth = GrowthSectionData.sampleData
+            let profitPower = ProfitPowerSectionData.sampleData
+            let signalOfConfidence = SignalOfConfidenceSectionData.sampleData
+            let revenueBreakdown = RevenueBreakdownData.sampleApple
+            let healthCheck = HealthCheckSectionData.sampleData
+            let holders = HoldersData.sampleData
+
+            self.tickerData = tickerData
+            self.newsArticles = news
+            self.analysisData = analysis
+            self.earningsData = earnings
+            self.growthData = growth
+            self.profitPowerData = profitPower
+            self.signalOfConfidenceData = signalOfConfidence
+            self.revenueBreakdownData = revenueBreakdown
+            self.healthCheckData = healthCheck
+            self.holdersData = holders
             self.isLoading = false
         }
     }

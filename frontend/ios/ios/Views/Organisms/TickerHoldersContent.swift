@@ -12,7 +12,7 @@ struct TickerHoldersContent: View {
     let holdersData: HoldersData
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Shareholder Breakdown Section
             ShareholderBreakdownSection(
                 breakdownData: holdersData.shareholderBreakdown

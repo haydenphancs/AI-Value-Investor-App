@@ -17,7 +17,7 @@ struct TickerAnalysisContent: View {
     var onTechnicalDetailTap: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Analyst Ratings Section
             AnalystRatingsSection(
                 ratingsData: analysisData.analystRatings,

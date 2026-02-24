@@ -33,7 +33,7 @@ struct NewsGroupContent: View {
     var onArticleTapped: ((NewsArticle) -> Void)?
 
     var body: some View {
-        VStack(spacing: 0) {
+        LazyVStack(spacing: 0) {
             ForEach(Array(articles.enumerated()), id: \.element.id) { index, article in
                 TimelineRow(
                     article: article,

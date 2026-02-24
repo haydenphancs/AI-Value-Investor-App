@@ -17,30 +17,38 @@ struct ContentView: View {
             AppColors.background
                 .ignoresSafeArea()
 
-            Group {
-                switch selectedTab {
-                case .home:
-                    HomeViewWithBinding(
-                        selectedTab: $selectedTab,
-                        researchSubTab: $researchSubTab
-                    )
-                case .updates:
-                    UpdatesView(selectedTab: $selectedTab)
-                case .research:
-                    ResearchViewWithBinding(
-                        selectedTab: $selectedTab,
-                        prefilledTicker: researchTickerSymbol,
-                        initialSubTab: researchSubTab
-                    )
-                case .tracking:
-                    TrackingViewWithBinding(
-                        selectedTab: $selectedTab,
-                        researchTickerSymbol: $researchTickerSymbol
-                    )
-                case .wiser:
-                    WiserViewWithBinding(selectedTab: $selectedTab)
-                }
-            }
+            // Keep all tab views alive to avoid re-creating ViewModels on every tab switch.
+            // Only the selected tab is visible; the others are hidden but retained in memory
+            // so their @StateObject instances persist and don't re-trigger data loading.
+            HomeViewWithBinding(
+                selectedTab: $selectedTab,
+                researchSubTab: $researchSubTab
+            )
+            .opacity(selectedTab == .home ? 1 : 0)
+            .allowsHitTesting(selectedTab == .home)
+
+            UpdatesView(selectedTab: $selectedTab)
+                .opacity(selectedTab == .updates ? 1 : 0)
+                .allowsHitTesting(selectedTab == .updates)
+
+            ResearchViewWithBinding(
+                selectedTab: $selectedTab,
+                prefilledTicker: researchTickerSymbol,
+                initialSubTab: researchSubTab
+            )
+            .opacity(selectedTab == .research ? 1 : 0)
+            .allowsHitTesting(selectedTab == .research)
+
+            TrackingViewWithBinding(
+                selectedTab: $selectedTab,
+                researchTickerSymbol: $researchTickerSymbol
+            )
+            .opacity(selectedTab == .tracking ? 1 : 0)
+            .allowsHitTesting(selectedTab == .tracking)
+
+            WiserViewWithBinding(selectedTab: $selectedTab)
+                .opacity(selectedTab == .wiser ? 1 : 0)
+                .allowsHitTesting(selectedTab == .wiser)
         }
         .preferredColorScheme(.dark)
         .onChange(of: selectedTab) { oldValue, newValue in
@@ -76,7 +84,7 @@ struct HomeViewWithBinding: View {
                 )
 
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: AppSpacing.xl) {
+                    LazyVStack(spacing: AppSpacing.xl) {
                         MarketTickersRow(tickers: viewModel.marketTickers)
                             .padding(.top, AppSpacing.sm)
 

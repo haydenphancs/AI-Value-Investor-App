@@ -19,64 +19,87 @@ class HomeViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
+    // Pre-computed sparkline data so it isn't regenerated on every load
+    private lazy var cachedSparklines: (pos1: [Double], pos2: [Double], neg1: [Double], neg2: [Double]) = {
+        (
+            pos1: Self.generateSparklineData(positive: true),
+            pos2: Self.generateSparklineData(positive: true),
+            neg1: Self.generateSparklineData(positive: false),
+            neg2: Self.generateSparklineData(positive: false)
+        )
+    }()
+
     // MARK: - Initialization
     init() {
-        loadMockData()
+        // Defer data loading to onAppear via Task to avoid blocking view init
+        Task { [weak self] in
+            await self?.loadInitialData()
+        }
     }
 
     // MARK: - Data Loading
-    func loadMockData() {
+    private func loadInitialData() async {
         isLoading = true
+        // Build mock data off the main actor, then assign on main
+        let tickers = buildMarketTickers()
+        let insight = buildMarketInsight()
+        let briefings = buildDailyBriefings()
+        let research = buildRecentResearch()
 
-        // Simulate network delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.loadMarketTickers()
-            self?.loadMarketInsight()
-            self?.loadDailyBriefings()
-            self?.loadRecentResearch()
-            self?.isLoading = false
-        }
+        marketTickers = tickers
+        marketInsight = insight
+        dailyBriefings = briefings
+        recentResearch = research
+        isLoading = false
     }
 
     func refresh() async {
         isLoading = true
-        // Simulate API call
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-        loadMockData()
+        let tickers = buildMarketTickers()
+        let insight = buildMarketInsight()
+        let briefings = buildDailyBriefings()
+        let research = buildRecentResearch()
+
+        marketTickers = tickers
+        marketInsight = insight
+        dailyBriefings = briefings
+        recentResearch = research
+        isLoading = false
     }
 
-    // MARK: - Mock Data Loaders
-    private func loadMarketTickers() {
-        marketTickers = [
+    // MARK: - Data Builders (pure functions that return values)
+    private func buildMarketTickers() -> [MarketTicker] {
+        [
             MarketTicker(
                 name: "S&P 500",
                 price: 6783.45,
                 changePercent: 0.85,
-                sparklineData: generateSparklineData(positive: true)
+                sparklineData: cachedSparklines.pos1
             ),
             MarketTicker(
                 name: "Nasdaq",
                 price: 23293.23,
                 changePercent: 0.85,
-                sparklineData: generateSparklineData(positive: true)
+                sparklineData: cachedSparklines.pos2
             ),
             MarketTicker(
                 name: "Bitcoin",
                 price: 89394.43,
                 changePercent: -2.34,
-                sparklineData: generateSparklineData(positive: false)
+                sparklineData: cachedSparklines.neg1
             ),
             MarketTicker(
                 name: "Gold",
                 price: 4322.43,
                 changePercent: -1.34,
-                sparklineData: generateSparklineData(positive: false)
+                sparklineData: cachedSparklines.neg2
             )
         ]
     }
 
-    private func loadMarketInsight() {
-        marketInsight = MarketInsight(
+    private func buildMarketInsight() -> MarketInsight {
+        MarketInsight(
             headline: "Tech Stocks Rally on Strong AI Earnings",
             bulletPoints: [
                 "Major technology companies posted impressive Q4 results driven by AI infrastructure investments.",
@@ -87,7 +110,7 @@ class HomeViewModel: ObservableObject {
         )
     }
 
-    private func loadDailyBriefings() {
+    private func buildDailyBriefings() -> [DailyBriefingItem] {
         let calendar = Calendar.current
         var dateComponents = DateComponents()
         dateComponents.month = 2
@@ -95,7 +118,7 @@ class HomeViewModel: ObservableObject {
         dateComponents.year = 2025
         let earningsDate = calendar.date(from: dateComponents)
 
-        dailyBriefings = [
+        return [
             DailyBriefingItem(
                 type: .whalesAlert,
                 title: "Whales Alert",
@@ -127,10 +150,8 @@ class HomeViewModel: ObservableObject {
         ]
     }
 
-    private func loadRecentResearch() {
-        // Mirror the ready reports from AnalysisReport.mockReports
-        // Ratings on 0-100 scale, fair values from TickerReport valuation data
-        recentResearch = [
+    private func buildRecentResearch() -> [ResearchReport] {
+        [
             ResearchReport(
                 stockTicker: "ORCL",
                 stockName: "Oracle Corporation",
@@ -171,7 +192,7 @@ class HomeViewModel: ObservableObject {
     }
 
     // MARK: - Helpers
-    private func generateSparklineData(positive: Bool) -> [Double] {
+    private static func generateSparklineData(positive: Bool) -> [Double] {
         var data: [Double] = []
         var value = Double.random(in: 90...110)
 

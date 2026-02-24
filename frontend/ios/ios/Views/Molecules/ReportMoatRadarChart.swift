@@ -42,6 +42,7 @@ struct ReportMoatRadarChart: View {
             axisLabels
         }
         .frame(width: chartSize + 80, height: chartSize + 80)
+        .drawingGroup()
     }
 
     // MARK: - Grid

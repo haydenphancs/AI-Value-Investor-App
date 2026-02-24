@@ -23,15 +23,11 @@ struct HomeHeader: View {
 // MARK: - Logo View
 struct LogoView: View {
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(AppColors.cardBackground)
-                .frame(width: 36, height: 36)
-
-            Text("logo")
-                .font(.system(size: 8, weight: .medium))
-                .foregroundColor(AppColors.textMuted)
-        }
+        Image("CaydexLogo")
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: 36, height: 36)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

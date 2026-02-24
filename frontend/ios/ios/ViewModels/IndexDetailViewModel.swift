@@ -43,14 +43,18 @@ class IndexDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Simulate API call with sample data
         // In production, this would fetch from FMP API
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
 
-            self.indexData = IndexDetailData.sampleSP500
-            self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.indexSymbol)
-            self.analysisData = TickerAnalysisData.sampleData
+            let symbol = self.indexSymbol
+            let indexData = IndexDetailData.sampleSP500
+            let news = TickerNewsArticle.sampleDataForTicker(symbol)
+            let analysis = TickerAnalysisData.sampleData
+
+            self.indexData = indexData
+            self.newsArticles = news
+            self.analysisData = analysis
             self.isLoading = false
         }
     }

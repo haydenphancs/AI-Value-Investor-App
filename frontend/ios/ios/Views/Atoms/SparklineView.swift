@@ -31,7 +31,7 @@ struct SparklineView: View {
             if data.count > 1 {
                 let minValue = data.min() ?? 0
                 let maxValue = data.max() ?? 1
-                let range = maxValue - minValue
+                let range = max(maxValue - minValue, .ulpOfOne)
                 let stepX = width / CGFloat(data.count - 1)
 
                 ZStack {
@@ -42,11 +42,7 @@ struct SparklineView: View {
                         for (index, value) in data.enumerated() {
                             let x = CGFloat(index) * stepX
                             let y = height - (CGFloat((value - minValue) / range) * height)
-                            if index == 0 {
-                                path.addLine(to: CGPoint(x: x, y: y))
-                            } else {
-                                path.addLine(to: CGPoint(x: x, y: y))
-                            }
+                            path.addLine(to: CGPoint(x: x, y: y))
                         }
 
                         path.addLine(to: CGPoint(x: width, y: height))
@@ -68,6 +64,8 @@ struct SparklineView: View {
                     }
                     .stroke(lineColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                 }
+                // Flatten path rendering into a single Metal texture
+                .drawingGroup()
             }
         }
     }

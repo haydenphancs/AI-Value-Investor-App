@@ -39,19 +39,25 @@ class TickerReportViewModel: ObservableObject {
         loadReport()
     }
 
+    /// Preview-only initializer: sets data synchronously, no async Task.
+    init(ticker: String, preloadedReport: TickerReportData) {
+        self.ticker = ticker
+        self.reportData = preloadedReport
+        self.isLoading = false
+    }
+
     // MARK: - Data Loading
     func loadReport() {
         isLoading = true
-        // Simulate network delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.reportData = TickerReportData.sampleOracle
-            self?.isLoading = false
+        Task { [weak self] in
+            guard let self = self else { return }
+            let report = TickerReportData.sampleOracle
+            self.reportData = report
+            self.isLoading = false
         }
     }
 
     func refresh() async {
-        isLoading = true
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
         loadReport()
     }
 

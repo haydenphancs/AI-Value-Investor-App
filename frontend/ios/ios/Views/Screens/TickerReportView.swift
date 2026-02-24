@@ -17,6 +17,14 @@ struct TickerReportView: View {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
     }
 
+    /// Preview-only initializer: skips async loading for faster previews.
+    fileprivate init(preloadedReport: TickerReportData) {
+        _viewModel = StateObject(wrappedValue: TickerReportViewModel(
+            ticker: preloadedReport.symbol,
+            preloadedReport: preloadedReport
+        ))
+    }
+
     var body: some View {
         ZStack {
             // Background
@@ -142,14 +150,14 @@ struct TickerReportView: View {
     // MARK: - Deep Dive Modules
 
     private func deepDiveModulesSection(_ report: TickerReportData) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             Text("Deep Dive Modules")
                 .font(AppTypography.headline)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.bottom, AppSpacing.md)
 
-            VStack(spacing: 0) {
+            LazyVStack(spacing: 0) {
                 ForEach(viewModel.deepDiveModules) { module in
                     ReportDeepDiveSection(
                         module: module,
@@ -235,7 +243,7 @@ struct TickerReportView: View {
 
 #Preview {
     NavigationStack {
-        TickerReportView(ticker: "ORCL")
+        TickerReportView(preloadedReport: .sampleOracle)
     }
     .preferredColorScheme(.dark)
 }

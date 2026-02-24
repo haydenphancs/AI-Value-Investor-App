@@ -13,7 +13,7 @@ struct IndexDetailOverviewContent: View {
     var onWebsiteTap: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        LazyVStack(spacing: AppSpacing.lg) {
             // Key Statistics
             TickerDetailKeyStatsSection(statisticsGroups: indexData.keyStatisticsGroups)
 

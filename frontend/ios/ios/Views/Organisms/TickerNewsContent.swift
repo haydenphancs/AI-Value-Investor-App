@@ -15,7 +15,7 @@ struct TickerNewsContent: View {
     var onRelatedTickerTap: ((String) -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.md) {
+        LazyVStack(spacing: AppSpacing.md) {
             if articles.isEmpty {
                 emptyStateView
             } else {

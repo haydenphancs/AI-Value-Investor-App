@@ -7,6 +7,21 @@
 
 import Foundation
 
+// MARK: - Shared Formatters
+private enum UpdatesFormatters {
+    static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+
+    static let sectionDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+}
+
 // MARK: - News Sentiment
 enum NewsSentiment: String, CaseIterable {
     case positive = "Positive"
@@ -73,9 +88,7 @@ struct NewsArticle: Identifiable, Hashable {
     let relatedTickers: [String]
 
     var formattedTime: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        return formatter.string(from: publishedAt)
+        UpdatesFormatters.timeFormatter.string(from: publishedAt)
     }
 
     var isToday: Bool {
@@ -92,9 +105,7 @@ struct NewsArticle: Identifiable, Hashable {
         } else if isYesterday {
             return "YESTERDAY"
         } else {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "MMM d, yyyy"
-            return formatter.string(from: publishedAt)
+            return UpdatesFormatters.sectionDateFormatter.string(from: publishedAt)
         }
     }
     

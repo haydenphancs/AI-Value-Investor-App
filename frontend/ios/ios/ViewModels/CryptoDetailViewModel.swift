@@ -43,14 +43,18 @@ class CryptoDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Simulate API call with sample data
         // In production, this would fetch from FMP API
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
 
-            self.cryptoData = CryptoDetailData.sampleEthereum
-            self.newsArticles = TickerNewsArticle.sampleDataForTicker(self.cryptoSymbol)
-            self.analysisData = TickerAnalysisData.sampleData
+            let symbol = self.cryptoSymbol
+            let cryptoData = CryptoDetailData.sampleEthereum
+            let news = TickerNewsArticle.sampleDataForTicker(symbol)
+            let analysis = TickerAnalysisData.sampleData
+
+            self.cryptoData = cryptoData
+            self.newsArticles = news
+            self.analysisData = analysis
             self.isLoading = false
         }
     }

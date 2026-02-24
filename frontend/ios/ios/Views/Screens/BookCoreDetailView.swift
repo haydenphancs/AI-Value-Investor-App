@@ -173,7 +173,7 @@ struct BookCoreDetailView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CoreDetailAskAIBar(inputText: $inputText, onSend: handleAISend)
+                CaudexAIChatBar(inputText: $inputText, onSend: handleAISend)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
@@ -818,57 +818,6 @@ private struct CoreDetailMiniHeader: View {
             AppColors.background
                 .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
                 .ignoresSafeArea(edges: .top)
-        )
-    }
-}
-
-// MARK: - Ask AI Bar
-private struct CoreDetailAskAIBar: View {
-    @Binding var inputText: String
-    let onSend: () -> Void
-
-    var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            // AI icon
-            Image(systemName: "sparkles")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(AppColors.accentCyan)
-
-            // Text field
-            TextField("Ask Caudex AI...", text: $inputText)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-                .submitLabel(.send)
-                .onSubmit(onSend)
-
-            Spacer()
-
-            // Send button
-            Button(action: onSend) {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(inputText.isEmpty ? AppColors.textMuted : AppColors.primaryBlue)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(inputText.isEmpty)
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.extraLarge)
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.bottom, AppSpacing.lg)
-        .background(
-            LinearGradient(
-                colors: [
-                    AppColors.background.opacity(0),
-                    AppColors.background.opacity(0.95),
-                    AppColors.background
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
         )
     }
 }

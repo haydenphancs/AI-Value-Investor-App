@@ -18,7 +18,7 @@ struct ReportHeaderBar: View {
         HStack(spacing: AppSpacing.md) {
             // Back button
             Button(action: onBack) {
-                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.down")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)

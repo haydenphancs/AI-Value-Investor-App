@@ -31,11 +31,6 @@ struct ResearchHeader: View {
                         .foregroundColor(AppColors.textPrimary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.sm)
-                .background(
-                    Capsule()
-                        .fill(AppColors.cardBackground)
-                )
 
                 // Right: Profile Avatar
                 Button(action: {

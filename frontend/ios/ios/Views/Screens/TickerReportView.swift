@@ -11,6 +11,7 @@ import SwiftUI
 struct TickerReportView: View {
     @StateObject private var viewModel: TickerReportViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var aiInputText: String = ""
 
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
@@ -47,54 +48,58 @@ struct TickerReportView: View {
     // MARK: - Report Content
 
     private func reportContent(_ report: TickerReportData) -> some View {
-        ZStack(alignment: .bottom) {
-            ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: AppSpacing.xxl) {
-                    // Header
-                    headerSection(report)
+        VStack(spacing: 0) {
+            // Sticky Header
+            headerSection(report)
 
-                    // Agent Badge + Score
-                    agentScoreSection(report)
+            ZStack(alignment: .bottom) {
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(spacing: AppSpacing.xxl) {
+                        // Agent Badge + Score
+                        agentScoreSection(report)
 
-                    // Executive Summary
-                    ReportExecutiveSummaryCard(
-                        summaryText: report.executiveSummaryText,
-                        bullets: report.executiveSummaryBullets
-                    )
-                    .padding(.horizontal, AppSpacing.lg)
+                        // Executive Summary
+                        ReportExecutiveSummaryCard(
+                            summaryText: report.executiveSummaryText,
+                            bullets: report.executiveSummaryBullets
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
 
-                    // Key Vitals
-                    ReportKeyVitalsSection(vitals: report.keyVitals)
+                        // Key Vitals
+                        ReportKeyVitalsSection(vitals: report.keyVitals)
 
-                    // Core Thesis
-                    ReportCoreThesisSection(thesis: report.coreThesis)
+                        // Core Thesis
+                        ReportCoreThesisSection(thesis: report.coreThesis)
 
-                    // Deep Dive Modules
-                    deepDiveModulesSection(report)
+                        // Deep Dive Modules
+                        deepDiveModulesSection(report)
 
-                    // Critical Factors
-                    ReportCriticalFactorsSection(factors: report.criticalFactors)
+                        // Critical Factors
+                        ReportCriticalFactorsSection(factors: report.criticalFactors)
 
-                    // View Detailed Analysis button
-                    detailedAnalysisButton
+                        // View Detailed Analysis button
+                        detailedAnalysisButton
 
-                    // Disclaimer
-                    disclaimerSection(report)
+                        // Disclaimer
+                        disclaimerSection(report)
 
-                    // Bottom padding for chat bar
-                    Spacer()
-                        .frame(height: 80)
+                        // Bottom padding for chat bar
+                        Spacer()
+                            .frame(height: 80)
+                    }
+                    .padding(.top, AppSpacing.sm)
                 }
-                .padding(.top, AppSpacing.sm)
-            }
-            .refreshable {
-                await viewModel.refresh()
-            }
+                .refreshable {
+                    await viewModel.refresh()
+                }
 
-            // Floating chat bar
-            ReportChatBar(onTapped: viewModel.chatWithReport)
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.bottom, AppSpacing.sm)
+                // Floating chat bar
+                CaudexAIChatBar(
+                    inputText: $aiInputText,
+                    placeholder: "Chat with the report...",
+                    onSend: viewModel.chatWithReport
+                )
+            }
         }
     }
 

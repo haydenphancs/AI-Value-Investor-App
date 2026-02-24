@@ -46,7 +46,7 @@ struct ResearchCard: View {
                 Text(report.headline)
                     .font(AppTypography.bodyBold)
                     .foregroundColor(AppColors.textPrimary)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .multilineTextAlignment(.leading)
 
                 // Summary
@@ -116,7 +116,7 @@ struct ResearchCard: View {
                 stockName: "Oracle Corporation",
                 companyLogoName: "icon_oracle",
                 persona: .warrenBuffett,
-                headline: "Oracle: Strong Quality Business",
+                headline: "Oracle: Strong Quality",
                 summary: "Enterprise software giant with deep moat in cloud infrastructure and database services.",
                 rating: 82,
                 fairValue: 190,
@@ -129,7 +129,7 @@ struct ResearchCard: View {
                 stockName: "Apple Inc.",
                 companyLogoName: "icon_apple",
                 persona: .warrenBuffett,
-                headline: "Apple: Excellent Quality Business",
+                headline: "Apple: Excellent Quality",
                 summary: "Unmatched ecosystem and brand loyalty create a powerful moat. Services revenue continues to grow.",
                 rating: 90,
                 fairValue: 213,

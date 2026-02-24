@@ -2,7 +2,8 @@
 //  ResearchHeader.swift
 //  ios
 //
-//  Organism: Research screen header with standardized logo, title, profile, and tab selector
+//  Organism: Research screen header — uses the same layout as TrackingHeader
+//  with "AI Research Analysis" title in place of the search bar.
 //
 
 import SwiftUI
@@ -14,9 +15,12 @@ struct ResearchHeader: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
-            // Top bar with centered title using ZStack
-            ZStack {
-                // Centered title (ignores side elements)
+            // Standardized header row (same as TrackingHeader but with title instead of search)
+            HStack(spacing: AppSpacing.md) {
+                // Left: App Logo
+                LogoView()
+
+                // Center: AI Research Analysis title
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 14, weight: .medium))
@@ -26,61 +30,35 @@ struct ResearchHeader: View {
                         .font(AppTypography.headline)
                         .foregroundColor(AppColors.textPrimary)
                 }
-                .padding(.horizontal, AppSpacing.md)
+                .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     Capsule()
                         .fill(AppColors.cardBackground)
                 )
 
-                // Side elements
-                HStack {
-                    // App Logo (standardized)
-                    LogoView()
-
-                    Spacer()
-
-                    // Profile Avatar (standardized, with avatar URL from AppState)
-                    Button(action: {
-                        onProfileTapped?()
-                    }) {
-                        ProfileAvatarView(
-                            avatarUrl: appState.user.profile?.avatarUrl,
-                            size: 36
-                        )
-                    }
-                    .buttonStyle(PlainButtonStyle())
+                // Right: Profile Avatar
+                Button(action: {
+                    onProfileTapped?()
+                }) {
+                    ProfileAvatarView(
+                        avatarUrl: appState.user.profile?.avatarUrl,
+                        size: 36
+                    )
                 }
+                .buttonStyle(PlainButtonStyle())
             }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.sm)
 
-            // Tab selector — matches LearnTabControl sizing
-            HStack(spacing: 0) {
-                ForEach(ResearchTab.allCases, id: \.rawValue) { tab in
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selectedTab = tab
-                        }
-                    } label: {
-                        Text(tab.rawValue)
-                            .font(AppTypography.bodyBold)
-                            .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, AppSpacing.md)
-                            .background(
-                                selectedTab == tab
-                                    ? AppColors.cardBackgroundLight
-                                    : Color.clear
-                            )
-                            .cornerRadius(AppCornerRadius.medium)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(AppSpacing.xs)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            // Segmented Tab Control (same as TrackingHeader)
+            SegmentedTabControl(
+                tabs: ResearchTab.allCases,
+                selectedTab: $selectedTab
+            )
+            .padding(.horizontal, AppSpacing.lg)
         }
-        .padding(.horizontal, AppSpacing.lg)
+        .padding(.bottom, AppSpacing.sm)
     }
 }
 

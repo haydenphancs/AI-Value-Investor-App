@@ -87,8 +87,8 @@ struct HomeViewWithBinding: View {
                         RecentResearchSection(
                             reports: viewModel.recentResearch,
                             onSeeAllTapped: { selectedTab = .research },
-                            onReportTapped: { _ in },
-                            onAskOrReadTapped: { _ in }
+                            onReportTapped: { _ in selectedTab = .research },
+                            onAskOrReadTapped: { _ in selectedTab = .research }
                         )
 
                         NewAnalysisButton {

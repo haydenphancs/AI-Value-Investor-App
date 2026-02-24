@@ -128,42 +128,44 @@ class HomeViewModel: ObservableObject {
     }
 
     private func loadRecentResearch() {
+        // Mirror the ready reports from AnalysisReport.mockReports
+        // Ratings on 0-100 scale, fair values from TickerReport valuation data
         recentResearch = [
             ResearchReport(
-                stockTicker: "MSFT",
-                stockName: "Microsoft",
-                companyLogoName: "icon_microsoft",
+                stockTicker: "ORCL",
+                stockName: "Oracle Corporation",
+                companyLogoName: "icon_oracle",
                 persona: .warrenBuffett,
-                headline: "Microsoft: The AI Moat Deepens",
-                summary: "Azure's AI services and UX Pilot AI partnership position MSFT as a dominant force in enterprise AI. Q4 cloud growth of 28% YoY signals strong market demand.",
-                rating: 4.6,
-                targetPrice: 425,
-                createdAt: Date().addingTimeInterval(-10800),
-                gradientColors: ["0078D4", "00BCF2"]
+                headline: "Oracle: Strong Quality Business",
+                summary: "Enterprise software giant with deep moat in cloud infrastructure and database services. Consistent earnings growth and long-term competitive advantages.",
+                rating: 82,
+                fairValue: 190,
+                createdAt: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 7)) ?? Date(),
+                gradientColors: ["C74634", "F80000"]
             ),
             ResearchReport(
-                stockTicker: "GOOGL",
-                stockName: "Google",
-                companyLogoName: "icon_google",
+                stockTicker: "AAPL",
+                stockName: "Apple Inc.",
+                companyLogoName: "icon_apple",
+                persona: .warrenBuffett,
+                headline: "Apple: Excellent Quality Business",
+                summary: "Unmatched ecosystem and brand loyalty create a powerful moat. Services revenue continues to grow, driving recurring income and higher margins.",
+                rating: 90,
+                fairValue: 213,
+                createdAt: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 24)) ?? Date(),
+                gradientColors: ["A2AAAD", "555555"]
+            ),
+            ResearchReport(
+                stockTicker: "NVDA",
+                stockName: "NVIDIA Corp.",
+                companyLogoName: "icon_nvidia",
                 persona: .peterLynch,
-                headline: "Google: Gemini's Market Impact",
-                summary: "Gemini AI integration across products shows promise. Search market share stable while cloud business accelerates with 26% growth.",
-                rating: 4.2,
-                targetPrice: 155,
-                createdAt: Date().addingTimeInterval(-345600),
-                gradientColors: ["4285F4", "34A853"]
-            ),
-            ResearchReport(
-                stockTicker: "AMD",
-                stockName: "AMD",
-                companyLogoName: "icon_amd",
-                persona: .cathieWood,
-                headline: "AMD: AI Chip Wars Heat Up",
-                summary: "MI300 series gaining traction in data centers. While trailing NVIDIA, AMD's competitive pricing and supply availability create opportunities.",
-                rating: 3.3,
-                targetPrice: 23,
-                createdAt: Date().addingTimeInterval(-432000),
-                gradientColors: ["ED1C24", "FF6B6B"]
+                headline: "NVIDIA: Excellent Quality Business",
+                summary: "Dominant position in AI accelerators with data center revenue surging. GPU demand from AI training and inference workloads continues to outpace supply.",
+                rating: 95,
+                fairValue: 220,
+                createdAt: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 23)) ?? Date(),
+                gradientColors: ["76B900", "1A1A1A"]
             )
         ]
     }

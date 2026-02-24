@@ -81,7 +81,7 @@ struct ResearchHeader: View {
             .cornerRadius(AppCornerRadius.large)
         }
         .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
+        .padding(.bottom, AppSpacing.sm)
     }
 }
 

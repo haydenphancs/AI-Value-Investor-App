@@ -40,7 +40,7 @@ struct AppColors {
     static let amdRed = Color(hex: "ED1C24")
 
     // Tab Bar
-    static let tabBarBackground = Color(hex: "0D1117")
+    static let tabBarBackground = Color(hex: "171B26")
     static let tabBarSelected = Color(hex: "3B82F6")
     static let tabBarUnselected = Color(hex: "6B7280")
 

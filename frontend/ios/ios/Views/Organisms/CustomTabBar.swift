@@ -22,10 +22,7 @@ struct CustomTabBar: View {
         }
         .padding(.top, AppSpacing.md)
         .padding(.bottom, AppSpacing.xl)
-        .background(
-            AppColors.tabBarBackground
-                .shadow(color: Color.black.opacity(0.3), radius: 10, x: 0, y: -5)
-        )
+        .background(AppColors.tabBarBackground)
     }
 }
 

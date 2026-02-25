@@ -102,6 +102,7 @@ struct HomeContentView: View {
                             ETFDetailView(etfSymbol: ticker.symbol)
                         }
                     }
+                    .navigationBarHidden(true)
                 }
                 .preferredColorScheme(.dark)
             }

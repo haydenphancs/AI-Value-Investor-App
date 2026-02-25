@@ -32,7 +32,7 @@ private enum SharedFormatters {
 }
 
 // MARK: - Market Ticker Type
-enum MarketTickerType {
+enum MarketTickerType: Hashable {
     case index      // S&P 500, Nasdaq, Dow Jones → IndexDetailView
     case stock      // Individual stocks → TickerDetailView
     case crypto     // Bitcoin, Ethereum → CryptoDetailView
@@ -41,7 +41,7 @@ enum MarketTickerType {
 }
 
 // MARK: - Market Ticker
-struct MarketTicker: Identifiable {
+struct MarketTicker: Identifiable, Hashable {
     let id = UUID()
     let name: String
     let symbol: String

@@ -14,7 +14,7 @@ struct RootContainerView: View {
     var body: some View {
         ZStack {
             // Layer 1: Main Tab Navigation
-            MainTabView()
+            ContentView()
                 .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode && !audioManager.isCompactMode)
 
             // Layer 2: Audio Player States

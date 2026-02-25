@@ -10,6 +10,7 @@ import SwiftUI
 
 struct GlobalHeaderView: View {
     @Environment(\.appState) private var appState
+    @State private var showSloganSheet = false
 
     var searchPlaceholder: String = "Search ticker or ask AI..."
     var onSearchTapped: (() -> Void)?
@@ -18,7 +19,12 @@ struct GlobalHeaderView: View {
     var body: some View {
         HStack(spacing: AppSpacing.md) {
             // Left: App Logo
-            LogoView()
+            Button(action: {
+                showSloganSheet = true
+            }) {
+                LogoView()
+            }
+            .buttonStyle(PlainButtonStyle())
 
             // Center: Smart Search Bar (flexible)
             TappableSearchBar(
@@ -39,6 +45,9 @@ struct GlobalHeaderView: View {
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.sm)
+        .fullScreenCover(isPresented: $showSloganSheet) {
+            CaydexSloganView()
+        }
     }
 }
 
@@ -78,6 +87,43 @@ struct ProfileAvatarView: View {
     }
 }
 
+// MARK: - Caydex Slogan View
+struct CaydexSloganView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            AppColors.background
+                .ignoresSafeArea()
+
+            Image("CaydexSlogan")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .padding(.horizontal, AppSpacing.xxxl)
+
+            // Close button
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(AppColors.textSecondary, AppColors.cardBackground)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.lg)
+
+                Spacer()
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
 #Preview {
     VStack {
         GlobalHeaderView()
@@ -86,4 +132,8 @@ struct ProfileAvatarView: View {
     }
     .background(AppColors.background)
     .preferredColorScheme(.dark)
+}
+
+#Preview("Slogan") {
+    CaydexSloganView()
 }

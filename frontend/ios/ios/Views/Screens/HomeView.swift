@@ -12,6 +12,7 @@ struct HomeContentView: View {
     @StateObject private var viewModel = HomeViewModel()
     @State private var showingSearch = false
     @State private var selectedNewsArticle: NewsArticle?
+    @State private var selectedMarketTicker: MarketTicker?
 
     var body: some View {
         NavigationStack {
@@ -32,8 +33,11 @@ struct HomeContentView: View {
                     ScrollView(showsIndicators: false) {
                         LazyVStack(spacing: AppSpacing.xl) {
                             // Market Tickers Row
-                            MarketTickersRow(tickers: viewModel.marketTickers)
-                                .padding(.top, AppSpacing.sm)
+                            MarketTickersRow(
+                                tickers: viewModel.marketTickers,
+                                onTickerTap: handleMarketTickerTap
+                            )
+                            .padding(.top, AppSpacing.sm)
 
                             // Market Insights Card
                             if let insight = viewModel.marketInsight {
@@ -82,6 +86,25 @@ struct HomeContentView: View {
                 NewsDetailView(article: article)
                     .preferredColorScheme(.dark)
             }
+            .fullScreenCover(item: $selectedMarketTicker) { ticker in
+                NavigationStack {
+                    Group {
+                        switch ticker.type {
+                        case .index:
+                            IndexDetailView(indexSymbol: ticker.symbol)
+                        case .stock:
+                            TickerDetailView(tickerSymbol: ticker.symbol)
+                        case .crypto:
+                            CryptoDetailView(cryptoSymbol: ticker.symbol)
+                        case .commodity:
+                            CommodityDetailView(commoditySymbol: ticker.symbol)
+                        case .etf:
+                            ETFDetailView(etfSymbol: ticker.symbol)
+                        }
+                    }
+                }
+                .preferredColorScheme(.dark)
+            }
         }
     }
 
@@ -125,6 +148,10 @@ struct HomeContentView: View {
 
     private func handleNewAnalysis() {
         print("New analysis tapped")
+    }
+
+    private func handleMarketTickerTap(_ ticker: MarketTicker) {
+        selectedMarketTicker = ticker
     }
 }
 

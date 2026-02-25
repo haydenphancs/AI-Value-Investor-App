@@ -69,6 +69,7 @@ struct HomeViewWithBinding: View {
     @State private var showSearch = false
     @State private var selectedNewsArticle: NewsArticle?
     @State private var selectedReportTicker: ReportTickerNavigation?
+    @State private var selectedMarketTicker: MarketTicker?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -85,8 +86,13 @@ struct HomeViewWithBinding: View {
 
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xl) {
-                        MarketTickersRow(tickers: viewModel.marketTickers)
-                            .padding(.top, AppSpacing.sm)
+                        MarketTickersRow(
+                            tickers: viewModel.marketTickers,
+                            onTickerTap: { ticker in
+                                selectedMarketTicker = ticker
+                            }
+                        )
+                        .padding(.top, AppSpacing.sm)
 
                         if let insight = viewModel.marketInsight {
                             MarketInsightsCard(insight: insight) {
@@ -141,6 +147,26 @@ struct HomeViewWithBinding: View {
         .fullScreenCover(item: $selectedReportTicker) { nav in
             NavigationStack {
                 TickerReportView(ticker: nav.ticker)
+            }
+            .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $selectedMarketTicker) { ticker in
+            NavigationStack {
+                Group {
+                    switch ticker.type {
+                    case .index:
+                        IndexDetailView(indexSymbol: ticker.symbol)
+                    case .stock:
+                        TickerDetailView(tickerSymbol: ticker.symbol)
+                    case .crypto:
+                        CryptoDetailView(cryptoSymbol: ticker.symbol)
+                    case .commodity:
+                        CommodityDetailView(commoditySymbol: ticker.symbol)
+                    case .etf:
+                        ETFDetailView(etfSymbol: ticker.symbol)
+                    }
+                }
+                .navigationBarHidden(true)
             }
             .preferredColorScheme(.dark)
         }

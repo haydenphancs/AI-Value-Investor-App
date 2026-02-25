@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ResearchHeader: View {
     @Environment(\.appState) private var appState
+    @State private var showSloganSheet = false
     @Binding var selectedTab: ResearchTab
     var onProfileTapped: (() -> Void)?
 
@@ -18,7 +19,12 @@ struct ResearchHeader: View {
             // Standardized header row (same as TrackingHeader but with title instead of search)
             HStack(spacing: AppSpacing.md) {
                 // Left: App Logo
-                LogoView()
+                Button(action: {
+                    showSloganSheet = true
+                }) {
+                    LogoView()
+                }
+                .buttonStyle(PlainButtonStyle())
 
                 // Center: AI Research Analysis title
                 HStack(spacing: AppSpacing.sm) {
@@ -54,6 +60,9 @@ struct ResearchHeader: View {
             .padding(.horizontal, AppSpacing.lg)
         }
         .padding(.bottom, AppSpacing.sm)
+        .fullScreenCover(isPresented: $showSloganSheet) {
+            CaydexSloganView()
+        }
     }
 }
 

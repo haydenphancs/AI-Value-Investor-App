@@ -5,7 +5,7 @@ AI VALUE INVESTOR - iOS APP STRUCTURE
 WHAT THIS APP DOES:
 A dark-themed iOS investment research app that uses AI to generate stock
 analysis reports in the style of famous investors (Warren Buffett, Peter Lynch,
-Charlie Munger, Cathie Wood, Benjamin Graham). Users can track stocks, read
+Cathie Wood, Bill Ackman). Users can track stocks, read
 market news, chat with AI about investments, listen to audio content about
 investing books, and learn investing concepts.
 

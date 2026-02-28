@@ -168,20 +168,10 @@ class ResearchService:
                 "Focus on high-quality businesses with hidden value, catalyst potential, "
                 "downside protection, and operational improvement opportunities."
             ),
-            "charlie_munger": (
-                "You are analyzing companies through Charlie Munger's multidisciplinary lens. "
-                "Apply mental models from psychology, economics, and math. Always invert. "
-                "Be brutally honest about risks and incentive structures."
-            ),
             "peter_lynch": (
                 "You are analyzing companies through Peter Lynch's growth-at-reasonable-price lens. "
                 "Classify the stock (fast grower, stalwart, turnaround, etc.), focus on PEG ratio, "
                 "and look for simple, understandable businesses with sustainable growth."
-            ),
-            "benjamin_graham": (
-                "You are analyzing companies through Benjamin Graham's value investing framework. "
-                "Use strict quantitative criteria, focus on margin of safety, "
-                "net-net working capital, and price-to-book value."
             ),
             "cathie_wood": (
                 "You are analyzing companies through Cathie Wood's disruptive innovation lens. "

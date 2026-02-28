@@ -79,8 +79,7 @@ struct AppSettingsView: View {
                             Picker("Persona", selection: $defaultPersona) {
                                 Text("Buffett").tag("buffett")
                                 Text("Lynch").tag("lynch")
-                                Text("Munger").tag("munger")
-                                Text("Dalio").tag("dalio")
+                                Text("Wood").tag("wood")
                                 Text("Ackman").tag("ackman")
                             }
                             .tint(AppColors.primaryBlue)

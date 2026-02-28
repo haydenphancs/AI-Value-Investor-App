@@ -18,11 +18,11 @@ struct ArticleHighlightCard: View {
             // Content
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(highlight.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(highlight.description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)

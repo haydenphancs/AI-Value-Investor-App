@@ -18,9 +18,9 @@ struct AIBooksSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             HStack {
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("AI-Enabled Books")
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("Most Read")
@@ -34,7 +34,7 @@ struct AIBooksSection: View {
                     onSeeAll?()
                 }) {
                     Text("See All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

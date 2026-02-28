@@ -20,7 +20,7 @@ struct RecentActivitiesSortSelector: View {
                     }
                 } label: {
                     Text(option.rawValue)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(selectedSort == option ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)

@@ -16,11 +16,11 @@ struct InsightsSummaryCard: View {
             HStack {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "bolt.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
                         .foregroundColor(AppColors.neutral)
 
                     Text("Insights")
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
@@ -31,7 +31,7 @@ struct InsightsSummaryCard: View {
 
             // Headline
             Text(summary.headline)
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -45,7 +45,7 @@ struct InsightsSummaryCard: View {
                             .padding(.top, 6)
 
                         Text(point)
-                            .font(AppTypography.callout)
+                            .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

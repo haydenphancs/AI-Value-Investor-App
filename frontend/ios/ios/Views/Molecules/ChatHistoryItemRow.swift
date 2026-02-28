@@ -32,14 +32,14 @@ struct ChatHistoryItemRow: View {
 
                 // Title
                 Text(item.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
                     .multilineTextAlignment(.leading)
 
                 // Preview
                 Text(item.preview)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)

@@ -30,11 +30,11 @@ struct SnapshotCard: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: AppSpacing.xs) {
                             Text(snapshot.rating.displayName)
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                                 .foregroundColor(snapshot.rating.color)
 
                             Text(snapshot.category.rawValue)
-                                .font(AppTypography.callout)
+                                .font(AppTypography.bodySmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -46,7 +46,7 @@ struct SnapshotCard: View {
 
                     // Expand/collapse chevron
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.vertical, AppSpacing.md)
@@ -59,13 +59,13 @@ struct SnapshotCard: View {
                     ForEach(snapshot.metrics) { metric in
                         HStack {
                             Text(metric.name)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textSecondary)
 
                             Spacer()
 
                             Text(metric.value)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
                         }
                     }

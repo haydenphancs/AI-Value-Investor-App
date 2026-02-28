@@ -23,7 +23,7 @@ struct MomentumLegendItem: View {
                 .foregroundColor(AppColors.textSecondary)
 
             Text(value >= 0 ? "+\(value)" : "\(value)")
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
                 .foregroundColor(color)
         }
     }

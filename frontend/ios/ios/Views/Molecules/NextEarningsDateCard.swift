@@ -18,21 +18,21 @@ struct NextEarningsDateCard: View {
             // Date info
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("Next Earnings Date")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 HStack(spacing: AppSpacing.xs) {
                     Text(nextEarningsDate.formattedDate)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     Text("(\(nextEarningsDate.statusText))")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textMuted)
                 }
 
                 Text(nextEarningsDate.timing.rawValue)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.primaryBlue)
             }
 
@@ -55,7 +55,7 @@ struct NextEarningsDateCard: View {
                 .frame(width: 48, height: 48)
 
             Image(systemName: "calendar")
-                .font(.system(size: 22, weight: .medium))
+                .font(AppTypography.iconXL).fontWeight(.medium)
                 .foregroundColor(AppColors.primaryBlue)
         }
     }

@@ -18,7 +18,7 @@ struct TargetSelectionSection: View {
             // Section header
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("Select Your Target:")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Choose a company or ticker symbol to analyze")

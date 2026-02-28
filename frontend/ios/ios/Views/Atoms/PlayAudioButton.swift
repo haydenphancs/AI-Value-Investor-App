@@ -59,7 +59,7 @@ struct PlayAudioButton: View {
 
                 if style != .minimal {
                     Text(buttonLabel)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                 }
             }
             .foregroundColor(foregroundColor)
@@ -141,7 +141,7 @@ struct LargePlayButton: View {
                         .frame(width: 48, height: 48)
 
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .bold))
+                        .font(AppTypography.iconMedium).fontWeight(.bold)
                         .foregroundColor(AppColors.background)
                         .offset(x: isPlaying ? 0 : 2)
                 }
@@ -149,7 +149,7 @@ struct LargePlayButton: View {
                 if showLabel {
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text(isPlaying ? "Now Playing" : "Listen Now")
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(.white)
 
                         Text(episode.formattedDuration)

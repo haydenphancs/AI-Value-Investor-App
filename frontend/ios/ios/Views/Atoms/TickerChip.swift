@@ -17,7 +17,7 @@ struct TickerChip: View {
             onTap?()
         }) {
             Text(ticker.symbol)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .fontWeight(.medium)
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)

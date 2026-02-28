@@ -19,7 +19,7 @@ struct GrowthPeriodToggle: View {
                     }
                 }) {
                     Text(period.rawValue)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(selectedPeriod == period ? AppColors.textPrimary : AppColors.textMuted)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.xs + 2)

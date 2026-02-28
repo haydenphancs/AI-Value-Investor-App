@@ -15,13 +15,13 @@ struct TechnicalIndicatorRow: View {
     var body: some View {
         HStack {
             Text(name)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             Text(value)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
 
             IndicatorSignalBadge(signal: signal)
@@ -40,13 +40,13 @@ struct PivotPointRow: View {
     var body: some View {
         HStack {
             Text(name)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             Text(value)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .fontWeight(.medium)
                 .foregroundColor(valueColor)
         }
@@ -73,20 +73,20 @@ struct VolumeMetricRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             HStack(spacing: AppSpacing.xxs) {
                 Text(value)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .fontWeight(.medium)
                     .foregroundColor(valueColor)
 
                 if showArrow {
                     Image(systemName: isUp ? "arrow.up" : "arrow.down")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
                         .foregroundColor(valueColor)
                 }
             }
@@ -105,7 +105,7 @@ struct FibonacciLevelRow: View {
         HStack {
             HStack(spacing: AppSpacing.xs) {
                 Text(percentage)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
 
                 if isKeyLevel {
@@ -118,7 +118,7 @@ struct FibonacciLevelRow: View {
             Spacer()
 
             Text(value)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
         }
         .padding(.vertical, AppSpacing.sm)
@@ -134,13 +134,13 @@ struct SupportResistanceLevelRow: View {
     var body: some View {
         HStack {
             Text(name)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             Text(String(format: "%.2f", value))
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(strength.rawValue)

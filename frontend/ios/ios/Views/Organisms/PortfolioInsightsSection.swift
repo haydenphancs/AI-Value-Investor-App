@@ -14,7 +14,7 @@ struct PortfolioInsightsSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Header
             Text("Portfolio Insights")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 
@@ -26,7 +26,7 @@ struct PortfolioInsightsSection: View {
                 // Empty State
                 VStack(spacing: AppSpacing.md) {
                     Image(systemName: "chart.pie")
-                        .font(.system(size: 32))
+                        .font(AppTypography.iconDisplay)
                         .foregroundColor(AppColors.textMuted)
 
                     Text("Add more assets to see insights")

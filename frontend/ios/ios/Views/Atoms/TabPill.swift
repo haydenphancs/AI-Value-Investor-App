@@ -17,7 +17,7 @@ struct TabPill: View {
             onTap?()
         }) {
             Text(title)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .fontWeight(isSelected ? .semibold : .regular)
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.lg)

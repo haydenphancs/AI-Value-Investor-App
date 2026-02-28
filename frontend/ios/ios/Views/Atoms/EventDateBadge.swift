@@ -14,11 +14,11 @@ struct EventDateBadge: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(day)
-                .font(.system(size: 20, weight: .bold))
+                .font(AppTypography.titleCompact)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(month)
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.captionSmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
         }
         .frame(width: 48, height: 48)

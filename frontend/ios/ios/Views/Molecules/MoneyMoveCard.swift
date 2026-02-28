@@ -28,7 +28,7 @@ struct MoneyMoveCard: View {
                                 .frame(width: 40, height: 40)
 
                             Image(systemName: moneyMove.iconName)
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(AppTypography.iconMedium).fontWeight(.semibold)
                                 .foregroundColor(.white)
                         }
                     }
@@ -43,7 +43,7 @@ struct MoneyMoveCard: View {
 
                 // Title
                 Text(moneyMove.title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)

@@ -17,7 +17,7 @@ struct EarningsPriceToggle: View {
             }
         } label: {
             Text("Price")
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(isEnabled ? AppColors.primaryBlue : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)

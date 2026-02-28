@@ -18,7 +18,7 @@ struct EducationBookCard: View {
             // Most Read badge
             if book.isMostRead {
                 Text("Most Read")
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
                     .padding(.bottom, -AppSpacing.sm)
             }
@@ -33,7 +33,7 @@ struct EducationBookCard: View {
                     // Book title overlay
                     VStack {
                         Text(book.title.uppercased())
-                            .font(.system(size: 8, weight: .bold))
+                            .font(AppTypography.captionTiny).fontWeight(.bold)
                             .foregroundColor(.white)
                             .multilineTextAlignment(.center)
                             .lineLimit(3)
@@ -47,7 +47,7 @@ struct EducationBookCard: View {
                     // Title and rating
                     HStack(alignment: .top) {
                         Text(book.title)
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(2)
 
@@ -56,11 +56,11 @@ struct EducationBookCard: View {
                         // Rating
                         HStack(spacing: AppSpacing.xxs) {
                             Image(systemName: "star.fill")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
                                 .foregroundColor(AppColors.neutral)
 
                             Text(book.formattedRating)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
                         }
                         .padding(.horizontal, AppSpacing.sm)
@@ -71,7 +71,7 @@ struct EducationBookCard: View {
 
                     // Author
                     Text(book.author)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     // Description
@@ -107,10 +107,10 @@ struct EducationBookCard: View {
                 }) {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "bubble.left.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
 
                         Text("Chat with Book")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(AppColors.textPrimary)
                     .frame(maxWidth: .infinity)
@@ -125,10 +125,10 @@ struct EducationBookCard: View {
                 }) {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "lightbulb.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
 
                         Text("Read Key Ideas")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)

@@ -131,7 +131,7 @@ struct FullScreenAudioPlayer: View {
                     audioManager.collapsePlayer()
                 }) {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(AppTypography.iconLarge).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                 }
@@ -142,9 +142,9 @@ struct FullScreenAudioPlayer: View {
                 if let episode = audioManager.currentEpisode {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: episode.category.icon)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(AppTypography.iconXS).fontWeight(.medium)
                         Text(episode.category.rawValue.uppercased())
-                            .font(AppTypography.captionBold)
+                            .font(AppTypography.captionEmphasis)
                             .tracking(0.8)
                     }
                     .foregroundColor(episode.category.accentColor)
@@ -158,7 +158,7 @@ struct FullScreenAudioPlayer: View {
                     // Show more options menu
                 }) {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(AppTypography.iconLarge).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                 }
@@ -183,13 +183,13 @@ struct FullScreenAudioPlayer: View {
         VStack(spacing: AppSpacing.sm) {
             if let episode = audioManager.currentEpisode {
                 Text(episode.title)
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
 
                 Text(episode.authorName)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }
@@ -235,7 +235,7 @@ struct FullScreenAudioPlayer: View {
             }) {
                 ZStack {
                     Image(systemName: "gobackward.15")
-                        .font(.system(size: 28, weight: .medium))
+                        .font(AppTypography.iconXL).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                 }
                 .frame(width: 56, height: 56)
@@ -252,7 +252,7 @@ struct FullScreenAudioPlayer: View {
                         .frame(width: 72, height: 72)
 
                     Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 28, weight: .bold))
+                        .font(AppTypography.iconXL).fontWeight(.bold)
                         .foregroundColor(AppColors.background)
                         .offset(x: audioManager.isPlaying ? 0 : 2)
                 }
@@ -265,7 +265,7 @@ struct FullScreenAudioPlayer: View {
             }) {
                 ZStack {
                     Image(systemName: "goforward.15")
-                        .font(.system(size: 28, weight: .medium))
+                        .font(AppTypography.iconXL).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                 }
                 .frame(width: 56, height: 56)
@@ -281,10 +281,10 @@ struct FullScreenAudioPlayer: View {
             Button(action: { showSpeedPicker = true }) {
                 VStack(spacing: AppSpacing.xxs) {
                     Text(audioManager.playbackSpeed.label)
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Speed")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(width: 56)
@@ -297,10 +297,10 @@ struct FullScreenAudioPlayer: View {
             Button(action: { showSleepTimer = true }) {
                 VStack(spacing: AppSpacing.xxs) {
                     Image(systemName: audioManager.sleepTimer == .off ? "moon" : "moon.fill")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(audioManager.sleepTimer == .off ? AppColors.textPrimary : AppColors.primaryBlue)
                     Text("Sleep")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(width: 56)
@@ -313,10 +313,10 @@ struct FullScreenAudioPlayer: View {
             Button(action: { showQueue = true }) {
                 VStack(spacing: AppSpacing.xxs) {
                     Image(systemName: "list.bullet")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Queue")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(width: 56)
@@ -331,10 +331,10 @@ struct FullScreenAudioPlayer: View {
             }) {
                 VStack(spacing: AppSpacing.xxs) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Share")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .frame(width: 56)
@@ -420,7 +420,7 @@ struct PlaybackSpeedSheet: View {
 
                             if audioManager.playbackSpeed == speed {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(AppTypography.iconSmall).fontWeight(.semibold)
                                     .foregroundColor(AppColors.primaryBlue)
                             }
                         }
@@ -464,7 +464,7 @@ struct SleepTimerSheet: View {
 
                             if audioManager.sleepTimer == option {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(AppTypography.iconSmall).fontWeight(.semibold)
                                     .foregroundColor(AppColors.primaryBlue)
                             }
                         }
@@ -523,7 +523,7 @@ struct AudioQueueSheet: View {
     private var emptyQueueView: some View {
         VStack(spacing: AppSpacing.lg) {
             Image(systemName: "list.bullet")
-                .font(.system(size: 48, weight: .light))
+                .font(AppTypography.iconHero).fontWeight(.light)
                 .foregroundColor(AppColors.textMuted)
 
             Text("Your queue is empty")
@@ -545,7 +545,7 @@ struct AudioQueueSheet: View {
 
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text(item.episode.title)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(1)
 

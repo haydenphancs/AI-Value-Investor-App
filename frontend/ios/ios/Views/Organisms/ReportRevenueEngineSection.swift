@@ -36,16 +36,16 @@ struct ReportRevenueEngineSection: View {
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             Text("Total Revenue")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
                 Text(data.formattedTotalRevenue)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(AppTypography.dataLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(data.period)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textMuted)
             }
         }
@@ -62,7 +62,7 @@ struct ReportRevenueEngineSection: View {
                 // Role badge
                 HStack(spacing: AppSpacing.xs) {
                     Text(role.rawValue.uppercased())
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppTypography.captionTiny)
                         .foregroundColor(role.color)
                 }
                 .padding(.horizontal, AppSpacing.sm)
@@ -76,13 +76,13 @@ struct ReportRevenueEngineSection: View {
 
                 // Revenue amount
                 Text(segment.formattedRevenue)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             // Segment name
             Text(segment.name)
-                .font(.system(size: 12, weight: .semibold))
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(2)
 
@@ -91,11 +91,11 @@ struct ReportRevenueEngineSection: View {
                 // Percentage of total
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "chart.pie.fill")
-                        .font(.system(size: 9))
+                        .font(AppTypography.captionTiny)
                         .foregroundColor(AppColors.textSecondary)
 
                     Text(segment.formattedPercentage)
-                        .font(.system(size: 11))
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
 
                     Text("of total")
@@ -110,7 +110,7 @@ struct ReportRevenueEngineSection: View {
                         .foregroundColor(segment.growthColor)
 
                     Text(segment.formattedGrowth)
-                        .font(.system(size: 11))
+                        .font(AppTypography.caption)
                         .foregroundColor(segment.growthColor)
                 }
             }
@@ -136,10 +136,10 @@ struct ReportRevenueEngineSection: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("Insight")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundStyle(LinearGradient(
                         colors: [.indigo, .cyan],
                         startPoint: .topLeading,
@@ -148,7 +148,7 @@ struct ReportRevenueEngineSection: View {
             }
 
             Text(note)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }

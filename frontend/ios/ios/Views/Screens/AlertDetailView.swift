@@ -25,7 +25,7 @@ struct AlertDetailView: View {
                     // Title & Description
                     VStack(spacing: AppSpacing.sm) {
                         Text(alert.title)
-                            .font(AppTypography.title2)
+                            .font(AppTypography.titleCompact)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(alert.description)
@@ -48,7 +48,7 @@ struct AlertDetailView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Text(alert.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
         }
@@ -63,7 +63,7 @@ struct AlertDetailView: View {
                 .frame(width: 72, height: 72)
 
             Image(systemName: alert.iconName)
-                .font(.system(size: 32, weight: .semibold))
+                .font(AppTypography.iconDisplay).fontWeight(.semibold)
                 .foregroundColor(alert.iconColor)
         }
     }
@@ -128,13 +128,13 @@ struct AlertDetailView: View {
     private func detailRow(label: String, value: String) -> some View {
         HStack {
             Text(label)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
             Text(value)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

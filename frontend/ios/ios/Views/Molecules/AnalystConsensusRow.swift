@@ -32,7 +32,7 @@ struct AnalystConsensusRow: View {
                     .foregroundColor(AppColors.textMuted)
 
                 Text(targetPrice)
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .fontWeight(.bold)
                     .foregroundColor(AppColors.textPrimary)
 

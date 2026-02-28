@@ -15,7 +15,7 @@ struct SectionHeader: View {
     var body: some View {
         HStack {
             Text(title)
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             Spacer()
@@ -25,7 +25,7 @@ struct SectionHeader: View {
                     onSeeAllTapped?()
                 }) {
                     Text("See All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

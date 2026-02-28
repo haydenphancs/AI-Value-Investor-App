@@ -19,7 +19,7 @@ struct ReportHeaderBar: View {
             // Back button
             Button(action: onBack) {
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
             }
@@ -32,26 +32,26 @@ struct ReportHeaderBar: View {
                     .frame(width: 36, height: 36)
                     .overlay(
                         Text(String(companyName.prefix(1)))
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
                     )
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(companyName)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     HStack(spacing: AppSpacing.xs) {
                         Text(ticker)
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
 
                         Text("•")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(exchange)
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
                     }
                 }
@@ -62,7 +62,7 @@ struct ReportHeaderBar: View {
             // Share button
             Button(action: onShare) {
                 Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
             }

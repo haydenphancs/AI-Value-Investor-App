@@ -46,10 +46,10 @@ struct SentimentBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .bold))
+                .font(AppTypography.iconTiny).fontWeight(.bold)
 
             Text(sentiment.rawValue)
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
         }
         .foregroundColor(textColor)
         .padding(.horizontal, AppSpacing.sm)

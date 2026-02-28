@@ -18,7 +18,7 @@ struct PersonaSelectionSection: View {
             HStack {
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Select Analysis Persona:")
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("Choose your investment style")
@@ -32,7 +32,7 @@ struct PersonaSelectionSection: View {
                     onViewAllTapped?()
                 }) {
                     Text("View All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

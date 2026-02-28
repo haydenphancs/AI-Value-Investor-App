@@ -58,7 +58,7 @@ struct LessonContentCard: View {
         } else {
             // Placeholder text for image
             Text("An image here")
-                .font(.system(size: 32, weight: .regular))
+                .font(AppTypography.titleHero).fontWeight(.regular)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(maxWidth: .infinity)
                 .frame(height: 150)

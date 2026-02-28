@@ -288,7 +288,7 @@ struct RevenueBreakdownChartView: View {
 
                     VStack(spacing: 2) {
                         Text("Net Profit")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
 
                         Rectangle()
@@ -328,7 +328,7 @@ struct RevenueBreakdownChartView: View {
                             )
 
                         Text("-Net Loss")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
                     }
 
@@ -367,7 +367,7 @@ struct RevenueBreakdownChartView: View {
             VStack(spacing: AppSpacing.xxl) {
                 Text("Profitable Company (Apple)")
                     .foregroundColor(.white)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleApple)
                     .padding()
@@ -379,7 +379,7 @@ struct RevenueBreakdownChartView: View {
 
                 Text("Loss-Making Company (Rivian)")
                     .foregroundColor(.white)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleLossCompany)
                     .padding()

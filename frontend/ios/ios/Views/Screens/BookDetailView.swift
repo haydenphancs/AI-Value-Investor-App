@@ -150,7 +150,7 @@ private struct BookDetailHeroSection: View {
             HStack {
                 Button(action: onBackTapped) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                 }
@@ -160,14 +160,14 @@ private struct BookDetailHeroSection: View {
                 HStack(spacing: AppSpacing.md) {
                     Button(action: onBookmarkTapped) {
                         Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(AppTypography.iconMedium).fontWeight(.medium)
                             .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textPrimary)
                             .frame(width: 44, height: 44)
                     }
 
                     Button(action: onShareTapped) {
                         Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(AppTypography.iconMedium).fontWeight(.medium)
                             .foregroundColor(AppColors.textPrimary)
                             .frame(width: 44, height: 44)
                     }
@@ -253,7 +253,7 @@ private struct BookDetailCoverImage: View {
                 // Book title on cover
                 VStack(spacing: AppSpacing.sm) {
                     Text(book.title.uppercased())
-                        .font(.system(size: 14, weight: .bold))
+                        .font(AppTypography.bodySmall).fontWeight(.bold)
                         .foregroundColor(.white)
                         .multilineTextAlignment(.center)
                         .lineLimit(4)
@@ -264,7 +264,7 @@ private struct BookDetailCoverImage: View {
                         .frame(width: 40, height: 1)
 
                     Text(book.author.uppercased())
-                        .font(.system(size: 8, weight: .medium))
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
                         .foregroundColor(.white.opacity(0.8))
                         .tracking(1)
                 }
@@ -320,7 +320,7 @@ private struct BookDetailBadge: View {
 
     var body: some View {
         Text(text)
-            .font(AppTypography.calloutBold)
+            .font(AppTypography.bodySmallEmphasis)
             .foregroundColor(color)
     }
 }
@@ -390,14 +390,14 @@ private struct BookDetailListenRow: View {
                             .frame(width: 48, height: 48)
 
                         Image(systemName: isResumeCorePlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 18, weight: .bold))
+                            .font(AppTypography.iconMedium).fontWeight(.bold)
                             .foregroundColor(AppColors.background)
                             .offset(x: isResumeCorePlaying ? 0 : 2)
                     }
 
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text(buttonLabel)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(book.formattedAudioDuration)
@@ -416,7 +416,7 @@ private struct BookDetailListenRow: View {
                     // Read time
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "clock")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.iconXS).fontWeight(.medium)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(book.formattedReadTime)
@@ -427,7 +427,7 @@ private struct BookDetailListenRow: View {
                     // Views
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "eye")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.iconXS).fontWeight(.medium)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(book.formattedViewCount)
@@ -470,7 +470,7 @@ private struct BookDetailTabSelector: View {
                     }
                 }) {
                     Text(tab.rawValue)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)
@@ -499,7 +499,7 @@ private struct BookDetailAboutContent: View {
             // Why this book section
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 Text("Why this book?")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(book.whyThisBook)
@@ -511,7 +511,7 @@ private struct BookDetailAboutContent: View {
             // Author section
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 Text("The Author")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 BookDetailAuthorCard(author: book.authorDetail)
@@ -543,13 +543,13 @@ private struct BookDetailAuthorCard: View {
                         .frame(width: 56, height: 56)
 
                     Text(author.name.prefix(1))
-                        .font(.system(size: 22, weight: .bold))
+                        .font(AppTypography.title)
                         .foregroundColor(.white)
                 }
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(author.name)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(author.title)
@@ -560,7 +560,7 @@ private struct BookDetailAuthorCard: View {
 
             // Bio
             Text(author.bio)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
@@ -607,7 +607,7 @@ private struct KeyHighlightsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Key Highlights")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -632,14 +632,14 @@ private struct KeyHighlightCard: View {
                     .frame(width: 40, height: 40)
 
                 Image(systemName: highlight.iconName)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(Color(hex: highlight.iconColor))
             }
 
             // Content
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(highlight.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(highlight.description)
@@ -730,7 +730,7 @@ private struct CoreChapterTimelineRow: View {
                             }
 
                             Text("\(chapter.number)")
-                                .font(.system(size: 13, weight: .bold))
+                                .font(AppTypography.label).fontWeight(.bold)
                                 .foregroundColor(isCompleted ? .white : uncompletedColor)
                         }
                         .frame(width: 32, height: 32)
@@ -745,19 +745,19 @@ private struct CoreChapterTimelineRow: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     HStack {
                         Text(chapter.title)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Spacer()
 
                         // Chevron indicator
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.iconXS).fontWeight(.semibold)
                             .foregroundColor(AppColors.textMuted)
                     }
 
                     Text(chapter.description)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -779,14 +779,14 @@ private struct DiscussionSection: View {
             // Header
             HStack {
                 Text("Discussion")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 Button(action: {}) {
                     Text("See All")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.accentCyan)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -823,14 +823,14 @@ private struct DiscussionCard: View {
                         .frame(width: 36, height: 36)
 
                     Text(discussion.authorName.prefix(1))
-                        .font(.system(size: 14, weight: .bold))
+                        .font(AppTypography.bodySmall).fontWeight(.bold)
                         .foregroundColor(.white)
                 }
 
                 // Name and date
                 VStack(alignment: .leading, spacing: 2) {
                     Text(discussion.authorName)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(discussion.formattedDate)
@@ -844,7 +844,7 @@ private struct DiscussionCard: View {
                 HStack(spacing: 2) {
                     ForEach(1...5, id: \.self) { star in
                         Image(systemName: star <= discussion.rating ? "star.fill" : "star")
-                            .font(.system(size: 10))
+                            .font(AppTypography.iconTiny)
                             .foregroundColor(star <= discussion.rating ? Color(hex: "F59E0B") : AppColors.textMuted)
                     }
                 }
@@ -852,7 +852,7 @@ private struct DiscussionCard: View {
 
             // Content
             Text(discussion.content)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
@@ -875,14 +875,14 @@ private struct BookDetailMiniHeader: View {
             // Back button
             Button(action: onBackTapped) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }
             .buttonStyle(PlainButtonStyle())
 
             // Title
             Text(book.title)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
 
@@ -892,14 +892,14 @@ private struct BookDetailMiniHeader: View {
             HStack(spacing: AppSpacing.lg) {
                 Button(action: onBookmarkTapped) {
                     Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())
 
                 Button(action: onShareTapped) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())

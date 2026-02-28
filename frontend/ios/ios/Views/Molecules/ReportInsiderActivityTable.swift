@@ -15,7 +15,7 @@ struct ReportInsiderActivityTable: View {
             // Header with sentiment badge
             HStack {
                 Text("Insider Activity")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textSecondary)
 
                 Spacer()
@@ -50,22 +50,22 @@ struct ReportInsiderActivityTable: View {
             ForEach(insiderData.transactions) { transaction in
                 HStack {
                     Text(transaction.type)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(transaction.type == "Buys" ? AppColors.bullish : AppColors.bearish)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     Text("\(transaction.count)")
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 50, alignment: .center)
 
                     Text(transaction.shares)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 50, alignment: .center)
 
                     Text(transaction.value)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 60, alignment: .trailing)
                 }

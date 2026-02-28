@@ -23,7 +23,7 @@ struct ReportDeepDiveMetricCard: View {
             // Title row with stars
             HStack {
                 Text(data.title)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
@@ -35,7 +35,7 @@ struct ReportDeepDiveMetricCard: View {
                 HStack(spacing: 2) {
                     ForEach(0..<5, id: \.self) { index in
                         Image(systemName: index < data.starRating ? "star.fill" : "star")
-                            .font(.system(size: 8))
+                            .font(AppTypography.iconMicro)
                             .foregroundColor(index < data.starRating ? Color(hex: "F59E0B") : AppColors.textMuted)
                     }
                 }
@@ -49,18 +49,18 @@ struct ReportDeepDiveMetricCard: View {
                 ForEach(data.metrics) { metric in
                     HStack {
                         Text(metric.label)
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
                             .lineLimit(1)
                         Spacer()
                         HStack(spacing: 2) {
                             if let trend = metric.trend {
                                 Image(systemName: trend.iconName)
-                                    .font(.system(size: 8, weight: .bold))
+                                    .font(AppTypography.iconMicro).fontWeight(.bold)
                                     .foregroundColor(trend.color)
                             }
                             Text(metric.value)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
                         }
@@ -72,7 +72,7 @@ struct ReportDeepDiveMetricCard: View {
 
             // Quality label
             Text(data.qualityLabel)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(ratingColor)
                 .lineLimit(2)
                 .minimumScaleFactor(0.9)

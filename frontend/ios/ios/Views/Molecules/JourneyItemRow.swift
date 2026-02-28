@@ -34,7 +34,7 @@ struct JourneyItemRow: View {
 
                 // Title with strikethrough if completed
                 Text(item.title)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(item.isCompleted ? AppColors.textMuted : AppColors.textPrimary)
                     .strikethrough(item.isCompleted, color: AppColors.textMuted)
 

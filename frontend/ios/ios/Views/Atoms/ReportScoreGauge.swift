@@ -48,7 +48,7 @@ struct ReportScoreGauge: View {
         var labelFont: Font {
             switch self {
             case .small: return AppTypography.caption
-            case .regular: return AppTypography.footnote
+            case .regular: return AppTypography.labelSmall
             }
         }
 

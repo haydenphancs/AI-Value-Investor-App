@@ -60,7 +60,7 @@ struct TradeGroupDetailView: View {
                     if viewModel.filteredTrades.isEmpty {
                         VStack(spacing: AppSpacing.md) {
                             Image(systemName: "tray")
-                                .font(.system(size: 36))
+                                .font(AppTypography.iconJumbo)
                                 .foregroundColor(AppColors.textMuted)
 
                             Text("No trades in this category")
@@ -83,14 +83,14 @@ struct TradeGroupDetailView: View {
                     dismiss()
                 } label: {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                 }
             }
 
             ToolbarItem(placement: .principal) {
                 Text(viewModel.tradeGroup.formattedDateFull)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }
@@ -142,12 +142,12 @@ struct TradeFilterPill: View {
                 HStack(spacing: AppSpacing.xs) {
                     if let iconName = tab.iconName {
                         Image(systemName: iconName)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(AppTypography.iconXS).fontWeight(.semibold)
                             .foregroundColor(isSelected ? .white : tab.iconColor)
                     }
 
                     Text(tab.rawValue)
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                 }
                 .foregroundColor(isSelected ? .white : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)
@@ -207,7 +207,7 @@ struct TradeDetailCard: View {
                 // Ticker + allocation change
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(trade.ticker)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     AllocationChangeText(allocationChange: trade.formattedAllocationChange)
@@ -220,7 +220,7 @@ struct TradeDetailCard: View {
                     TradeActionBadge(action: trade.action)
 
                     Text(trade.formattedAmount)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                 }
             }
@@ -285,7 +285,7 @@ struct TradeTickerLogo: View {
             .frame(width: 48, height: 48)
             .overlay(
                 Text("Logo")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textMuted)
             )
     }
@@ -297,7 +297,7 @@ struct TradeActionBadge: View {
 
     var body: some View {
         Text(action.rawValue)
-            .font(.system(size: 11, weight: .bold))
+            .font(AppTypography.caption).fontWeight(.bold)
             .foregroundColor(.white)
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.xs)

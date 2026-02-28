@@ -19,7 +19,7 @@ struct EarningsDataTypeToggle: View {
                     }
                 } label: {
                     Text(type.rawValue)
-                        .font(AppTypography.footnoteBold)
+                        .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(selectedType == type ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)

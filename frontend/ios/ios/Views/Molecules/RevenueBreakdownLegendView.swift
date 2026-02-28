@@ -15,7 +15,7 @@ struct RevenueBreakdownLegendView: View {
             // Revenue Sources Column
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Text("Revenue Sources")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .padding(.bottom, AppSpacing.xs)
 
@@ -33,7 +33,7 @@ struct RevenueBreakdownLegendView: View {
             // Costs & Profit Column
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Text("Costs & Profit")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .padding(.bottom, AppSpacing.xs)
 

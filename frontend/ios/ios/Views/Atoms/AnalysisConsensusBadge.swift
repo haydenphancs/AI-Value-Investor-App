@@ -12,7 +12,7 @@ struct AnalysisConsensusBadge: View {
 
     var body: some View {
         Text(consensus.rawValue)
-            .font(AppTypography.title2)
+            .font(AppTypography.titleCompact)
             .fontWeight(.bold)
             .foregroundColor(consensus.color)
     }

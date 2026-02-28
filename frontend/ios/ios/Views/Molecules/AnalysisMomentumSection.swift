@@ -20,7 +20,7 @@ struct AnalysisMomentumSection: View {
             // Header with toggle
             HStack {
                 Text("Analyst Momentum")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()

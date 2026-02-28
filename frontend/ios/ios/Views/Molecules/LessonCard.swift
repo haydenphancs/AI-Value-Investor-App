@@ -23,7 +23,7 @@ struct LessonCard: View {
                 // Title row with category badge
                 HStack(alignment: .top, spacing: AppSpacing.sm) {
                     Text(lesson.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)

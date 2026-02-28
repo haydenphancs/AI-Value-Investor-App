@@ -52,7 +52,7 @@ struct Top10OwnersSheet: View {
                         showInfoSheet = true
                     } label: {
                         Image(systemName: "info.circle")
-                            .font(.system(size: 16))
+                            .font(AppTypography.iconDefault)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -85,7 +85,7 @@ struct Top10OwnerTabSelector: View {
                     }
                 } label: {
                     Text(tab.rawValue)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)
@@ -121,7 +121,7 @@ struct Top10InstitutionRow: View {
             // Name and Category
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(institution.name)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -136,7 +136,7 @@ struct Top10InstitutionRow: View {
             // Value and Percentage
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(institution.formattedValue)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(institution.formattedPercent)
@@ -168,7 +168,7 @@ struct Top10InsiderRow: View {
             // Name and Title
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(insider.name)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -183,7 +183,7 @@ struct Top10InsiderRow: View {
             // Value and Percentage
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(insider.formattedValue)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(insider.formattedPercent)
@@ -212,11 +212,11 @@ struct Top10OwnersInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "building.2.fill")
-                                .font(.system(size: 24))
+                                .font(AppTypography.iconXL)
                                 .foregroundColor(AppColors.primaryBlue)
 
                             Text("Understanding Top Owners")
-                                .font(AppTypography.title2)
+                                .font(AppTypography.titleCompact)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -258,7 +258,7 @@ struct Top10OwnersInfoSheet: View {
                     // What the Numbers Mean
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         Text("What the Numbers Mean")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
                         VStack(spacing: AppSpacing.sm) {
@@ -294,11 +294,11 @@ struct Top10OwnersInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: icon)
-                    .font(.system(size: 18))
+                    .font(AppTypography.iconMedium)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -310,11 +310,11 @@ struct Top10OwnersInfoSheet: View {
                 ForEach(tips, id: \.self) { tip in
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                             .foregroundColor(AppColors.bullish)
 
                         Text(tip)
-                            .font(AppTypography.callout)
+                            .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -331,16 +331,16 @@ struct Top10OwnersInfoSheet: View {
     private func numberExplanation(title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: "number.circle.fill")
-                .font(.system(size: 20))
+                .font(AppTypography.iconLarge)
                 .foregroundColor(AppColors.primaryBlue)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

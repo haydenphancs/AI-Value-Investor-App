@@ -31,7 +31,7 @@ struct TickerStickyHeader: View {
             HStack {
                 // Left side - Company name only (compact)
                 Text(companyName)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -40,12 +40,12 @@ struct TickerStickyHeader: View {
                 // Right side - Price and change inline
                 HStack(spacing: AppSpacing.sm) {
                     Text(price)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     HStack(spacing: 2) {
                         Image(systemName: arrowIcon)
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(AppTypography.iconMicro).fontWeight(.semibold)
                             .foregroundColor(changeColor)
 
                         Text(priceChangePercent)

@@ -16,10 +16,10 @@ struct NewAnalysisButton: View {
         }) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("New Analysis")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
             }
             .foregroundColor(.white)
             .padding(.horizontal, AppSpacing.xxl)

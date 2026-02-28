@@ -25,7 +25,7 @@ struct CreditsBadge: View {
             }
 
             Text(style == .large ? "\(credits)" : "You have \(credits) credits remaining")
-                .font(style == .large ? AppTypography.largeTitle : AppTypography.caption)
+                .font(style == .large ? AppTypography.titleLarge : AppTypography.caption)
                 .fontWeight(style == .large ? .bold : .regular)
                 .foregroundColor(style == .large ? AppColors.textPrimary : AppColors.textSecondary)
 

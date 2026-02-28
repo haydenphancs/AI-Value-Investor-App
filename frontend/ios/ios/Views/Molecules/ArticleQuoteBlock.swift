@@ -31,7 +31,7 @@ struct ArticleQuoteBlock: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 // Quote icon
                 Image(systemName: "quote.opening")
-                    .font(.system(size: 20, weight: .bold))
+                    .font(AppTypography.iconLarge).fontWeight(.bold)
                     .foregroundColor(AppColors.primaryBlue.opacity(0.5))
 
                 // Quote text

@@ -105,7 +105,7 @@ struct GlobalMiniPlayer: View {
             }
         }) {
             Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .bold))
+                .font(AppTypography.iconSmall).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 28, height: 28)
         }
@@ -115,7 +115,7 @@ struct GlobalMiniPlayer: View {
     // MARK: - Waveform Icon
     private var waveformIcon: some View {
         Image(systemName: "chart.bar.fill")
-            .font(.system(size: 18, weight: .medium))
+            .font(AppTypography.iconMedium).fontWeight(.medium)
             .foregroundColor(AppColors.textSecondary)
             .frame(width: 24, height: 24)
     }
@@ -126,7 +126,7 @@ struct GlobalMiniPlayer: View {
             if let episode = audioManager.currentEpisode {
                 // Episode title (truncated)
                 Text(episode.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -149,7 +149,7 @@ struct GlobalMiniPlayer: View {
             }
         }) {
             Image(systemName: "gobackward.15")
-                .font(.system(size: 18, weight: .semibold))
+                .font(AppTypography.iconMedium).fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 32, height: 32)
         }
@@ -169,7 +169,7 @@ struct GlobalMiniPlayer: View {
                     .frame(width: 44, height: 44)
 
                 Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(AppTypography.iconDefault).fontWeight(.bold)
                     .foregroundColor(.white)
                     .offset(x: audioManager.isPlaying ? 0 : 1)
             }
@@ -183,7 +183,7 @@ struct GlobalMiniPlayer: View {
             cyclePlaybackSpeed()
         }) {
             Text(audioManager.playbackSpeed.label)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 36, height: 28)
         }

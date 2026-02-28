@@ -14,7 +14,7 @@ struct InvestorQuoteCard: View {
         VStack(spacing: AppSpacing.lg) {
             // Quote icon
             Image(systemName: "quote.opening")
-                .font(.system(size: 24, weight: .medium))
+                .font(AppTypography.iconXL).fontWeight(.medium)
                 .foregroundColor(AppColors.bullish)
 
             // Quote text
@@ -26,7 +26,7 @@ struct InvestorQuoteCard: View {
 
             // Author
             Text("— \(quote.author)")
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
         }
         .padding(AppSpacing.xxl)

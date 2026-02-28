@@ -16,9 +16,9 @@ struct CommunityDiscussionsSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             HStack {
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Community Discussions")
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("Join the conversation")
@@ -32,7 +32,7 @@ struct CommunityDiscussionsSection: View {
                     onSeeAll?()
                 }) {
                     Text("See All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

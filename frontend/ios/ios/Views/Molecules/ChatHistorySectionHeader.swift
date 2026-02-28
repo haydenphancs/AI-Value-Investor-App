@@ -18,14 +18,14 @@ struct ChatHistorySectionHeader: View {
         }) {
             HStack {
                 Text(section.rawValue)
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textMuted)
 
                 Spacer()
 
 //                if showChevron {
 //                    Image(systemName: "chevron.right")
-//                        .font(.system(size: 12, weight: .semibold))
+//                        .font(AppTypography.iconXS).fontWeight(.semibold)
 //                        .foregroundColor(AppColors.textMuted)
 //                }
             }

@@ -16,7 +16,7 @@ struct FollowButton: View {
             onTap?()
         }) {
             Text(isFollowing ? "Following" : "Follow")
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
                 .foregroundColor(isFollowing ? AppColors.textSecondary : AppColors.primaryBlue)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)

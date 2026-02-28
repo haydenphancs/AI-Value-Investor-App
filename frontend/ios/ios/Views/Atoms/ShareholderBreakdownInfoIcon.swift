@@ -14,7 +14,7 @@ struct ShareholderBreakdownInfoIcon: View {
     var body: some View {
         Button(action: onTap) {
             Image(systemName: "info.circle")
-                .font(.system(size: 14, weight: .medium))
+                .font(AppTypography.iconSmall).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
         }
         .buttonStyle(.plain)

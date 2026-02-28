@@ -17,7 +17,7 @@ struct ReportMetricRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(labelColor)
 
             Spacer()
@@ -25,11 +25,11 @@ struct ReportMetricRow: View {
             HStack(spacing: AppSpacing.xs) {
                 if let trend = trend {
                     Image(systemName: trend.iconName)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
                         .foregroundColor(trend.color)
                 }
                 Text(value)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .fontWeight(.semibold)
                     .foregroundColor(valueColor)
             }

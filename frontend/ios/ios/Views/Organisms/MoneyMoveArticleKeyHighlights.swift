@@ -15,11 +15,11 @@ struct MoneyMoveArticleKeyHighlights: View {
             // Section header
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.neutral)
 
                 Text("Key Highlights")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
             }
 

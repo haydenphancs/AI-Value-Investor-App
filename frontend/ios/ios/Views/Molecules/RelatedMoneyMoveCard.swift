@@ -35,7 +35,7 @@ struct RelatedMoneyMoveCard: View {
                             .frame(width: 32, height: 32)
 
                         Image(systemName: article.category.iconName)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(AppTypography.iconSmall).fontWeight(.semibold)
                             .foregroundColor(.white)
                     }
                     .padding(AppSpacing.md)
@@ -44,7 +44,7 @@ struct RelatedMoneyMoveCard: View {
                 // Content
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text(article.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(2)
 
@@ -59,7 +59,7 @@ struct RelatedMoneyMoveCard: View {
                     HStack(spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.xxs) {
                             Image(systemName: "clock")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(AppTypography.iconTiny).fontWeight(.medium)
                             Text("\(article.readTimeMinutes) min")
                                 .font(AppTypography.caption)
                         }
@@ -67,7 +67,7 @@ struct RelatedMoneyMoveCard: View {
 
                         HStack(spacing: AppSpacing.xxs) {
                             Image(systemName: "eye")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(AppTypography.iconTiny).fontWeight(.medium)
                             Text(article.viewCount)
                                 .font(AppTypography.caption)
                         }

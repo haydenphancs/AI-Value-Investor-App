@@ -32,7 +32,7 @@ struct AnalysisSectionHeader: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 if let subtitle = subtitle {
@@ -47,7 +47,7 @@ struct AnalysisSectionHeader: View {
             if let actionText = actionText, let onAction = onAction {
                 Button(action: onAction) {
                     Text(actionText)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             } else if showMoreButton {
@@ -55,7 +55,7 @@ struct AnalysisSectionHeader: View {
                     onAction?()
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                         .frame(width: 24, height: 24)
                 }

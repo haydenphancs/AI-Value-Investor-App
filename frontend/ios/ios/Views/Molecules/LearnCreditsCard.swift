@@ -20,7 +20,7 @@ struct LearnCreditsCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             Text("Credit Balance")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Manage your research credits")
@@ -31,7 +31,7 @@ struct LearnCreditsCard: View {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .lastTextBaseline, spacing: AppSpacing.sm) {
                     Text("\(balance.credits)")
-                        .font(.system(size: 40, weight: .bold, design: .rounded))
+                        .font(AppTypography.dataHero)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("credits")
@@ -56,10 +56,10 @@ struct LearnCreditsCard: View {
             }) {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
 
                     Text("Add More Credits")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                 }
                 .foregroundColor(Color(hex: "F97316"))
                 .frame(maxWidth: .infinity)

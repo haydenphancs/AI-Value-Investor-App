@@ -169,7 +169,7 @@ struct NotificationsSettingsView: View {
             // Group Header with master toggle
             HStack(spacing: AppSpacing.md) {
                 Image(systemName: icon)
-                    .font(.system(size: 18))
+                    .font(AppTypography.iconMedium)
                     .foregroundColor(iconColor)
                     .frame(width: 36, height: 36)
                     .background(iconColor.opacity(0.15))
@@ -177,7 +177,7 @@ struct NotificationsSettingsView: View {
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(subtitle)

@@ -146,14 +146,14 @@ struct MoneyMoveArticleDetailView: View {
             // Back button
             Button(action: handleBackTapped) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }
             .buttonStyle(PlainButtonStyle())
 
             // Title
             Text(article.title)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
 
@@ -172,14 +172,14 @@ struct MoneyMoveArticleDetailView: View {
 
                 Button(action: handleShareTapped) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())
 
                 Button(action: handleBookmarkTapped) {
                     Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())

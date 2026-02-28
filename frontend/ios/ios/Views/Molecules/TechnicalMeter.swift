@@ -21,7 +21,7 @@ struct TechnicalMeter: View {
             // Header
             VStack(spacing: AppSpacing.xs) {
                 Text("Technical Meter")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Aggregated technical indicators")
@@ -95,7 +95,7 @@ struct TechnicalGauge: View {
             // Center display
             VStack(spacing: 2) {
                 Text(signal.rawValue)
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .fontWeight(.bold)
                     .foregroundColor(signal.color)
             }

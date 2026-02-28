@@ -260,7 +260,7 @@ struct ProfitPowerTooltipView: View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             // Period header
             Text(dataPoint.period)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.bottom, AppSpacing.xxs)
 
@@ -324,7 +324,7 @@ struct ProfitPowerTooltipView: View {
 
             // Value
             Text(String(format: "%.1f%%", value))
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

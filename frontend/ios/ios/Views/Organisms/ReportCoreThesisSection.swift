@@ -13,7 +13,7 @@ struct ReportCoreThesisSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("The Core Thesis")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             ReportCoreThesisCard(isBullCase: true, bullets: thesis.bullCase)

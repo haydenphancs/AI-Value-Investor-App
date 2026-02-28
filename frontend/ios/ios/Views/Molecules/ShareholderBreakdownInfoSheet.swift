@@ -49,11 +49,11 @@ struct ShareholderBreakdownInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "person.3.fill")
-                    .font(.system(size: 24))
+                    .font(AppTypography.iconXL)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Who Owns the Company?")
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -75,7 +75,7 @@ struct ShareholderBreakdownInfoSheet: View {
     private var ownershipTypesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Ownership Types")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -124,7 +124,7 @@ struct ShareholderBreakdownInfoSheet: View {
                     .frame(width: 12, height: 12)
 
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -135,14 +135,14 @@ struct ShareholderBreakdownInfoSheet: View {
             }
 
             Text(description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.bullish)
                     Text(bullish)
                         .font(AppTypography.caption)
@@ -152,7 +152,7 @@ struct ShareholderBreakdownInfoSheet: View {
 
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.bearish)
                     Text(bearish)
                         .font(AppTypography.caption)
@@ -175,7 +175,7 @@ struct ShareholderBreakdownInfoSheet: View {
     private var whatToLookForSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("What to Look For")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -206,17 +206,17 @@ struct ShareholderBreakdownInfoSheet: View {
     private func tipRow(icon: String, iconColor: Color, title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 20))
+                .font(AppTypography.iconLarge)
                 .foregroundColor(iconColor)
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -234,7 +234,7 @@ struct ShareholderBreakdownInfoSheet: View {
     private var examplesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Real-World Examples")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -256,7 +256,7 @@ struct ShareholderBreakdownInfoSheet: View {
     private func exampleCard(company: String, breakdown: String, insight: String) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text(company)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(breakdown)
@@ -264,7 +264,7 @@ struct ShareholderBreakdownInfoSheet: View {
                 .foregroundColor(AppColors.textMuted)
 
             Text(insight)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

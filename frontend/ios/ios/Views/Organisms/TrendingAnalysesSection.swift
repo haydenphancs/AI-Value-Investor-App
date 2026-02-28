@@ -17,7 +17,7 @@ struct TrendingAnalysesSection: View {
             // Section header
             HStack {
                 Text("Trending Analyses")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -26,7 +26,7 @@ struct TrendingAnalysesSection: View {
                     onExploreTapped?()
                 }) {
                     Text("Explore")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

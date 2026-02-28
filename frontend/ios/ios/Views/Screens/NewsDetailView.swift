@@ -114,10 +114,10 @@ struct NewsDetailView: View {
         Button(action: handleReadFullStory) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "arrow.up.right.square")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("Read full story")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
             }
             .foregroundColor(AppColors.textPrimary)
             .frame(maxWidth: .infinity)

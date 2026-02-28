@@ -19,21 +19,21 @@ struct ETFDividendHistoryView: View {
             HStack {
                 Button(action: { dismiss() }) {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
                 Spacer()
 
                 Text("\(symbol) Dividend History")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 // Invisible spacer to center title
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(.clear)
             }
             .padding(.horizontal, AppSpacing.lg)
@@ -73,12 +73,12 @@ struct ETFDividendHistoryView: View {
                     ForEach(dividendHistory) { payment in
                         HStack {
                             Text(payment.exDividendDate)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textSecondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             Text(payment.dividendPerShare)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textSecondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)

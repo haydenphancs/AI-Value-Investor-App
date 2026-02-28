@@ -22,11 +22,11 @@ struct DailyBriefingRow: View {
                 // Content
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(item.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(item.subtitle)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -39,7 +39,7 @@ struct DailyBriefingRow: View {
                     DateBadge(from: date)
                 } else {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
             }

@@ -17,10 +17,10 @@ struct InputOptionButton: View {
         }) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: type.iconName)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
 
                 Text(type.rawValue)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
             }
             .foregroundColor(AppColors.textSecondary)
             .padding(.horizontal, AppSpacing.lg)

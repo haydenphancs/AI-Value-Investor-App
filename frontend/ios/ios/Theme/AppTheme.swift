@@ -94,31 +94,73 @@ extension Color {
 }
 
 // MARK: - App Typography
+//
+// 5 Semantic Levels: Title → Heading → Body → Label → Caption
+// Plus specialized tiers for financial data (rounded) and SF Symbol icons.
+// All point sizes preserved from the original design for layout stability.
+//
+
 struct AppTypography {
-    // Headlines
-    static let largeTitle = Font.system(size: 28, weight: .bold)
-    static let title = Font.system(size: 22, weight: .bold)
-    static let title2 = Font.system(size: 20, weight: .semibold)
-    static let title3 = Font.system(size: 18, weight: .semibold)
 
-    // Body
-    static let headline = Font.system(size: 17, weight: .semibold)
-    static let body = Font.system(size: 15, weight: .regular)
-    static let bodyBold = Font.system(size: 15, weight: .semibold)
-    static let callout = Font.system(size: 14, weight: .regular)
-    static let calloutBold = Font.system(size: 14, weight: .semibold)
+    // ━━━ TITLE (Level 1) ━━━
+    // Hero content, screen titles, major section headers
+    static let titleHero    = Font.system(size: 32, weight: .bold)
+    static let titleLarge   = Font.system(size: 28, weight: .bold)
+    static let title        = Font.system(size: 22, weight: .bold)
+    static let titleCompact = Font.system(size: 20, weight: .semibold)
 
-    // Small
-    static let subheadline = Font.system(size: 13, weight: .regular)
-    static let footnote = Font.system(size: 12, weight: .regular)
-    static let footnoteBold = Font.system(size: 12, weight: .semibold)
-    static let caption = Font.system(size: 11, weight: .regular)
-    static let captionBold = Font.system(size: 11, weight: .medium)
+    // ━━━ HEADING (Level 2) ━━━
+    // Section & card headers, emphasized inline content
+    static let heading      = Font.system(size: 18, weight: .semibold)
+    static let headingSmall = Font.system(size: 17, weight: .semibold)
 
-    // Ticker Numbers
-    static let tickerPrice = Font.system(size: 14, weight: .bold, design: .rounded)
-    static let tickerChange = Font.system(size: 10, weight: .semibold, design: .rounded)
-    static let tickerName = Font.system(size: 9, weight: .regular)
+    // ━━━ BODY (Level 3) ━━━
+    // Primary readable content
+    static let bodyEmphasis      = Font.system(size: 15, weight: .semibold)
+    static let body              = Font.system(size: 15, weight: .regular)
+    static let bodySmallEmphasis = Font.system(size: 14, weight: .semibold)
+    static let bodySmall         = Font.system(size: 14, weight: .regular)
+
+    // ━━━ LABEL (Level 4) ━━━
+    // Metadata, supporting info, subtitles
+    static let labelEmphasis      = Font.system(size: 13, weight: .semibold)
+    static let label              = Font.system(size: 13, weight: .regular)
+    static let labelSmallEmphasis = Font.system(size: 12, weight: .semibold)
+    static let labelSmall         = Font.system(size: 12, weight: .regular)
+
+    // ━━━ CAPTION (Level 5) ━━━
+    // Micro-copy, badges, chart axes, fine print
+    static let captionEmphasis      = Font.system(size: 11, weight: .semibold)
+    static let caption              = Font.system(size: 11, weight: .regular)
+    static let captionSmallEmphasis = Font.system(size: 10, weight: .semibold)
+    static let captionSmall         = Font.system(size: 10, weight: .regular)
+    static let captionTiny          = Font.system(size: 9, weight: .regular)
+
+    // ━━━ DATA (Financial numerics) ━━━
+    // Rounded design for numeric emphasis in financial context
+    static let dataHero    = Font.system(size: 32, weight: .bold, design: .rounded)
+    static let dataDisplay = Font.system(size: 28, weight: .bold, design: .rounded)
+    static let dataTitle   = Font.system(size: 22, weight: .bold, design: .rounded)
+    static let dataHeading = Font.system(size: 20, weight: .bold, design: .rounded)
+    static let dataLarge   = Font.system(size: 18, weight: .bold, design: .rounded)
+    static let dataMedium  = Font.system(size: 14, weight: .bold, design: .rounded)
+    static let dataSmall   = Font.system(size: 10, weight: .semibold, design: .rounded)
+
+    // ━━━ ICONS (SF Symbol sizing) ━━━
+    // Size-only tokens — add .fontWeight() modifier for weight control
+    static let iconSplash  = Font.system(size: 80)
+    static let iconHero    = Font.system(size: 48)
+    static let iconXXL     = Font.system(size: 40)
+    static let iconJumbo   = Font.system(size: 36)
+    static let iconDisplay = Font.system(size: 32)
+    static let iconXL      = Font.system(size: 24)
+    static let iconLarge   = Font.system(size: 20)
+    static let iconMedium  = Font.system(size: 18)
+    static let iconDefault = Font.system(size: 16)
+    static let iconSmall   = Font.system(size: 14)
+    static let iconXS      = Font.system(size: 12)
+    static let iconTiny    = Font.system(size: 10)
+    static let iconMicro   = Font.system(size: 8)
 }
 
 // MARK: - App Spacing

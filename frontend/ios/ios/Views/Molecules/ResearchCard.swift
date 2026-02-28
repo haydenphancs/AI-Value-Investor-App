@@ -44,14 +44,14 @@ struct ResearchCard: View {
 
                 // Headline
                 Text(report.headline)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
                     .multilineTextAlignment(.leading)
 
                 // Summary
                 Text(report.summary)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
@@ -72,7 +72,7 @@ struct ResearchCard: View {
                         onAskOrRead?()
                     }) {
                         Text("Ask or Read")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }
@@ -90,19 +90,19 @@ struct ResearchCard: View {
         switch report.stockTicker {
         case "ORCL":
             Image(systemName: "server.rack")
-                .font(.system(size: 32, weight: .bold))
+                .font(AppTypography.iconDisplay).fontWeight(.bold)
                 .foregroundColor(.white.opacity(0.9))
         case "AAPL":
             Image(systemName: "apple.logo")
-                .font(.system(size: 36, weight: .bold))
+                .font(AppTypography.iconJumbo).fontWeight(.bold)
                 .foregroundColor(.white.opacity(0.9))
         case "NVDA":
             Image(systemName: "gpu")
-                .font(.system(size: 32, weight: .bold))
+                .font(AppTypography.iconDisplay).fontWeight(.bold)
                 .foregroundColor(.white.opacity(0.9))
         default:
             Text(String(report.stockTicker.prefix(1)))
-                .font(.system(size: 40, weight: .bold))
+                .font(AppTypography.iconXXL).fontWeight(.bold)
                 .foregroundColor(.white.opacity(0.9))
         }
     }

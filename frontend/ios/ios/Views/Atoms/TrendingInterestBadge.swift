@@ -13,7 +13,7 @@ struct TrendingInterestBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.iconTiny).fontWeight(.semibold)
 
             Text("+\(interestPercent)% interest")
                 .font(AppTypography.caption)

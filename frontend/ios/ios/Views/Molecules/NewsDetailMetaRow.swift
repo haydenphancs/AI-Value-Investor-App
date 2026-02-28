@@ -17,22 +17,22 @@ struct NewsDetailMetaRow: View {
             // Calendar Icon and Date
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: "calendar")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AppTypography.iconXS).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
 
                 Text(date)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
             }
 
             // Read Time
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: "clock")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AppTypography.iconXS).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
 
                 Text("\(readTimeMinutes) min read")
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
             }
 

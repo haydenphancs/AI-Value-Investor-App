@@ -45,7 +45,7 @@ struct SearchNewsCard: View {
 
                         // Headline
                         Text(item.headline)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
@@ -64,7 +64,7 @@ struct SearchNewsCard: View {
                     onReadMore?()
                 }) {
                     Text(item.readMoreAction)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.bearish)
                 }
                 .buttonStyle(PlainButtonStyle())

@@ -17,7 +17,7 @@ struct TickerDetailSnapshotsSection: View {
             // Section title with info button inside card styling
             HStack {
                 Text("Snapshots")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -70,10 +70,10 @@ struct SnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "camera.viewfinder")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("What are Snapshots?")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -87,10 +87,10 @@ struct SnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Why Snapshots Matter")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -130,10 +130,10 @@ struct SnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "star.fill")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Understanding Ratings")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -179,10 +179,10 @@ struct SnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Pro Tips")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -236,17 +236,17 @@ struct SnapshotBulletPoint: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -269,17 +269,17 @@ struct SnapshotUsageStep: View {
                     .frame(width: 28, height: 28)
 
                 Text("\(number)")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(.white)
             }
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -300,24 +300,24 @@ struct RatingExplanation: View {
             HStack(spacing: 2) {
                 ForEach(0..<stars, id: \.self) { _ in
                     Image(systemName: "star.fill")
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(color)
                 }
                 ForEach(stars..<5, id: \.self) { _ in
                     Image(systemName: "star.fill")
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.textMuted.opacity(0.3))
                 }
             }
 
             // Rating title
             Text(rating)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(color)
 
             // Description
             Text(description)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -336,12 +336,12 @@ struct ProTipCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24)
 
             Text(tip)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

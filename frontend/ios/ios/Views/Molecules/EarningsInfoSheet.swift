@@ -115,7 +115,7 @@ struct EarningsInfoSheet: View {
                     // Tips Section
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         Text("Tips")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
                         tipRow(icon: "lightbulb.fill", text: "Consistent beats often indicate strong management execution")
@@ -151,7 +151,7 @@ struct EarningsInfoSheet: View {
     private func infoSection(title: String, items: [InfoItem]) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text(title)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -183,7 +183,7 @@ struct EarningsInfoSheet: View {
                 .frame(width: 32, height: 32)
             } else if let icon = item.icon {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(AppTypography.iconDefault)
                     .foregroundColor(item.iconColor ?? AppColors.textSecondary)
                     .frame(width: 32, height: 32)
                     .background(
@@ -194,11 +194,11 @@ struct EarningsInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(item.title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(item.description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -213,11 +213,11 @@ struct EarningsInfoSheet: View {
     private func tipRow(icon: String, text: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.sm) {
             Image(systemName: icon)
-                .font(.system(size: 12))
+                .font(AppTypography.iconXS)
                 .foregroundColor(AppColors.neutral)
 
             Text(text)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
         }
     }

@@ -105,19 +105,19 @@ struct EarningsSurpriseBarChart: View {
             ZStack(alignment: .trailing) {
                 // Max label at top
                 Text(formatYValue(surpriseRange.max))
-                    .font(.system(size: 11))
+                    .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                     .position(x: geometry.size.width / 2, y: height - maxY)
                 
                 // Zero label at calculated position
                 Text("0%")
-                    .font(.system(size: 11))
+                    .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                     .position(x: geometry.size.width / 2, y: height - zeroY)
                 
                 // Min label at bottom
                 Text(formatYValue(surpriseRange.min))
-                    .font(.system(size: 11))
+                    .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                     .position(x: geometry.size.width / 2, y: height - minY)
             }

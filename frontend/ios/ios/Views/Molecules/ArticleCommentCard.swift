@@ -31,12 +31,12 @@ struct ArticleCommentCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: AppSpacing.xs) {
                         Text(comment.authorName)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         if comment.isVerified {
                             Image(systemName: "checkmark.seal.fill")
-                                .font(.system(size: 10))
+                                .font(AppTypography.iconTiny)
                                 .foregroundColor(AppColors.primaryBlue)
                         }
                     }
@@ -51,7 +51,7 @@ struct ArticleCommentCard: View {
                 // More options
                 Button(action: {}) {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -70,7 +70,7 @@ struct ArticleCommentCard: View {
                 Button(action: { onLikeTapped?() }) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "heart")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(AppTypography.iconSmall).fontWeight(.medium)
                         Text("\(comment.likeCount)")
                             .font(AppTypography.caption)
                     }
@@ -82,7 +82,7 @@ struct ArticleCommentCard: View {
                 Button(action: { onReplyTapped?() }) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "bubble.left")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(AppTypography.iconSmall).fontWeight(.medium)
                         Text("\(comment.replyCount) replies")
                             .font(AppTypography.caption)
                     }

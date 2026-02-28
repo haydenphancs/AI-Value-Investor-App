@@ -67,7 +67,7 @@ struct RecentActivitiesSection: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Recent Activities")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 RecentActivitiesInfoIcon {
@@ -85,7 +85,7 @@ struct RecentActivitiesSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Period label
             Text("Latest Filings (\(data.institutionalFlowSummary.periodDescription))")
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, AppSpacing.xs)
 
@@ -121,7 +121,7 @@ struct RecentActivitiesSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Period label
             Text(data.insiderActivities.summary.periodDescription)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, AppSpacing.xs)
 

@@ -21,15 +21,15 @@ struct MoneyMoveArticleCommentsSection: View {
             HStack {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "bubble.left.and.bubble.right.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.primaryBlue)
 
                     Text("Comments")
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("(\(totalCount))")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
 
@@ -39,7 +39,7 @@ struct MoneyMoveArticleCommentsSection: View {
                 if comments.count < totalCount {
                     Button(action: { onViewAllTapped?() }) {
                         Text("View all")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                     .buttonStyle(PlainButtonStyle())
@@ -55,7 +55,7 @@ struct MoneyMoveArticleCommentsSection: View {
                         .frame(width: 36, height: 36)
                         .overlay(
                             Image(systemName: "person.fill")
-                                .font(.system(size: 14))
+                                .font(AppTypography.iconSmall)
                                 .foregroundColor(AppColors.textMuted)
                         )
 
@@ -66,7 +66,7 @@ struct MoneyMoveArticleCommentsSection: View {
                     Spacer()
 
                     Image(systemName: "paperplane")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(AppSpacing.md)
@@ -91,11 +91,11 @@ struct MoneyMoveArticleCommentsSection: View {
                 Button(action: { onViewAllTapped?() }) {
                     HStack {
                         Text("Load more comments")
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
 
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.iconXS).fontWeight(.semibold)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                     .frame(maxWidth: .infinity)

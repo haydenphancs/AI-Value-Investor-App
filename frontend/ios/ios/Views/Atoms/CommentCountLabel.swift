@@ -22,7 +22,7 @@ struct CommentCountLabel: View {
         HStack(spacing: AppSpacing.xs) {
             if showIcon {
                 Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AppTypography.iconXS).fontWeight(.medium)
             }
 
             Text("\(formattedCount) Comments")

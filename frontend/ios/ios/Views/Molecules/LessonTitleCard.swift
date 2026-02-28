@@ -26,7 +26,7 @@ struct LessonTitleCard: View {
 
             // Main title
             Text(title)
-                .font(.system(size: 42, weight: .bold))
+                .font(AppTypography.titleHero)
                 .foregroundColor(AppColors.textPrimary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(4)

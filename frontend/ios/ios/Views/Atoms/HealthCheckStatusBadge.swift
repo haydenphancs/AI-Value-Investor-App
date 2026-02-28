@@ -16,12 +16,12 @@ struct HealthCheckStatusBadge: View {
         HStack(spacing: AppSpacing.xs) {
             // Checkmark icon
             Image(systemName: rating.iconName)
-                .font(.system(size: 14, weight: .semibold))
+                .font(AppTypography.iconSmall).fontWeight(.semibold)
                 .foregroundColor(rating.color)
 
             // Rating text: [2/4] Mix
             Text("[\(passedCount)/\(totalCount)] \(rating.rawValue)")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(rating.color)
         }
         .padding(.horizontal, AppSpacing.sm)

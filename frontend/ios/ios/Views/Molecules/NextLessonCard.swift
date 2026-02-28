@@ -21,7 +21,7 @@ struct NextLessonCard: View {
                     // Badge
                     HStack(spacing: AppSpacing.xs) {
                         Text("Next Up")
-                            .font(AppTypography.captionBold)
+                            .font(AppTypography.captionEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
 
                         Text("Journey \(lesson.journeyNumber): \(lesson.journeyTitle)")
@@ -31,7 +31,7 @@ struct NextLessonCard: View {
 
                     // Title
                     Text(lesson.lessonTitle)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -54,7 +54,7 @@ struct NextLessonCard: View {
 
                 // Right side - arrow
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.lg)

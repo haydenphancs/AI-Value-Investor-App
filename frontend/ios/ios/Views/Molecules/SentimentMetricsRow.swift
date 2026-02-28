@@ -45,7 +45,7 @@ struct SentimentMetricCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: iconName)
-                    .font(.system(size: 12))
+                    .font(AppTypography.iconXS)
                     .foregroundColor(AppColors.textSecondary)
 
                 Text(title)
@@ -54,7 +54,7 @@ struct SentimentMetricCard: View {
             }
 
             Text(value)
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
 

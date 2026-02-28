@@ -20,7 +20,7 @@ struct CryptoProfileSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section title
             Text("Crypto Profile")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Profile content
@@ -28,7 +28,7 @@ struct CryptoProfileSection: View {
                 // Description with expandable text
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text(profile.description)
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .lineLimit(isExpanded ? nil : collapsedLineLimit)
@@ -41,7 +41,7 @@ struct CryptoProfileSection: View {
                         }
                     }) {
                         Text(isExpanded ? "Show less" : "more")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.primaryBlue)
                     }
@@ -67,7 +67,7 @@ struct CryptoProfileSection: View {
                 // Website
                 HStack {
                     Text("Website")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     Spacer()
@@ -77,11 +77,11 @@ struct CryptoProfileSection: View {
                     }) {
                         HStack(spacing: AppSpacing.xs) {
                             Text(profile.website)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.primaryBlue)
 
                             Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(AppTypography.iconTiny).fontWeight(.semibold)
                                 .foregroundColor(AppColors.primaryBlue)
                         }
                     }
@@ -92,7 +92,7 @@ struct CryptoProfileSection: View {
                 if let whitepaper = profile.whitepaper {
                     HStack {
                         Text("Whitepaper")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
 
                         Spacer()
@@ -102,11 +102,11 @@ struct CryptoProfileSection: View {
                         }) {
                             HStack(spacing: AppSpacing.xs) {
                                 Text(whitepaper)
-                                    .font(AppTypography.footnoteBold)
+                                    .font(AppTypography.labelSmallEmphasis)
                                     .foregroundColor(AppColors.primaryBlue)
 
                                 Image(systemName: "arrow.up.right")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(AppTypography.iconTiny).fontWeight(.semibold)
                                     .foregroundColor(AppColors.primaryBlue)
                             }
                         }

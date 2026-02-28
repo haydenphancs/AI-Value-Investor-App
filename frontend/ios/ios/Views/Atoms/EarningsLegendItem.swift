@@ -48,7 +48,7 @@ struct EarningsLegendItem: View {
             if type == .surprised {
                 // Show gray "%" symbol for Surprised
                 Text("%")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppTypography.labelSmall).fontWeight(.bold)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 12, height: 12)
             } else {
@@ -59,7 +59,7 @@ struct EarningsLegendItem: View {
             }
 
             Text(type.label)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
         }
     }

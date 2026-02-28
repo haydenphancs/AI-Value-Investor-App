@@ -16,7 +16,7 @@ struct RelatedTickerTag: View {
             onTap?()
         }) {
             Text(ticker)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .fontWeight(.medium)
                 .foregroundColor(AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)

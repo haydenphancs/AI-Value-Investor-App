@@ -136,11 +136,11 @@ struct DonutChartLegendItem: View {
                 .frame(width: 8, height: 8)
 
             Text(label)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             Text(String(format: "%.0f%%", value))
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

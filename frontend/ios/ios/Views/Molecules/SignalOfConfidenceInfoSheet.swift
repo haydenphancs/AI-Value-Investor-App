@@ -33,7 +33,7 @@ struct SignalOfConfidenceInfoSheet: View {
                     Button("Done") {
                         dismiss()
                     }
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
                 }
             }
@@ -49,7 +49,7 @@ struct SignalOfConfidenceInfoSheet: View {
     private var introductionSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Understanding Signal of Confidence")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Signal of Confidence shows how a company returns capital to shareholders through dividends and share buybacks. These actions demonstrate management's confidence in the business and commitment to shareholder value.")
@@ -58,7 +58,7 @@ struct SignalOfConfidenceInfoSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Why Buybacks Matter")
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.top, AppSpacing.sm)
 
@@ -74,7 +74,7 @@ struct SignalOfConfidenceInfoSheet: View {
     private var metricTypesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Metric Types")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(SignalOfConfidenceMetricType.allCases) { metricType in
@@ -93,11 +93,11 @@ struct SignalOfConfidenceInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(metricType.rawValue)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(metricType.description)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -115,7 +115,7 @@ struct SignalOfConfidenceInfoSheet: View {
     private var investingTipsSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Value Investing Tips")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(SignalOfConfidenceInfoItem.valueInvestingTips) { tip in
@@ -128,23 +128,23 @@ struct SignalOfConfidenceInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: tip.icon)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text(tip.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(tip.description)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let example = tip.example {
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     Image(systemName: "lightbulb.fill")
-                        .font(.system(size: 11))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.neutral)
 
                     Text(example)

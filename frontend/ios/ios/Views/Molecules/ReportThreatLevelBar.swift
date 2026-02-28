@@ -18,7 +18,7 @@ struct ReportThreatLevelBar: View {
             // THREAT LEVEL header
             HStack(spacing: AppSpacing.sm) {
                 Text("THREAT LEVEL")
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textMuted)
                     .tracking(1.5)
             }
@@ -39,7 +39,7 @@ struct ReportThreatLevelBar: View {
                             )
 
                         Text(lvl.rawValue)
-                            .font(.system(size: 8, weight: lvl == level ? .bold : .regular))
+                            .font(AppTypography.captionTiny).fontWeight(lvl == level ? .bold : .regular)
                             .foregroundColor(lvl == level ? level.color : AppColors.textMuted)
                     }
                 }

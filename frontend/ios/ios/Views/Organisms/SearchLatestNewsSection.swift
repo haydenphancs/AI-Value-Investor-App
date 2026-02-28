@@ -16,7 +16,7 @@ struct SearchLatestNewsSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             Text("Latest News")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

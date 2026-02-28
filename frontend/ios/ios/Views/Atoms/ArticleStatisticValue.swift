@@ -19,15 +19,15 @@ struct ArticleStatisticValue: View {
             // Value with optional trend
             HStack(spacing: AppSpacing.xs) {
                 Text(value)
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .font(AppTypography.dataDisplay)
                     .foregroundColor(AppColors.textPrimary)
 
                 if let trend = trend, let trendValue = trendValue {
                     HStack(spacing: 2) {
                         Image(systemName: trend.icon)
-                            .font(.system(size: 10, weight: .bold))
+                            .font(AppTypography.iconTiny).fontWeight(.bold)
                         Text(trendValue)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(AppTypography.captionEmphasis)
                     }
                     .foregroundColor(trend.color)
                     .padding(.horizontal, AppSpacing.xs)

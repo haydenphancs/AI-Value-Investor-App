@@ -12,7 +12,7 @@ struct ChatHistoryTypeBadge: View {
 
     var body: some View {
         Text(type.displayName)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(type.textColor)
     }
 }

@@ -346,11 +346,11 @@ private struct CoreDetailHeaderSection: View {
             // Chapter badge with play button
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "book.fill")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.iconXS).fontWeight(.semibold)
                     .foregroundColor(book.level.color)
 
                 Text(content.formattedChapterLabel.uppercased())
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(book.level.color)
                     .tracking(0.8)
 
@@ -360,7 +360,7 @@ private struct CoreDetailHeaderSection: View {
                 Button(action: handleDirectPlay) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 28, weight: .medium))
+                            .font(AppTypography.iconXL).fontWeight(.medium)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }
@@ -369,7 +369,7 @@ private struct CoreDetailHeaderSection: View {
 
             // Chapter title
             Text(content.chapterTitle)
-                .font(AppTypography.largeTitle)
+                .font(AppTypography.titleLarge)
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -439,7 +439,7 @@ private struct CoreHeadingView: View {
 
     var body: some View {
         Text(text)
-            .font(AppTypography.title2)
+            .font(AppTypography.titleCompact)
             .foregroundColor(AppColors.textPrimary)
             .padding(.top, AppSpacing.md)
     }
@@ -466,7 +466,7 @@ private struct CoreQuoteView: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Quote icon
             Image(systemName: "quote.opening")
-                .font(.system(size: 24, weight: .bold))
+                .font(AppTypography.iconXL).fontWeight(.bold)
                 .foregroundColor(AppColors.accentCyan.opacity(0.6))
 
             // Quote text
@@ -483,16 +483,16 @@ private struct CoreQuoteView: View {
                     .frame(width: 24, height: 2)
 
                 Text(quote.author)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.accentCyan)
 
                 if let source = quote.source {
                     Text(",")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textMuted)
 
                     Text(source)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .italic()
                 }
@@ -513,7 +513,7 @@ private struct CoreAssetListView: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             if let title = title {
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -539,18 +539,18 @@ private struct CoreAssetCard: View {
                     .frame(width: 44, height: 44)
 
                 Image(systemName: asset.icon)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(Color(hex: asset.iconColor))
             }
 
             // Content
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(asset.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(asset.description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -594,20 +594,20 @@ private struct CoreActionStepCard: View {
 
                     if step.isCompleted {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(AppTypography.iconXS).fontWeight(.bold)
                             .foregroundColor(AppColors.bullish)
                     }
                 }
 
                 Text(step.title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             // Description
             Text(step.description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
                 .padding(.leading, 24 + AppSpacing.md)
@@ -629,7 +629,7 @@ private struct CoreBulletPointsView: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             if let title = title {
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -642,7 +642,7 @@ private struct CoreBulletPointsView: View {
                             .padding(.top, 6)
 
                         Text(point.text)
-                            .font(point.isHighlighted ? AppTypography.bodyBold : AppTypography.body)
+                            .font(point.isHighlighted ? AppTypography.bodyEmphasis : AppTypography.body)
                             .foregroundColor(point.isHighlighted ? AppColors.textPrimary : AppColors.textSecondary)
                             .lineSpacing(4)
                     }
@@ -662,16 +662,16 @@ private struct CoreCalloutView: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: callout.style.iconName)
-                .font(.system(size: 18, weight: .semibold))
+                .font(AppTypography.iconMedium).fontWeight(.semibold)
                 .foregroundColor(callout.style.iconColor)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(callout.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(callout.text)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
             }
@@ -696,10 +696,10 @@ private struct CoreDetailNavigationHeader: View {
             Button(action: onBackTapped) {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                     Text(hasPrevious ? "Prev" : "Back")
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                 }
                 .foregroundColor(AppColors.textPrimary)
                 .frame(height: 44)
@@ -712,7 +712,7 @@ private struct CoreDetailNavigationHeader: View {
             // Close button (center)
             Button(action: onCloseTapped) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -726,10 +726,10 @@ private struct CoreDetailNavigationHeader: View {
                 Button(action: onNextTapped) {
                     HStack(spacing: AppSpacing.sm) {
                         Text("Next")
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                         
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                     }
                     .foregroundColor(AppColors.textPrimary)
                     .frame(height: 44)
@@ -765,7 +765,7 @@ private struct CoreDetailMiniHeader: View {
             // Back button
             Button(action: onBackTapped) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -779,7 +779,7 @@ private struct CoreDetailMiniHeader: View {
                     .foregroundColor(AppColors.textSecondary)
 
                 Text(content.chapterTitle)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
             }
@@ -789,7 +789,7 @@ private struct CoreDetailMiniHeader: View {
             // Close button
             Button(action: onCloseTapped) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -801,9 +801,9 @@ private struct CoreDetailMiniHeader: View {
                 Button(action: onNextTapped) {
                     HStack(spacing: AppSpacing.xs) {
                         Text("Next")
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                     }
                     .foregroundColor(AppColors.textPrimary)
                     .frame(height: 44)
@@ -836,10 +836,10 @@ private struct CoreCompletionButton: View {
         }) {
             HStack(spacing: AppSpacing.md) {
                 Text(isCompleted ? "Review Again" : "Complete & Continue")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
 
                 Image(systemName: isCompleted ? "arrow.counterclockwise" : "arrow.right")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AppTypography.iconSmall).fontWeight(.semibold)
             }
             .foregroundColor(isCompleted ? AppColors.textSecondary : .white)
             .frame(maxWidth: .infinity)

@@ -57,7 +57,7 @@ struct StockPerformanceCard: View {
             // Follow-up question
             if let question = performance.followUpQuestion {
                 Text(question)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .italic()
             }
@@ -80,7 +80,7 @@ private struct StatItem: View {
                 .foregroundColor(AppColors.textMuted)
 
             Text(value)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

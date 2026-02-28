@@ -31,11 +31,11 @@ struct ReportPriceMovementSection: View {
             // Percentage text + time label
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(ctx.displayPercentage)
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(AppTypography.dataTitle)
                     .foregroundColor(ctx.trendColor)
 
                 Text(ctx.timeLabel)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
             }
 
@@ -58,10 +58,10 @@ struct ReportPriceMovementSection: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                     
                     Text("Insight")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundStyle(LinearGradient(
                             colors: [.indigo, .cyan],
                             startPoint: .topLeading,
@@ -71,7 +71,7 @@ struct ReportPriceMovementSection: View {
                 
                 // Narrative text
                 Text(ctx.narrative)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

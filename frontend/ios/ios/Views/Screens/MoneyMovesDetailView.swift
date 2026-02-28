@@ -308,7 +308,7 @@ private struct MoneyMovesDetailHeader: View {
                     onBackTapped?()
                 }) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
@@ -318,11 +318,11 @@ private struct MoneyMovesDetailHeader: View {
             // Title section
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("Money Moves")
-                    .font(AppTypography.largeTitle)
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Real-world case studies & deep dives")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }
@@ -411,20 +411,20 @@ private struct FeaturedDeepDiveHeroCard: View {
 
                     // Category label
                     Text("FEATURED DEEP DIVE")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(.white.opacity(0.8))
                         .tracking(1.2)
 
                     // Title
                     Text(article.title)
-                        .font(.system(size: 28, weight: .bold))
+                        .font(AppTypography.titleLarge)
                         .foregroundColor(.white)
                         .minimumScaleFactor(0.8)
                         .lineLimit(2)
 
                     // Description
                     Text(article.subtitle)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(.white.opacity(0.9))
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
@@ -433,7 +433,7 @@ private struct FeaturedDeepDiveHeroCard: View {
                     HStack(spacing: AppSpacing.lg) {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "clock")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(AppTypography.iconXS).fontWeight(.medium)
                             Text("\(article.readTimeMinutes) min")
                                 .font(AppTypography.caption)
                         }
@@ -441,13 +441,13 @@ private struct FeaturedDeepDiveHeroCard: View {
 
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "person.2.fill")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(AppTypography.iconXS).fontWeight(.medium)
                             Text("\(article.viewCount) investors")
                                 .font(AppTypography.caption)
 
                             if article.hasAudioVersion {
                                 Image(systemName: "headphones")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(AppTypography.iconXS).fontWeight(.medium)
                                     .padding(.leading, AppSpacing.md)
                             }
                         }
@@ -517,14 +517,14 @@ private struct MoneyMovesCategorySectionHeader: View {
                     .frame(width: 36, height: 36)
 
                 Image(systemName: category.iconName)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(.white)
             }
 
             // Title and subtitle
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(category.rawValue)
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(category.tagline)

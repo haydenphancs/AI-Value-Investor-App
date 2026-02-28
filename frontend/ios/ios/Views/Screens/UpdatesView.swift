@@ -158,7 +158,7 @@ struct ManageAssetsSheet: View {
 
                                 if let change = ticker.formattedChange {
                                     Text(change)
-                                        .font(AppTypography.callout)
+                                        .font(AppTypography.bodySmall)
                                         .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
                                 }
                             }
@@ -174,7 +174,7 @@ struct ManageAssetsSheet: View {
                         Button(action: { showTickerSearch = true }) {
                             HStack {
                                 Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 22))
+                                    .font(AppTypography.iconXL)
                                     .foregroundColor(AppColors.primaryBlue)
                                 Text("Add Ticker")
                                     .font(AppTypography.body)
@@ -297,7 +297,7 @@ struct TickerSearchSheet: View {
                                         HStack {
                                             VStack(alignment: .leading, spacing: 2) {
                                                 Text(item.ticker)
-                                                    .font(AppTypography.bodyBold)
+                                                    .font(AppTypography.bodyEmphasis)
                                                     .foregroundColor(AppColors.textPrimary)
                                                 Text(item.companyName)
                                                     .font(AppTypography.caption)

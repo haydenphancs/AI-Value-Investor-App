@@ -19,7 +19,7 @@ struct EarningsTimeRangeToggle: View {
                     }
                 } label: {
                     Text(range.rawValue)
-                        .font(AppTypography.footnoteBold)
+                        .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(selectedRange == range ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)

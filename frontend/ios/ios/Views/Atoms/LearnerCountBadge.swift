@@ -15,7 +15,7 @@ struct LearnerCountBadge: View {
         HStack(spacing: AppSpacing.xxs) {
             if showIcon {
                 Image(systemName: "person.2.fill")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AppTypography.iconTiny).fontWeight(.medium)
             }
 
             Text("\(count) investors")

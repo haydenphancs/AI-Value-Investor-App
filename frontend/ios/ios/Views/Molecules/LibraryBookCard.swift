@@ -27,7 +27,7 @@ struct LibraryBookCard: View {
                         // Book title overlay
                         VStack {
                             Text(book.title.uppercased())
-                                .font(.system(size: 8, weight: .bold))
+                                .font(AppTypography.captionTiny).fontWeight(.bold)
                                 .foregroundColor(.white)
                                 .multilineTextAlignment(.center)
                                 .lineLimit(3)
@@ -45,7 +45,7 @@ struct LibraryBookCard: View {
                                 
 
                             Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .bold))
+                                .font(AppTypography.iconXS).fontWeight(.bold)
                                 .foregroundColor(.white)
                         }
                         .offset(x: 6, y: -6)
@@ -56,14 +56,14 @@ struct LibraryBookCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     // Curriculum order badge
                     Text("BOOK \(book.curriculumOrder)")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(AppColors.primaryBlue)
                         .tracking(0.5)
 
                     // Title and rating
                     HStack(alignment: .top) {
                         Text(book.title)
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(2)
 
@@ -72,11 +72,11 @@ struct LibraryBookCard: View {
                         // Rating
                         HStack(spacing: AppSpacing.xxs) {
                             Image(systemName: "star.fill")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
                                 .foregroundColor(AppColors.neutral)
 
                             Text(book.formattedRating)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
                         }
                         .padding(.horizontal, AppSpacing.sm)
@@ -87,7 +87,7 @@ struct LibraryBookCard: View {
 
                     // Author
                     Text(book.author)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     // Description
@@ -119,10 +119,10 @@ struct LibraryBookCard: View {
                 }) {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "bubble.left.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
 
                         Text("Chat with Book")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(AppColors.textPrimary)
                     .frame(maxWidth: .infinity)
@@ -139,10 +139,10 @@ struct LibraryBookCard: View {
                     }) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
 
                             Text("Review")
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                         }
                         .foregroundColor(AppColors.bullish)
                         .frame(maxWidth: .infinity)
@@ -157,10 +157,10 @@ struct LibraryBookCard: View {
                     }) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
 
                             Text("Read Key Ideas")
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                         }
                         .foregroundColor(AppColors.primaryBlue)
                         .frame(maxWidth: .infinity)

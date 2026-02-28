@@ -13,7 +13,7 @@ struct RelatedTickerChip: View {
 
     var body: some View {
         Text(symbol)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(isHighlighted ? AppColors.primaryBlue : AppColors.textSecondary)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

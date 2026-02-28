@@ -24,10 +24,10 @@ struct GenerateAnalysisButton: View {
                 } else {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "sparkles")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                         Text("Generate Analysis")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                     }
                 }
 

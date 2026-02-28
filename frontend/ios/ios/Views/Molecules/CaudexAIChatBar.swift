@@ -39,7 +39,7 @@ struct CaudexAIChatBar: View {
             HStack(spacing: AppSpacing.md) {
                 // Sparkle icon
                 Image(systemName: "sparkles")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(AppTypography.iconMedium).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
 
                 // Text field
@@ -54,7 +54,7 @@ struct CaudexAIChatBar: View {
                     }
                 }) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
+                        .font(AppTypography.iconDisplay)
                         .foregroundColor(canSend ? AppColors.primaryBlue : AppColors.textMuted)
                 }
                 .buttonStyle(PlainButtonStyle())

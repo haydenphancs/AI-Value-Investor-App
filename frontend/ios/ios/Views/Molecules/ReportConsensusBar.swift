@@ -74,11 +74,11 @@ struct ReportConsensusBar: View {
     private var analystPriceTargetHeader: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Analyst Price Target")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             Text("One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus. Target \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget)). Current price: \(consensus.formattedCurrentPrice).")
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -156,7 +156,7 @@ struct ReportConsensusBar: View {
                 let xPos = CGFloat(lastIndex) * xStep
 
                 Text(consensus.formattedCurrentPrice)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppTypography.labelSmall).fontWeight(.bold)
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -246,15 +246,15 @@ struct ReportConsensusBar: View {
     private func targetBadge(label: String, price: String, percent: String, color: Color) -> some View {
         VStack(alignment: .center, spacing: 2) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
+                .font(AppTypography.captionTiny)
                 .foregroundColor(AppColors.textMuted)
 
             Text(price)
-                .font(.system(size: 11, weight: .bold))
+                .font(AppTypography.caption).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(percent)
-                .font(.system(size: 10, weight: .bold))
+                .font(AppTypography.captionSmall).fontWeight(.bold)
                 .foregroundColor(color)
         }
     }
@@ -272,16 +272,16 @@ struct ReportConsensusBar: View {
     private var momentumSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Momentum")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             HStack(spacing: AppSpacing.lg) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
                         .foregroundColor(AppColors.bullish)
                     Text("\(consensus.momentumUpgrades)")
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Upgrades")
                         .font(AppTypography.caption)
@@ -290,10 +290,10 @@ struct ReportConsensusBar: View {
 
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.down")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
                         .foregroundColor(AppColors.bearish)
                     Text("\(consensus.momentumDowngrades)")
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Downgrades")
                         .font(AppTypography.caption)
@@ -310,14 +310,14 @@ struct ReportConsensusBar: View {
             if let hedgeFundNote = consensus.hedgeFundNote {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text("Hedge Funds")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
 
                     // Hedge Fund Flow Chart (Price on top, Buy/Sell volume below)
                     if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
                             Text("12-Month Flow")
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textMuted)
                                 .padding(.top, AppSpacing.md)
 
@@ -332,7 +332,7 @@ struct ReportConsensusBar: View {
                     }
 
                     Text(hedgeFundNote)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textSecondary)
                         .padding(.top, AppSpacing.sm)
                 }

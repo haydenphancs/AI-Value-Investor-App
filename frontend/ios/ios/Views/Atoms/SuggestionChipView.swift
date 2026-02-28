@@ -16,7 +16,7 @@ struct SuggestionChipView: View {
             onTap?()
         }) {
             Text(chip.text)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(chip.type.textColor)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.md)

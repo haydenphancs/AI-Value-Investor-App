@@ -55,13 +55,13 @@ struct ValuationSnapshotCard: View {
                             .frame(width: 36, height: 36)
 
                         Image(systemName: valuation.level.iconName)
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(valuation.level.color)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Valuation")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(valuation.level.rawValue)
@@ -73,7 +73,7 @@ struct ValuationSnapshotCard: View {
 
                     // P/E badge
                     Text("\(String(format: "%.1f", valuation.peRatio))x P/E")
-                        .font(AppTypography.footnoteBold)
+                        .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(valuation.level.color)
                         .padding(.horizontal, AppSpacing.sm)
                         .padding(.vertical, AppSpacing.xxs)
@@ -81,7 +81,7 @@ struct ValuationSnapshotCard: View {
                         .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
@@ -102,7 +102,7 @@ struct ValuationSnapshotCard: View {
 
                 // Story
                 Text(valuation.resolvedStory)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -172,10 +172,10 @@ struct ValuationMetricPill: View {
     var body: some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
             Text(label)
-                .font(.system(size: 10))
+                .font(AppTypography.captionSmall)
                 .foregroundColor(AppColors.textMuted)
         }
         .padding(.horizontal, AppSpacing.md)
@@ -213,13 +213,13 @@ struct SectorPerformanceSnapshotCard: View {
                             .frame(width: 36, height: 36)
 
                         Image(systemName: "chart.pie.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(AppColors.primaryBlue)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Sector Performance")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         HStack(spacing: AppSpacing.xs) {
@@ -238,7 +238,7 @@ struct SectorPerformanceSnapshotCard: View {
                     Spacer()
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
@@ -254,7 +254,7 @@ struct SectorPerformanceSnapshotCard: View {
 
                 // Story
                 Text(sectorPerformance.resolvedStory)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -282,7 +282,7 @@ struct SectorPerformanceBlock: View {
             Spacer()
 
             Text(sector.formattedChange)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(sector.color)
         }
         .padding(.horizontal, AppSpacing.md)
@@ -315,13 +315,13 @@ struct MacroForecastSnapshotCard: View {
                             .frame(width: 36, height: 36)
 
                         Image(systemName: "globe.americas.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(AppColors.accentCyan)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Macro Forecast")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text("Economic Outlook")
@@ -341,7 +341,7 @@ struct MacroForecastSnapshotCard: View {
                         .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
@@ -355,7 +355,7 @@ struct MacroForecastSnapshotCard: View {
 
                 // Story
                 Text(macroForecast.resolvedStory)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -384,17 +384,17 @@ struct MacroForecastItemCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: indicator.signal.iconName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AppTypography.iconSmall).fontWeight(.semibold)
                     .foregroundColor(indicator.signal.color)
 
                 Text(indicator.title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 Text(indicator.signal.rawValue)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppTypography.captionSmallEmphasis)
                     .foregroundColor(indicator.signal.color)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, 2)
@@ -403,7 +403,7 @@ struct MacroForecastItemCard: View {
             }
 
             Text(indicator.description)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)

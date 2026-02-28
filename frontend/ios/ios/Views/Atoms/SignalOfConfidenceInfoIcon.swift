@@ -18,7 +18,7 @@ struct SignalOfConfidenceInfoIcon: View {
                     .frame(width: 24, height: 24)
 
                 Image(systemName: "info")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.iconXS).fontWeight(.semibold)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

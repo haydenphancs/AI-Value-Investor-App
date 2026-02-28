@@ -109,7 +109,7 @@ struct CaydexSloganView: View {
                         dismiss()
                     }) {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 28))
+                            .font(AppTypography.titleLarge)
                             .foregroundStyle(AppColors.textSecondary, AppColors.cardBackground)
                     }
                     .buttonStyle(PlainButtonStyle())

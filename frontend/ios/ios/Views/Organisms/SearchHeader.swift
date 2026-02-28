@@ -23,7 +23,7 @@ struct SearchHeader: View {
                     onBackTapped?()
                 }) {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 32, height: 32)
                 }
@@ -32,7 +32,7 @@ struct SearchHeader: View {
                 // Search bar
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.primaryBlue)
 
                     TextField("", text: $searchText, prompt: Text("Search or ask Caudex AI...")

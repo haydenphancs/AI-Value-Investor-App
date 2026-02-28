@@ -33,7 +33,7 @@ struct ProfitPowerInfoSheet: View {
                     Button("Done") {
                         dismiss()
                     }
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
                 }
             }
@@ -49,7 +49,7 @@ struct ProfitPowerInfoSheet: View {
     private var introductionSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Understanding Profit Power")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Profit Power shows multiple profitability margins over time, helping you assess a company's ability to convert revenue into profit at different stages of operations.")
@@ -64,7 +64,7 @@ struct ProfitPowerInfoSheet: View {
     private var marginTypesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Margin Types")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(ProfitMarginType.allCases) { marginType in
@@ -83,11 +83,11 @@ struct ProfitPowerInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(marginType.rawValue)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(marginType.description)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -105,7 +105,7 @@ struct ProfitPowerInfoSheet: View {
     private var investingTipsSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Value Investing Tips")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(ProfitPowerInfoItem.valueInvestingTips) { tip in
@@ -118,23 +118,23 @@ struct ProfitPowerInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: tip.icon)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text(tip.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(tip.description)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let example = tip.example {
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     Image(systemName: "lightbulb.fill")
-                        .font(.system(size: 11))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.neutral)
 
                     Text(example)

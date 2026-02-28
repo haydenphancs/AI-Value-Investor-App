@@ -16,14 +16,14 @@ struct TickerDetailSectorIndustrySection: View {
             // Section title with info button inside card styling
             HStack {
                 Text("Sector & Industry")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Button(action: {
                     showInfoSheet = true
                 }) {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -68,10 +68,10 @@ struct SectorIndustryInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Why Sector & Industry Matters")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -109,7 +109,7 @@ struct SectorIndustryInfoSheet: View {
                     // Metrics explained
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         Text("Key Metrics Explained")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
                         MetricExplanation(
@@ -150,17 +150,17 @@ struct InfoBulletPoint: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -176,11 +176,11 @@ struct MetricExplanation: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             Text(term)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text(explanation)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

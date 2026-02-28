@@ -18,13 +18,13 @@ struct TickerCard: View {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 // Ticker Name
                 Text(ticker.name)
-                    .font(AppTypography.tickerName)
+                    .font(AppTypography.captionTiny)
                     .foregroundColor(AppColors.textSecondary)
                     .lineLimit(1)
 
                 // Price
                 Text(ticker.formattedPrice)
-                    .font(AppTypography.tickerPrice)
+                    .font(AppTypography.dataMedium)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -35,7 +35,7 @@ struct TickerCard: View {
 
                 // Change Percentage
                 Text(ticker.formattedChange)
-                    .font(AppTypography.tickerChange)
+                    .font(AppTypography.dataSmall)
                     .foregroundColor(ticker.isPositive ? AppColors.bullish : AppColors.bearish)
             }
             .padding(AppSpacing.sm)

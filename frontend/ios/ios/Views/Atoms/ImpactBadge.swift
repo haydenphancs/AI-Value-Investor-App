@@ -12,7 +12,7 @@ struct ImpactBadge: View {
 
     var body: some View {
         Text(level.rawValue)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(level.color)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

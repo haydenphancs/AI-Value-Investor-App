@@ -17,7 +17,7 @@ struct TappableSearchBar: View {
         }) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
 
                 Text(placeholder)

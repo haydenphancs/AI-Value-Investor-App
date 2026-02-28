@@ -12,7 +12,7 @@ struct AnalystActionTypeBadge: View {
 
     var body: some View {
         Text(actionType.rawValue)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(badgeTextColor)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

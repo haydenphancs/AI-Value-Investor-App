@@ -15,7 +15,7 @@ struct MoreOptionsButton: View {
             onTap?()
         }) {
             Image(systemName: "ellipsis")
-                .font(.system(size: 16, weight: .medium))
+                .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
                 .rotationEffect(.degrees(90))
                 .frame(width: 24, height: 24)

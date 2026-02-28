@@ -98,7 +98,7 @@ struct MoneyMoveArticleHeroHeader: View {
                     Button(action: { onBackTapped?() }) {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "chevron.left")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(AppTypography.iconDefault).fontWeight(.semibold)
                             Text("Back")
                                 .font(AppTypography.body)
                         }
@@ -119,7 +119,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         // Share button
                         Button(action: { onShareTapped?() }) {
                             Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(AppTypography.iconDefault).fontWeight(.semibold)
                                 .foregroundColor(.white)
                                 .frame(width: 36, height: 36)
                                 .background(
@@ -132,7 +132,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         // Bookmark button
                         Button(action: { onBookmarkTapped?() }) {
                             Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(AppTypography.iconDefault).fontWeight(.semibold)
                                 .foregroundColor(.white)
                                 .frame(width: 36, height: 36)
                                 .background(
@@ -145,7 +145,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         // More button
                         Button(action: { onMoreTapped?() }) {
                             Image(systemName: "ellipsis")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(AppTypography.iconDefault).fontWeight(.semibold)
                                 .foregroundColor(.white)
                                 .frame(width: 36, height: 36)
                                 .background(
@@ -165,13 +165,13 @@ struct MoneyMoveArticleHeroHeader: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     // Category (or "FEATURED DEEP DIVE" for featured articles)
                     Text(article.isFeatured ? "FEATURED DEEP DIVE" : article.category.rawValue.uppercased())
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(.white.opacity(0.7))
                         .tracking(1.2)
 
                     // Title
                     Text(article.title)
-                        .font(.system(size: 28, weight: .bold))
+                        .font(AppTypography.titleLarge)
                         .foregroundColor(.white)
                         .lineSpacing(4)
 
@@ -197,7 +197,7 @@ struct MoneyMoveArticleHeroHeader: View {
                                 // Read time
                                 HStack(spacing: AppSpacing.xs) {
                                     Image(systemName: "clock")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(AppTypography.captionEmphasis).fontWeight(.medium)
                                     Text(article.formattedReadTime)
                                         .font(AppTypography.caption)
                                 }
@@ -205,7 +205,7 @@ struct MoneyMoveArticleHeroHeader: View {
                                 // Views
                                 HStack(spacing: AppSpacing.xs) {
                                     Image(systemName: "eye")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(AppTypography.captionEmphasis).fontWeight(.medium)
                                     Text(article.viewCount)
                                         .font(AppTypography.caption)
                                 }
@@ -224,7 +224,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         HStack(spacing: AppSpacing.sm) {
                             NowPlayingBars()
                             Text("Now Playing")
-                                .font(AppTypography.captionBold)
+                                .font(AppTypography.captionEmphasis)
                                 .foregroundColor(.white)
                         }
                         .padding(.top, AppSpacing.xs)

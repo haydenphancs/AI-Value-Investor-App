@@ -13,7 +13,7 @@ struct ReportKeyManagementTable: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Key Management")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             // Table header
@@ -32,7 +32,7 @@ struct ReportKeyManagementTable: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(manager.name)
-                                .font(AppTypography.subheadline)
+                                .font(AppTypography.label)
                                 .foregroundColor(AppColors.textPrimary)
                             Text(manager.title)
                                 .font(AppTypography.caption)
@@ -43,7 +43,7 @@ struct ReportKeyManagementTable: View {
 
                         VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                             Text(manager.ownership)
-                                .font(AppTypography.subheadline)
+                                .font(AppTypography.label)
                                 .fontWeight(.medium)
                                 .foregroundColor(AppColors.textPrimary)
                             Text(manager.ownershipValue)
@@ -69,10 +69,10 @@ struct ReportKeyManagementTable: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                     Text("Insight")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundStyle(LinearGradient(
                             colors: [.indigo, .cyan],
                             startPoint: .topLeading,
@@ -81,7 +81,7 @@ struct ReportKeyManagementTable: View {
                 }
 
                 Text(management.ownershipInsight)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

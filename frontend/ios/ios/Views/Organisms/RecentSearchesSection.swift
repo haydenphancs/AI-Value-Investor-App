@@ -18,7 +18,7 @@ struct RecentSearchesSection: View {
             // Header
             HStack {
                 Text("Recent Searches")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -57,7 +57,7 @@ struct RecentSearchesSection: View {
     private var emptyStateView: some View {
         VStack(spacing: AppSpacing.md) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 32))
+                .font(AppTypography.iconDisplay)
                 .foregroundColor(AppColors.textMuted)
 
             Text("No recent searches")

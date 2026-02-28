@@ -18,7 +18,7 @@ struct ETFDetailSnapshotsSection: View {
             // Section title with info button
             HStack {
                 Text("Snapshots")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -77,18 +77,18 @@ struct ETFSnapshotCardHeader: View {
                         .frame(width: 36, height: 36)
 
                     Image(systemName: category.iconName)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(category.iconColor)
                 }
 
                 Text(category.rawValue)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.iconXS).fontWeight(.semibold)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(.vertical, AppSpacing.md)
@@ -121,7 +121,7 @@ struct ETFIdentityRatingCard: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(etfData.symbol)
-                                .font(.system(size: 28, weight: .bold))
+                                .font(AppTypography.titleLarge)
                                 .foregroundColor(AppColors.textPrimary)
                             Text(etfData.name)
                                 .font(AppTypography.caption)
@@ -133,7 +133,7 @@ struct ETFIdentityRatingCard: View {
 
                         VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                             Text(etfData.formattedPrice)
-                                .font(.system(size: 22, weight: .bold))
+                                .font(AppTypography.title)
                                 .foregroundColor(AppColors.textPrimary)
 
                             // Change pill
@@ -199,7 +199,7 @@ struct ETFStrategyCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     // The hook
                     Text("\"\(strategy.hook)\"")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                         .italic()
                         .lineSpacing(4)
@@ -254,7 +254,7 @@ struct ETFNetYieldCard: View {
                                 .foregroundColor(AppColors.bearish)
 
                             Text("Fee: \(netYield.formattedExpenseRatio)")
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
 
                             Text(netYield.feeContext)
@@ -283,7 +283,7 @@ struct ETFNetYieldCard: View {
                                 .foregroundColor(AppColors.bullish)
 
                             Text("Yield: \(netYield.formattedDividendYield)")
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
 
                             Text("Pays \(netYield.payFrequency)")
@@ -313,11 +313,11 @@ struct ETFNetYieldCard: View {
                     // The verdict
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Image(systemName: "lightbulb.fill")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                             .foregroundColor(AppColors.neutral)
 
                         Text(netYield.verdict)
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .fontWeight(.medium)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -360,11 +360,11 @@ struct ETFDividendHistoryRow: View {
                 HStack {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "calendar.badge.clock")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                             .foregroundColor(AppColors.primaryBlue)
 
                         Text("Dividend History")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.textPrimary)
                     }
@@ -372,7 +372,7 @@ struct ETFDividendHistoryRow: View {
                     Spacer()
 
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
 
@@ -381,7 +381,7 @@ struct ETFDividendHistoryRow: View {
                     // Dividend Per Share
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text("Per Share")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
                         Text(lastPayment.dividendPerShare)
                             .font(AppTypography.caption)
@@ -394,7 +394,7 @@ struct ETFDividendHistoryRow: View {
                     // Ex-Dividend Date
                     VStack(alignment: .center, spacing: AppSpacing.xxs) {
                         Text("Ex-Div Date")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
                         Text(lastPayment.exDividendDate)
                             .font(AppTypography.caption)
@@ -407,7 +407,7 @@ struct ETFDividendHistoryRow: View {
                     // Pay Date
                     VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                         Text("Pay Date")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
                         Text(lastPayment.payDate)
                             .font(AppTypography.caption)
@@ -498,14 +498,14 @@ struct ETFAssetAllocationBar: View {
             // Title with total assets
             HStack {
                 Text("Asset Allocation")
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 Text(allocation.totalAssets)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textSecondary)
             }
@@ -533,7 +533,7 @@ struct ETFAssetAllocationBar: View {
                             .fill(segment.color)
                             .frame(width: 8, height: 8)
                         Text("\(segment.label) \(String(format: "%.1f", segment.value))%")
-                            .font(.system(size: 10))
+                            .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -567,7 +567,7 @@ struct ETFSectorsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Sectors")
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
 
@@ -595,7 +595,7 @@ struct ETFSectorsView: View {
                         .frame(height: 6)
 
                         Text(String(format: "%.1f%%", row.weight))
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(AppTypography.captionEmphasis)
                             .foregroundColor(row.isOther ? AppColors.textMuted : AppColors.textPrimary)
                             .frame(width: 44, alignment: .trailing)
                     }
@@ -613,7 +613,7 @@ struct ETFTopHoldingsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("The Ingredients")
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
 
@@ -640,16 +640,16 @@ struct ETFHoldingSquare: View {
                     .frame(width: 48, height: 48)
 
                 Text(String(holding.symbol.prefix(2)))
-                    .font(.system(size: 16, weight: .bold))
+                    .font(AppTypography.iconDefault).fontWeight(.bold)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(holding.symbol)
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.captionSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(holding.formattedWeight)
-                .font(.system(size: 10))
+                .font(AppTypography.captionSmall)
                 .foregroundColor(AppColors.textMuted)
         }
         .frame(width: 60)
@@ -671,7 +671,7 @@ struct ETFConcentrationMeter: View {
             // Label row
             HStack {
                 Text("Top \(concentration.topN) Weight: \(concentration.formattedWeight)")
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
 
@@ -718,7 +718,7 @@ struct ETFConcentrationMeter: View {
             // Insight
             HStack(alignment: .top, spacing: AppSpacing.sm) {
                 Image(systemName: "lightbulb.fill")
-                    .font(.system(size: 14))
+                    .font(AppTypography.iconSmall)
                     .foregroundColor(AppColors.neutral)
 
                 Text(concentration.insight)
@@ -738,7 +738,7 @@ struct ETFSnapshotBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold))
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(color)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xxs)
@@ -758,7 +758,7 @@ struct ETFSnapshotTag: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .medium))
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(AppColors.textSecondary)
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.xs)
@@ -782,10 +782,10 @@ struct ETFSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "camera.viewfinder")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("What are Snapshots?")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -799,10 +799,10 @@ struct ETFSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "square.grid.2x2.fill")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Snapshot Categories")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -837,10 +837,10 @@ struct ETFSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Pro Tips")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 

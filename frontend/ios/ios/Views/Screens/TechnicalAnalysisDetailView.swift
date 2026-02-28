@@ -78,7 +78,7 @@ struct TechnicalDetailHeader: View {
         HStack {
             Button(action: onBackTapped) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(AppTypography.iconMedium).fontWeight(.medium)
                     .foregroundColor(AppColors.textPrimary)
             }
             .frame(width: 44, height: 44)
@@ -86,14 +86,14 @@ struct TechnicalDetailHeader: View {
             Spacer()
 
             Text("\(symbol) Technical Analysis")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Spacer()
 
             Button(action: onInfoTapped) {
                 Image(systemName: "info.circle")
-                    .font(.system(size: 18))
+                    .font(AppTypography.iconMedium)
                     .foregroundColor(AppColors.textMuted)
             }
             .frame(width: 44, height: 44)

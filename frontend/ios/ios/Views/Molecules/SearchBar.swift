@@ -15,7 +15,7 @@ struct SearchBar: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .medium))
+                .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
 
             TextField("", text: $text, prompt: Text(placeholder)

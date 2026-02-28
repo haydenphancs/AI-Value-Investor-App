@@ -71,7 +71,7 @@ struct BookLibraryView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                                 Text("Your Curriculum")
-                                    .font(AppTypography.title3)
+                                    .font(AppTypography.heading)
                                     .foregroundColor(AppColors.textPrimary)
 
                                 Text("Complete in order for maximum learning")
@@ -142,7 +142,7 @@ private struct BookLibraryHeader: View {
                     onBackTapped?()
                 }) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
@@ -152,11 +152,11 @@ private struct BookLibraryHeader: View {
             // Title section
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("Book Library")
-                    .font(AppTypography.largeTitle)
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("10 essential books to master value investing")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }
@@ -173,7 +173,7 @@ private struct BookLibrarySearchBar: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .medium))
+                .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
 
             TextField("Search by title or author...", text: $searchText)
@@ -187,7 +187,7 @@ private struct BookLibrarySearchBar: View {
                     searchText = ""
                 }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
@@ -239,24 +239,24 @@ private struct ProgressDashboardCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     // Label
                     Text("YOUR PROGRESS")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(.white.opacity(0.8))
                         .tracking(1.2)
 
                     // Main stat
                     VStack(alignment: .leading, spacing: AppSpacing.xs) {
                         Text("\(masteredCount) of \(totalCount)")
-                            .font(.system(size: 32, weight: .bold))
+                            .font(AppTypography.titleHero)
                             .foregroundColor(.white)
 
                         Text("Books Mastered")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(.white.opacity(0.9))
                     }
 
                     // Motivational message
                     Text(motivationalMessage)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(.white.opacity(0.85))
                         .lineLimit(2)
                 }
@@ -329,11 +329,11 @@ private struct ProgressRingView: View {
             // Percentage text
             VStack(spacing: 0) {
                 Text("\(Int(progress * 100))%")
-                    .font(.system(size: 22, weight: .bold))
+                    .font(AppTypography.title)
                     .foregroundColor(.white)
 
                 Text("Complete")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(AppTypography.captionTiny).fontWeight(.medium)
                     .foregroundColor(.white.opacity(0.8))
             }
         }
@@ -347,10 +347,10 @@ private struct ProgressBadgePill: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: "trophy.fill")
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.iconTiny).fontWeight(.semibold)
 
             Text("\(count) MASTERED")
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
         }
         .foregroundColor(.white)
         .padding(.horizontal, AppSpacing.md)

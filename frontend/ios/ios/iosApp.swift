@@ -128,7 +128,7 @@ struct SplashView: View {
 
             VStack(spacing: 20) {
                 Image(systemName: "chart.line.uptrend.xyaxis.circle.fill")
-                    .font(.system(size: 80))
+                    .font(AppTypography.iconSplash)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("AI Value Investor")
@@ -158,7 +158,7 @@ struct ErrorToastView: View {
                         .foregroundColor(AppColors.bearish)
 
                     Text(error.title)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
@@ -176,7 +176,7 @@ struct ErrorToastView: View {
                 if error.suggestedAction != .fixInput {
                     Button(action: onDismiss) {
                         Text(error.suggestedAction.buttonTitle)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }

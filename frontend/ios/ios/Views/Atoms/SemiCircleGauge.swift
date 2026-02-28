@@ -100,7 +100,7 @@ struct SemiCircleGauge: View {
                         .foregroundColor(labelColor)
 
                     Text(label)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(labelColor)
                 }
                 .offset(y: size * 0.1)

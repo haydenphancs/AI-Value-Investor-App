@@ -462,7 +462,7 @@ struct TabPlaceholderView: View {
 
                 VStack(spacing: AppSpacing.md) {
                     Image(systemName: "hammer.fill")
-                        .font(.system(size: 48))
+                        .font(AppTypography.iconHero)
                         .foregroundColor(AppColors.textMuted)
 
                     Text(title)

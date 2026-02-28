@@ -35,7 +35,7 @@ struct HealthCheckMetricCard: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(metric.type.rawValue)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(metric.type.subtitle)
@@ -47,7 +47,7 @@ struct HealthCheckMetricCard: View {
 
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(metric.formattedValue)
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(metric.valueColor)
 
                 if let comparison = metric.formattedComparison {
@@ -86,7 +86,7 @@ struct HealthCheckMetricCard: View {
 
     private var insightSection: some View {
         insightTextView
-            .font(AppTypography.callout)
+            .font(AppTypography.bodySmall)
             .foregroundColor(AppColors.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }

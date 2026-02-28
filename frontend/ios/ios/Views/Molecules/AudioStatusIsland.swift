@@ -36,7 +36,7 @@ struct AudioStatusIsland: View {
                 audioManager.togglePlayPause()
             }) {
                 Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(AppTypography.iconTiny).fontWeight(.bold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 20, height: 20)
             }

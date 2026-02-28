@@ -15,13 +15,13 @@ struct CompanyProfileRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             Text(value)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(isLink ? AppColors.primaryBlue : AppColors.textPrimary)
         }
     }

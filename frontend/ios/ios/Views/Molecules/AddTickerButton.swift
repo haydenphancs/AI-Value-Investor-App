@@ -13,7 +13,7 @@ struct AddTickerButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "plus")
-                .font(.system(size: 14, weight: .medium))
+                .font(AppTypography.iconSmall).fontWeight(.medium)
                 .foregroundColor(AppColors.textSecondary)
                 .frame(width: 32, height: 32)
                 .background(AppColors.cardBackgroundLight)

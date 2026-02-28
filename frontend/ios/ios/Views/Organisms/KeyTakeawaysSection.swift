@@ -31,11 +31,11 @@ struct KeyTakeawaysSection: View {
         HStack(spacing: AppSpacing.sm) {
             // List Icon
             Image(systemName: "list.bullet.rectangle.portrait.fill")
-                .font(.system(size: 16, weight: .medium))
+                .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text("Key Takeaways")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

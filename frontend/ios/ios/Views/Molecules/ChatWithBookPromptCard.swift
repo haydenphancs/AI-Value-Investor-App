@@ -31,14 +31,14 @@ struct ChatWithBookPromptCard: View {
                         .frame(width: 40, height: 40)
 
                     Image(systemName: "book.fill")
-                        .font(.system(size: 18))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(.white)
                 }
 
                 // Text content
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text("Want to go deeper?")
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("Chat with The Intelligent Investor")
@@ -50,7 +50,7 @@ struct ChatWithBookPromptCard: View {
 
                 // Arrow
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.lg)

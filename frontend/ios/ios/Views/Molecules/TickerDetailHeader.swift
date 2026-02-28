@@ -29,7 +29,7 @@ struct TickerDetailHeader: View {
                     onBackTapped?()
                 }) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }
@@ -37,7 +37,7 @@ struct TickerDetailHeader: View {
 
                 // Ticker symbol (always visible)
                 Text(tickerSymbol)
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 // Price (shown when pinned/scrolled)
@@ -58,7 +58,7 @@ struct TickerDetailHeader: View {
                     onSearchTapped?()
                 }) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }
@@ -69,7 +69,7 @@ struct TickerDetailHeader: View {
                     onNotificationTapped?()
                 }) {
                     Image(systemName: "bell")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }
@@ -80,7 +80,7 @@ struct TickerDetailHeader: View {
                     onFavoriteTapped?()
                 }) {
                     Image(systemName: isFavorite ? "star.fill" : "star")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(isFavorite ? AppColors.neutral : AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }
@@ -91,7 +91,7 @@ struct TickerDetailHeader: View {
                     onMoreTapped?()
                 }) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 40, height: 40)
                 }

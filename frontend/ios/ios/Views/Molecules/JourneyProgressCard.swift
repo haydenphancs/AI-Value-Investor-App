@@ -20,11 +20,11 @@ struct JourneyProgressCard: View {
                     HStack(spacing: AppSpacing.sm) {
                         // Level icon
                         Image(systemName: track.level.iconName)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(AppTypography.iconSmall).fontWeight(.semibold)
                             .foregroundColor(track.level.color)
 
                         Text("\(track.level.rawValue) Track")
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
                     }
 
@@ -37,7 +37,7 @@ struct JourneyProgressCard: View {
 
                 // Progress percentage
                 Text("\(track.progressPercentage)%")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .font(AppTypography.dataDisplay)
                     .foregroundColor(track.level.color)
             }
 
@@ -74,7 +74,7 @@ struct JourneyProgressCard: View {
                 onContinue?()
             }) {
                 Text("Resume Lessons")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)

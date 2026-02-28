@@ -29,7 +29,7 @@ struct CryptoPriceHeader: View {
             // Left side - Crypto name and market status
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(cryptoName)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
 
                 CryptoMarketStatusBadge(status: marketStatus)
@@ -40,17 +40,17 @@ struct CryptoPriceHeader: View {
             // Right side - Price info
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(price)
-                    .font(.system(size: 24, weight: .bold))
+                    .font(AppTypography.title)
                     .foregroundColor(AppColors.textPrimary)
 
                 // Price change
                 HStack(spacing: 4) {
                     Image(systemName: arrowIcon)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.iconTiny).fontWeight(.semibold)
                         .foregroundColor(changeColor)
 
                     Text("\(priceChange) \(priceChangePercent)")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .fontWeight(.semibold)
                         .foregroundColor(changeColor)
                 }

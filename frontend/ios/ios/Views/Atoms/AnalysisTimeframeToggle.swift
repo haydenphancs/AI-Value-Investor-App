@@ -20,7 +20,7 @@ struct AnalysisTimeframeToggle<T: RawRepresentable & CaseIterable & Equatable>: 
                     }
                 } label: {
                     Text(option.rawValue)
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(selectedOption == option ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)

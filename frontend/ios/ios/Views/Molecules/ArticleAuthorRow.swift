@@ -31,12 +31,12 @@ struct ArticleAuthorRow: View {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 HStack(spacing: AppSpacing.xs) {
                     Text(author.name)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     if author.isVerified {
                         Image(systemName: "checkmark.seal.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }
@@ -52,7 +52,7 @@ struct ArticleAuthorRow: View {
             if showFollowButton {
                 Button(action: { onFollowTapped?() }) {
                     Text(isFollowing ? "Following" : "Follow")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(isFollowing ? AppColors.textSecondary : .white)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)

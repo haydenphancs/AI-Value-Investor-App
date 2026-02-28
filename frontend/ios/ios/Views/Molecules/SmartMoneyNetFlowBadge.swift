@@ -15,7 +15,7 @@ struct SmartMoneyNetFlowBadge: View {
         HStack(spacing: AppSpacing.sm) {
             // AI/Smart Money icon
             Image(systemName: "brain.head.profile")
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 28, height: 28)
                 .background(
@@ -24,16 +24,16 @@ struct SmartMoneyNetFlowBadge: View {
                 )
 
             Text("Net Informative Flow:")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             HStack(spacing: AppSpacing.xxs) {
                 Image(systemName: summary.flowIcon)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppTypography.iconXS).fontWeight(.bold)
                     .foregroundColor(summary.flowColor)
 
                 Text(summary.formattedNetFlow)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(summary.flowColor)
             }
         }

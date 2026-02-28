@@ -16,7 +16,7 @@ struct InvestorJourneyStudyScheduleSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section title
             Text("Study Schedule")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

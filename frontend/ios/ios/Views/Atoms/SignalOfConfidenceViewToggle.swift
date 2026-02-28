@@ -19,7 +19,7 @@ struct SignalOfConfidenceViewToggle: View {
                     }
                 }) {
                     Text(viewType.rawValue)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(selectedView == viewType ? AppColors.textPrimary : AppColors.textMuted)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.xs + 2)

@@ -41,7 +41,7 @@ struct LevelBadge: View {
                     .frame(width: 44, height: 44)
 
                 Image(systemName: level.iconName)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(iconColor)
             }
 

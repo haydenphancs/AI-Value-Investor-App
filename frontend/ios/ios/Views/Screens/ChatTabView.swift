@@ -111,7 +111,7 @@ struct ChatTabView: View {
                 // Header with chevron to close
                 HStack {
                     Text("History")
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
@@ -120,7 +120,7 @@ struct ChatTabView: View {
                         handleHistoryTap()
                     } label: {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(AppColors.textSecondary)
                     }
                     .buttonStyle(.plain)

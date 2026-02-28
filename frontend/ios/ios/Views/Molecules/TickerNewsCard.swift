@@ -55,7 +55,7 @@ struct TickerNewsCard: View {
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     // Headline
                     Text(article.headline)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(nil)
                         .multilineTextAlignment(.leading)

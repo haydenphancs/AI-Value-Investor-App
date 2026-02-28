@@ -19,7 +19,7 @@ struct NewsDetailHeader: View {
                 onBackTapped?()
             }) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
@@ -31,7 +31,7 @@ struct NewsDetailHeader: View {
                 NewsSourceBrandIcon(source: source, size: 28, cornerRadius: 6)
 
                 Text(source.name)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -42,7 +42,7 @@ struct NewsDetailHeader: View {
                 onMoreTapped?()
             }) {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())

@@ -105,7 +105,7 @@ struct ReportForecastChart: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.sm) {
                     Text("Management Guidance")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
                 }
 
@@ -122,7 +122,7 @@ struct ReportForecastChart: View {
                             .frame(width: 2)
 
                         Text("\"\(quote)\"")
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(AppColors.textSecondary)
                             .italic()
                     }

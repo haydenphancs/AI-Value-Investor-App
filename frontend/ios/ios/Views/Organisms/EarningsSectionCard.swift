@@ -105,7 +105,7 @@ struct EarningsSectionCard: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Earnings")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 // Info button
@@ -118,7 +118,7 @@ struct EarningsSectionCard: View {
                             .frame(width: 20, height: 20)
 
                         Text("i")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.labelSmallEmphasis)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -132,7 +132,7 @@ struct EarningsSectionCard: View {
                 onDetailTap?()
             } label: {
                 Text("Detail")
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(PlainButtonStyle())

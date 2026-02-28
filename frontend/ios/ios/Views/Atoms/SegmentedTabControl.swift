@@ -20,7 +20,7 @@ struct SegmentedTabControl<T: Hashable & RawRepresentable>: View where T.RawValu
                     }
                 } label: {
                     Text(tab.rawValue)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)

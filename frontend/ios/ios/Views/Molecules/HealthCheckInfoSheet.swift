@@ -51,11 +51,11 @@ struct HealthCheckInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "heart.text.square.fill")
-                    .font(.system(size: 24))
+                    .font(AppTypography.iconXL)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Financial Health Check")
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -76,7 +76,7 @@ struct HealthCheckInfoSheet: View {
     private var whatIsHealthCheckSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("What Does Health Check Tell You?")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -107,17 +107,17 @@ struct HealthCheckInfoSheet: View {
     private func infoCard(icon: String, iconColor: Color, title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 20))
+                .font(AppTypography.iconLarge)
                 .foregroundColor(iconColor)
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -135,7 +135,7 @@ struct HealthCheckInfoSheet: View {
     private var metricsExplainedSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("The Four Key Metrics")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -149,11 +149,11 @@ struct HealthCheckInfoSheet: View {
     private func metricExplanationRow(metric: HealthCheckMetricType) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text(metric.rawValue)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text(metric.valueInvestorDescription)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -196,7 +196,7 @@ struct HealthCheckInfoSheet: View {
                     .foregroundColor(AppColors.neutral)
 
                 Text("How Value Investors Use This")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -236,17 +236,17 @@ struct HealthCheckInfoSheet: View {
                     .frame(width: 28, height: 28)
 
                 Text(number)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -264,7 +264,7 @@ struct HealthCheckInfoSheet: View {
     private var ratingSystemSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Understanding the Rating")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -292,13 +292,13 @@ struct HealthCheckInfoSheet: View {
     private func ratingRow(rating: HealthCheckRating, description: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: AppSpacing.md) {
             Image(systemName: rating.iconName)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(rating.color)
                 .frame(width: 24, alignment: .center)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(rating.rawValue)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(rating.color)
 
                 Text(description)

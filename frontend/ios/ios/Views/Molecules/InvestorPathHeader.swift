@@ -20,7 +20,7 @@ struct InvestorJourneyHeader: View {
                     onBackTapped?()
                 }) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
@@ -30,11 +30,11 @@ struct InvestorJourneyHeader: View {
             // Title section
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("The Investor Journey")
-                    .font(AppTypography.largeTitle)
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("From Novice to Master")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
 
@@ -42,13 +42,13 @@ struct InvestorJourneyHeader: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack {
                     Text("Overall Progress")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textMuted)
 
                     Spacer()
 
                     Text("\(completedLessons)/\(totalLessons) Lessons Completed")
-                        .font(AppTypography.footnoteBold)
+                        .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
                 }
 

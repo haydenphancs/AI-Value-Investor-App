@@ -17,7 +17,7 @@ struct ReportValuationVitalCard: View {
             // Title + badge
             HStack {
                 Text("Valuation")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -38,7 +38,7 @@ struct ReportValuationVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.formattedCurrentPrice)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -51,19 +51,19 @@ struct ReportValuationVitalCard: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Text(data.formattedFairValue)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             
             // Upside Potential
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text("Upside Potential")
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textMuted)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Text(data.formattedUpside)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(data.upsideColor)
             }
         }
@@ -85,7 +85,7 @@ struct ReportMoatVitalCard: View {
             // Title + Wide Moat badge
             HStack {
                 Text("Moat")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -109,7 +109,7 @@ struct ReportMoatVitalCard: View {
                 HStack(spacing: AppSpacing.xs) {
                     
                     Text(data.stabilityLabel)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                         .fontWeight(.semibold)
                 }
@@ -121,7 +121,7 @@ struct ReportMoatVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.primarySource)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -146,7 +146,7 @@ struct ReportFinancialHealthVitalCard: View {
             // Title + level badge
             HStack {
                 Text("Financial Health")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -169,7 +169,7 @@ struct ReportFinancialHealthVitalCard: View {
 
                 HStack(alignment: .center, spacing: AppSpacing.xs) {
                     Text(data.formattedZScore)
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .fontWeight(.bold)
                         .foregroundColor(data.level.color)
                 }
@@ -186,7 +186,7 @@ struct ReportFinancialHealthVitalCard: View {
             // Additional metric - Rising Expenses
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10))
+                    .font(AppTypography.iconTiny)
                     .foregroundColor(data.additionalMetricStatus.color)
                 Text(data.additionalMetricDisplayText)
                     .font(AppTypography.caption)
@@ -217,7 +217,7 @@ struct ReportRevenueVitalCard: View {
             // Title + score badge
             HStack {
                 Text("Revenue")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -234,7 +234,7 @@ struct ReportRevenueVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.totalRevenue)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -244,7 +244,7 @@ struct ReportRevenueVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.formattedGrowth)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(data.growthColor)
             }
 
@@ -255,7 +255,7 @@ struct ReportRevenueVitalCard: View {
                     .foregroundColor(AppColors.textMuted)
                 HStack(spacing: AppSpacing.xs) {
                     Text(data.topSegment)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
@@ -283,7 +283,7 @@ struct ReportInsiderVitalCard: View {
             // Title + score badge
             HStack {
                 Text("Insiders")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -300,7 +300,7 @@ struct ReportInsiderVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.netActivity)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(data.activityColor)
             }
 
@@ -311,7 +311,7 @@ struct ReportInsiderVitalCard: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text("\(data.buyCount)")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bullish)
                 }
 
@@ -320,7 +320,7 @@ struct ReportInsiderVitalCard: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text("\(data.sellCount)")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bearish)
                 }
             }
@@ -349,7 +349,7 @@ struct ReportMacroVitalCard: View {
             // Title + score badge
             HStack {
                 Text("Macro")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -378,7 +378,7 @@ struct ReportMacroVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.topRisk)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(2)
@@ -387,7 +387,7 @@ struct ReportMacroVitalCard: View {
             // Risk Trend + Count
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: data.riskTrend.iconName)
-                    .font(.system(size: 10))
+                    .font(AppTypography.iconTiny)
                     .foregroundColor(data.riskTrend.color)
                 Text(data.riskTrend.rawValue)
                     .font(AppTypography.caption)
@@ -418,7 +418,7 @@ struct ReportForecastVitalCard: View {
             // Title + score badge
             HStack {
                 Text("Forecast")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -435,7 +435,7 @@ struct ReportForecastVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.formattedRevenueCAGR)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.bullish)
             }
 
@@ -445,7 +445,7 @@ struct ReportForecastVitalCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Text(data.formattedEPSCAGR)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.bullish)
             }
 
@@ -479,7 +479,7 @@ struct ReportWallStreetVitalCard: View {
             // Title + score badge
             HStack {
                 Text("Wall Street")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -509,7 +509,7 @@ struct ReportWallStreetVitalCard: View {
                     .foregroundColor(AppColors.textMuted)
                 HStack(spacing: AppSpacing.xs) {
                     Text(data.formattedTarget)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.primaryBlue)
                     Text(data.formattedUpside)
                         .font(AppTypography.caption)
@@ -524,7 +524,7 @@ struct ReportWallStreetVitalCard: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text("\(data.upgrades)")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bullish)
                 }
 
@@ -533,7 +533,7 @@ struct ReportWallStreetVitalCard: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text("\(data.downgrades)")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bearish)
                 }
             }

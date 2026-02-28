@@ -18,7 +18,7 @@ struct CommodityDetailProfileSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section title
             Text("Profile")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Profile content
@@ -26,7 +26,7 @@ struct CommodityDetailProfileSection: View {
                 // Description with expandable text
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text(profile.description)
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .lineLimit(isExpanded ? nil : collapsedLineLimit)
@@ -39,7 +39,7 @@ struct CommodityDetailProfileSection: View {
                         }
                     }) {
                         Text(isExpanded ? "Show less" : "more")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.primaryBlue)
                     }
@@ -54,10 +54,10 @@ struct CommodityDetailProfileSection: View {
                 // Category badge
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: profile.category.iconName)
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(profile.category.color)
                     Text(profile.category.rawValue)
-                        .font(AppTypography.footnoteBold)
+                        .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(profile.category.color)
                 }
                 .padding(.horizontal, AppSpacing.md)

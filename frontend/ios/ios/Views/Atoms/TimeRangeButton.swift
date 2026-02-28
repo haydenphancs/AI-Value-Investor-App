@@ -17,7 +17,7 @@ struct TimeRangeButton: View {
             onTap?()
         }) {
             Text(range.displayName)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, AppSpacing.sm)

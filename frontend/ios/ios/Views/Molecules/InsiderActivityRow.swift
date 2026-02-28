@@ -16,7 +16,7 @@ struct InsiderActivityRow: View {
             // Left side: Name, Title, Date
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(activity.name)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -35,7 +35,7 @@ struct InsiderActivityRow: View {
             // Right side: Change value, Transaction type, Price
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(activity.formattedChange)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(activity.changeColor)
 
                 Text(activity.transactionType.rawValue)

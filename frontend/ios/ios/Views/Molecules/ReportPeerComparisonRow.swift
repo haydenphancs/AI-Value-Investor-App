@@ -17,7 +17,7 @@ struct ReportPeerComparisonRow: View {
                 // Name + Ticker
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(competitor.name)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
                     Text(competitor.ticker)
@@ -61,7 +61,7 @@ struct ReportPeerComparisonRow: View {
                 .frame(height: 6)
 
                 Text(String(format: "%.1f", competitor.moatScore))
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 28, alignment: .trailing)
             }
@@ -73,7 +73,7 @@ struct ReportPeerComparisonRow: View {
                     .foregroundColor(AppColors.textMuted)
                 Spacer()
                 Text(String(format: "%.0f%%", competitor.marketSharePercent))
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

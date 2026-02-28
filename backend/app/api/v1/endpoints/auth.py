@@ -1,218 +1,131 @@
 """
-Authentication Endpoints
-Handles user authentication, registration, and token management.
-Note: Primary auth is handled by Supabase Auth on iOS side.
-This provides additional server-side token validation and management.
+Authentication Endpoints — Supabase Auth Proxy
+Frontend: POST /auth/login, /auth/register, /auth/refresh, /auth/logout
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
-from pydantic import BaseModel, EmailStr
 import logging
 
 from app.database import get_supabase
-from app.core.security import create_access_token, create_refresh_token, decode_token
 from app.dependencies import get_current_user_id
+from app.core.security import create_access_token, create_refresh_token, decode_token
+from app.schemas.auth import (
+    SignInRequest, SignUpRequest, RefreshTokenRequest,
+    TokenResponse, AuthUserResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# Request/Response Models
-# =======================
+@router.post("/login", response_model=TokenResponse)
+async def sign_in(
+    request: SignInRequest,
+    supabase: Client = Depends(get_supabase),
+):
+    """Sign in via Supabase Auth, return app tokens."""
+    try:
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": request.email,
+            "password": request.password,
+        })
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    user_id: str
+        user = auth_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
+        # Fetch app-level user row (created by DB trigger on auth.users insert)
+        db_user = supabase.table("users").select("id, email").eq(
+            "id", str(user.id)
+        ).single().execute()
 
-class TokenRefreshRequest(BaseModel):
-    refresh_token: str
+        user_id = db_user.data["id"] if db_user.data else str(user.id)
 
+        access_token = create_access_token(data={"sub": user_id, "email": user.email})
+        refresh_token = create_refresh_token(data={"sub": user_id, "email": user.email})
 
-class UserLoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-# Endpoints
-# =========
-
-@router.post("/token", response_model=TokenResponse)
-async def create_token(
-    supabase_token: str,
-    supabase: Client = Depends(get_supabase)
-) -> TokenResponse:
-    """
-    Exchange Supabase Auth token for application tokens.
-    iOS app authenticates with Supabase, then calls this to get app tokens.
-
-    Args:
-        supabase_token: JWT token from Supabase Auth
-        supabase: Supabase client
-
-    Returns:
-        TokenResponse: Access and refresh tokens
-    """
-    from app.core.security import verify_supabase_token
-
-    # Verify Supabase token
-    payload = verify_supabase_token(supabase_token)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Supabase token"
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=user_id,
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sign in failed: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    user_id = payload.get("sub")
 
-    # Verify user exists in our database
-    result = supabase.table("users").select("*").eq("auth_user_id", user_id).single().execute()
+@router.post("/register", response_model=TokenResponse)
+async def sign_up(
+    request: SignUpRequest,
+    supabase: Client = Depends(get_supabase),
+):
+    """Register via Supabase Auth, return app tokens."""
+    try:
+        auth_response = supabase.auth.sign_up({
+            "email": request.email,
+            "password": request.password,
+            "options": {
+                "data": {"display_name": request.display_name}
+            },
+        })
 
-    if not result.data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found in database"
+        user = auth_response.user
+        if not user:
+            raise HTTPException(status_code=400, detail="Registration failed")
+
+        # DB trigger auto-creates public.users row.
+        # Update display_name (trigger may not copy it from metadata).
+        supabase.table("users").update({
+            "display_name": request.display_name,
+        }).eq("id", str(user.id)).execute()
+
+        access_token = create_access_token(data={"sub": str(user.id), "email": user.email})
+        refresh_token = create_refresh_token(data={"sub": str(user.id), "email": user.email})
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=str(user.id),
         )
-
-    user_data = result.data
-
-    # Create application tokens
-    access_token = create_access_token(
-        data={"sub": user_data["id"], "email": user_data["email"]}
-    )
-    refresh_token = create_refresh_token(
-        data={"sub": user_data["id"], "email": user_data["email"]}
-    )
-
-    # Update last login
-    supabase.table("users").update({
-        "last_login_at": "now()"
-    }).eq("id", user_data["id"]).execute()
-
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        user_id=user_data["id"]
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sign up failed: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Registration failed")
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(
-    request: TokenRefreshRequest,
-    supabase: Client = Depends(get_supabase)
-) -> TokenResponse:
-    """
-    Refresh access token using refresh token.
-
-    Args:
-        request: Refresh token request
-        supabase: Supabase client
-
-    Returns:
-        TokenResponse: New access and refresh tokens
-    """
+async def refresh_token(request: RefreshTokenRequest):
+    """Refresh access token using refresh token."""
     try:
         payload = decode_token(request.refresh_token)
-
-        # Verify it's a refresh token
         if payload.get("type") != "refresh":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token type"
-            )
+            raise HTTPException(status_code=401, detail="Invalid token type")
 
         user_id = payload.get("sub")
         email = payload.get("email")
 
-        # Create new tokens
-        access_token = create_access_token(
-            data={"sub": user_id, "email": email}
-        )
-        new_refresh_token = create_refresh_token(
-            data={"sub": user_id, "email": email}
-        )
+        access_token = create_access_token(data={"sub": user_id, "email": email})
+        new_refresh = create_refresh_token(data={"sub": user_id, "email": email})
 
         return TokenResponse(
             access_token=access_token,
-            refresh_token=new_refresh_token,
-            user_id=user_id
+            refresh_token=new_refresh,
+            user_id=user_id,
         )
-
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Token refresh failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token"
-        )
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 
 @router.post("/logout")
-async def logout(
-    user_id: str = Depends(get_current_user_id)
-):
-    """
-    Logout user (client should delete tokens).
-
-    Args:
-        user_id: Current user ID
-
-    Returns:
-        dict: Success message
-    """
-    # In a production app, you might want to:
-    # 1. Blacklist the token in Redis
-    # 2. Log the logout event
-    # 3. Clear any user sessions
-
+async def logout(user_id: str = Depends(get_current_user_id)):
+    """Logout (client deletes tokens)."""
     logger.info(f"User {user_id} logged out")
-
     return {"message": "Successfully logged out"}
-
-
-@router.get("/me")
-async def get_current_user_info(
-    user_id: str = Depends(get_current_user_id),
-    supabase: Client = Depends(get_supabase)
-):
-    """
-    Get current authenticated user information.
-
-    Args:
-        user_id: Current user ID
-        supabase: Supabase client
-
-    Returns:
-        dict: User information
-    """
-    result = supabase.table("users").select("*").eq("id", user_id).single().execute()
-
-    if not result.data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    return result.data
-
-
-@router.post("/verify")
-async def verify_token(
-    user_id: str = Depends(get_current_user_id)
-):
-    """
-    Verify if token is valid.
-
-    Args:
-        user_id: Current user ID
-
-    Returns:
-        dict: Verification result
-    """
-    return {
-        "valid": True,
-        "user_id": user_id
-    }

@@ -1,184 +1,155 @@
 """
 Deep Research Endpoints
-Handles AI-generated company analysis with investor personas.
-Requirements: Section 4.3 - Deep Research Agents (Investor Replication)
+Frontend: POST /research/generate, GET /research/reports/{id}/status,
+          GET /research/reports/{id}, GET /research/reports,
+          POST /research/reports/{id}/rate, DELETE /research/reports/{id},
+          GET /research/personas
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
-from pydantic import BaseModel
-from typing import Optional
+import asyncio
 import logging
 
 from app.database import get_supabase
-from app.dependencies import (
-    get_current_user,
-    StandardRateLimit
+from app.dependencies import get_current_user, StandardRateLimit
+from app.schemas.research import (
+    GenerateResearchRequest, ResearchGenerationResponse,
+    ResearchStatusResponse, RateReportRequest,
 )
-from app.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# Request/Response Models
-# =======================
-
-class ResearchRequest(BaseModel):
-    stock_id: str
-    investor_persona: str  # buffett, ackman, munger, lynch, graham
-    analysis_period: Optional[str] = "annual"
-
-
-class ResearchResponse(BaseModel):
-    id: str
-    stock_id: str
-    investor_persona: str
-    status: str
-    title: Optional[str]
-    executive_summary: Optional[str]
-    created_at: str
-
-
-# Endpoints
-# =========
-
-@router.post("/generate", response_model=ResearchResponse)
+@router.post("/generate", response_model=ResearchGenerationResponse)
 async def generate_research_report(
-    request: ResearchRequest,
-    background_tasks: BackgroundTasks,
+    request: GenerateResearchRequest,
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
-    _rate_limit=StandardRateLimit
+    _rate_limit=StandardRateLimit,
 ):
     """
-    Generate a deep research report for a stock.
-    Section 4.3.3 - REQ-6: Use large context window model (Gemini)
-    Section 4.3.3 - REQ-7: Ignore short-term price volatility
-    Section 5.1 - Must complete within 30 seconds
-    Section 5.5 - Check credits BEFORE expensive Gemini analysis
-
-    Args:
-        request: Research request parameters
-        background_tasks: FastAPI background tasks
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        ResearchResponse: Report metadata (processing in background)
+    Generate deep research report. Creates DB row, launches async task,
+    returns immediately for frontend polling.
     """
-    # Initialize user service
-    user_service = UserService(supabase)
+    # Check credits
+    credits = supabase.table("user_credits").select(
+        "remaining"
+    ).eq("user_id", user["id"]).single().execute()
 
-    # Check credits BEFORE creating report (Section 5.5 - prevent wasted API calls)
-    has_credits = await user_service.check_user_credits(user["id"], required_credits=1)
-
-    if not has_credits:
+    if not credits.data or credits.data["remaining"] < 1:
         raise HTTPException(
             status_code=403,
-            detail="Insufficient credits. You have reached your monthly deep research limit. "
-                   "Upgrade your tier or wait for monthly reset."
+            detail="Insufficient credits. Upgrade your tier or wait for monthly reset.",
         )
 
-    # Validate investor persona
-    valid_personas = ["buffett", "ackman", "munger", "lynch", "graham"]
-    if request.investor_persona not in valid_personas:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid investor persona. Choose from: {', '.join(valid_personas)}"
-        )
+    # Validate persona exists
+    persona_check = supabase.table("agent_personas").select("key").eq(
+        "key", request.persona
+    ).eq("is_active", True).execute()
 
-    # Create report record
+    if not persona_check.data:
+        raise HTTPException(status_code=400, detail=f"Invalid persona: {request.persona}")
+
+    ticker = request.stock_id.upper()
+
+    # Fetch company name from FMP
+    company_name = ticker
+    try:
+        from app.integrations.fmp import get_fmp_client
+        fmp = get_fmp_client()
+        profile = await fmp.get_company_profile(ticker)
+        if profile:
+            company_name = profile.get("companyName", ticker)
+    except Exception:
+        pass
+
+    # Create report row
     report_data = {
         "user_id": user["id"],
-        "stock_id": request.stock_id,
-        "investor_persona": request.investor_persona,
-        "analysis_period": request.analysis_period,
-        "status": "pending"
+        "ticker": ticker,
+        "company_name": company_name,
+        "investor_persona": request.persona,
+        "status": "pending",
+        "progress": 0,
+        "current_step": "Initializing research...",
     }
 
-    result = supabase.table("deep_research_reports").insert(report_data).execute()
-
+    result = supabase.table("research_reports").insert(report_data).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to create report")
 
     report = result.data[0]
 
-    # Schedule background task to generate report
-    # Credits will be decremented AFTER successful generation (user-friendly)
-    background_tasks.add_task(
-        generate_report_task,
-        report["id"],
-        request.stock_id,
-        request.investor_persona,
-        user["id"]  # Pass user_id for credit decrement
+    # Launch async background task
+    asyncio.create_task(
+        _run_research_task(report["id"], ticker, request.persona, user["id"])
     )
 
-    return ResearchResponse(**report)
+    return ResearchGenerationResponse(
+        report_id=report["id"],
+        status="pending",
+        estimated_seconds=60,
+        poll_url=f"/api/v1/research/reports/{report['id']}/status",
+    )
 
 
-@router.get("/reports")
-async def get_my_reports(
-    limit: int = 20,
-    user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
-):
-    """
-    Get user's research reports.
-
-    Args:
-        limit: Number of reports to return
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        list: User's research reports
-    """
-    result = supabase.table("deep_research_reports").select(
-        """
-        id, stock_id, investor_persona, status, title,
-        executive_summary, created_at, completed_at, user_rating,
-        stock:stocks(ticker, company_name, logo_url)
-        """
-    ).eq("user_id", user["id"]).is_("deleted_at", "null").order(
-        "created_at", desc=True
-    ).limit(limit).execute()
-
-    return result.data
-
-
-@router.get("/reports/{report_id}")
-async def get_report_detail(
+@router.get("/reports/{report_id}/status", response_model=ResearchStatusResponse)
+async def get_research_status(
     report_id: str,
     user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase),
 ):
-    """
-    Get full research report details.
-
-    Args:
-        report_id: Report ID
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Full report data
-    """
-    result = supabase.table("deep_research_reports").select(
-        """
-        *,
-        stock:stocks(*)
-        """
+    """Poll research report status (called every 3s by frontend)."""
+    result = supabase.table("research_reports").select(
+        "id, status, progress, current_step, error_message, estimated_time_remaining"
     ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    # Increment view count
-    supabase.table("deep_research_reports").update({
-        "views_count": result.data["views_count"] + 1
-    }).eq("id", report_id).execute()
+    return ResearchStatusResponse(
+        report_id=result.data["id"],
+        status=result.data["status"],
+        progress=result.data.get("progress", 0),
+        current_step=result.data.get("current_step"),
+        error_message=result.data.get("error_message"),
+        estimated_time_remaining=result.data.get("estimated_time_remaining"),
+    )
+
+
+@router.get("/reports/{report_id}")
+async def get_research_report(
+    report_id: str,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Get full research report detail."""
+    result = supabase.table("research_reports").select("*").eq(
+        "id", report_id
+    ).eq("user_id", user["id"]).single().execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return result.data
+
+
+@router.get("/reports")
+async def get_my_reports(
+    limit: int = Query(20, le=100),
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Get current user's research reports."""
+    result = supabase.table("research_reports").select(
+        "id, ticker, company_name, investor_persona, status, title, "
+        "executive_summary, created_at, completed_at, user_rating"
+    ).eq("user_id", user["id"]).order(
+        "created_at", desc=True
+    ).limit(limit).execute()
 
     return result.data
 
@@ -186,32 +157,19 @@ async def get_report_detail(
 @router.post("/reports/{report_id}/rate")
 async def rate_report(
     report_id: str,
-    rating: int,
-    feedback: Optional[str] = None,
+    request: RateReportRequest,
     user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase),
 ):
-    """
-    Rate a research report (1-5 stars).
-
-    Args:
-        report_id: Report ID
-        rating: Rating (1-5)
-        feedback: Optional feedback text
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Success message
-    """
-    if not 1 <= rating <= 5:
+    """Rate a research report (1-5 stars)."""
+    if not 1 <= request.rating <= 5:
         raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
 
-    update_data = {"user_rating": rating}
-    if feedback:
-        update_data["user_feedback"] = feedback
+    update = {"user_rating": request.rating}
+    if request.feedback:
+        update["user_feedback"] = request.feedback
 
-    supabase.table("deep_research_reports").update(update_data).eq(
+    supabase.table("research_reports").update(update).eq(
         "id", report_id
     ).eq("user_id", user["id"]).execute()
 
@@ -222,89 +180,47 @@ async def rate_report(
 async def delete_report(
     report_id: str,
     user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase),
 ):
-    """
-    Soft delete a research report.
-
-    Args:
-        report_id: Report ID
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Success message
-    """
-    supabase.table("deep_research_reports").update({
-        "deleted_at": "now()"
+    """Soft-delete a research report."""
+    supabase.table("research_reports").update({
+        "status": "deleted"
     }).eq("id", report_id).eq("user_id", user["id"]).execute()
 
     return {"message": "Report deleted successfully"}
 
 
-# Background Task Function
-# ========================
-
-async def generate_report_task(
-    report_id: str,
-    stock_id: str,
-    investor_persona: str,
-    user_id: str
+@router.get("/personas")
+async def get_personas(
+    supabase: Client = Depends(get_supabase),
 ):
-    """
-    Background task to generate research report.
-    This will call the research service to generate the actual report.
-    Credits are decremented AFTER successful generation (user-friendly).
+    """Get all active investor personas (no auth required)."""
+    result = supabase.table("agent_personas").select(
+        "id, key, name, title, tagline, style, description, "
+        "key_principles, accent_color, icon_name, focus, famous_quotes, is_active"
+    ).eq("is_active", True).execute()
 
-    Args:
-        report_id: Report ID
-        stock_id: Stock ID
-        investor_persona: Investor persona to use
-        user_id: User ID (for credit decrement)
-    """
+    return result.data
+
+
+# Background task
+async def _run_research_task(
+    report_id: str, ticker: str, persona: str, user_id: str
+):
+    """Async background task: generate research report, update DB, decrement credits."""
     try:
-        # Import here to avoid circular dependencies
         from app.services.research_service import ResearchService
-        from app.agents.research_agent import ResearchAgent
-        from app.database import get_supabase
-
-        supabase = get_supabase()
-
-        # Initialize services
-        research_agent = ResearchAgent()
-        research_service = ResearchService(supabase=supabase, research_agent=research_agent)
-
-        # Generate report
-        await research_service.generate_report(
-            report_id=report_id,
-            stock_id=stock_id,
-            investor_persona=investor_persona
-        )
-
-        # Decrement credits AFTER successful generation (Section 5.5)
-        user_service = UserService(supabase)
-        await user_service.decrement_credits(
-            user_id=user_id,
-            credits=1,
-            activity_type="deep_research_generated",
-            activity_metadata={
-                "report_id": report_id,
-                "stock_id": stock_id,
-                "investor_persona": investor_persona
-            }
-        )
-
-        logger.info(f"Report {report_id} generated successfully, credits decremented for user {user_id}")
-
+        service = ResearchService()
+        await service.generate_report(report_id, ticker, persona, user_id)
     except Exception as e:
-        logger.error(f"Research report generation failed: {e}", exc_info=True)
-
-        # Update report status to failed
-        from app.database import get_supabase
-        supabase = get_supabase()
-        supabase.table("deep_research_reports").update({
-            "status": "failed",
-            "error_message": str(e)
-        }).eq("id", report_id).execute()
-
-        # NOTE: Credits are NOT decremented on failure (user-friendly approach)
+        logger.error(f"Research task failed for {report_id}: {e}", exc_info=True)
+        try:
+            from app.database import get_supabase
+            supabase = get_supabase()
+            supabase.table("research_reports").update({
+                "status": "failed",
+                "error_message": str(e),
+                "progress": 0,
+            }).eq("id", report_id).execute()
+        except Exception:
+            pass

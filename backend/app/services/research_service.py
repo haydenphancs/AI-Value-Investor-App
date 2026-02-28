@@ -1,264 +1,317 @@
 """
-Research Service
-Business logic for generating deep research reports with investor personas.
-Requirements: Section 4.3 - Deep Research Agents
+Research Service — orchestrates Gemini + FMP for deep research reports.
+Updates research_reports table with progress/status for frontend polling.
 """
 
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import datetime
 import asyncio
+import json
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
 
-from supabase import Client
-
-from app.agents.research_agent import ResearchAgent
-from app.schemas.common import InvestorPersona, ReportStatus
+from app.database import get_supabase
+from app.integrations.gemini import get_gemini_client
+from app.integrations.fmp import get_fmp_client
+from app.services.user_service import UserService
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class ResearchService:
-    """
-    Service for generating AI-powered deep research reports.
-    Section 4.3 - Investor persona-based company analysis.
-    """
-
-    def __init__(
-        self,
-        supabase: Client,
-        research_agent: Optional[ResearchAgent] = None
-    ):
-        """
-        Initialize research service.
-
-        Args:
-            supabase: Supabase client
-            research_agent: Research agent
-        """
-        self.supabase = supabase
-        self.research_agent = research_agent or ResearchAgent()
-        logger.info("ResearchService initialized")
+    def __init__(self):
+        self.supabase = get_supabase()
+        self.gemini = get_gemini_client()
+        self.fmp = get_fmp_client()
 
     async def generate_report(
         self,
         report_id: str,
-        stock_id: str,
-        investor_persona: InvestorPersona,
-        analysis_period: str = "annual",
-        custom_instructions: Optional[str] = None
-    ) -> str:
-        """
-        Generate deep research report (background task).
-        Section 4.3.1 - Deep Research Agents
-        Section 5.1 - Must complete within 30 seconds (timeout)
+        ticker: str,
+        persona_key: str,
+        user_id: str,
+    ):
+        """Full pipeline: gather data, generate analysis, extract components, save."""
+        start = datetime.now(timezone.utc)
 
-        Args:
-            report_id: Report ID (pre-created)
-            stock_id: Stock ID
-            investor_persona: Investor persona
-            analysis_period: Analysis period
-            custom_instructions: Optional custom instructions
-
-        Returns:
-            str: Report ID
-
-        Example:
-            report_id = await service.generate_report(
-                report_id="report-123",
-                stock_id="stock-456",
-                investor_persona=InvestorPersona.BUFFETT
-            )
-        """
         try:
-            logger.info(f"Generating report {report_id} for stock {stock_id} using {investor_persona.value}")
+            # Step 1: Gathering financial data
+            self._update_status(report_id, "processing", 10, "Gathering financial data...")
+            financial_data = await self._gather_financial_data(ticker)
 
-            # Update status to processing
-            self._update_report_status(report_id, ReportStatus.PROCESSING)
+            # Step 2: Loading persona
+            self._update_status(report_id, "processing", 25, "Loading investor persona...")
+            persona_prompt = await self._get_persona_prompt(persona_key)
 
-            # Get stock details
-            stock = self.supabase.table("stocks").select("*").eq("id", stock_id).single().execute()
+            # Step 3: Generating analysis
+            self._update_status(report_id, "processing", 40, "Generating investment analysis...")
+            analysis = await self._generate_analysis(ticker, financial_data, persona_prompt)
 
-            if not stock.data:
-                raise ValueError(f"Stock {stock_id} not found")
+            # Step 4: Extracting structured components
+            self._update_status(report_id, "processing", 70, "Extracting key insights...")
+            components = await self._extract_components(analysis["text"], ticker, persona_key)
 
-            ticker = stock.data["ticker"]
-            company_name = stock.data["company_name"]
+            # Step 5: Saving report
+            self._update_status(report_id, "processing", 90, "Finalizing report...")
 
-            # Generate report with timeout (Section 5.1 - 30 second requirement)
-            try:
-                report_data = await asyncio.wait_for(
-                    self.research_agent.generate_research_report(
-                        ticker=ticker,
-                        persona=investor_persona,
-                        analysis_period=analysis_period,
-                        custom_instructions=custom_instructions
-                    ),
-                    timeout=settings.DEEP_RESEARCH_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Report generation timed out after {settings.DEEP_RESEARCH_TIMEOUT_SECONDS}s")
-                self._update_report_status(
-                    report_id,
-                    ReportStatus.FAILED,
-                    error_message="Report generation timed out. Please try again."
-                )
-                raise
+            generation_time = int((datetime.now(timezone.utc) - start).total_seconds())
 
-            # Update report with generated content
             update_data = {
-                "status": ReportStatus.COMPLETED.value,
-                "title": f"{company_name} Analysis - {report_data['persona_name']} Style",
-                "executive_summary": report_data.get("executive_summary"),
-                "pros": report_data.get("pros"),
-                "cons": report_data.get("cons"),
-                "moat_analysis": report_data.get("moat_analysis"),
-                "valuation_notes": report_data.get("valuation_notes"),
-                "risk_factors": report_data.get("risk_factors"),
-                "investment_thesis": report_data.get("investment_thesis"),
-                "full_report": report_data.get("full_report"),
-                "report_metadata": {
-                    "persona_emoji": report_data.get("persona_emoji"),
-                    "analysis_period": analysis_period
-                },
-                "generation_time_seconds": report_data.get("generation_time_seconds"),
-                "tokens_used": report_data.get("tokens_used"),
-                "cost_usd": self._estimate_cost(report_data.get("tokens_used", 0)),
-                "completed_at": datetime.utcnow().isoformat()
+                "status": "completed",
+                "progress": 100,
+                "current_step": "Complete",
+                "title": components.get("title", f"{ticker} Analysis"),
+                "executive_summary": components.get("executive_summary"),
+                "investment_thesis": components.get("investment_thesis"),
+                "pros": components.get("pros"),
+                "cons": components.get("cons"),
+                "moat_analysis": components.get("moat_analysis"),
+                "valuation_analysis": components.get("valuation_analysis"),
+                "risk_assessment": components.get("risk_assessment"),
+                "full_report": analysis["text"],
+                "key_takeaways": components.get("key_takeaways"),
+                "action_recommendation": components.get("action_recommendation"),
+                "generation_time_seconds": generation_time,
+                "tokens_used": analysis.get("tokens_used"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            self.supabase.table("deep_research_reports").update(update_data).eq(
+            self.supabase.table("research_reports").update(update_data).eq(
                 "id", report_id
             ).execute()
 
-            logger.info(f"Report {report_id} completed successfully")
+            # Decrement credits after success
+            user_service = UserService()
+            await user_service.decrement_credits(user_id, 1)
 
-            return report_id
+            logger.info(f"Report {report_id} completed in {generation_time}s")
 
         except Exception as e:
             logger.error(f"Report generation failed: {e}", exc_info=True)
-
-            # Update status to failed
-            self._update_report_status(
-                report_id,
-                ReportStatus.FAILED,
-                error_message=str(e)
-            )
-
+            self._update_status(report_id, "failed", 0, error_message=str(e))
             raise
 
-    def _update_report_status(
-        self,
-        report_id: str,
-        status: ReportStatus,
-        error_message: Optional[str] = None
+    def _update_status(
+        self, report_id: str, status: str, progress: int,
+        current_step: Optional[str] = None, error_message: Optional[str] = None,
     ):
-        """
-        Update report status.
-
-        Args:
-            report_id: Report ID
-            status: New status
-            error_message: Optional error message
-        """
+        update = {"status": status, "progress": progress}
+        if current_step:
+            update["current_step"] = current_step
+        if error_message:
+            update["error_message"] = error_message
         try:
-            update_data = {"status": status.value}
-
-            if error_message:
-                update_data["error_message"] = error_message
-
-            self.supabase.table("deep_research_reports").update(update_data).eq(
+            self.supabase.table("research_reports").update(update).eq(
                 "id", report_id
             ).execute()
-
         except Exception as e:
-            logger.error(f"Failed to update report status: {e}")
+            logger.error(f"Status update failed: {e}")
 
-    def _estimate_cost(self, tokens_used: int) -> float:
-        """
-        Estimate cost based on tokens used.
-        Gemini pricing (example rates):
-        - Input: $0.00025 / 1K tokens
-        - Output: $0.0005 / 1K tokens
-        Assuming 50/50 split
+    async def _gather_financial_data(self, ticker: str) -> Dict[str, Any]:
+        """Parallel FMP data gathering."""
+        tasks = [
+            self.fmp.get_company_profile(ticker),
+            self.fmp.get_income_statement(ticker, "annual", 5),
+            self.fmp.get_balance_sheet(ticker, "annual", 5),
+            self.fmp.get_cash_flow_statement(ticker, "annual", 5),
+            self.fmp.get_key_metrics(ticker, "annual", 5),
+            self.fmp.get_financial_ratios(ticker, "annual", 5),
+        ]
 
-        Args:
-            tokens_used: Total tokens
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        Returns:
-            float: Estimated cost in USD
-        """
-        if not tokens_used:
-            return 0.0
+        profile = results[0] if not isinstance(results[0], Exception) else {}
+        income = results[1] if not isinstance(results[1], Exception) else []
+        balance = results[2] if not isinstance(results[2], Exception) else []
+        cash_flow = results[3] if not isinstance(results[3], Exception) else []
+        metrics = results[4] if not isinstance(results[4], Exception) else []
+        ratios = results[5] if not isinstance(results[5], Exception) else []
 
-        # Rough estimate: $0.000375 per 1K tokens (average)
-        cost_per_1k = 0.000375
-        return (tokens_used / 1000) * cost_per_1k
+        return {
+            "company_name": profile.get("companyName", ticker),
+            "sector": profile.get("sector"),
+            "industry": profile.get("industry"),
+            "description": profile.get("description"),
+            "market_cap": profile.get("mktCap"),
+            "income_statements": income,
+            "balance_sheets": balance,
+            "cash_flows": cash_flow,
+            "key_metrics": metrics,
+            "ratios": ratios,
+        }
 
-    async def get_report_by_id(
-        self,
-        report_id: str,
-        user_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get report by ID with access check.
-
-        Args:
-            report_id: Report ID
-            user_id: User ID (for access control)
-
-        Returns:
-            dict: Report data or None
-        """
+    async def _get_persona_prompt(self, persona_key: str) -> str:
+        """Get persona system prompt from DB, fallback to default."""
         try:
-            result = self.supabase.table("deep_research_reports").select(
-                "*,stock:stocks(*)"
-            ).eq("id", report_id).eq("user_id", user_id).single().execute()
+            result = self.supabase.table("agent_personas").select(
+                "persona_prompt"
+            ).eq("key", persona_key).single().execute()
 
-            if result.data:
-                # Increment view count
-                self.supabase.table("deep_research_reports").update({
-                    "views_count": result.data["views_count"] + 1
-                }).eq("id", report_id).execute()
+            if result.data and result.data.get("persona_prompt"):
+                return result.data["persona_prompt"]
+        except Exception:
+            pass
 
-            return result.data
+        # Fallback default prompt
+        return self._default_persona_prompt(persona_key)
 
-        except Exception as e:
-            logger.error(f"Failed to get report: {e}")
-            return None
+    def _default_persona_prompt(self, persona_key: str) -> str:
+        defaults = {
+            "warren_buffett": (
+                "You are analyzing companies through Warren Buffett's investment lens. "
+                "Focus on durable competitive advantages (moats), management quality, "
+                "capital allocation, long-term orientation (10+ years), and margin of safety. "
+                "Use clear, folksy wisdom backed by rigorous business analysis."
+            ),
+            "bill_ackman": (
+                "You are analyzing companies through Bill Ackman's activist investor lens. "
+                "Focus on high-quality businesses with hidden value, catalyst potential, "
+                "downside protection, and operational improvement opportunities."
+            ),
+            "charlie_munger": (
+                "You are analyzing companies through Charlie Munger's multidisciplinary lens. "
+                "Apply mental models from psychology, economics, and math. Always invert. "
+                "Be brutally honest about risks and incentive structures."
+            ),
+            "peter_lynch": (
+                "You are analyzing companies through Peter Lynch's growth-at-reasonable-price lens. "
+                "Classify the stock (fast grower, stalwart, turnaround, etc.), focus on PEG ratio, "
+                "and look for simple, understandable businesses with sustainable growth."
+            ),
+            "benjamin_graham": (
+                "You are analyzing companies through Benjamin Graham's value investing framework. "
+                "Use strict quantitative criteria, focus on margin of safety, "
+                "net-net working capital, and price-to-book value."
+            ),
+            "cathie_wood": (
+                "You are analyzing companies through Cathie Wood's disruptive innovation lens. "
+                "Focus on exponential growth potential, convergence of technologies, "
+                "total addressable market expansion, and long-term vision."
+            ),
+        }
+        return defaults.get(persona_key, defaults["warren_buffett"])
 
-    async def get_user_reports(
-        self,
-        user_id: str,
-        limit: int = 20,
-        status: Optional[ReportStatus] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get user's reports.
+    async def _generate_analysis(
+        self, ticker: str, data: Dict[str, Any], system_prompt: str,
+    ) -> Dict[str, Any]:
+        """Generate full analysis via Gemini."""
+        context = self._build_context(data)
+        prompt = f"""Analyze {data.get('company_name', ticker)} ({ticker}) comprehensively.
 
-        Args:
-            user_id: User ID
-            limit: Maximum results
-            status: Optional status filter
+FINANCIAL DATA:
+{context}
 
-        Returns:
-            list: Reports
-        """
+Provide a complete investment research report including:
+1. Business overview (in plain English)
+2. Competitive advantages / moat analysis
+3. Management quality assessment
+4. Financial strength analysis
+5. Pros (3-5 specific strengths)
+6. Cons (3-5 specific risks/weaknesses)
+7. Valuation assessment with margin of safety
+8. Risk assessment (business, financial, market risks)
+9. Investment thesis with key drivers
+10. Final verdict with conviction level and recommended action
+
+IMPORTANT: Ignore short-term price movements. Focus on long-term fundamentals.
+Be specific with numbers and evidence from the financial data provided."""
+
+        return await self.gemini.generate_text(
+            prompt=prompt,
+            system_instruction=system_prompt,
+        )
+
+    def _build_context(self, data: Dict[str, Any]) -> str:
+        parts = []
+        if data.get("description"):
+            parts.append(f"Company: {data['description'][:500]}")
+        if data.get("sector"):
+            parts.append(f"Sector: {data['sector']} | Industry: {data.get('industry')}")
+        if data.get("income_statements"):
+            recent = data["income_statements"][0]
+            parts.append(f"\nRecent Financials:")
+            parts.append(f"  Revenue: ${recent.get('revenue', 0):,.0f}")
+            parts.append(f"  Net Income: ${recent.get('netIncome', 0):,.0f}")
+            parts.append(f"  EPS: ${recent.get('eps', 0):.2f}")
+        if data.get("ratios"):
+            r = data["ratios"][0]
+            parts.append(f"\nKey Ratios:")
+            parts.append(f"  ROE: {r.get('returnOnEquity', 0)*100:.1f}%")
+            parts.append(f"  P/E: {r.get('priceEarningsRatio', 0):.1f}")
+            parts.append(f"  Debt/Equity: {r.get('debtEquityRatio', 0):.2f}")
+        if data.get("key_metrics"):
+            m = data["key_metrics"][0]
+            parts.append(f"  FCF/Share: ${m.get('freeCashFlowPerShare', 0):.2f}")
+            parts.append(f"  Book Value/Share: ${m.get('bookValuePerShare', 0):.2f}")
+        return "\n".join(parts)
+
+    async def _extract_components(
+        self, full_text: str, ticker: str, persona_key: str,
+    ) -> Dict[str, Any]:
+        """Extract structured JSON components from the full report text using Gemini."""
+        extraction_prompt = f"""Given this investment research report, extract structured data as JSON.
+
+REPORT:
+{full_text[:6000]}
+
+Return ONLY valid JSON with these keys:
+{{
+  "title": "string - report title",
+  "executive_summary": "string - 2-3 sentence summary",
+  "investment_thesis": {{
+    "summary": "string",
+    "key_drivers": ["string"],
+    "risks": ["string"],
+    "time_horizon": "string",
+    "conviction_level": "High/Medium/Low"
+  }},
+  "pros": ["string - 3-5 items"],
+  "cons": ["string - 3-5 items"],
+  "moat_analysis": {{
+    "moat_rating": "Wide/Narrow/None",
+    "moat_sources": ["string"],
+    "moat_sustainability": "string",
+    "competitive_position": "string",
+    "barriers_to_entry": "string"
+  }},
+  "valuation_analysis": {{
+    "valuation_rating": "Undervalued/Fair/Overvalued",
+    "key_metrics": {{}},
+    "historical_context": "string",
+    "margin_of_safety": "string"
+  }},
+  "risk_assessment": {{
+    "overall_risk": "Low/Medium/High",
+    "business_risks": ["string"],
+    "financial_risks": ["string"],
+    "market_risks": ["string"]
+  }},
+  "key_takeaways": ["string - 3-5 items"],
+  "action_recommendation": "Buy/Hold/Sell/Watch"
+}}"""
+
         try:
-            query = self.supabase.table("deep_research_reports").select(
-                "id,stock_id,investor_persona,status,title,executive_summary,"
-                "created_at,completed_at,user_rating,stock:stocks(ticker,company_name,logo_url)"
-            ).eq("user_id", user_id).is_("deleted_at", "null")
+            result = await self.gemini.generate_text(
+                prompt=extraction_prompt,
+                system_instruction="You are a JSON extraction assistant. Return ONLY valid JSON, no markdown.",
+            )
+            text = result["text"].strip()
+            # Strip markdown code fences if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            if text.startswith("json"):
+                text = text[4:]
 
-            if status:
-                query = query.eq("status", status.value)
-
-            query = query.order("created_at", desc=True).limit(limit)
-
-            result = query.execute()
-
-            return result.data
-
+            return json.loads(text.strip())
         except Exception as e:
-            logger.error(f"Failed to get user reports: {e}")
-            return []
+            logger.warning(f"Component extraction failed, using fallback: {e}")
+            return {
+                "title": f"{ticker} Investment Analysis",
+                "executive_summary": full_text[:500],
+                "pros": [],
+                "cons": [],
+                "key_takeaways": [],
+                "action_recommendation": "Watch",
+            }

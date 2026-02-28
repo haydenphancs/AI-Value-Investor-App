@@ -71,6 +71,7 @@ struct ResearchHeader: View {
         ResearchHeader(selectedTab: .constant(.research))
         Spacer()
     }
+    .environment(AppState())
     .background(AppColors.background)
     .preferredColorScheme(.dark)
 }

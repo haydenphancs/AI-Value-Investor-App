@@ -9,12 +9,14 @@ import SwiftUI
 
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
+    @Environment(\.appState) private var appState
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
     @State private var showingBookLibrary = false
+    @State private var showProfile = false
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
 
@@ -70,6 +72,12 @@ struct LearnContentView: View {
         .fullScreenCover(item: $selectedLibraryBook) { book in
             BookDetailView(book: book)
                 .environmentObject(audioManager)
+        }
+        .fullScreenCover(isPresented: $showProfile) {
+            ProfileView()
+                .environment(appState)
+                .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
         }
         .navigationBarHidden(true)
         }
@@ -153,7 +161,7 @@ struct LearnContentView: View {
     }
 
     private func handleProfileTapped() {
-        print("Profile tapped")
+        showProfile = true
     }
 
     private func handleSeeAllJourney() {

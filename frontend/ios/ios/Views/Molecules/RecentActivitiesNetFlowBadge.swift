@@ -14,11 +14,11 @@ struct RecentActivitiesNetFlowBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Text("\(summary.quarterDescription) Net Flow:")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             Text(summary.formattedNetFlow)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(summary.netFlowColor)
         }
     }

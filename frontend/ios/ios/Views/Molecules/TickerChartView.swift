@@ -114,7 +114,7 @@ struct TickerChartView: View {
                     // Toggle chart type
                 }) {
                     Image(systemName: "chart.xyaxis.line")
-                        .font(.system(size: 16, weight: .regular))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                         .padding(.leading, 4)
                         .padding(.trailing, 8)
@@ -126,7 +126,7 @@ struct TickerChartView: View {
                     // Open chart settings
                 }) {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 16, weight: .regular))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(PlainButtonStyle())

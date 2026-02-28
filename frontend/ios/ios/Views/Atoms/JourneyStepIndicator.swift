@@ -36,11 +36,11 @@ struct JourneyStepIndicator: View {
 
             if isCompleted {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppTypography.iconXS).fontWeight(.bold)
                     .foregroundColor(foregroundColor)
             } else {
                 Text("\(stepNumber)")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.iconXS).fontWeight(.semibold)
                     .foregroundColor(foregroundColor)
             }
         }

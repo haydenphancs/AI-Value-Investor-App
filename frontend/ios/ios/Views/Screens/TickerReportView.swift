@@ -48,7 +48,7 @@ struct TickerReportView: View {
                 .tint(AppColors.primaryBlue)
                 .scaleEffect(1.2)
             Text("Loading report...")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
         }
     }
@@ -152,7 +152,7 @@ struct TickerReportView: View {
     private func deepDiveModulesSection(_ report: TickerReportData) -> some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             Text("Deep Dive Modules")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.bottom, AppSpacing.md)
@@ -209,11 +209,11 @@ struct TickerReportView: View {
         Button(action: viewModel.viewDetailedAnalysis) {
             HStack(spacing: AppSpacing.sm) {
                 Text("View Detailed Analysis")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.iconXS).fontWeight(.semibold)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .frame(maxWidth: .infinity)
@@ -227,7 +227,7 @@ struct TickerReportView: View {
     private func disclaimerSection(_ report: TickerReportData) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Disclaimer")
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             Text(report.disclaimerText)

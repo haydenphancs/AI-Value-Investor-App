@@ -63,7 +63,7 @@ struct NewsDetailHeroImage: View {
             // Center icon
             VStack(spacing: AppSpacing.sm) {
                 Image(systemName: "photo.fill")
-                    .font(.system(size: 40, weight: .light))
+                    .font(AppTypography.iconXXL).fontWeight(.light)
                     .foregroundColor(AppColors.textMuted.opacity(0.5))
 
                 Text("Image unavailable")

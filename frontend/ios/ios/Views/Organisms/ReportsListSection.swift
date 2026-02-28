@@ -27,7 +27,7 @@ struct ReportsListSection: View {
                         .foregroundColor(AppColors.textSecondary)
 
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(AppTypography.iconTiny).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .padding(.horizontal, AppSpacing.sm)

@@ -30,7 +30,7 @@ struct RecentActivitiesTabSelector: View {
                     }
                 } label: {
                     Text(tab.rawValue)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(tabForegroundColor(for: tab, isDisabled: isDisabled))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)

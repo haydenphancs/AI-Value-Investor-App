@@ -15,7 +15,7 @@ struct ChapterCountBadge: View {
         HStack(spacing: AppSpacing.xs) {
             if showIcon {
                 Image(systemName: "book.closed.fill")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AppTypography.iconTiny).fontWeight(.medium)
             }
 
             Text("\(count) chapters")

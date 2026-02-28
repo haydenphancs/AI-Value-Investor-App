@@ -18,7 +18,7 @@ struct TickerDetailPerformanceSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section title inside card styling
             Text("Performance")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Performance grid
@@ -107,7 +107,7 @@ struct PerformanceBenchmarkRow: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text(summary.formattedAvgReturn)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                     if let sinceDate = summary.sinceDate {
                         Text("Since \(sinceDate)")
@@ -123,7 +123,7 @@ struct PerformanceBenchmarkRow: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text(summary.formattedBenchmark)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
                     if let benchmarkSinceDate = summary.benchmarkSinceDate {
                         Text("Since \(benchmarkSinceDate)")

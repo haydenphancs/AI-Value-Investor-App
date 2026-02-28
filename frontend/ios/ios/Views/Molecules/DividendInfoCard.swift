@@ -86,7 +86,7 @@ private struct DividendInfoRow: View {
             Spacer()
 
             Text(value)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(valueColor)
         }
     }

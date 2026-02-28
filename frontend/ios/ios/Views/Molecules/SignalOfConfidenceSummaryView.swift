@@ -12,7 +12,7 @@ struct SignalOfConfidenceSummaryView: View {
 
     var body: some View {
         Text(summary.formattedSummary)
-            .font(AppTypography.subheadline)
+            .font(AppTypography.label)
             .foregroundColor(AppColors.textSecondary)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)

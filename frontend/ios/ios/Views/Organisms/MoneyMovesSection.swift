@@ -17,9 +17,9 @@ struct MoneyMovesSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             HStack {
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Money Moves")
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text("Most Read")
@@ -33,7 +33,7 @@ struct MoneyMovesSection: View {
                     onSeeAll?()
                 }) {
                     Text("See All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }

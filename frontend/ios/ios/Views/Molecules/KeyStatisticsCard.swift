@@ -22,7 +22,7 @@ struct KeyStatisticsCard: View {
 
                     // Value
                     Text(statistic.value)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(statistic.isHighlighted ? AppColors.primaryBlue : AppColors.textPrimary)
                         .lineLimit(1)
                 }

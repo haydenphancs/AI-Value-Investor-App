@@ -21,13 +21,13 @@ struct RiskFactorRow: View {
                         .frame(width: 36, height: 36)
 
                     Image(systemName: factor.iconName)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(factor.iconColor)
                 }
 
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(factor.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(factor.description)

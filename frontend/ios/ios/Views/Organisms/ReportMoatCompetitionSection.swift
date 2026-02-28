@@ -40,7 +40,7 @@ struct ReportMoatCompetitionSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Title
             Text("Market Dynamics")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             // Industry and Concentration row
@@ -52,7 +52,7 @@ struct ReportMoatCompetitionSection: View {
                         .foregroundColor(AppColors.textMuted)
 
                     Text(data.marketDynamics.industry)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
@@ -66,7 +66,7 @@ struct ReportMoatCompetitionSection: View {
                         .foregroundColor(AppColors.textMuted)
 
                     Text(data.marketDynamics.concentration.rawValue)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(AppTypography.caption).fontWeight(.bold)
                         .foregroundColor(data.marketDynamics.concentration.color)
                         .padding(.horizontal, AppSpacing.sm)
                         .padding(.vertical, AppSpacing.xs)
@@ -102,28 +102,28 @@ struct ReportMoatCompetitionSection: View {
 
                     HStack(spacing: AppSpacing.xxs) {
                         Text(data.marketDynamics.formattedCurrentTAM)
-                            .font(.system(size: 14, weight: .bold))
+                            .font(AppTypography.bodySmall).fontWeight(.bold)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text("→")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textSecondary)
 
                         Text(data.marketDynamics.formattedFutureTAM)
-                            .font(.system(size: 14, weight: .bold))
+                            .font(AppTypography.bodySmall).fontWeight(.bold)
                             .foregroundColor(AppColors.textPrimary)
                     }
 
                     HStack(spacing: AppSpacing.xxs) {
                         Text("(\(data.marketDynamics.currentYear))")
-                            .font(.system(size: 9))
+                            .font(AppTypography.captionTiny)
                             .foregroundColor(AppColors.textMuted)
 
                         Spacer()
                             .frame(width: 14)
 
                         Text("(\(data.marketDynamics.futureYear))")
-                            .font(.system(size: 9))
+                            .font(AppTypography.captionTiny)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -161,7 +161,7 @@ struct ReportMoatCompetitionSection: View {
 
             if isBadge {
                 Text(value)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(AppTypography.caption).fontWeight(.bold)
                     .foregroundColor(valueColor)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xs)
@@ -173,13 +173,13 @@ struct ReportMoatCompetitionSection: View {
                     .minimumScaleFactor(0.8)
             } else {
                 Text(value)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppTypography.labelSmall).fontWeight(.bold)
                     .foregroundColor(valueColor)
             }
 
             if let subtitle = subtitle {
                 Text(subtitle)
-                    .font(.system(size: 9))
+                    .font(AppTypography.captionTiny)
                     .foregroundColor(AppColors.textMuted)
             }
         }
@@ -194,7 +194,7 @@ struct ReportMoatCompetitionSection: View {
             HStack(spacing: AppSpacing.md) {
                 // Moat badge (styled like RISING SEGMENT)
                 Text(data.overallRating.rawValue.uppercased())
-                    .font(.system(size: 11, weight: .bold))
+                    .font(AppTypography.caption).fontWeight(.bold)
                     .foregroundColor(data.overallRating.color)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xs)
@@ -271,10 +271,10 @@ struct ReportMoatCompetitionSection: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("Insight")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundStyle(LinearGradient(
                         colors: [.indigo, .cyan],
                         startPoint: .topLeading,
@@ -283,7 +283,7 @@ struct ReportMoatCompetitionSection: View {
             }
 
             Text(data.durabilityNote)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
@@ -295,7 +295,7 @@ struct ReportMoatCompetitionSection: View {
     private var peerComparisonSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Competitive Landscape")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             ForEach(data.competitors) { competitor in
@@ -317,10 +317,10 @@ struct ReportMoatCompetitionSection: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("Insight")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundStyle(LinearGradient(
                         colors: [.indigo, .cyan],
                         startPoint: .topLeading,
@@ -329,7 +329,7 @@ struct ReportMoatCompetitionSection: View {
             }
 
             Text(data.competitiveInsight)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }

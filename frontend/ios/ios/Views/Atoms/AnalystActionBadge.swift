@@ -38,11 +38,11 @@ struct AnalystActionBadge: View {
             // Icon and count
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: actionType.iconName)
-                    .font(.system(size: 10, weight: .bold))
+                    .font(AppTypography.iconTiny).fontWeight(.bold)
                     .foregroundColor(actionType.color)
 
                 Text("\(count)")
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 

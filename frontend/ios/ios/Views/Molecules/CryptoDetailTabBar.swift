@@ -41,7 +41,7 @@ struct CryptoDetailTabButton: View {
         }) {
             VStack(spacing: AppSpacing.sm) {
                 Text(tab.rawValue)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(isSelected ? AppColors.primaryBlue : AppColors.textMuted)
                     .padding(.horizontal, AppSpacing.md)
 

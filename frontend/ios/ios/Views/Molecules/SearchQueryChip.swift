@@ -18,12 +18,12 @@ struct SearchQueryChip: View {
             HStack(spacing: AppSpacing.sm) {
                 if let iconName = suggestion.iconName {
                     Image(systemName: iconName)
-                        .font(.system(size: 12))
+                        .font(AppTypography.iconXS)
                         .foregroundColor(AppColors.textSecondary)
                 }
 
                 Text(suggestion.text)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
             .padding(.horizontal, AppSpacing.md)

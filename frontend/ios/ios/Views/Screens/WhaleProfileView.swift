@@ -79,7 +79,7 @@ struct WhaleProfileView: View {
                     dismiss()
                 } label: {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
                 }
             }
@@ -90,7 +90,7 @@ struct WhaleProfileView: View {
                         viewModel.toggleFollow()
                     } label: {
                         Text(profile.isFollowing ? "Following" : "Follow")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }
@@ -130,7 +130,7 @@ struct WhaleProfileHeader: View {
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(profile.title)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
 
@@ -195,10 +195,10 @@ struct WhaleRiskBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: riskProfile.iconName)
-                .font(.system(size: 12, weight: .medium))
+                .font(AppTypography.iconXS).fontWeight(.medium)
 
             Text(riskProfile.rawValue)
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
         }
         .foregroundColor(riskProfile.color)
         .padding(.horizontal, AppSpacing.md)
@@ -218,7 +218,7 @@ struct WhaleDescriptionSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text(description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
                 .lineLimit(isExpanded ? nil : lineLimit)
@@ -230,7 +230,7 @@ struct WhaleDescriptionSection: View {
                 }
             } label: {
                 Text(isExpanded ? "Show Less" : "Show More")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)
@@ -250,7 +250,7 @@ struct WhalePortfolioStats: View {
             // Portfolio Value
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(profile.formattedPortfolioValue)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Portfolio Value")
@@ -263,7 +263,7 @@ struct WhalePortfolioStats: View {
             // Annual Return
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
                 Text(profile.formattedYTDReturn)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
 
                 Text("Annual Return")
@@ -284,7 +284,7 @@ struct WhaleSectorExposureSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack {
                 Text("Sector Exposure")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -293,7 +293,7 @@ struct WhaleSectorExposureSection: View {
                     showInfoSheet = true
                 } label: {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(.plain)
@@ -335,11 +335,11 @@ struct SectorExposureInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "chart.pie.fill")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.primaryBlue)
 
                             Text("What is Sector Exposure?")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -356,11 +356,11 @@ struct SectorExposureInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.alertOrange)
 
                             Text("Why It Matters")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -391,11 +391,11 @@ struct SectorExposureInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "hand.tap.fill")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.bullish)
 
                             Text("How to Use This")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -436,18 +436,18 @@ struct RecentTradesInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "arrow.left.arrow.right")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.primaryBlue)
 
                             Text("What are Recent Trades?")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
                         VStack(alignment: .leading, spacing: AppSpacing.md) {
                             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                                 Text("The Definition:")
-                                    .font(AppTypography.bodyBold)
+                                    .font(AppTypography.bodyEmphasis)
                                     .foregroundColor(AppColors.textPrimary)
                                 
                                 Text("\"Recent Trades\" captures the latest buy and sell transactions disclosed by institutional investors (Whales) or politicians.")
@@ -458,7 +458,7 @@ struct RecentTradesInfoSheet: View {
                             
                             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                                 Text("The Data Source:")
-                                    .font(AppTypography.bodyBold)
+                                    .font(AppTypography.bodyEmphasis)
                                     .foregroundColor(AppColors.textPrimary)
                                 
                                 Text("This information is sourced from mandatory legal filings, such as SEC 13F Filings (for hedge funds) and Congressional Disclosures (for politicians).")
@@ -469,7 +469,7 @@ struct RecentTradesInfoSheet: View {
                             
                             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                                 Text("The \"Lag\" Factor:")
-                                    .font(AppTypography.bodyBold)
+                                    .font(AppTypography.bodyEmphasis)
                                     .foregroundColor(AppColors.textPrimary)
                                 
                                 Text("Note that these trades are often reported with a delay (e.g., 45 days for 13F filings), meaning they represent a snapshot of past activity rather than real-time moves.")
@@ -487,11 +487,11 @@ struct RecentTradesInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.alertOrange)
 
                             Text("Why It Matters")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -518,11 +518,11 @@ struct RecentTradesInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "hand.tap.fill")
-                                .font(.system(size: 20))
+                                .font(AppTypography.iconLarge)
                                 .foregroundColor(AppColors.bullish)
 
                             Text("How to Use This")
-                                .font(AppTypography.title3)
+                                .font(AppTypography.heading)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -559,7 +559,7 @@ struct WhaleBulletPoint: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .font(AppTypography.iconSmall)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 20)
 
@@ -583,7 +583,7 @@ struct WhaleCurrentPicksSection: View {
             // Header
             HStack {
                 Text("Current Picks")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -592,7 +592,7 @@ struct WhaleCurrentPicksSection: View {
                     onTopTenTapped?()
                 } label: {
                     Text("Top 10")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
                 .buttonStyle(.plain)
@@ -629,7 +629,7 @@ struct WhaleBehaviorSummaryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Behavior Summary:")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             Text(behaviorSummary.formattedSummary)
@@ -664,7 +664,7 @@ struct WhaleHoldingRow: View {
                 // Company Info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(holding.companyName)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
 
@@ -678,7 +678,7 @@ struct WhaleHoldingRow: View {
                 // Allocation and Change
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                     Text(holding.formattedAllocation)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(holding.formattedChange)
@@ -720,7 +720,7 @@ struct WhaleTickerIcon: View {
                 .frame(width: 40, height: 40)
 
             Text(String(ticker.prefix(1)))
-                .font(.system(size: 16, weight: .bold))
+                .font(AppTypography.bodyEmphasis).fontWeight(.bold)
                 .foregroundColor(backgroundColor)
         }
     }
@@ -738,7 +738,7 @@ struct WhaleRecentTradesSection: View {
             // Header
             HStack {
                 Text("Recent Trades")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -747,7 +747,7 @@ struct WhaleRecentTradesSection: View {
                     showInfoSheet = true
                 } label: {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .buttonStyle(.plain)
@@ -796,7 +796,7 @@ struct WhaleTradeGroupCard: View {
                         // Left side: Date and trade count stacked
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(group.formattedDate)
-                                .font(AppTypography.bodyBold)
+                                .font(AppTypography.bodyEmphasis)
                                 .foregroundColor(AppColors.textSecondary)
                             
                             Text(group.formattedTradeCount)
@@ -809,11 +809,11 @@ struct WhaleTradeGroupCard: View {
                         // Right side: Net amount and action
                         VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                             Text(group.formattedNetAmount.replacingOccurrences(of: " BOUGHT", with: "").replacingOccurrences(of: " SOLD", with: ""))
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                                 .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
                             
                             Text(group.netAction.rawValue)
-                                .font(.system(size: 10, weight: .bold))
+                                .font(AppTypography.captionSmall).fontWeight(.bold)
                                 .foregroundColor(group.netAction == .bought ? AppColors.bullish : AppColors.bearish)
                         }
                     }
@@ -829,7 +829,7 @@ struct WhaleTradeGroupCard: View {
 
                 // Chevron
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
                     .padding(.leading, AppSpacing.md)
             }
@@ -847,16 +847,16 @@ struct WhaleSentimentSummary: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "brain.head.profile")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Sentiment Summary")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(summary)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
         }
@@ -887,10 +887,10 @@ struct WhaleProUpgradeFooter: View {
         } label: {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 12))
+                    .font(AppTypography.iconXS)
 
                 Text("See All Holdings - Upgrade to Pro")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
             }
             .foregroundColor(AppColors.textSecondary)
         }

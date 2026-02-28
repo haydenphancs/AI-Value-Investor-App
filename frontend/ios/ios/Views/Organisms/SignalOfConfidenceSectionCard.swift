@@ -68,7 +68,7 @@ struct SignalOfConfidenceSectionCard: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Signal of Confidence")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 SignalOfConfidenceInfoIcon {
@@ -80,7 +80,7 @@ struct SignalOfConfidenceSectionCard: View {
 
             Button(action: onDetailTapped) {
                 Text("Detail")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

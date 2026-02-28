@@ -18,7 +18,7 @@ struct IndicatorSignalBadge: View {
 
             if let icon = signal.arrowIcon {
                 Image(systemName: icon)
-                    .font(.system(size: 8, weight: .bold))
+                    .font(AppTypography.iconMicro).fontWeight(.bold)
                     .foregroundColor(signal.color)
             }
         }
@@ -50,7 +50,7 @@ struct SummaryBadge: View {
                 .foregroundColor(color)
 
             Text("\(count)")
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.xs)
                 .padding(.vertical, 2)

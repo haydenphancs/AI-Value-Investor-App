@@ -23,7 +23,7 @@ struct SearchResultRow: View {
                 // Name and subtitle
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(item.name)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(item.subtitle)
@@ -59,7 +59,7 @@ struct SearchResultRow: View {
                         .clipShape(Circle())
                 } else {
                     Image(systemName: "person.fill")
-                        .font(.system(size: 20))
+                        .font(AppTypography.iconLarge)
                         .foregroundColor(AppColors.textSecondary)
                 }
             }
@@ -71,7 +71,7 @@ struct SearchResultRow: View {
                     .frame(width: 44, height: 44)
 
                 Text(ticker)
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(.white)
             }
         }
@@ -85,7 +85,7 @@ struct SearchResultRow: View {
             }
         } else {
             Image(systemName: "chevron.right")
-                .font(.system(size: 14, weight: .semibold))
+                .font(AppTypography.iconSmall).fontWeight(.semibold)
                 .foregroundColor(AppColors.textMuted)
         }
     }

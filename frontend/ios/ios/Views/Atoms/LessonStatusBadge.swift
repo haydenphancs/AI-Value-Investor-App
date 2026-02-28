@@ -19,7 +19,7 @@ struct LessonStatusBadge: View {
             HStack(spacing: AppSpacing.xs) {
                 if status == .completed {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
                 }
 
                 Text(status.rawValue)

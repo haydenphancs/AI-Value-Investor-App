@@ -12,7 +12,7 @@ struct ReportAgentBadge: View {
 
     var body: some View {
         Text(agent.rawValue)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(AppColors.textSecondary)
             .tracking(1.2)
     }

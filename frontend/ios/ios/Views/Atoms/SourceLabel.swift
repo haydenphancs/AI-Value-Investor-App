@@ -13,7 +13,7 @@ struct SourceLabel: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: source.systemIconName)
-                .font(.system(size: 10, weight: .medium))
+                .font(AppTypography.iconTiny).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
 
             Text(source.name)

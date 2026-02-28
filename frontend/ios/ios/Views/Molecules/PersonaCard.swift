@@ -31,13 +31,13 @@ struct PersonaCard: View {
                 // Name (split into two lines)
                 VStack(spacing: 0) {
                     Text(persona.rawValue.components(separatedBy: " ").first ?? "")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
 
                     Text(persona.rawValue.components(separatedBy: " ").last ?? "")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
@@ -58,7 +58,7 @@ struct PersonaCard: View {
                     if isSelected {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 10))
+                                .font(AppTypography.iconTiny)
                             Text("Selected")
                                 .font(AppTypography.caption)
                         }

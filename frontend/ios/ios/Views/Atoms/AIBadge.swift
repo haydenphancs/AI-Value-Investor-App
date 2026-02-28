@@ -12,7 +12,7 @@ struct AIBadge: View {
 
     var body: some View {
         Text(text)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(AppColors.accentCyan)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

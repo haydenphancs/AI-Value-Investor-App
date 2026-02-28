@@ -15,7 +15,7 @@ struct HistoryButton: View {
             onTap?()
         }) {
             Image(systemName: "line.3.horizontal")
-                .font(.system(size: 20, weight: .medium))
+                .font(AppTypography.iconLarge).fontWeight(.medium)
                 .foregroundColor(AppColors.textPrimary)
         }
         .buttonStyle(PlainButtonStyle())

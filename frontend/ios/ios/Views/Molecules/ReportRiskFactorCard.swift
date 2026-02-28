@@ -17,7 +17,7 @@ struct ReportRiskFactorCard: View {
             HStack {
                 // Category icon
                 Image(systemName: factor.category.iconName)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(factor.severity.color)
                     .frame(width: 28, height: 28)
                     .background(
@@ -29,7 +29,7 @@ struct ReportRiskFactorCard: View {
 
                 // Severity tag
                 Text(factor.severity.rawValue)
-                    .font(.system(size: 9, weight: .bold))
+                    .font(AppTypography.captionTiny)
                     .foregroundColor(factor.severity.color)
                     .tracking(0.5)
                     .padding(.horizontal, 6)
@@ -42,7 +42,7 @@ struct ReportRiskFactorCard: View {
 
             // Title
             Text(factor.title)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(2)
 
@@ -54,7 +54,7 @@ struct ReportRiskFactorCard: View {
                         .foregroundColor(AppColors.textMuted)
                     Spacer()
                     Text("\(Int(factor.impact * 100))%")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(gaugeColor)
                 }
 
@@ -90,7 +90,7 @@ struct ReportRiskFactorCard: View {
             // Trend indicator
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: factor.trend.iconName)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppTypography.iconTiny).fontWeight(.semibold)
                     .foregroundColor(factor.trend.color)
 
                 Text(factor.trend.rawValue)

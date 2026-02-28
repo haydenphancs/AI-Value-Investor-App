@@ -13,7 +13,7 @@ struct ManageAssetsButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 16, weight: .medium))
+                .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textSecondary)
                 .frame(width: 36, height: 36)
                 .background(AppColors.cardBackgroundLight)

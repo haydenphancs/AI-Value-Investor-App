@@ -18,10 +18,10 @@ struct AIDeepResearchButton: View {
             HStack(spacing: AppSpacing.sm) {
                 // Sparkle icon
                 Image(systemName: "sparkles")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
             }
             .foregroundColor(AppColors.textPrimary)
             .frame(maxWidth: .infinity)

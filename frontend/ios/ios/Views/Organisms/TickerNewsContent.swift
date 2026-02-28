@@ -48,11 +48,11 @@ struct TickerNewsContent: View {
     private var emptyStateView: some View {
         VStack(spacing: AppSpacing.lg) {
             Image(systemName: "newspaper")
-                .font(.system(size: 48))
+                .font(AppTypography.iconHero)
                 .foregroundColor(AppColors.textMuted)
 
             Text("No News Available")
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("News articles for \(currentTicker) will appear here when available.")

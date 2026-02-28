@@ -17,7 +17,7 @@ struct LiveNewsHeader: View {
                     .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
 
                 Text("Live News")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -26,10 +26,10 @@ struct LiveNewsHeader: View {
             Button(action: { onFilterTapped?() }) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(AppTypography.iconXS).fontWeight(.medium)
 
                     Text("All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                 }
                 .foregroundColor(AppColors.textSecondary)
             }

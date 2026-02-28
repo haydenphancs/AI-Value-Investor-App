@@ -19,7 +19,7 @@ struct CommunityInsightsSection: View {
             // Section header
             HStack {
                 Text("Community Insights")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -28,7 +28,7 @@ struct CommunityInsightsSection: View {
                     onJoinDiscussion?()
                 }) {
                     Text("Join Discussion")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
                 .buttonStyle(PlainButtonStyle())

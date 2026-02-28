@@ -16,7 +16,7 @@ struct UpgradesDowngradesSection: View {
             // Header
             HStack {
                 Text("Upgrades & Downgrades")
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -25,7 +25,7 @@ struct UpgradesDowngradesSection: View {
                     onInfoTapped?()
                 }) {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 18))
+                        .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
@@ -59,14 +59,14 @@ struct UpgradesDowngradesView: View {
                         dismiss()
                     }) {
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(AppTypography.iconMedium).fontWeight(.medium)
                             .foregroundColor(AppColors.textPrimary)
                     }
 
                     Spacer()
 
                     Text("Upgrades & Downgrades")
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
@@ -75,7 +75,7 @@ struct UpgradesDowngradesView: View {
                         // Info action
                     }) {
                         Image(systemName: "info.circle")
-                            .font(.system(size: 18))
+                            .font(AppTypography.iconMedium)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }

@@ -33,7 +33,7 @@ struct GrowthInfoIcon: View {
 
         HStack(spacing: AppSpacing.sm) {
             Text("Growth")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             GrowthInfoIcon(action: {})

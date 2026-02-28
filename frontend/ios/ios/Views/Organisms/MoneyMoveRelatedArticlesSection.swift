@@ -16,11 +16,11 @@ struct MoneyMoveRelatedArticlesSection: View {
             // Header
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "newspaper.fill")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.accentCyan)
 
                 Text("Related Articles")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
             }
             .padding(.horizontal, AppSpacing.lg)

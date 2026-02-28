@@ -26,7 +26,7 @@ struct TabBarItem: View {
         }) {
             VStack(spacing: AppSpacing.xs) {
                 Image(systemName: tab.systemIconName)
-                    .font(.system(size: 20, weight: isSelected ? .semibold : .regular))
+                    .font(AppTypography.iconLarge).fontWeight(isSelected ? .semibold : .regular)
                     .foregroundColor(iconColor)
 
                 Text(tab.rawValue)

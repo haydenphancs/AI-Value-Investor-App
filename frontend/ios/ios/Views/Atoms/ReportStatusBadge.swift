@@ -15,7 +15,7 @@ struct ReportStatusBadge: View {
             if status == .processing {
                 // Animated dots for processing
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(AppTypography.iconTiny).fontWeight(.bold)
             }
 
             Text(status.rawValue)

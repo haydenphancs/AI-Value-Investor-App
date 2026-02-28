@@ -22,7 +22,7 @@ struct CommunityDiscussionRow: View {
                     .frame(width: 40, height: 40)
                     .overlay(
                         Text(discussion.authorName.prefix(1).uppercased())
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(.white)
                     )
 
@@ -31,7 +31,7 @@ struct CommunityDiscussionRow: View {
                     // Author and time
                     HStack {
                         Text(discussion.authorName)
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(discussion.timeAgo)
@@ -41,7 +41,7 @@ struct CommunityDiscussionRow: View {
 
                     // Content
                     Text(discussion.content)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineLimit(3)
                         .multilineTextAlignment(.leading)
@@ -50,7 +50,7 @@ struct CommunityDiscussionRow: View {
                     HStack(spacing: AppSpacing.lg) {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "bubble.left")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
 
                             Text(discussion.formattedReplies)
                                 .font(AppTypography.caption)
@@ -59,7 +59,7 @@ struct CommunityDiscussionRow: View {
 
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "heart")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
 
                             Text(discussion.formattedLikes)
                                 .font(AppTypography.caption)

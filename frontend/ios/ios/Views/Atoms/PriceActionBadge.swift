@@ -20,7 +20,7 @@ struct PriceActionBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Text(tag)
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
         .padding(.horizontal, AppSpacing.md)

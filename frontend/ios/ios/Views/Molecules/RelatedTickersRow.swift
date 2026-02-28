@@ -15,7 +15,7 @@ struct RelatedTickersRow: View {
         HStack(alignment: .center, spacing: AppSpacing.sm) {
             // Tag Icon
             Image(systemName: "tag.fill")
-                .font(.system(size: 14, weight: .medium))
+                .font(AppTypography.iconSmall).fontWeight(.medium)
                 .foregroundColor(AppColors.neutral)
                 .rotationEffect(.degrees(-90))
 

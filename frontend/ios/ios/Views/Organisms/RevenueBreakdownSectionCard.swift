@@ -47,7 +47,7 @@ struct RevenueBreakdownSectionCard: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("How \(data.tickerSymbol) Makes Money")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 GrowthInfoIcon {
@@ -59,7 +59,7 @@ struct RevenueBreakdownSectionCard: View {
 
             Button(action: onDetailTapped) {
                 Text("Detail")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

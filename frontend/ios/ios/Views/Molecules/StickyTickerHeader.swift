@@ -14,13 +14,13 @@ struct StickyTickerHeader: View {
     var body: some View {
         HStack {
             Text(companyName)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Spacer()
 
             Text(price)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
         }

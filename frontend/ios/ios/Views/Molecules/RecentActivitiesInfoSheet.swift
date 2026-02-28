@@ -64,11 +64,11 @@ struct RecentActivitiesInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "chart.bar.doc.horizontal")
-                    .font(.system(size: 24))
+                    .font(AppTypography.iconXL)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Understanding Recent Activities")
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -89,11 +89,11 @@ struct RecentActivitiesInfoSheet: View {
     private var institutionsSectionHeader: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: "building.columns.fill")
-                .font(.system(size: 18))
+                .font(AppTypography.iconMedium)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text("Institutions Tab")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
         }
         .padding(.top, AppSpacing.md)
@@ -102,11 +102,11 @@ struct RecentActivitiesInfoSheet: View {
     private var insidersSectionHeader: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: "person.fill.checkmark")
-                .font(.system(size: 18))
+                .font(AppTypography.iconMedium)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text("Insiders Tab")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
         }
         .padding(.top, AppSpacing.md)
@@ -117,7 +117,7 @@ struct RecentActivitiesInfoSheet: View {
     private var whatIsThisSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("What Are Institutional Activities?")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Institutional investors—like mutual funds, pension funds, and hedge funds—must disclose their stock holdings quarterly through SEC Form 13F filings. This data shows you what the \"big money\" is doing.")
@@ -126,7 +126,7 @@ struct RecentActivitiesInfoSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("The most recent quarter's filings are summarized here, showing which institutions increased or decreased their positions.")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -137,7 +137,7 @@ struct RecentActivitiesInfoSheet: View {
     private var flowBarSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Understanding the Flow Bar")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -176,7 +176,7 @@ struct RecentActivitiesInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
@@ -192,7 +192,7 @@ struct RecentActivitiesInfoSheet: View {
     private var whatAreInsiderActivitiesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("What Are Insider Activities?")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Company insiders—executives, directors, and major shareholders—must report their stock trades to the SEC within 2 business days via Form 4. These filings reveal when people with deep company knowledge are buying or selling.")
@@ -201,7 +201,7 @@ struct RecentActivitiesInfoSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Unlike institutional filings, insider trades are reported almost immediately, giving you a more timely view of activity.")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -212,7 +212,7 @@ struct RecentActivitiesInfoSheet: View {
     private var informativeVsUninformativeSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Informative vs. Uninformative Trades")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("Not all insider trades carry the same weight. We classify trades based on their likely motivation:")
@@ -265,7 +265,7 @@ struct RecentActivitiesInfoSheet: View {
                     .frame(width: 10, height: 10)
 
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(color == AppColors.textSecondary ? AppColors.textPrimary : color)
             }
 
@@ -298,7 +298,7 @@ struct RecentActivitiesInfoSheet: View {
     private var keyInsightsSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Key Insights")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -332,7 +332,7 @@ struct RecentActivitiesInfoSheet: View {
     private func insightCard(number: String, title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Text(number)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24, height: 24)
                 .background(
@@ -342,11 +342,11 @@ struct RecentActivitiesInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -365,11 +365,11 @@ struct RecentActivitiesInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 18))
+                    .font(AppTypography.iconMedium)
                     .foregroundColor(AppColors.neutral)
 
                 Text("Important Considerations")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -396,12 +396,12 @@ struct RecentActivitiesInfoSheet: View {
     private func considerationRow(_ text: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.sm) {
             Image(systemName: "arrow.right.circle.fill")
-                .font(.system(size: 12))
+                .font(AppTypography.iconXS)
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, 2)
 
             Text(text)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

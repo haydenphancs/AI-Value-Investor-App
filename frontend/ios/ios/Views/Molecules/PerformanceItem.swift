@@ -23,7 +23,7 @@ struct PerformanceItem: View {
 
             // Percentage change
             Text(period.formattedChange)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(color)
 
             // S&P comparison (only shown when data exists)

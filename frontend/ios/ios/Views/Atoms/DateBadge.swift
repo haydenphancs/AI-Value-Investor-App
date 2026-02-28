@@ -27,11 +27,11 @@ struct DateBadge: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(day)
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .font(AppTypography.dataHeading)
                 .foregroundColor(.white)
 
             Text(month)
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.captionSmallEmphasis)
                 .foregroundColor(.white.opacity(0.8))
         }
         .frame(width: 48, height: 48)

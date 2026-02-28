@@ -169,7 +169,7 @@ struct VolumeCard: View {
                 .foregroundColor(AppColors.textMuted)
 
             Text(value)
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
 
@@ -240,7 +240,7 @@ struct SupportResistanceSection: View {
                     Spacer()
                     VStack(spacing: AppSpacing.xxs) {
                         Text(srData.formattedCurrentPrice)
-                            .font(AppTypography.title2)
+                            .font(AppTypography.titleCompact)
                             .fontWeight(.bold)
                             .foregroundColor(AppColors.textPrimary)
 
@@ -295,7 +295,7 @@ struct TechnicalSectionCard<Content: View>: View {
             // Header
             HStack {
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()

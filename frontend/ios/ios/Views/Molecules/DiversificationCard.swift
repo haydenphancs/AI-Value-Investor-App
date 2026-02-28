@@ -20,18 +20,18 @@ struct DiversificationCard: View {
                         .frame(width: 32, height: 32)
 
                     Image(systemName: "lightbulb.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
                         .foregroundColor(AppColors.primaryBlue)
                 }
 
                 Text("Diversification Score")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             // Description
             Text(score.message)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             // Progress Bar with Score
@@ -43,7 +43,7 @@ struct DiversificationCard: View {
                 )
 
                 Text(score.formattedScore)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 40, alignment: .trailing)
             }
@@ -60,7 +60,7 @@ struct DiversificationCard: View {
                             .foregroundColor(AppColors.textMuted)
 
                         Text(allocation.formattedPercentage)
-                            .font(AppTypography.captionBold)
+                            .font(AppTypography.captionEmphasis)
                             .foregroundColor(AppColors.textSecondary)
                     }
                 }

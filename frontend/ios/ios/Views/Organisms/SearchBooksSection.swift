@@ -16,7 +16,7 @@ struct SearchBooksSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             Text("AI-Enabled Books")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

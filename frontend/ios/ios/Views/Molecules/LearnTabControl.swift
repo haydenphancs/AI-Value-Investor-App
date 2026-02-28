@@ -19,7 +19,7 @@ struct LearnTabControl: View {
                     }
                 } label: {
                     Text(tab.rawValue)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)

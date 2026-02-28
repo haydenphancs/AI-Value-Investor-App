@@ -38,7 +38,7 @@ struct RatingBadge: View {
 
     var body: some View {
         Text(formattedText)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(.white)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

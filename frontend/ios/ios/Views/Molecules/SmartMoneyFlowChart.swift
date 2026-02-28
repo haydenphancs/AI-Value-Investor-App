@@ -223,7 +223,7 @@ struct SmartMoneyFlowChart: View {
 
         VStack(spacing: AppSpacing.xl) {
             Text("Smart Money vs Price")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             SmartMoneyFlowChart(

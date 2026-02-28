@@ -34,7 +34,7 @@ struct ProgressBar: View {
             // Percentage text
             if showPercentage {
                 Text("\(Int(progress * 100))%")
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 40, alignment: .trailing)

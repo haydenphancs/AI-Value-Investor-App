@@ -25,11 +25,11 @@ struct AnalysisDescriptionCard: View {
             // Content
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Text(styleTitle)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(persona.description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)

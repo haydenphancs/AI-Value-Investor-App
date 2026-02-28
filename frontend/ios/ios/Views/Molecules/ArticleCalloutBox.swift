@@ -16,13 +16,13 @@ struct ArticleCalloutBox: View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             // Icon
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .semibold))
+                .font(AppTypography.iconDefault).fontWeight(.semibold)
                 .foregroundColor(style.borderColor)
                 .frame(width: 24)
 
             // Text
             Text(text)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textPrimary)
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)

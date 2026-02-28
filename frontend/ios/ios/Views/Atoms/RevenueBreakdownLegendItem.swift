@@ -23,7 +23,7 @@ struct RevenueBreakdownLegendItem: View {
 
             // Name
             Text(name)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(minWidth: 60, alignment: .leading)
 
@@ -32,7 +32,7 @@ struct RevenueBreakdownLegendItem: View {
             // Value and percentage stacked
             VStack(alignment: .trailing, spacing: 0) {
                 Text(value)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textPrimary)
                 Text("(\(percentage))")
                     .font(AppTypography.caption)

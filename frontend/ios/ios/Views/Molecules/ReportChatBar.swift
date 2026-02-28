@@ -14,17 +14,17 @@ struct ReportChatBar: View {
         Button(action: onTapped) {
             HStack(spacing: AppSpacing.md) {
                 Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 16))
+                    .font(AppTypography.iconDefault)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Chat with the report")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
 
                 Spacer()
 
                 Image(systemName: "mic.fill")
-                    .font(.system(size: 14))
+                    .font(AppTypography.iconSmall)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(.horizontal, AppSpacing.lg)

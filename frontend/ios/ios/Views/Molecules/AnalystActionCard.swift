@@ -22,7 +22,7 @@ struct AnalystActionCard: View {
                 // Header: Firm name, Badge, Date
                 HStack(alignment: .top) {
                     Text(action.firmName)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
@@ -38,21 +38,21 @@ struct AnalystActionCard: View {
                 if let previousRating = action.previousRating {
                     HStack(spacing: AppSpacing.sm) {
                         Text(previousRating.rawValue)
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(AppColors.textSecondary)
 
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 10))
+                            .font(AppTypography.iconTiny)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(action.newRating.rawValue)
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(action.newRating.color)
                     }
                 } else {
                     // For initiated actions, just show new rating
                     Text(action.newRating.rawValue)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(action.newRating.color)
                 }
 
@@ -61,21 +61,21 @@ struct AnalystActionCard: View {
                    let newPrice = action.formattedNewPrice {
                     HStack(spacing: AppSpacing.sm) {
                         Text(previousPrice)
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(AppColors.textSecondary)
 
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 10))
+                            .font(AppTypography.iconTiny)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(newPrice)
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(action.priceChangeColor)
                     }
                 } else if let newPrice = action.formattedNewPrice {
                     // For initiated/reiterated without previous price
                     Text(newPrice)
-                        .font(AppTypography.subheadline)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textSecondary)
                 }
             }

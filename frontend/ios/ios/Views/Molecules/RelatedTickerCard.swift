@@ -23,13 +23,13 @@ struct RelatedTickerCard: View {
                 // Symbol and chevron
                 HStack {
                     Text(ticker.symbol)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
 
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.iconTiny).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
 
@@ -43,12 +43,12 @@ struct RelatedTickerCard: View {
 
                 // Price
                 Text(ticker.formattedPrice)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 // Change percentage
                 Text(ticker.formattedChange)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.semibold)
                     .foregroundColor(changeColor)
             }

@@ -18,7 +18,7 @@ struct NewsTimelineItem: View {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     // Headline
                     Text(article.headline)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(3)
                         .multilineTextAlignment(.leading)

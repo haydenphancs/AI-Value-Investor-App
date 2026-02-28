@@ -15,7 +15,7 @@ struct ClearAllButton: View {
             onTap?()
         }) {
             Text("Clear All")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.bearish)
         }
         .buttonStyle(PlainButtonStyle())

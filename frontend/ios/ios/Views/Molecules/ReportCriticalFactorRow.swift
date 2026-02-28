@@ -14,17 +14,17 @@ struct ReportCriticalFactorRow: View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             // Severity icon
             Image(systemName: factor.severity.iconName)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(factor.severity.color)
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(factor.title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(factor.description)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(2)
             }

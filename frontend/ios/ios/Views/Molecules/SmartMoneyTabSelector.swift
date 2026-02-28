@@ -28,7 +28,7 @@ struct SmartMoneyTabSelector: View {
             }
         } label: {
             Text(tab.rawValue)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)

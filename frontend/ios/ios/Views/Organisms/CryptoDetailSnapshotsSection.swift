@@ -19,7 +19,7 @@ struct CryptoDetailSnapshotsSection: View {
             // Section title with info button
             HStack {
                 Text("Snapshots")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -80,20 +80,20 @@ struct CryptoSnapshotCard: View {
                             .frame(width: 36, height: 36)
 
                         Image(systemName: snapshot.category.iconName)
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(snapshot.category.iconColor)
                     }
 
                     // Category name
                     Text(snapshot.category.rawValue)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
 
                     // Expand/collapse chevron
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.vertical, AppSpacing.md)
@@ -107,11 +107,11 @@ struct CryptoSnapshotCard: View {
                         // Placeholder for future content
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "text.alignleft")
-                                .font(.system(size: 14))
+                                .font(AppTypography.iconSmall)
                                 .foregroundColor(AppColors.textMuted)
 
                             Text("Content coming soon")
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textMuted)
                                 .italic()
                         }
@@ -119,7 +119,7 @@ struct CryptoSnapshotCard: View {
                     } else {
                         ForEach(Array(snapshot.paragraphs.enumerated()), id: \.offset) { _, paragraph in
                             Text(paragraph)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textSecondary)
                                 .lineSpacing(4)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -149,10 +149,10 @@ struct CryptoSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "camera.viewfinder")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("What are Snapshots?")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -166,10 +166,10 @@ struct CryptoSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "square.grid.2x2.fill")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Snapshot Categories")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
@@ -204,10 +204,10 @@ struct CryptoSnapshotsInfoSheet: View {
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 18))
+                                .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Pro Tips")
-                                .font(AppTypography.headline)
+                                .font(AppTypography.headingSmall)
                                 .foregroundColor(AppColors.textPrimary)
                         }
 

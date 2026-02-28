@@ -17,7 +17,7 @@ struct RevenueBreakdownInfoSheet: View {
                     // Header explanation
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         Text("Understanding Revenue Breakdown")
-                            .font(AppTypography.title2)
+                            .font(AppTypography.titleCompact)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text("This chart shows how a company generates revenue and where the money goes. Understanding these flows helps assess business quality and profitability.")
@@ -63,7 +63,7 @@ struct RevenueBreakdownInfoSheet: View {
     private var chartExplanation: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Reading the Chart")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -97,11 +97,11 @@ struct RevenueBreakdownInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
             }
         }
@@ -112,17 +112,17 @@ struct RevenueBreakdownInfoSheet: View {
     private func infoCard(item: RevenueBreakdownInfoItem) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: item.icon)
-                .font(.system(size: 24))
+                .font(AppTypography.iconXL)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text(item.title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(item.description)
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -139,7 +139,7 @@ struct RevenueBreakdownInfoSheet: View {
     private var keyRatiosSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Key Profitability Ratios")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.sm) {
@@ -172,7 +172,7 @@ struct RevenueBreakdownInfoSheet: View {
     private func ratioRow(name: String, formula: String, benchmark: String) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
             Text(name)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(formula)

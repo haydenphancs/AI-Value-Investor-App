@@ -16,11 +16,11 @@ struct SortButton: View {
         } label: {
             HStack(spacing: AppSpacing.xs) {
                 Text("Sort")
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
 
                 Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AppTypography.iconXS).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

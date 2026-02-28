@@ -71,7 +71,7 @@ struct LiveIndicator: View {
     HStack(spacing: 8) {
         LiveIndicator()
         Text("Live News")
-            .font(AppTypography.bodyBold)
+            .font(AppTypography.bodyEmphasis)
             .foregroundColor(AppColors.textPrimary)
     }
     .padding()

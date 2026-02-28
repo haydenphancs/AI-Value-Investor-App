@@ -10,7 +10,7 @@ import SwiftUI
 
 struct MarqueeText: View {
     let text: String
-    var font: Font = AppTypography.bodyBold
+    var font: Font = AppTypography.bodyEmphasis
     var color: Color = AppColors.textPrimary
     var speed: Double = 30 // points per second
     var delayBeforeScroll: Double = 2.0

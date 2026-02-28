@@ -106,12 +106,12 @@ struct DisclaimerCard: View {
             // Header
             HStack(spacing: AppSpacing.md) {
                 Image(systemName: icon)
-                    .font(.system(size: 20))
+                    .font(AppTypography.iconLarge)
                     .foregroundColor(iconColor)
                     .frame(width: 40, height: 40)
 
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -125,7 +125,7 @@ struct DisclaimerCard: View {
                             .padding(.top, 6)
 
                         Text(item)
-                            .font(AppTypography.callout)
+                            .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

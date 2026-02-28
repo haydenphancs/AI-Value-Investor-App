@@ -37,12 +37,12 @@ struct LessonCompletionCard: View {
 
                 // Title
                 Text(title)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
                 // Subtitle
                 Text(subtitle)
-                    .font(.system(size: 16, weight: .regular))
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(4)
@@ -56,7 +56,7 @@ struct LessonCompletionCard: View {
                     onCTATapped?()
                 }) {
                     Text(ctaButtonTitle)
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)
@@ -70,7 +70,7 @@ struct LessonCompletionCard: View {
                     onCloseTapped?()
                 }) {
                     Text("Close")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(AppTypography.body).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .padding(.top, AppSpacing.sm)
@@ -108,7 +108,7 @@ struct LessonCompletionCard: View {
 
             // Checkmark icon
             Image(systemName: "checkmark")
-                .font(.system(size: 36, weight: .bold))
+                .font(AppTypography.iconJumbo).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
         }
     }
@@ -121,7 +121,7 @@ struct LessonCompletionCard: View {
                 .frame(width: 8, height: 8)
 
             Text("Lesson \(lessonNumber) of \(totalLessons)")
-                .font(.system(size: 14, weight: .medium))
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             // Separator dot
@@ -132,11 +132,11 @@ struct LessonCompletionCard: View {
             // Clock icon and duration
             HStack(spacing: 4) {
                 Image(systemName: "clock")
-                    .font(.system(size: 12))
+                    .font(AppTypography.iconXS)
                     .foregroundColor(AppColors.textMuted)
 
                 Text("\(estimatedMinutes) min")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

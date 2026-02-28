@@ -17,7 +17,7 @@ struct StockPriceDisplay: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(price)
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .font(AppTypography.dataHero)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Current Price")
@@ -29,7 +29,7 @@ struct StockPriceDisplay: View {
 
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(change)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(isPositive ? AppColors.bullish : AppColors.bearish)
 
                 Text(period)

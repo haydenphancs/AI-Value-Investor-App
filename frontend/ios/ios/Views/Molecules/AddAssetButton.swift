@@ -16,10 +16,10 @@ struct AddAssetButton: View {
         } label: {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AppTypography.iconSmall).fontWeight(.semibold)
 
                 Text("Add New")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
             }
             .foregroundColor(AppColors.textPrimary)
             .padding(.horizontal, AppSpacing.xl)

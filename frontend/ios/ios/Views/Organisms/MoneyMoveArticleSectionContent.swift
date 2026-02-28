@@ -20,7 +20,7 @@ struct MoneyMoveArticleSectionContent: View {
                 }
 
                 Text(section.title)
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -65,7 +65,7 @@ struct MoneyMoveArticleSectionContent: View {
 
         case .subheading(let text):
             Text(text)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.top, AppSpacing.sm)
 
@@ -88,7 +88,7 @@ struct ArticleChartView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text(chartData.title)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
             Chart {

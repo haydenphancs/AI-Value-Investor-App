@@ -36,13 +36,13 @@ struct StorageCard: View {
             // Header row: Title + Percentage
             HStack {
                 Text("Storage")
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
                 Text(storageInfo.formattedPercentage)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
 
@@ -61,7 +61,7 @@ struct StorageCard: View {
                     onUpgrade?()
                 }) {
                     Text("Upgrade")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.primaryBlue)
                 }
                 .buttonStyle(PlainButtonStyle())

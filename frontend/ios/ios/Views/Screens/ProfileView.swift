@@ -46,13 +46,13 @@ struct ProfileView: View {
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Text("Account")
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: { dismiss() }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
                             .foregroundColor(AppColors.textSecondary)
                     }
                 }
@@ -80,11 +80,11 @@ struct ProfileView: View {
 
                 VStack(spacing: AppSpacing.xs) {
                     Text(viewModel.displayName)
-                        .font(AppTypography.title2)
+                        .font(AppTypography.titleCompact)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(viewModel.email)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
 
@@ -112,13 +112,13 @@ struct ProfileView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     HStack {
                         Text("Monthly Credits")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Spacer()
 
                         Text("\(viewModel.creditsUsed)/\(viewModel.creditsTotal)")
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .font(AppTypography.dataHeading)
                             .foregroundColor(AppColors.primaryBlue)
                     }
 
@@ -152,9 +152,9 @@ struct ProfileView: View {
                         }) {
                             HStack(spacing: AppSpacing.xs) {
                                 Image(systemName: "plus")
-                                    .font(.system(size: 10, weight: .bold))
+                                    .font(AppTypography.iconTiny).fontWeight(.bold)
                                 Text("Add Credits")
-                                    .font(AppTypography.captionBold)
+                                    .font(AppTypography.captionEmphasis)
                             }
                             .foregroundColor(.white)
                             .padding(.horizontal, AppSpacing.md)
@@ -200,7 +200,7 @@ struct ProfileView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     HStack(spacing: AppSpacing.md) {
                         Image(systemName: "eye")
-                            .font(.system(size: 16))
+                            .font(AppTypography.iconDefault)
                             .foregroundColor(AppColors.textSecondary)
                             .frame(width: 28, height: 28)
 
@@ -216,7 +216,7 @@ struct ProfileView: View {
                             } label: {
                                 HStack(spacing: AppSpacing.xs) {
                                     Image(systemName: mode.icon)
-                                        .font(.system(size: 12))
+                                        .font(AppTypography.iconXS)
                                     Text(mode.rawValue)
                                         .font(AppTypography.caption)
                                 }
@@ -367,10 +367,10 @@ struct ProfileView: View {
             }) {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "rectangle.portrait.and.arrow.right")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                     Text("Sign Out")
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                 }
                 .foregroundColor(AppColors.bearish)
                 .frame(maxWidth: .infinity)
@@ -451,10 +451,10 @@ struct TierBadge: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: tierIcon)
-                .font(.system(size: 12, weight: .bold))
+                .font(AppTypography.iconXS).fontWeight(.bold)
 
             Text(tierLabel)
-                .font(AppTypography.captionBold)
+                .font(AppTypography.captionEmphasis)
         }
         .foregroundColor(tierTextColor)
         .padding(.horizontal, AppSpacing.md)
@@ -520,11 +520,11 @@ struct ProfileStatItem: View {
     var body: some View {
         VStack(spacing: AppSpacing.xs) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .font(AppTypography.iconSmall)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text(value)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(AppTypography.dataLarge)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(label)
@@ -544,11 +544,11 @@ struct ProfileSectionHeader: View {
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .font(AppTypography.iconSmall)
                 .foregroundColor(AppColors.textMuted)
 
             Text(title)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textMuted)
                 .textCase(.uppercase)
                 .tracking(0.5)
@@ -591,11 +591,11 @@ struct UpgradeCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text("Upgrade Plan")
-                            .font(AppTypography.bodyBold)
+                            .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
                     }
 
@@ -608,7 +608,7 @@ struct UpgradeCard: View {
                 Spacer()
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppTypography.iconSmall).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary.opacity(0.8))
             }
         }
@@ -674,7 +674,7 @@ struct ProfileSettingsRowContent: View {
     var body: some View {
         HStack(spacing: AppSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(AppTypography.iconDefault)
                 .foregroundColor(iconColor)
                 .frame(width: 28, height: 28)
 
@@ -693,7 +693,7 @@ struct ProfileSettingsRowContent: View {
             Spacer()
 
             Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
+                .font(AppTypography.iconSmall).fontWeight(.semibold)
                 .foregroundColor(AppColors.textMuted)
         }
         .padding(.horizontal, AppSpacing.lg)

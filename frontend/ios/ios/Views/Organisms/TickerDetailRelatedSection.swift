@@ -15,7 +15,7 @@ struct TickerDetailRelatedSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section header
             Text("People Also Check")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

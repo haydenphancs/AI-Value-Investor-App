@@ -335,7 +335,7 @@ struct FollowedWhalesRow: View {
                                 .frame(width: 64, height: 64)
                                 .overlay(
                                     Image(systemName: "person.fill")
-                                        .font(.system(size: 28))
+                                        .font(AppTypography.iconXL)
                                         .foregroundColor(AppColors.textMuted)
                                 )
 
@@ -371,7 +371,7 @@ struct WhaleTradesTimelineSection: View {
             // Section Header with "more" button
             HStack {
                 Text("Recent Trades")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -380,7 +380,7 @@ struct WhaleTradesTimelineSection: View {
                     onMoreTapped?()
                 } label: {
                     Text("more")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
                 .buttonStyle(.plain)
@@ -475,7 +475,7 @@ struct WhaleTradeCard: View {
                     .frame(width: 48, height: 48)
                     .overlay(
                         Image(systemName: "person.fill")
-                            .font(.system(size: 22))
+                            .font(AppTypography.iconXL)
                             .foregroundColor(AppColors.textMuted)
                     )
 
@@ -485,7 +485,7 @@ struct WhaleTradeCard: View {
                         // Name and trade count
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(activity.entityName)
-                                .font(AppTypography.bodyBold)
+                                .font(AppTypography.bodyEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
 
                             Text(activity.formattedTradeCount)
@@ -498,11 +498,11 @@ struct WhaleTradeCard: View {
                         // Amount + Action badge
                         VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                             Text(activity.formattedAmount)
-                                .font(AppTypography.calloutBold)
+                                .font(AppTypography.bodySmallEmphasis)
                                 .foregroundColor(activity.action.color)
 
                             Text(activity.action.rawValue)
-                                .font(.system(size: 10, weight: .bold))
+                                .font(AppTypography.captionSmall).fontWeight(.bold)
                                 .foregroundColor(activity.action.color)
                         }
                     }
@@ -518,7 +518,7 @@ struct WhaleTradeCard: View {
 
                 // Chevron
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.lg)
@@ -543,17 +543,17 @@ struct WhaleAlertBannerCard: View {
                     .frame(width: 44, height: 44)
                     .overlay(
                         Image(systemName: "bell.fill")
-                            .font(.system(size: 20))
+                            .font(AppTypography.iconLarge)
                             .foregroundColor(AppColors.alertOrange)
                     )
 
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(alert.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(alert.description)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineLimit(2)
                 }
@@ -564,7 +564,7 @@ struct WhaleAlertBannerCard: View {
                 onViewAlert?()
             } label: {
                 Text(alert.actionTitle)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.alertOrange)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.sm)
@@ -600,7 +600,7 @@ struct MostPopularWhalesSection: View {
             // Header with "more" button
             HStack {
                 Text("Most Popular")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -609,7 +609,7 @@ struct MostPopularWhalesSection: View {
                     onMoreTapped?()
                 } label: {
                     Text("more")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
                 .buttonStyle(.plain)
@@ -698,12 +698,12 @@ struct WhaleHeroCard: View {
                         Spacer()
 
                         Text(whale.name)
-                            .font(AppTypography.title2)
+                            .font(AppTypography.titleCompact)
                             .foregroundColor(AppColors.textPrimary)
 
                         if !whale.title.isEmpty {
                             Text(whale.title)
-                                .font(AppTypography.callout)
+                                .font(AppTypography.bodySmall)
                                 .foregroundColor(AppColors.accentCyan)
                         }
 
@@ -716,7 +716,7 @@ struct WhaleHeroCard: View {
 
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "person.2.fill")
-                                .font(.system(size: 11))
+                                .font(AppTypography.iconXS)
                                 .foregroundColor(AppColors.textMuted)
 
                             Text(whale.formattedFollowers)
@@ -737,7 +737,7 @@ struct WhaleHeroCard: View {
                             .frame(width: 80, height: 80)
                             .overlay(
                                 Image(systemName: "person.fill")
-                                    .font(.system(size: 36))
+                                    .font(AppTypography.iconJumbo)
                                     .foregroundColor(AppColors.textMuted)
                             )
                             .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
@@ -770,14 +770,14 @@ struct WhaleCard: View {
                     .frame(width: 44, height: 44)
                     .overlay(
                         Image(systemName: "person.fill")
-                            .font(.system(size: 20))
+                            .font(AppTypography.iconLarge)
                             .foregroundColor(AppColors.textMuted)
                     )
 
                 // Info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(whale.name)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(whale.formattedFollowers)
@@ -792,7 +792,7 @@ struct WhaleCard: View {
                     onFollowToggle?()
                 } label: {
                     Text(whale.isFollowing ? "Following" : "Follow")
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(whale.isFollowing ? AppColors.textSecondary : .white)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)
@@ -831,7 +831,7 @@ struct AddAssetSheet: View {
                     if searchText.isEmpty {
                         VStack(spacing: AppSpacing.md) {
                             Image(systemName: "magnifyingglass")
-                                .font(.system(size: 48))
+                                .font(AppTypography.iconHero)
                                 .foregroundColor(AppColors.textMuted)
 
                             Text("Search for a stock to add to your watchlist")

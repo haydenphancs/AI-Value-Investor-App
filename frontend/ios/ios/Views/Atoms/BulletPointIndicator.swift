@@ -12,7 +12,7 @@ struct BulletPointIndicator: View {
 
     var body: some View {
         Image(systemName: type.iconName)
-            .font(.system(size: 14, weight: .medium))
+            .font(AppTypography.iconSmall).fontWeight(.medium)
             .foregroundColor(type.color)
     }
 }

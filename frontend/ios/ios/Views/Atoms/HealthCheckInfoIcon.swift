@@ -33,7 +33,7 @@ struct HealthCheckInfoIcon: View {
 
         HStack(spacing: AppSpacing.sm) {
             Text("Health Check")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             HealthCheckInfoIcon(action: {})

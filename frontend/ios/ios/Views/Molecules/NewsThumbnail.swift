@@ -26,7 +26,7 @@ struct NewsThumbnail: View {
                     AppColors.cardBackgroundLight
 
                     Image(systemName: "photo")
-                        .font(.system(size: 24))
+                        .font(AppTypography.iconXL)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .frame(width: width, height: height)

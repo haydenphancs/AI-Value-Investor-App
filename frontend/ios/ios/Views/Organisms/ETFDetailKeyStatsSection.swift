@@ -15,7 +15,7 @@ struct ETFDetailKeyStatsSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             // Section title inside card styling
             Text("Key Statistics")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

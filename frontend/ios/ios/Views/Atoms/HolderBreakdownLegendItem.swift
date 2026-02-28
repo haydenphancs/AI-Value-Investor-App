@@ -22,14 +22,14 @@ struct HolderBreakdownLegendItem: View {
 
             // Label
             Text(label)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             // Percentage value
             Text(percentage)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

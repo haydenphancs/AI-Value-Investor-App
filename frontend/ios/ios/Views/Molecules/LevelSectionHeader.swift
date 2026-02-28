@@ -21,12 +21,12 @@ struct LevelSectionHeader: View {
         HStack(spacing: AppSpacing.md) {
             // Level icon
             Text(level.iconName)
-                .font(.system(size: 18))
+                .font(AppTypography.heading)
 
             // Title and tagline
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text("Level \(level.rawValue): \(level.title)")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(level.tagline)

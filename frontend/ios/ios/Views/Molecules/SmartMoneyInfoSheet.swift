@@ -48,7 +48,7 @@ struct SmartMoneyInfoSheet: View {
     private var quoteSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Image(systemName: "quote.opening")
-                .font(.system(size: 24))
+                .font(AppTypography.iconXL)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text("Insiders might sell their shares for any number of reasons (taxes, divorce, buying a house), but they buy them for only one: they think the price will rise.")
@@ -58,7 +58,7 @@ struct SmartMoneyInfoSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("— Peter Lynch")
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
         }
         .padding(AppSpacing.lg)
@@ -78,7 +78,7 @@ struct SmartMoneyInfoSheet: View {
     private var whatIsSmartMoneySection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("What is Smart Money?")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             Text("\"Smart Money\" refers to capital invested by those with deep knowledge of the market or a specific company. Tracking their buying and selling patterns can provide valuable signals about a stock's future direction.")
@@ -87,7 +87,7 @@ struct SmartMoneyInfoSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("The chart shows stock price (top) alongside buy/sell activity (bottom), letting you see when smart money acted relative to price movements.")
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -98,7 +98,7 @@ struct SmartMoneyInfoSheet: View {
     private var smartMoneyTypesSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Types of Smart Money")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -151,23 +151,23 @@ struct SmartMoneyInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: icon)
-                    .font(.system(size: 18))
+                    .font(AppTypography.iconMedium)
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(width: 24)
 
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(alignment: .top, spacing: AppSpacing.sm) {
                 Image(systemName: "lightbulb.fill")
-                    .font(.system(size: 12))
+                    .font(AppTypography.iconXS)
                     .foregroundColor(signalType.color)
 
                 Text(signal)
@@ -190,7 +190,7 @@ struct SmartMoneyInfoSheet: View {
     private var keyTakeawaysSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Key Takeaways")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -224,7 +224,7 @@ struct SmartMoneyInfoSheet: View {
     private func takeawayRow(number: String, title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Text(number)
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24, height: 24)
                 .background(
@@ -234,11 +234,11 @@ struct SmartMoneyInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)
-                    .font(AppTypography.callout)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

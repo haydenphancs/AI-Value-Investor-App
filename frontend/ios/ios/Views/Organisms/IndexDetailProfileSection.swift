@@ -19,7 +19,7 @@ struct IndexDetailProfileSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section title
             Text("Index Profile")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Profile content
@@ -27,7 +27,7 @@ struct IndexDetailProfileSection: View {
                 // Description with expandable text
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text(profile.description)
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .lineLimit(isExpanded ? nil : collapsedLineLimit)
@@ -40,7 +40,7 @@ struct IndexDetailProfileSection: View {
                         }
                     }) {
                         Text(isExpanded ? "Show less" : "more")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.primaryBlue)
                     }
@@ -67,7 +67,7 @@ struct IndexDetailProfileSection: View {
                 // Website
                 HStack {
                     Text("Website")
-                        .font(AppTypography.footnote)
+                        .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     Spacer()
@@ -77,11 +77,11 @@ struct IndexDetailProfileSection: View {
                     }) {
                         HStack(spacing: AppSpacing.xs) {
                             Text(profile.website)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.primaryBlue)
 
                             Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(AppTypography.iconTiny).fontWeight(.semibold)
                                 .foregroundColor(AppColors.primaryBlue)
                         }
                     }

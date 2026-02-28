@@ -21,7 +21,7 @@ struct SendButton: View {
                     .frame(width: 44, height: 44)
 
                 Image(systemName: "paperplane.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(isEnabled ? .white : AppColors.textMuted)
                     .rotationEffect(.degrees(45))
             }

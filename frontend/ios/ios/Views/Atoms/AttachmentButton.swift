@@ -20,7 +20,7 @@ struct AttachmentButton: View {
                     .frame(width: 44, height: 44)
 
                 Image(systemName: "plus")
-                    .font(.system(size: 20, weight: .medium))
+                    .font(AppTypography.iconLarge).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
             }
         }

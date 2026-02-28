@@ -24,7 +24,7 @@ struct EarningsSurpriseRow: View {
                 ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
                     if let surprise = quarter.formattedSurprise {
                         Text(surprise)
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                             .foregroundColor(quarter.surpriseColor)
                             .frame(maxWidth: .infinity)
                     } else {

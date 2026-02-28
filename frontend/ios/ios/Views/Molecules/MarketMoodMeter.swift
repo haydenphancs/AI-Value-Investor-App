@@ -24,7 +24,7 @@ struct MarketMoodMeter: View {
             // Header
             VStack(spacing: AppSpacing.xs) {
                 Text("Market Mood Meter")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text("Real-time sentiment tracking")

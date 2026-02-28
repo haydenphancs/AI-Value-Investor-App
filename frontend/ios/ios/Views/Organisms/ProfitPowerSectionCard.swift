@@ -65,7 +65,7 @@ struct ProfitPowerSectionCard: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Profit Power")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 ProfitPowerInfoIcon {
@@ -77,7 +77,7 @@ struct ProfitPowerSectionCard: View {
 
             Button(action: onDetailTapped) {
                 Text("Detail")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

@@ -21,7 +21,7 @@ struct ReportCard: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: AppSpacing.xs) {
                         Text(report.companyName)
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(report.tickerAndIndustry)
@@ -55,7 +55,7 @@ struct ReportCard: View {
 
                             VStack(alignment: .leading, spacing: 0) {
                                 Text(report.persona.rawValue)
-                                    .font(AppTypography.footnote)
+                                    .font(AppTypography.labelSmall)
                                     .fontWeight(.semibold)
                                     .foregroundColor(AppColors.textPrimary)
 
@@ -86,7 +86,7 @@ struct ReportCard: View {
 
                         VStack(alignment: .leading, spacing: 0) {
                             Text(report.persona.rawValue)
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
 
@@ -112,9 +112,9 @@ struct ReportCard: View {
                         }) {
                             HStack(spacing: AppSpacing.xs) {
                                 Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(AppTypography.iconXS).fontWeight(.semibold)
                                 Text("Retry Analysis")
-                                    .font(AppTypography.footnote)
+                                    .font(AppTypography.labelSmall)
                                     .fontWeight(.semibold)
                             }
                             .foregroundColor(report.status.color)

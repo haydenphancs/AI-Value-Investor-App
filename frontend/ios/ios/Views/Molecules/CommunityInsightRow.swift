@@ -26,7 +26,7 @@ struct CommunityInsightRow: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: AppSpacing.sm) {
                         Text(insight.userName)
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 
                         Text(insight.timeAgo)
@@ -53,9 +53,9 @@ struct CommunityInsightRow: View {
                 }) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "heart")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                         Text("\(insight.likesCount)")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                     }
                     .foregroundColor(AppColors.textMuted)
                 }
@@ -67,9 +67,9 @@ struct CommunityInsightRow: View {
                 }) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "bubble.right")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                         Text("\(insight.commentsCount)")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                     }
                     .foregroundColor(AppColors.textMuted)
                 }
@@ -81,9 +81,9 @@ struct CommunityInsightRow: View {
                 }) {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "arrowshape.turn.up.right")
-                            .font(.system(size: 14))
+                            .font(AppTypography.iconSmall)
                         Text("Share")
-                            .font(AppTypography.footnote)
+                            .font(AppTypography.labelSmall)
                     }
                     .foregroundColor(AppColors.textMuted)
                 }

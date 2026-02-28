@@ -23,18 +23,18 @@ struct AlertCardView: View {
                         .frame(width: 40, height: 40)
 
                     Image(systemName: alert.iconName)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(alert.iconColor)
                 }
 
                 // Content
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(alert.title)
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(alert.description)
-                        .font(AppTypography.caption)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -67,7 +67,7 @@ struct AlertCardView: View {
             )
         case .smartMoney:
             Image(systemName: "chevron.right")
-                .font(.system(size: 14, weight: .medium))
+                .font(AppTypography.iconSmall).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
         }
     }

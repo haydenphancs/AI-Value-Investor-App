@@ -15,7 +15,7 @@ struct GrowthMetricChip: View {
     var body: some View {
         Button(action: action) {
             Text(metricType.rawValue)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.sm)

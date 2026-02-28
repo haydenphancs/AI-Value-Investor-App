@@ -15,7 +15,7 @@ struct SentimentAnalysisCard: View {
             // Header row
             HStack {
                 Text("OVERALL SENTIMENT")
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
 
                 Spacer()

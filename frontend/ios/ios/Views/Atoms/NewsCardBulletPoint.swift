@@ -20,7 +20,7 @@ struct NewsCardBulletPoint: View {
 
             // Bullet text with bold title support
             formattedText
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

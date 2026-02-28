@@ -16,17 +16,17 @@ struct ReportExecutiveSummaryCard: View {
             // Section header
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "doc.text.fill")
-                    .font(.system(size: 14))
+                    .font(AppTypography.iconSmall)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Executive Summary")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             // Summary text
             Text(summaryText)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
 
@@ -41,7 +41,7 @@ struct ReportExecutiveSummaryCard: View {
 
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text("\(bullet.category): \(bullet.text)")
-                                .font(AppTypography.footnote)
+                                .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textSecondary)
                         }
                     }

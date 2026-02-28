@@ -15,7 +15,7 @@ struct ReportKeyVitalsSection: View {
         if vitals.hasAny {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 Text("Key Vitals")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
                     .padding(.horizontal, AppSpacing.lg)
 

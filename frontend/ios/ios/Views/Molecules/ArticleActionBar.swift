@@ -44,7 +44,7 @@ struct ArticleActionBar: View {
                         audioManager.addToQueue(episode)
                     }) {
                         Image(systemName: "text.badge.plus")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(AppTypography.iconMedium).fontWeight(.medium)
                             .foregroundColor(AppColors.textSecondary)
                     }
                     .buttonStyle(PlainButtonStyle())
@@ -53,7 +53,7 @@ struct ArticleActionBar: View {
                 // Share
                 Button(action: { onShareTapped?() }) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -61,7 +61,7 @@ struct ArticleActionBar: View {
                 // Bookmark
                 Button(action: { onBookmarkTapped?() }) {
                     Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -69,7 +69,7 @@ struct ArticleActionBar: View {
                 // More options
                 Button(action: { onMoreTapped?() }) {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())

@@ -238,11 +238,11 @@ struct IndexDetailView: View {
     private func placeholderContent(title: String, description: String) -> some View {
         VStack(spacing: AppSpacing.lg) {
             Image(systemName: "chart.bar.doc.horizontal")
-                .font(.system(size: 48))
+                .font(AppTypography.iconHero)
                 .foregroundColor(AppColors.textMuted)
 
             Text(title)
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .foregroundColor(AppColors.textPrimary)
 
             Text(description)

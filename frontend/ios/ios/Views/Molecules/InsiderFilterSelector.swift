@@ -20,7 +20,7 @@ struct InsiderFilterSelector: View {
                     }
                 } label: {
                     Text(filter.rawValue)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(selectedFilter == filter ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)

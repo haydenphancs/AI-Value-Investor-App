@@ -34,7 +34,7 @@ struct NewsSentimentBadge: View {
 
     var body: some View {
         Text(sentiment.displayName)
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(textColor)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)

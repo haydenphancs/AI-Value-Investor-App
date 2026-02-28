@@ -37,10 +37,10 @@ struct ReportFundamentalsSection: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                     Text("Insight")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundStyle(LinearGradient(
                             colors: [.indigo, .cyan],
                             startPoint: .topLeading,
@@ -49,7 +49,7 @@ struct ReportFundamentalsSection: View {
                 }
 
                 Text(assessment.text)
-                    .font(AppTypography.subheadline)
+                    .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

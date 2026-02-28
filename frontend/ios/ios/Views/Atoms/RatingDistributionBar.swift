@@ -22,7 +22,7 @@ struct RatingDistributionBar: View {
         HStack(spacing: AppSpacing.md) {
             // Label
             Text(label)
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .frame(width: 70, alignment: .leading)
 
@@ -44,7 +44,7 @@ struct RatingDistributionBar: View {
 
             // Count
             Text("\(count)")
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 24, alignment: .trailing)
         }

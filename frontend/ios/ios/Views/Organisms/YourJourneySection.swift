@@ -16,7 +16,7 @@ struct YourJourneySection: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             Text("Your Journey")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Progress card

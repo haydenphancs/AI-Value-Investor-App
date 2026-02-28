@@ -19,7 +19,7 @@ struct PriceTargetRange: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text(priceTarget.formattedLow)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bearish)
                 }
 
@@ -30,7 +30,7 @@ struct PriceTargetRange: View {
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                     Text(priceTarget.formattedHigh)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.bullish)
                 }
             }

@@ -20,7 +20,7 @@ struct KeyStatisticItem: View {
 
             // Value
             Text(statistic.value)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
         }

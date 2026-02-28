@@ -16,7 +16,7 @@ struct InstitutionalActivityRow: View {
             // Left side: Name, Category, Date
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(activity.institutionName)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -35,7 +35,7 @@ struct InstitutionalActivityRow: View {
             // Right side: Change value, Change percent, Total held
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(activity.formattedChange)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(activity.changeColor)
 
                 Text(activity.formattedChangePercent)

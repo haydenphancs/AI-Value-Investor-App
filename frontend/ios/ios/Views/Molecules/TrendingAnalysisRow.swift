@@ -23,14 +23,14 @@ struct TrendingAnalysisRow: View {
                         .frame(width: 44, height: 44)
 
                     Image(systemName: analysis.systemIconName)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
                 // Text Content
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text(analysis.title)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
 
@@ -45,7 +45,7 @@ struct TrendingAnalysisRow: View {
 
                 // Chevron
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.md)

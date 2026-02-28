@@ -143,7 +143,7 @@ struct ReportMoatRadarChart: View {
                     .foregroundColor(AppColors.textSecondary)
                     .multilineTextAlignment(.center)
                 Text(String(format: "%.1f", dimension.score))
-                    .font(AppTypography.captionBold)
+                    .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .frame(width: 72)

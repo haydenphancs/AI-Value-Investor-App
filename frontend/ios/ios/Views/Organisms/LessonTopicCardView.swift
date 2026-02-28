@@ -140,7 +140,7 @@ struct LessonTopicCardView: View {
     private var headerView: some View {
         HStack {
             Text(storyContent.lessonLabel)
-                .font(.system(size: 13, weight: .semibold))
+                .font(AppTypography.labelEmphasis)
                 .foregroundColor(AppColors.textSecondary)
                 .tracking(0.5)
 
@@ -150,7 +150,7 @@ struct LessonTopicCardView: View {
                 handleClose()
             }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
@@ -218,7 +218,7 @@ struct LessonTopicCardView: View {
                         .frame(width: 44, height: 44)
 
                     Image(systemName: voiceManager.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
             }

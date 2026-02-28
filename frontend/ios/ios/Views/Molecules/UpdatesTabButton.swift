@@ -17,12 +17,12 @@ struct UpdatesTabButton: View {
             HStack(spacing: AppSpacing.xs) {
                 if tab.isMarketTab {
                     Image(systemName: "globe.americas.fill")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(AppTypography.iconXS).fontWeight(.medium)
                         .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
                 }
 
                 Text(tab.title)
-                    .font(isSelected ? AppTypography.calloutBold : AppTypography.callout)
+                    .font(isSelected ? AppTypography.bodySmallEmphasis : AppTypography.bodySmall)
                     .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
 
                 if let change = tab.formattedChange {

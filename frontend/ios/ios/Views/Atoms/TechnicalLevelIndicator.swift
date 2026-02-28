@@ -19,7 +19,7 @@ struct TechnicalLevelIndicator: View {
                 .frame(width: 28, height: 28)
 
             Text("\(level)")
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(isActive ? AppColors.textPrimary : AppColors.textMuted)
         }
     }

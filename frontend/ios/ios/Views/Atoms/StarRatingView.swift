@@ -27,7 +27,7 @@ struct StarRatingView: View {
             // Rating value
             if showValue {
                 Text(String(format: "%.1f", rating))
-                    .font(AppTypography.footnote)
+                    .font(AppTypography.labelSmall)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
             }

@@ -15,7 +15,7 @@ struct FilterButton: View {
         Button(action: action) {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 32, height: 32)
                     .background(AppColors.cardBackgroundLight)

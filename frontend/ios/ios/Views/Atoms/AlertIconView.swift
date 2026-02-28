@@ -30,7 +30,7 @@ struct AlertIconView: View {
                 .frame(width: 40, height: 40)
 
             Image(systemName: type.systemIconName)
-                .font(.system(size: 16, weight: .semibold))
+                .font(AppTypography.iconDefault).fontWeight(.semibold)
                 .foregroundColor(backgroundColor)
         }
     }

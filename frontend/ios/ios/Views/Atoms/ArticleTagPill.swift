@@ -47,7 +47,7 @@ struct ArticleTagPill: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(AppTypography.captionBold)
+            .font(AppTypography.captionEmphasis)
             .foregroundColor(style.textColor)
             .tracking(0.8)
             .padding(.horizontal, AppSpacing.md)

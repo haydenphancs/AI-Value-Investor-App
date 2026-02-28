@@ -22,7 +22,7 @@ struct FeatureRow: View {
             // Text Content
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(feature.title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(feature.subtitle)

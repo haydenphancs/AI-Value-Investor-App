@@ -279,7 +279,7 @@ struct GrowthChartView: View {
                 .foregroundColor(AppColors.textPrimary)
             
             Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
         }
         .padding(.horizontal, 12)

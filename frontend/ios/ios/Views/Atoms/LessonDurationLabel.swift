@@ -14,7 +14,7 @@ struct LessonDurationLabel: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: "clock")
-                .font(.system(size: 10))
+                .font(AppTypography.iconTiny)
 
             Text("\(durationMinutes) min")
                 .font(AppTypography.caption)

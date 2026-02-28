@@ -17,11 +17,11 @@ struct MarketInsightsCard: View {
             HStack {
                 HStack(spacing: AppSpacing.sm) {
                     Image(systemName: "bolt.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
                         .foregroundColor(AppColors.neutral)
 
                     Text("Market Insights")
-                        .font(AppTypography.bodyBold)
+                        .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                 }
 
@@ -31,14 +31,14 @@ struct MarketInsightsCard: View {
                     onSeeAllTapped?()
                 }) {
                     Text("See All")
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }
 
             // Headline
             Text(insight.headline)
-                .font(AppTypography.title2)
+                .font(AppTypography.titleCompact)
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -52,7 +52,7 @@ struct MarketInsightsCard: View {
                             .padding(.top, 6)
 
                         Text(point)
-                            .font(AppTypography.callout)
+                            .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

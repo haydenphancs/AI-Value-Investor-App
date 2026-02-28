@@ -13,7 +13,7 @@ struct SentimentPercentageBadge: View {
 
     var body: some View {
         Text("\(sentiment.rawValue) \(percentage)%")
-            .font(AppTypography.calloutBold)
+            .font(AppTypography.bodySmallEmphasis)
             .foregroundColor(sentiment.color)
     }
 }

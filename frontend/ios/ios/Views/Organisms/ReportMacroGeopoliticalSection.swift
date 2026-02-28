@@ -30,7 +30,7 @@ struct ReportMacroGeopoliticalSection: View {
 
             // Headline
             Text(data.headline)
-                .font(AppTypography.calloutBold)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineSpacing(2)
         }
@@ -58,10 +58,10 @@ struct ReportMacroGeopoliticalSection: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("Insight")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundStyle(LinearGradient(
                         colors: [.indigo, .cyan],
                         startPoint: .topLeading,
@@ -70,7 +70,7 @@ struct ReportMacroGeopoliticalSection: View {
             }
 
             Text(data.intelligenceBrief)
-                .font(AppTypography.subheadline)
+                .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }

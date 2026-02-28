@@ -31,7 +31,7 @@ struct SearchBookCard: View {
                     // Fallback title if no image
                     VStack {
                         Text(book.title.uppercased())
-                            .font(.system(size: 8, weight: .bold))
+                            .font(AppTypography.captionTiny).fontWeight(.bold)
                             .foregroundColor(.white)
                             .multilineTextAlignment(.center)
                             .lineLimit(3)
@@ -46,7 +46,7 @@ struct SearchBookCard: View {
                     // Title and rating
                     HStack(alignment: .top) {
                         Text(book.title)
-                            .font(AppTypography.headline)
+                            .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(2)
 
@@ -55,11 +55,11 @@ struct SearchBookCard: View {
                         // Rating badge
                         HStack(spacing: AppSpacing.xxs) {
                             Image(systemName: "star.fill")
-                                .font(.system(size: 12))
+                                .font(AppTypography.iconXS)
                                 .foregroundColor(AppColors.neutral)
 
                             Text(book.formattedRating)
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
                         }
                         .padding(.horizontal, AppSpacing.sm)
@@ -70,7 +70,7 @@ struct SearchBookCard: View {
 
                     // Author
                     Text(book.author)
-                        .font(AppTypography.callout)
+                        .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
 
                     // Description
@@ -82,7 +82,7 @@ struct SearchBookCard: View {
                     // Meta info
                     HStack(spacing: AppSpacing.md) {
                         Image(systemName: "book.closed.fill")
-                            .font(.system(size: 10))
+                            .font(AppTypography.iconTiny)
                             .foregroundColor(AppColors.textMuted)
 
                         Text(book.formattedPages)
@@ -106,10 +106,10 @@ struct SearchBookCard: View {
                 }) {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "bubble.left.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
 
                         Text("Chat with Book")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(AppColors.textPrimary)
                     .frame(maxWidth: .infinity)
@@ -124,10 +124,10 @@ struct SearchBookCard: View {
                 }) {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "lightbulb.fill")
-                            .font(.system(size: 12))
+                            .font(AppTypography.iconXS)
 
                         Text("Read Key Ideas")
-                            .font(AppTypography.calloutBold)
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)

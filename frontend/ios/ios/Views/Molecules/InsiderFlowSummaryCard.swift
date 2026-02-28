@@ -23,7 +23,7 @@ struct InsiderFlowSummaryCard: View {
                         .tracking(0.5)
 
                     Text(summary.formattedBuys)
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.bullish)
 
                     Text(summary.buyersLabel)
@@ -46,7 +46,7 @@ struct InsiderFlowSummaryCard: View {
                         .tracking(0.5)
 
                     Text(summary.formattedSells)
-                        .font(AppTypography.title3)
+                        .font(AppTypography.heading)
                         .foregroundColor(AppColors.bearish)
 
                     Text(summary.sellersLabel)

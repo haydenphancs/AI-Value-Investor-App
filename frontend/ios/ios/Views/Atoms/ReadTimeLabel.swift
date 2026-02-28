@@ -21,7 +21,7 @@ struct ReadTimeLabel: View {
         HStack(spacing: AppSpacing.xs) {
             if showIcon {
                 Image(systemName: "clock")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AppTypography.iconTiny).fontWeight(.medium)
             }
 
             Text(formattedTime)

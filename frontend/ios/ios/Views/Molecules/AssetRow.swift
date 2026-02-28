@@ -19,7 +19,7 @@ struct AssetRow: View {
                 // Ticker Info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(asset.ticker)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(asset.companyName)
@@ -41,7 +41,7 @@ struct AssetRow: View {
                 // Price Info
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                     Text(asset.formattedPrice)
-                        .font(AppTypography.headline)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     PriceChangeLabel(changePercent: asset.changePercent)

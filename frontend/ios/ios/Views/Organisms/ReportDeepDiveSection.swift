@@ -24,14 +24,14 @@ struct ReportDeepDiveSection<Content: View>: View {
                         .frame(width: module.iconName == "dollarsign.circle" ? 36 : 28, alignment: module.iconName == "dollarsign.circle" ? .leading : .center)
 
                     Text(module.title)
-                        .font(AppTypography.calloutBold)
+                        .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                         .offset(x: module.iconName == "dollarsign.circle" ? -8 : 0)
 
                     Spacer()
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.horizontal, AppSpacing.lg)

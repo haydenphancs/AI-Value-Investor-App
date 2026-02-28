@@ -15,7 +15,7 @@ struct WhatYouGetSection: View {
             // Section header with info icon
             HStack {
                 Text("What You'll Get")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
@@ -24,7 +24,7 @@ struct WhatYouGetSection: View {
                     // Show info tooltip
                 }) {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 16))
+                        .font(AppTypography.iconDefault)
                         .foregroundColor(AppColors.textMuted)
                 }
             }

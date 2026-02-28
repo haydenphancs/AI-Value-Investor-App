@@ -43,21 +43,21 @@ struct NewsSourceBrandIcon: View {
         HStack(spacing: AppSpacing.md) {
             NewsSourceBrandIcon(source: NewsSource(name: "CNBC", iconName: nil))
             Text("CNBC")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
         }
 
         HStack(spacing: AppSpacing.md) {
             NewsSourceBrandIcon(source: NewsSource(name: "Reuters", iconName: nil))
             Text("Reuters")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
         }
 
         HStack(spacing: AppSpacing.md) {
             NewsSourceBrandIcon(source: NewsSource(name: "Bloomberg", iconName: nil))
             Text("Bloomberg")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

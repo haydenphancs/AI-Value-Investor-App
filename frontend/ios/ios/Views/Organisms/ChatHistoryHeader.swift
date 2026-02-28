@@ -26,7 +26,7 @@ struct ChatHistoryHeader: View {
                     onChevronTap?()
                 }) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 .buttonStyle(PlainButtonStyle())

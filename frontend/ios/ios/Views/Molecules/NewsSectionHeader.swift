@@ -13,7 +13,7 @@ struct NewsSectionHeader: View {
     var body: some View {
         HStack {
             Text(title)
-                .font(AppTypography.footnoteBold)
+                .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
 
             Spacer()

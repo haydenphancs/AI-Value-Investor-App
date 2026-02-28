@@ -48,11 +48,11 @@ struct GrowthInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 24))
+                    .font(AppTypography.iconXL)
                     .foregroundColor(AppColors.primaryBlue)
 
                 Text("Growth Analysis")
-                    .font(AppTypography.title2)
+                    .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -73,7 +73,7 @@ struct GrowthInfoSheet: View {
     private var understandingGrowthSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Key Metrics Explained")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
@@ -87,11 +87,11 @@ struct GrowthInfoSheet: View {
     private func metricExplanationRow(metric: GrowthMetricType) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text(metric.rawValue)
-                .font(AppTypography.bodyBold)
+                .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
 
             Text(metric.description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -112,7 +112,7 @@ struct GrowthInfoSheet: View {
                     .foregroundColor(AppColors.neutral)
 
                 Text("Value Investing Tips")
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -128,24 +128,24 @@ struct GrowthInfoSheet: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: tip.icon)
-                    .font(.system(size: 16))
+                    .font(AppTypography.iconDefault)
                     .foregroundColor(AppColors.bullish)
                     .frame(width: 24)
 
                 Text(tip.title)
-                    .font(AppTypography.bodyBold)
+                    .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
 
             Text(tip.description)
-                .font(AppTypography.callout)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let example = tip.example {
                 HStack(alignment: .top, spacing: AppSpacing.sm) {
                     Text("Example:")
-                        .font(AppTypography.captionBold)
+                        .font(AppTypography.captionEmphasis)
                         .foregroundColor(AppColors.accentCyan)
 
                     Text(example)
@@ -169,7 +169,7 @@ struct GrowthInfoSheet: View {
     private var chartReadingGuideSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             Text("Reading the Chart")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -220,7 +220,7 @@ struct GrowthInfoSheet: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(description)

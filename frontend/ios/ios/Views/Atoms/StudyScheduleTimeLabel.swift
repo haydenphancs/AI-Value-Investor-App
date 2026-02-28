@@ -14,7 +14,7 @@ struct StudyScheduleTimeLabel: View {
 
     var body: some View {
         Text(time)
-            .font(AppTypography.calloutBold)
+            .font(AppTypography.bodySmallEmphasis)
             .foregroundColor(color)
     }
 }

@@ -15,7 +15,7 @@ struct AlertsEventsSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Header
             Text("Alerts & Upcoming Events")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

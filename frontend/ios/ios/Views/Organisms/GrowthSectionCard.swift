@@ -68,7 +68,7 @@ struct GrowthSectionCard: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Growth")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 GrowthInfoIcon {
@@ -80,7 +80,7 @@ struct GrowthSectionCard: View {
 
             Button(action: onDetailTapped) {
                 Text("Detail")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

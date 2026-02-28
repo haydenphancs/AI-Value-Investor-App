@@ -106,7 +106,7 @@ struct AppSettingsView: View {
                                 settingsLabel(title: "Clear Cache", subtitle: cacheSize)
                                 Spacer()
                                 Image(systemName: "trash")
-                                    .font(.system(size: 14))
+                                    .font(AppTypography.iconSmall)
                                     .foregroundColor(AppColors.textMuted)
                             }
                             .padding(.horizontal, AppSpacing.lg)
@@ -121,11 +121,11 @@ struct AppSettingsView: View {
                     VStack(alignment: .leading, spacing: AppSpacing.sm) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 14))
+                                .font(AppTypography.iconSmall)
                                 .foregroundColor(AppColors.bearish)
 
                             Text("DANGER ZONE")
-                                .font(AppTypography.footnoteBold)
+                                .font(AppTypography.labelSmallEmphasis)
                                 .foregroundColor(AppColors.bearish)
                                 .tracking(0.5)
                         }
@@ -136,7 +136,7 @@ struct AppSettingsView: View {
                         }) {
                             HStack(spacing: AppSpacing.md) {
                                 Image(systemName: "person.crop.circle.badge.xmark")
-                                    .font(.system(size: 16))
+                                    .font(AppTypography.iconDefault)
                                     .foregroundColor(AppColors.bearish)
                                     .frame(width: 28, height: 28)
                                     .background(AppColors.bearish.opacity(0.15))
@@ -155,7 +155,7 @@ struct AppSettingsView: View {
                                 Spacer()
 
                                 Image(systemName: "chevron.right")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(AppTypography.iconSmall).fontWeight(.semibold)
                                     .foregroundColor(AppColors.textMuted)
                             }
                             .padding(.horizontal, AppSpacing.lg)
@@ -216,11 +216,11 @@ struct AppSettingsView: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: icon)
-                    .font(.system(size: 14))
+                    .font(AppTypography.iconSmall)
                     .foregroundColor(AppColors.textMuted)
 
                 Text(title.uppercased())
-                    .font(AppTypography.footnoteBold)
+                    .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textMuted)
                     .tracking(0.5)
             }

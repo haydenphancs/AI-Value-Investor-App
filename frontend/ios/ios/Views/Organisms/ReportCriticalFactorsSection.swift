@@ -13,7 +13,7 @@ struct ReportCriticalFactorsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Critical Factors to Watch")
-                .font(AppTypography.headline)
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             // Combined card with dividers

@@ -44,7 +44,7 @@ struct HealthCheckSectionCard: View {
         HStack(alignment: .center, spacing: AppSpacing.sm) {
             // Title
             Text("Health Check")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             // Status badge (e.g., "[2/4] Mix")
@@ -64,7 +64,7 @@ struct HealthCheckSectionCard: View {
             // Detail link
             Button(action: onDetailTapped) {
                 Text("Detail")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

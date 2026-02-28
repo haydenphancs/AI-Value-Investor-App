@@ -60,7 +60,7 @@ struct AllWhalesView: View {
                     HStack(spacing: AppSpacing.sm) {
                         HStack(spacing: AppSpacing.sm) {
                             Image(systemName: "magnifyingglass")
-                                .font(.system(size: 14))
+                                .font(AppTypography.iconSmall)
                                 .foregroundColor(AppColors.textMuted)
 
                             TextField("Search whales...", text: $searchText)
@@ -73,7 +73,7 @@ struct AllWhalesView: View {
                                     searchText = ""
                                 } label: {
                                     Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 14))
+                                        .font(AppTypography.iconSmall)
                                         .foregroundColor(AppColors.textMuted)
                                 }
                                 .buttonStyle(.plain)
@@ -92,7 +92,7 @@ struct AllWhalesView: View {
                             }
                         } label: {
                             Text("Cancel")
-                                .font(AppTypography.callout)
+                                .font(AppTypography.bodySmall)
                                 .foregroundColor(AppColors.primaryBlue)
                         }
                         .buttonStyle(.plain)
@@ -113,7 +113,7 @@ struct AllWhalesView: View {
                                     }
                                 } label: {
                                     Text(filter.rawValue)
-                                        .font(AppTypography.calloutBold)
+                                        .font(AppTypography.bodySmallEmphasis)
                                         .foregroundColor(
                                             selectedFilter == filter
                                                 ? AppColors.textPrimary
@@ -174,7 +174,7 @@ struct AllWhalesView: View {
                             if searchResults.isEmpty && !searchText.isEmpty {
                                 VStack(spacing: AppSpacing.md) {
                                     Image(systemName: "magnifyingglass")
-                                        .font(.system(size: 40))
+                                        .font(AppTypography.iconXXL)
                                         .foregroundColor(AppColors.textMuted)
 
                                     Text("No results for \"\(searchText)\"")
@@ -235,7 +235,7 @@ struct AllWhalesView: View {
                         }
                     } label: {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 16, weight: .medium))
+                            .font(AppTypography.iconDefault).fontWeight(.medium)
                             .foregroundColor(AppColors.textPrimary)
                     }
                 }
@@ -324,7 +324,7 @@ struct AllWhalesCategorySection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Header
             Text(title)
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

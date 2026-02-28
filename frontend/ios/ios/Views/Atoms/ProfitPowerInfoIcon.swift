@@ -33,7 +33,7 @@ struct ProfitPowerInfoIcon: View {
 
         HStack(spacing: AppSpacing.sm) {
             Text("Profit Power")
-                .font(AppTypography.title3)
+                .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
             ProfitPowerInfoIcon(action: {})

@@ -36,7 +36,7 @@ struct SmartMoneySection: View {
 
             // Period label
             Text("\(currentData.summary.periodDescription) Flow")
-                .font(AppTypography.footnote)
+                .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, AppSpacing.xs)
 
@@ -72,7 +72,7 @@ struct SmartMoneySection: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Smart Money")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 SmartMoneyInfoIcon {

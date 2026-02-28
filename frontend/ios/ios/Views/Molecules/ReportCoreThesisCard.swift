@@ -28,11 +28,11 @@ struct ReportCoreThesisCard: View {
             // Header
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: iconName)
-                    .font(.system(size: 16))
+                    .font(AppTypography.iconDefault)
                     .foregroundColor(accentColor)
 
                 Text(title)
-                    .font(AppTypography.headline)
+                    .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }
 
@@ -46,7 +46,7 @@ struct ReportCoreThesisCard: View {
                             .padding(.top, 6)
 
                         Text(bullet.text)
-                            .font(AppTypography.subheadline)
+                            .font(AppTypography.label)
                             .foregroundColor(AppColors.textSecondary)
                             .lineSpacing(3)
                     }

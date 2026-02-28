@@ -55,7 +55,7 @@ struct ShareholderBreakdownSection: View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
                 Text("Shareholder Breakdown")
-                    .font(AppTypography.title3)
+                    .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
                 ShareholderBreakdownInfoIcon {
@@ -67,7 +67,7 @@ struct ShareholderBreakdownSection: View {
 
             Button(action: { showTop10Sheet = true }) {
                 Text("Top 10")
-                    .font(AppTypography.calloutBold)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
             }
             .buttonStyle(.plain)

@@ -1,492 +1,438 @@
 -- =====================================================
--- Supabase Row Level Security (RLS) Policies
--- Run this AFTER creating the main schema
+-- Caydex - Row Level Security (RLS) Policies
+-- Run AFTER supabase_schema.sql
+-- Version: 3.0
+-- Date: February 28, 2026
+-- =====================================================
+--
+-- RLS Strategy:
+--   - User-owned data: auth.uid() = user_id (direct, no JOIN needed)
+--   - Public/read-only data: open SELECT, service_role for writes
+--   - Chat messages: access via session ownership
+--   - Whale data: public read, service_role writes
+--   - Education content: public read, service_role writes
+--
+-- Since users.id = auth.users.id directly, RLS checks are simple:
+--   auth.uid() = user_id (no JOIN to users table needed!)
 -- =====================================================
 
 -- =====================================================
--- ENABLE RLS ON TABLES
+-- ENABLE RLS ON ALL TABLES
 -- =====================================================
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-ALTER TABLE watchlists ENABLE ROW LEVEL SECURITY;
-ALTER TABLE deep_research_reports ENABLE ROW LEVEL SECURITY;
-ALTER TABLE widget_updates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_credits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE watchlist_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_personas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE research_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE user_activity_log ENABLE ROW LEVEL SECURITY;
-
--- Public tables (no RLS needed):
--- stocks, news_articles, news_stocks, breaking_news, company_fundamentals,
--- earnings, stock_prices, analyst_forecasts, company_insights,
--- educational_content, content_chunks, article_chunks
+ALTER TABLE whales ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whale_sector_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whale_holdings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whale_trade_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whale_trades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whale_follows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE news_articles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE asset_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE books ENABLE ROW LEVEL SECURITY;
+ALTER TABLE book_chapters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lessons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_lesson_progress ENABLE ROW LEVEL SECURITY;
+ALTER TABLE money_move_articles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_bookmarks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE book_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE article_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE company_filing_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_study_schedules ENABLE ROW LEVEL SECURITY;
 
 -- =====================================================
--- USERS TABLE POLICIES
+-- USERS
 -- =====================================================
+-- users.id = auth.uid() directly (no JOIN needed)
 
--- Users can read their own data
-CREATE POLICY "Users can view own profile"
+CREATE POLICY "users_select_own"
     ON users FOR SELECT
-    USING (auth.uid() = auth_user_id);
+    USING (auth.uid() = id);
 
--- Users can update their own data
-CREATE POLICY "Users can update own profile"
+CREATE POLICY "users_update_own"
     ON users FOR UPDATE
-    USING (auth.uid() = auth_user_id);
+    USING (auth.uid() = id);
 
--- Allow user creation on signup
-CREATE POLICY "Users can insert own profile"
+CREATE POLICY "users_insert_own"
     ON users FOR INSERT
-    WITH CHECK (auth.uid() = auth_user_id);
+    WITH CHECK (auth.uid() = id);
 
--- Service role can do everything
-CREATE POLICY "Service role full access to users"
-    ON users
+CREATE POLICY "users_service_all"
+    ON users FOR ALL
     USING (auth.role() = 'service_role');
 
 -- =====================================================
--- WATCHLISTS TABLE POLICIES
+-- USER CREDITS
 -- =====================================================
 
--- Users can view their own watchlists
-CREATE POLICY "Users can view own watchlist"
-    ON watchlists FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = watchlists.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+CREATE POLICY "credits_select_own"
+    ON user_credits FOR SELECT
+    USING (auth.uid() = user_id);
 
--- Users can add to their watchlist
-CREATE POLICY "Users can add to own watchlist"
-    ON watchlists FOR INSERT
-    WITH CHECK (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = watchlists.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+CREATE POLICY "credits_update_own"
+    ON user_credits FOR UPDATE
+    USING (auth.uid() = user_id);
 
--- Users can update their watchlist
-CREATE POLICY "Users can update own watchlist"
-    ON watchlists FOR UPDATE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = watchlists.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Users can delete from their watchlist
-CREATE POLICY "Users can delete from own watchlist"
-    ON watchlists FOR DELETE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = watchlists.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- =====================================================
--- DEEP RESEARCH REPORTS POLICIES
--- =====================================================
-
--- Users can view their own reports
-CREATE POLICY "Users can view own reports"
-    ON deep_research_reports FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = deep_research_reports.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-        AND deleted_at IS NULL
-    );
-
--- Users can create reports
-CREATE POLICY "Users can create own reports"
-    ON deep_research_reports FOR INSERT
-    WITH CHECK (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = deep_research_reports.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Users can update their own reports (ratings, feedback)
-CREATE POLICY "Users can update own reports"
-    ON deep_research_reports FOR UPDATE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = deep_research_reports.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Users can soft delete their reports
-CREATE POLICY "Users can delete own reports"
-    ON deep_research_reports FOR DELETE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = deep_research_reports.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- =====================================================
--- WIDGET UPDATES POLICIES
--- =====================================================
-
--- Users can view their widget updates
-CREATE POLICY "Users can view own widgets"
-    ON widget_updates FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = widget_updates.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Only service/backend can create widgets
-CREATE POLICY "Service can manage widgets"
-    ON widget_updates FOR ALL
+CREATE POLICY "credits_service_all"
+    ON user_credits FOR ALL
     USING (auth.role() = 'service_role');
 
 -- =====================================================
--- CHAT SESSIONS POLICIES
+-- WATCHLIST ITEMS
 -- =====================================================
 
--- Users can view their own chat sessions
-CREATE POLICY "Users can view own chat sessions"
+CREATE POLICY "watchlist_select_own"
+    ON watchlist_items FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "watchlist_insert_own"
+    ON watchlist_items FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "watchlist_update_own"
+    ON watchlist_items FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "watchlist_delete_own"
+    ON watchlist_items FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- =====================================================
+-- AGENT PERSONAS (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "personas_select_all"
+    ON agent_personas FOR SELECT
+    USING (true);
+
+CREATE POLICY "personas_service_all"
+    ON agent_personas FOR ALL
+    USING (auth.role() = 'service_role');
+
+-- =====================================================
+-- RESEARCH REPORTS
+-- =====================================================
+
+CREATE POLICY "reports_select_own"
+    ON research_reports FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "reports_insert_own"
+    ON research_reports FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "reports_update_own"
+    ON research_reports FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "reports_delete_own"
+    ON research_reports FOR DELETE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "reports_service_all"
+    ON research_reports FOR ALL
+    USING (auth.role() = 'service_role');
+
+-- =====================================================
+-- CHAT SESSIONS
+-- =====================================================
+
+CREATE POLICY "chat_sessions_select_own"
     ON chat_sessions FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = chat_sessions.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+    USING (auth.uid() = user_id);
 
--- Users can create chat sessions
-CREATE POLICY "Users can create own chat sessions"
+CREATE POLICY "chat_sessions_insert_own"
     ON chat_sessions FOR INSERT
-    WITH CHECK (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = chat_sessions.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+    WITH CHECK (auth.uid() = user_id);
 
--- Users can update their chat sessions
-CREATE POLICY "Users can update own chat sessions"
+CREATE POLICY "chat_sessions_update_own"
     ON chat_sessions FOR UPDATE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = chat_sessions.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+    USING (auth.uid() = user_id);
 
--- Users can delete their chat sessions
-CREATE POLICY "Users can delete own chat sessions"
+CREATE POLICY "chat_sessions_delete_own"
     ON chat_sessions FOR DELETE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = chat_sessions.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
+    USING (auth.uid() = user_id);
 
 -- =====================================================
--- CHAT MESSAGES POLICIES
+-- CHAT MESSAGES
 -- =====================================================
+-- Access via session ownership (JOIN to chat_sessions)
 
--- Users can view messages in their sessions
-CREATE POLICY "Users can view own chat messages"
+CREATE POLICY "chat_messages_select_own"
     ON chat_messages FOR SELECT
     USING (
         EXISTS (
-            SELECT 1 FROM chat_sessions cs
-            JOIN users u ON cs.user_id = u.id
-            WHERE cs.id = chat_messages.session_id
-            AND u.auth_user_id = auth.uid()
+            SELECT 1 FROM chat_sessions
+            WHERE chat_sessions.id = chat_messages.session_id
+            AND chat_sessions.user_id = auth.uid()
         )
     );
 
--- Users can add messages to their sessions
-CREATE POLICY "Users can create own chat messages"
+CREATE POLICY "chat_messages_insert_own"
     ON chat_messages FOR INSERT
     WITH CHECK (
         EXISTS (
-            SELECT 1 FROM chat_sessions cs
-            JOIN users u ON cs.user_id = u.id
-            WHERE cs.id = chat_messages.session_id
-            AND u.auth_user_id = auth.uid()
+            SELECT 1 FROM chat_sessions
+            WHERE chat_sessions.id = chat_messages.session_id
+            AND chat_sessions.user_id = auth.uid()
         )
     );
 
 -- Service role can insert AI responses
-CREATE POLICY "Service can create AI messages"
-    ON chat_messages FOR INSERT
-    WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "chat_messages_service_insert"
+    ON chat_messages FOR ALL
+    USING (auth.role() = 'service_role');
 
 -- =====================================================
--- NOTIFICATIONS POLICIES
+-- WHALES (public read, service writes)
 -- =====================================================
 
--- Users can view their own notifications
-CREATE POLICY "Users can view own notifications"
-    ON notifications FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = notifications.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Users can mark notifications as read
-CREATE POLICY "Users can update own notifications"
-    ON notifications FOR UPDATE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = notifications.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Users can delete their notifications
-CREATE POLICY "Users can delete own notifications"
-    ON notifications FOR DELETE
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = notifications.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Service role can create notifications
-CREATE POLICY "Service can create notifications"
-    ON notifications FOR INSERT
-    WITH CHECK (auth.role() = 'service_role');
-
--- =====================================================
--- USER ACTIVITY LOG POLICIES
--- =====================================================
-
--- Users can view their own activity
-CREATE POLICY "Users can view own activity"
-    ON user_activity_log FOR SELECT
-    USING (
-        EXISTS (
-            SELECT 1 FROM users
-            WHERE users.id = user_activity_log.user_id
-            AND users.auth_user_id = auth.uid()
-        )
-    );
-
--- Service role can log activity
-CREATE POLICY "Service can log activity"
-    ON user_activity_log FOR INSERT
-    WITH CHECK (auth.role() = 'service_role');
-
--- =====================================================
--- PUBLIC TABLE POLICIES (Read-Only)
--- =====================================================
-
--- Allow everyone to read stocks
-CREATE POLICY "Anyone can view stocks"
-    ON stocks FOR SELECT
+CREATE POLICY "whales_select_all"
+    ON whales FOR SELECT
     USING (true);
 
--- Allow everyone to read news
-CREATE POLICY "Anyone can view news"
+CREATE POLICY "whales_service_all"
+    ON whales FOR ALL
+    USING (auth.role() = 'service_role');
+
+CREATE POLICY "whale_sectors_select_all"
+    ON whale_sector_allocations FOR SELECT
+    USING (true);
+
+CREATE POLICY "whale_sectors_service_all"
+    ON whale_sector_allocations FOR ALL
+    USING (auth.role() = 'service_role');
+
+CREATE POLICY "whale_holdings_select_all"
+    ON whale_holdings FOR SELECT
+    USING (true);
+
+CREATE POLICY "whale_holdings_service_all"
+    ON whale_holdings FOR ALL
+    USING (auth.role() = 'service_role');
+
+CREATE POLICY "whale_trade_groups_select_all"
+    ON whale_trade_groups FOR SELECT
+    USING (true);
+
+CREATE POLICY "whale_trade_groups_service_all"
+    ON whale_trade_groups FOR ALL
+    USING (auth.role() = 'service_role');
+
+CREATE POLICY "whale_trades_select_all"
+    ON whale_trades FOR SELECT
+    USING (true);
+
+CREATE POLICY "whale_trades_service_all"
+    ON whale_trades FOR ALL
+    USING (auth.role() = 'service_role');
+
+-- =====================================================
+-- WHALE FOLLOWS (user-owned)
+-- =====================================================
+
+CREATE POLICY "whale_follows_select_own"
+    ON whale_follows FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "whale_follows_insert_own"
+    ON whale_follows FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "whale_follows_delete_own"
+    ON whale_follows FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- =====================================================
+-- NEWS ARTICLES (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "news_select_all"
     ON news_articles FOR SELECT
     USING (true);
 
-CREATE POLICY "Anyone can view news-stock relationships"
-    ON news_stocks FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view breaking news"
-    ON breaking_news FOR SELECT
-    USING (true);
-
--- Allow everyone to read financial data
-CREATE POLICY "Anyone can view fundamentals"
-    ON company_fundamentals FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view earnings"
-    ON earnings FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view stock prices"
-    ON stock_prices FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view analyst forecasts"
-    ON analyst_forecasts FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view company insights"
-    ON company_insights FOR SELECT
-    USING (true);
-
--- Allow everyone to read educational content
-CREATE POLICY "Anyone can view educational content"
-    ON educational_content FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view content chunks"
-    ON content_chunks FOR SELECT
-    USING (true);
-
-CREATE POLICY "Anyone can view article chunks"
-    ON article_chunks FOR SELECT
-    USING (true);
-
--- =====================================================
--- SERVICE ROLE POLICIES (Backend Operations)
--- =====================================================
-
--- Service role can manage public data
-CREATE POLICY "Service can manage stocks"
-    ON stocks FOR ALL
-    USING (auth.role() = 'service_role');
-
-CREATE POLICY "Service can manage news"
+CREATE POLICY "news_service_all"
     ON news_articles FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage news-stocks"
-    ON news_stocks FOR ALL
+-- =====================================================
+-- ASSET SNAPSHOTS (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "snapshots_select_all"
+    ON asset_snapshots FOR SELECT
+    USING (true);
+
+CREATE POLICY "snapshots_service_all"
+    ON asset_snapshots FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage breaking news"
-    ON breaking_news FOR ALL
+-- =====================================================
+-- BOOKS & CHAPTERS (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "books_select_all"
+    ON books FOR SELECT
+    USING (true);
+
+CREATE POLICY "books_service_all"
+    ON books FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage fundamentals"
-    ON company_fundamentals FOR ALL
+CREATE POLICY "book_chapters_select_all"
+    ON book_chapters FOR SELECT
+    USING (true);
+
+CREATE POLICY "book_chapters_service_all"
+    ON book_chapters FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage earnings"
-    ON earnings FOR ALL
+-- =====================================================
+-- LESSONS (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "lessons_select_all"
+    ON lessons FOR SELECT
+    USING (true);
+
+CREATE POLICY "lessons_service_all"
+    ON lessons FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage stock prices"
-    ON stock_prices FOR ALL
+-- =====================================================
+-- USER LESSON PROGRESS (user-owned)
+-- =====================================================
+
+CREATE POLICY "lesson_progress_select_own"
+    ON user_lesson_progress FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "lesson_progress_insert_own"
+    ON user_lesson_progress FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "lesson_progress_update_own"
+    ON user_lesson_progress FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "lesson_progress_service_all"
+    ON user_lesson_progress FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage forecasts"
-    ON analyst_forecasts FOR ALL
+-- =====================================================
+-- MONEY MOVE ARTICLES (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "money_moves_select_all"
+    ON money_move_articles FOR SELECT
+    USING (true);
+
+CREATE POLICY "money_moves_service_all"
+    ON money_move_articles FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage insights"
-    ON company_insights FOR ALL
+-- =====================================================
+-- USER BOOKMARKS (user-owned)
+-- =====================================================
+
+CREATE POLICY "bookmarks_select_own"
+    ON user_bookmarks FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "bookmarks_insert_own"
+    ON user_bookmarks FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "bookmarks_delete_own"
+    ON user_bookmarks FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- =====================================================
+-- RAG VECTOR TABLES (public read, service writes)
+-- =====================================================
+
+CREATE POLICY "book_chunks_select_all"
+    ON book_chunks FOR SELECT
+    USING (true);
+
+CREATE POLICY "book_chunks_service_all"
+    ON book_chunks FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage educational content"
-    ON educational_content FOR ALL
-    USING (auth.role() = 'service_role');
+CREATE POLICY "article_chunks_select_all"
+    ON article_chunks FOR SELECT
+    USING (true);
 
-CREATE POLICY "Service can manage content chunks"
-    ON content_chunks FOR ALL
-    USING (auth.role() = 'service_role');
-
-CREATE POLICY "Service can manage article chunks"
+CREATE POLICY "article_chunks_service_all"
     ON article_chunks FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can manage background jobs"
-    ON background_jobs FOR ALL
+CREATE POLICY "filing_chunks_select_all"
+    ON company_filing_chunks FOR SELECT
+    USING (true);
+
+CREATE POLICY "filing_chunks_service_all"
+    ON company_filing_chunks FOR ALL
     USING (auth.role() = 'service_role');
 
-CREATE POLICY "Service can view API logs"
-    ON api_usage_logs FOR SELECT
+-- =====================================================
+-- USER STUDY SCHEDULES (user-owned)
+-- =====================================================
+
+CREATE POLICY "study_schedules_select_own"
+    ON user_study_schedules FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "study_schedules_insert_own"
+    ON user_study_schedules FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "study_schedules_update_own"
+    ON user_study_schedules FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "study_schedules_service_all"
+    ON user_study_schedules FOR ALL
     USING (auth.role() = 'service_role');
-
-CREATE POLICY "Service can create API logs"
-    ON api_usage_logs FOR INSERT
-    WITH CHECK (auth.role() = 'service_role');
-
--- =====================================================
--- HELPER FUNCTIONS FOR RLS
--- =====================================================
-
--- Function to check if user has permission for stock operations
-CREATE OR REPLACE FUNCTION user_owns_stock_data(p_user_id UUID)
-RETURNS BOOLEAN AS $$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM users
-        WHERE id = p_user_id
-        AND auth_user_id = auth.uid()
-    );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Function to check user tier
-CREATE OR REPLACE FUNCTION get_user_tier()
-RETURNS user_tier AS $$
-BEGIN
-    RETURN (
-        SELECT tier FROM users
-        WHERE auth_user_id = auth.uid()
-        LIMIT 1
-    );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- =====================================================
 -- VERIFICATION
 -- =====================================================
 
--- Verify RLS is enabled
 DO $$
 DECLARE
     r RECORD;
+    rls_count INT := 0;
+    policy_count INT := 0;
 BEGIN
     RAISE NOTICE '=================================================';
-    RAISE NOTICE 'RLS Status:';
+    RAISE NOTICE 'RLS Status per Table:';
+    RAISE NOTICE '-------------------------------------------------';
+
     FOR r IN (
         SELECT tablename, rowsecurity
         FROM pg_tables
         WHERE schemaname = 'public'
-        AND tablename IN (
-            'users', 'watchlists', 'deep_research_reports',
-            'widget_updates', 'chat_sessions', 'chat_messages',
-            'notifications', 'user_activity_log'
-        )
+        ORDER BY tablename
     )
     LOOP
-        RAISE NOTICE '% : RLS %', r.tablename, 
-            CASE WHEN r.rowsecurity THEN 'ENABLED ✓' ELSE 'DISABLED ✗' END;
+        IF r.rowsecurity THEN
+            rls_count := rls_count + 1;
+        END IF;
+        RAISE NOTICE '  %-35s %s', r.tablename,
+            CASE WHEN r.rowsecurity THEN 'ENABLED' ELSE 'disabled' END;
     END LOOP;
-    RAISE NOTICE '=================================================';
-END $$;
 
--- Success message
-DO $$
-BEGIN
-    RAISE NOTICE '=================================================';
-    RAISE NOTICE 'RLS Policies created successfully!';
-    RAISE NOTICE 'All user data is now protected by Row Level Security';
+    SELECT COUNT(*) INTO policy_count FROM pg_policies WHERE schemaname = 'public';
+
+    RAISE NOTICE '-------------------------------------------------';
+    RAISE NOTICE 'Tables with RLS enabled: %', rls_count;
+    RAISE NOTICE 'Total policies created:  %', policy_count;
     RAISE NOTICE '=================================================';
 END $$;

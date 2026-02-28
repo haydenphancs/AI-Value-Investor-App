@@ -1,172 +1,80 @@
 """
-User Management Endpoints
-Handles user profile, preferences, and account management.
+User Endpoints
+Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
-from pydantic import BaseModel
-from typing import Optional
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user, get_current_active_user
-from app.services.user_service import UserService
+from app.dependencies import get_current_user
+from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# Request/Response Models
-# =======================
-
-class UserProfileUpdate(BaseModel):
-    full_name: Optional[str] = None
-    preferred_timezone: Optional[str] = None
-    notification_preferences: Optional[dict] = None
-
-
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    full_name: Optional[str]
-    tier: str
-    monthly_deep_research_used: int
-    monthly_deep_research_limit: int
-    created_at: str
-
-
-# Endpoints
-# =========
-
 @router.get("/me", response_model=UserResponse)
-async def get_my_profile(
-    user: dict = Depends(get_current_active_user)
-) -> UserResponse:
-    """
-    Get current user's profile.
-
-    Args:
-        user: Current user data
-
-    Returns:
-        UserResponse: User profile data
-    """
-    return UserResponse(**user)
-
-
-@router.patch("/me")
-async def update_my_profile(
-    updates: UserProfileUpdate,
-    user: dict = Depends(get_current_active_user),
-    supabase: Client = Depends(get_supabase)
+async def get_current_user_info(
+    user: dict = Depends(get_current_user),
 ):
-    """
-    Update current user's profile.
+    """Get current user profile."""
+    return UserResponse(
+        id=user["id"],
+        email=user["email"],
+        display_name=user.get("display_name"),
+        avatar_url=user.get("avatar_url"),
+        tier=user.get("tier", "free"),
+        created_at=user["created_at"],
+        updated_at=user.get("updated_at"),
+    )
 
-    Args:
-        updates: Profile updates
-        user: Current user data
-        supabase: Supabase client
 
-    Returns:
-        dict: Updated user data
-    """
-    update_data = updates.model_dump(exclude_unset=True)
+@router.get("/me/credits", response_model=UserCreditsResponse)
+async def get_user_credits(
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Get current user's credit balance from user_credits table."""
+    try:
+        result = supabase.table("user_credits").select(
+            "total, used, remaining, resets_at"
+        ).eq("user_id", user["id"]).single().execute()
 
+        if not result.data:
+            # Return defaults if no credit row yet
+            return UserCreditsResponse(total=3, used=0, remaining=3)
+
+        return UserCreditsResponse(**result.data)
+    except Exception as e:
+        logger.error(f"Failed to fetch credits: {e}")
+        return UserCreditsResponse(total=3, used=0, remaining=3)
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_profile(
+    request: UpdateProfileRequest,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Update current user profile (display_name, avatar_url)."""
+    update_data = request.model_dump(exclude_none=True)
     if not update_data:
-        return user
+        raise HTTPException(status_code=400, detail="No fields to update")
 
-    result = supabase.table("users").update(update_data).eq("id", user["id"]).execute()
+    result = supabase.table("users").update(update_data).eq(
+        "id", user["id"]
+    ).execute()
 
-    return result.data[0] if result.data else user
-
-
-@router.get("/me/usage")
-async def get_my_usage(
-    user: dict = Depends(get_current_active_user),
-    supabase: Client = Depends(get_supabase)
-):
-    """
-    Get user's usage statistics and limits.
-    Section 5.5 - Business Rules
-
-    Args:
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Usage statistics
-    """
-    user_service = UserService(supabase)
-
-    # Check if user has credits
-    has_credits = await user_service.check_user_credits(user["id"])
-
-    return {
-        "tier": user["tier"],
-        "has_credits": has_credits,
-        "deep_research": {
-            "used": user.get("monthly_deep_research_used", 0),
-            "limit": user.get("monthly_deep_research_limit", 1),
-            "remaining": (
-                user.get("monthly_deep_research_limit", 1) - user.get("monthly_deep_research_used", 0)
-                if user.get("monthly_deep_research_limit", 1) != -1
-                else "unlimited"
-            ),
-            "reset_at": user.get("last_credit_reset_at")
-        }
-    }
-
-
-@router.get("/me/stats")
-async def get_my_stats(
-    user: dict = Depends(get_current_active_user),
-    supabase: Client = Depends(get_supabase)
-):
-    """
-    Get comprehensive user statistics.
-    Uses UserService for detailed stats including activity tracking.
-
-    Args:
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Comprehensive user statistics
-    """
-    user_service = UserService(supabase)
-
-    stats = await user_service.get_user_stats(user["id"])
-
-    if not stats:
-        raise HTTPException(
-            status_code=404,
-            detail="User statistics not found"
-        )
-
-    return stats
-
-
-@router.delete("/me")
-async def delete_my_account(
-    user: dict = Depends(get_current_active_user),
-    supabase: Client = Depends(get_supabase)
-):
-    """
-    Soft delete user account.
-
-    Args:
-        user: Current user data
-        supabase: Supabase client
-
-    Returns:
-        dict: Deletion confirmation
-    """
-    # Soft delete by setting deleted_at timestamp
-    supabase.table("users").update({
-        "deleted_at": "now()"
-    }).eq("id", user["id"]).execute()
-
-    return {"message": "Account deleted successfully"}
+    updated = result.data[0] if result.data else user
+    return UserResponse(
+        id=updated["id"],
+        email=updated["email"],
+        display_name=updated.get("display_name"),
+        avatar_url=updated.get("avatar_url"),
+        tier=updated.get("tier", "free"),
+        created_at=updated["created_at"],
+        updated_at=updated.get("updated_at"),
+    )

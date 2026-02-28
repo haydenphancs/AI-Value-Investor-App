@@ -39,6 +39,7 @@ struct iosApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
+                .environment(\.appState, appState)
                 .preferredColorScheme(.dark)
                 .task {
                     guard !isConfigured else { return }

@@ -63,10 +63,12 @@ struct ContentView: View {
 
 // MARK: - HomeView with Binding Support
 struct HomeViewWithBinding: View {
+    @Environment(AppState.self) private var appState
     @StateObject private var viewModel = HomeViewModel()
     @Binding var selectedTab: HomeTab
     @Binding var researchSubTab: ResearchTab
     @State private var showSearch = false
+    @State private var showProfile = false
     @State private var selectedNewsArticle: NewsArticle?
     @State private var selectedReportTicker: ReportTickerNavigation?
     @State private var selectedMarketTicker: MarketTicker?
@@ -78,7 +80,9 @@ struct HomeViewWithBinding: View {
 
             VStack(spacing: 0) {
                 HomeHeader(
-                    onProfileTapped: {},
+                    onProfileTapped: {
+                        showProfile = true
+                    },
                     onSearchTapped: {
                         showSearch = true
                     }
@@ -140,6 +144,12 @@ struct HomeViewWithBinding: View {
         .sheet(isPresented: $showSearch) {
             SearchView()
         }
+        .fullScreenCover(isPresented: $showProfile) {
+            ProfileView()
+                .environment(appState)
+                .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
+        }
         .fullScreenCover(item: $selectedNewsArticle) { article in
             NewsDetailView(article: article)
                 .preferredColorScheme(.dark)
@@ -189,11 +199,13 @@ struct HomeViewWithBinding: View {
 
 // MARK: - ResearchView with Binding Support
 struct ResearchViewWithBinding: View {
+    @Environment(AppState.self) private var appState
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
     let initialSubTab: ResearchTab
     @State private var selectedReportTicker: ReportTickerNavigation?
+    @State private var showProfile = false
 
     init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil, initialSubTab: ResearchTab = .research) {
         self._selectedTab = selectedTab
@@ -236,6 +248,12 @@ struct ResearchViewWithBinding: View {
                 TickerReportView(ticker: nav.ticker)
             }
             .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(isPresented: $showProfile) {
+            ProfileView()
+                .environment(appState)
+                .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
         }
     }
 
@@ -329,7 +347,7 @@ struct ResearchViewWithBinding: View {
 
     // MARK: - Action Handlers
     private func handleProfileTapped() {
-        print("Profile tapped")
+        showProfile = true
     }
 
     private func handleTickerSelected(_ ticker: QuickTicker) {

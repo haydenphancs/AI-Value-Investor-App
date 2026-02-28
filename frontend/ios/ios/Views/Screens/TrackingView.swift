@@ -31,7 +31,9 @@ struct TradeGroupNavigation: Identifiable, Hashable {
 
 // MARK: - TrackingContentView (Used in TabView)
 struct TrackingContentView: View {
+    @Environment(\.appState) private var appState
     @StateObject private var viewModel = TrackingViewModel()
+    @State private var showProfile = false
 
     var body: some View {
         NavigationStack {
@@ -101,6 +103,12 @@ struct TrackingContentView: View {
                     AlertDetailView(alert: alert)
                 }
             }
+            .fullScreenCover(isPresented: $showProfile) {
+                ProfileView()
+                    .environment(appState)
+                    .environment(\.appState, appState)
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 
@@ -110,15 +118,17 @@ struct TrackingContentView: View {
     }
 
     private func handleProfileTapped() {
-        print("Profile tapped")
+        showProfile = true
     }
 }
 
 // MARK: - TrackingContentViewWithBinding (Used when tab navigation needed)
 struct TrackingContentViewWithBinding: View {
+    @Environment(\.appState) private var appState
     @StateObject private var viewModel = TrackingViewModel()
     @Binding var selectedTab: HomeTab
     @Binding var researchTickerSymbol: String?
+    @State private var showProfile = false
 
     var body: some View {
         NavigationStack {
@@ -191,6 +201,12 @@ struct TrackingContentViewWithBinding: View {
                     AlertDetailView(alert: alert)
                 }
             }
+            .fullScreenCover(isPresented: $showProfile) {
+                ProfileView()
+                    .environment(appState)
+                    .environment(\.appState, appState)
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 
@@ -200,7 +216,7 @@ struct TrackingContentViewWithBinding: View {
     }
 
     private func handleProfileTapped() {
-        print("Profile tapped")
+        showProfile = true
     }
 }
 

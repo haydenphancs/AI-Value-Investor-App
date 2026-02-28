@@ -8,9 +8,11 @@
 import SwiftUI
 
 struct UpdatesView: View {
+    @Environment(\.appState) private var appState
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
     @State private var showManageAssetsSheet = false
+    @State private var showProfile = false
     @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
@@ -95,6 +97,12 @@ struct UpdatesView: View {
                     onAddTicker: { ticker in viewModel.addTicker(ticker) }
                 )
             }
+            .fullScreenCover(isPresented: $showProfile) {
+                ProfileView()
+                    .environment(appState)
+                    .environment(\.appState, appState)
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 
@@ -104,7 +112,7 @@ struct UpdatesView: View {
     }
 
     private func handleProfileTapped() {
-        print("Profile tapped")
+        showProfile = true
     }
 
     private func handleAddTicker() {

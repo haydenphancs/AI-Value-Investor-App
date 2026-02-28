@@ -130,6 +130,7 @@ struct CaydexSloganView: View {
         GlobalHeaderView(searchPlaceholder: "Search market news...")
         Spacer()
     }
+    .environment(AppState())
     .background(AppColors.background)
     .preferredColorScheme(.dark)
 }

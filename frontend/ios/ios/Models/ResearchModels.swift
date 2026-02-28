@@ -41,8 +41,7 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
     case warrenBuffett = "Warren Buffett"
     case cathieWood = "Cathie Wood"
     case peterLynch = "Peter Lynch"
-    case rayDalio = "Ray Dalio"
-    case satoshiNakamoto = "Satoshi Nakamoto"
+    case billAckman = "Bill Ackman"
 
     var id: String { rawValue }
 
@@ -51,8 +50,7 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
         case .warrenBuffett: return "Safe, Long-term Value"
         case .cathieWood: return "Disruptive Innovation"
         case .peterLynch: return "Growth at Value"
-        case .rayDalio: return "Risk Parity"
-        case .satoshiNakamoto: return "Decentralized Sound Money"
+        case .billAckman: return "Activist Value"
         }
     }
 
@@ -61,8 +59,7 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
         case .warrenBuffett: return "icon_persona_buffett"
         case .cathieWood: return "icon_persona_wood"
         case .peterLynch: return "icon_persona_lynch"
-        case .rayDalio: return "icon_persona_dalio"
-        case .satoshiNakamoto: return "icon_persona_satoshi"
+        case .billAckman: return "icon_persona_ackman"
         }
     }
 
@@ -71,8 +68,7 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
         case .warrenBuffett: return "building.columns.fill"
         case .cathieWood: return "bolt.fill"
         case .peterLynch: return "chart.line.uptrend.xyaxis"
-        case .rayDalio: return "circle.fill"
-        case .satoshiNakamoto: return "bitcoinsign.circle.fill"
+        case .billAckman: return "megaphone.fill"
         }
     }
 
@@ -81,8 +77,7 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
         case .warrenBuffett: return Color(hex: "3B82F6") // Blue
         case .cathieWood: return Color(hex: "A855F7")    // Purple
         case .peterLynch: return Color(hex: "06B6D4")    // Cyan
-        case .rayDalio: return Color(hex: "F97316")      // Orange
-        case .satoshiNakamoto: return Color(hex: "F97316") // Orange
+        case .billAckman: return Color(hex: "F97316")    // Orange
         }
     }
 
@@ -94,10 +89,8 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
             return "Emphasizes disruptive innovation, emerging technologies, and high-growth potential companies that could reshape industries."
         case .peterLynch:
             return "Looks for growth at a reasonable price (GARP), with focus on companies you understand and can spot in everyday life."
-        case .rayDalio:
-            return "Applies risk parity principles, diversification across asset classes, and systematic macro-economic analysis."
-        case .satoshiNakamoto:
-            return "Focuses on decentralized assets, sound money principles, and blockchain-native investments with long-term store of value potential."
+        case .billAckman:
+            return "Takes concentrated positions in high-quality businesses, uses activist strategies to unlock value, and focuses on companies with durable competitive advantages."
         }
     }
 }
@@ -113,39 +106,32 @@ struct AnalysisFeature: Identifiable {
 
     static let allFeatures: [AnalysisFeature] = [
         AnalysisFeature(
-            title: "Financial Deep Dive",
-            subtitle: "Year historical analysis, ratios, and trend forecasting",
+            title: "Financials & Forecasts",
+            subtitle: "Revenue engine, fundamentals, growth metrics, and future projections",
             iconName: "icon_feature_financial",
-            systemIconName: "chart.pie.fill",
+            systemIconName: "chart.line.uptrend.xyaxis",
             iconColor: Color(hex: "22C55E")
         ),
         AnalysisFeature(
-            title: "Competitive Position",
-            subtitle: "Market share analysis and moat assessment",
+            title: "Moat & Competitive Edge",
+            subtitle: "Competitive position, pricing power, and macro risks",
             iconName: "icon_feature_competitive",
-            systemIconName: "building.2.fill",
+            systemIconName: "shield.fill",
             iconColor: Color(hex: "3B82F6")
         ),
         AnalysisFeature(
-            title: "AI-Powered Insights",
-            subtitle: "Pattern recognition, anomaly detection and beyond!",
-            iconName: "icon_feature_ai",
-            systemIconName: "sparkles",
+            title: "Insider & Wall Street",
+            subtitle: "Insider activity, management quality, and analyst consensus",
+            iconName: "icon_feature_whales",
+            systemIconName: "person.2.fill",
             iconColor: Color(hex: "F97316")
         ),
         AnalysisFeature(
-            title: "Risk Assessment",
-            subtitle: "Comprehensive risk factors and mitigation strategies",
-            iconName: "icon_feature_risk",
-            systemIconName: "exclamationmark.triangle.fill",
-            iconColor: Color(hex: "EF4444")
-        ),
-        AnalysisFeature(
-            title: "Insiders and Whales",
-            subtitle: "Track big moves, new opens, increase or decrease their positions",
-            iconName: "icon_feature_whales",
-            systemIconName: "person.2.fill",
-            iconColor: Color(hex: "06B6D4")
+            title: "AI Chat with Report",
+            subtitle: "Ask follow-up questions and get instant answers",
+            iconName: "icon_feature_ai",
+            systemIconName: "sparkles",
+            iconColor: Color(hex: "A855F7")
         )
     ]
 }
@@ -166,17 +152,47 @@ struct CreditBalance {
 }
 
 // MARK: - Trending Analysis
-struct TrendingAnalysis: Identifiable {
+struct TrendingCompany: Identifiable, Hashable {
     let id = UUID()
+    let ticker: String
+    let name: String
+    let price: String
+    let marketCap: String
+}
+
+struct TrendingAnalysis: Identifiable, Hashable {
+    let id: UUID
     let title: String
-    let companiesCount: Int
+    let description: String
+    let companies: [TrendingCompany]
     let interestPercent: Int
     let iconName: String
     let systemIconName: String
     let iconBackgroundColor: Color
 
+    init(title: String, description: String, companies: [TrendingCompany], interestPercent: Int, iconName: String, systemIconName: String, iconBackgroundColor: Color) {
+        self.id = UUID()
+        self.title = title
+        self.description = description
+        self.companies = companies
+        self.interestPercent = interestPercent
+        self.iconName = iconName
+        self.systemIconName = systemIconName
+        self.iconBackgroundColor = iconBackgroundColor
+    }
+
+    static func == (lhs: TrendingAnalysis, rhs: TrendingAnalysis) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    var companiesCount: Int { companies.count }
+
     var formattedCompaniesCount: String {
-        "\(companiesCount) companies analyzed this month"
+        "\(companiesCount) companies"
     }
 
     var formattedInterest: String {
@@ -186,7 +202,21 @@ struct TrendingAnalysis: Identifiable {
     static let mockTrending: [TrendingAnalysis] = [
         TrendingAnalysis(
             title: "AI & Machine Learning Stocks",
-            companiesCount: 12,
+            description: "NVDA, MSFT, GOOGL leading the AI infrastructure boom with record data center spending",
+            companies: [
+                TrendingCompany(ticker: "NVDA", name: "NVIDIA Corp.", price: "$142.50", marketCap: "$3.5T"),
+                TrendingCompany(ticker: "MSFT", name: "Microsoft Corp.", price: "$428.30", marketCap: "$3.2T"),
+                TrendingCompany(ticker: "GOOGL", name: "Alphabet Inc.", price: "$178.90", marketCap: "$2.2T"),
+                TrendingCompany(ticker: "AMD", name: "Advanced Micro Devices", price: "$164.20", marketCap: "$265B"),
+                TrendingCompany(ticker: "PLTR", name: "Palantir Technologies", price: "$24.80", marketCap: "$54B"),
+                TrendingCompany(ticker: "SNOW", name: "Snowflake Inc.", price: "$162.40", marketCap: "$53B"),
+                TrendingCompany(ticker: "AI", name: "C3.ai Inc.", price: "$28.50", marketCap: "$3.5B"),
+                TrendingCompany(ticker: "PATH", name: "UiPath Inc.", price: "$22.10", marketCap: "$12.5B"),
+                TrendingCompany(ticker: "AMZN", name: "Amazon.com Inc.", price: "$186.40", marketCap: "$1.9T"),
+                TrendingCompany(ticker: "META", name: "Meta Platforms Inc.", price: "$512.60", marketCap: "$1.3T"),
+                TrendingCompany(ticker: "CRM", name: "Salesforce Inc.", price: "$272.80", marketCap: "$264B"),
+                TrendingCompany(ticker: "ORCL", name: "Oracle Corp.", price: "$128.90", marketCap: "$351B"),
+            ],
             interestPercent: 127,
             iconName: "icon_trending_ai",
             systemIconName: "brain.head.profile",
@@ -194,19 +224,37 @@ struct TrendingAnalysis: Identifiable {
         ),
         TrendingAnalysis(
             title: "Clean Energy Sector",
-            companiesCount: 8,
+            description: "Solar and EV supply chains rebounding as global policy shifts accelerate adoption",
+            companies: [
+                TrendingCompany(ticker: "ENPH", name: "Enphase Energy Inc.", price: "$124.50", marketCap: "$16.8B"),
+                TrendingCompany(ticker: "SEDG", name: "SolarEdge Technologies", price: "$68.30", marketCap: "$3.8B"),
+                TrendingCompany(ticker: "FSLR", name: "First Solar Inc.", price: "$198.70", marketCap: "$21.2B"),
+                TrendingCompany(ticker: "NEE", name: "NextEra Energy Inc.", price: "$76.40", marketCap: "$157B"),
+                TrendingCompany(ticker: "TSLA", name: "Tesla Inc.", price: "$248.50", marketCap: "$792B"),
+                TrendingCompany(ticker: "RIVN", name: "Rivian Automotive", price: "$16.20", marketCap: "$16.4B"),
+                TrendingCompany(ticker: "PLUG", name: "Plug Power Inc.", price: "$3.85", marketCap: "$2.8B"),
+                TrendingCompany(ticker: "BE", name: "Bloom Energy Corp.", price: "$14.60", marketCap: "$3.3B"),
+            ],
             interestPercent: 89,
             iconName: "icon_trending_energy",
             systemIconName: "bolt.fill",
             iconBackgroundColor: Color(hex: "22C55E")
         ),
         TrendingAnalysis(
-            title: "Cryptocurrency & Blockchain",
-            companiesCount: 15,
-            interestPercent: 203,
-            iconName: "icon_trending_crypto",
-            systemIconName: "bitcoinsign.circle.fill",
-            iconBackgroundColor: Color(hex: "F97316")
+            title: "Quantum Computing",
+            description: "IONQ, RGTI, QBTS gaining momentum as enterprise pilots move toward production",
+            companies: [
+                TrendingCompany(ticker: "IONQ", name: "IonQ Inc.", price: "$12.40", marketCap: "$2.7B"),
+                TrendingCompany(ticker: "RGTI", name: "Rigetti Computing", price: "$1.85", marketCap: "$340M"),
+                TrendingCompany(ticker: "QBTS", name: "D-Wave Quantum Inc.", price: "$1.20", marketCap: "$230M"),
+                TrendingCompany(ticker: "IBM", name: "IBM Corp.", price: "$188.60", marketCap: "$172B"),
+                TrendingCompany(ticker: "GOOGL", name: "Alphabet Inc.", price: "$178.90", marketCap: "$2.2T"),
+                TrendingCompany(ticker: "HON", name: "Honeywell International", price: "$204.30", marketCap: "$134B"),
+            ],
+            interestPercent: 156,
+            iconName: "icon_trending_quantum",
+            systemIconName: "atom",
+            iconBackgroundColor: Color(hex: "A855F7")
         )
     ]
 }
@@ -296,7 +344,7 @@ struct AnalysisReport: Identifiable {
             companyName: "Meta Platforms",
             ticker: "META",
             industry: "Social Media",
-            persona: .rayDalio,
+            persona: .billAckman,
             status: .failed,
             progress: nil,
             rating: nil,

@@ -46,6 +46,11 @@ struct ResearchContentView: View {
             .navigationDestination(for: String.self) { ticker in
                 TickerReportView(ticker: ticker)
             }
+            .navigationDestination(for: TrendingAnalysis.self) { analysis in
+                TrendingAnalysisDetailView(analysis: analysis) { ticker in
+                    viewModel.searchText = ticker
+                }
+            }
         }
     }
 
@@ -167,7 +172,7 @@ struct ResearchContentView: View {
     }
 
     private func handleTrendingAnalysisTapped(_ analysis: TrendingAnalysis) {
-        viewModel.selectTrendingAnalysis(analysis)
+        navigationPath.append(analysis)
     }
 
     // MARK: - Reports Tab Action Handlers

@@ -21,11 +21,6 @@ struct ReportKeyVitalsSection: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: AppSpacing.md) {
-                        if let valuation = vitals.valuation {
-                            ReportValuationVitalCard(data: valuation)
-                                .frame(width: 185)
-                        }
-
                         if let moat = vitals.moat {
                             ReportMoatVitalCard(data: moat)
                                 .frame(width: 185)

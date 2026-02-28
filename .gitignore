@@ -216,4 +216,5 @@ __marimo__/
 DerivedData/
 *.xcuserstate
 *.xcworkspace
-!default.xcworkspace
+!default.xcworkspace.temp/
+.temp/

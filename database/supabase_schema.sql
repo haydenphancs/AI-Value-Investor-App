@@ -747,9 +747,7 @@ VALUES
     ('warren_buffett', 'Warren Buffett', 'Value Investing Legend', 'Long-term value with a margin of safety', 'Value investing with a focus on long-term compounding', 'Analyzes companies through the lens of intrinsic value, competitive moats, and management quality.', 'person.fill', '1B4332', 'Intrinsic value & moats', true),
     ('cathie_wood', 'Cathie Wood', 'Disruptive Innovation Pioneer', 'Exponential growth through disruption', 'Growth investing focused on disruptive innovation', 'Focuses on companies at the forefront of technological innovation and disruption.', 'sparkles', '6366F1', 'Disruptive innovation', true),
     ('peter_lynch', 'Peter Lynch', 'The People''s Investor', 'Invest in what you know', 'Growth at a reasonable price (GARP)', 'Combines fundamental analysis with practical, everyday observations about companies.', 'chart.line.uptrend.xyaxis', '2563EB', 'GARP investing', true),
-    ('bill_ackman', 'Bill Ackman', 'Activist Investor', 'Concentrated bets with conviction', 'Activist investing with deep fundamental analysis', 'Takes concentrated positions and advocates for operational and strategic changes.', 'bolt.fill', 'DC2626', 'Activist catalysts', true),
-    ('charlie_munger', 'Charlie Munger', 'The Sage of Reason', 'Invert, always invert', 'Mental models and multidisciplinary thinking', 'Applies mental models from multiple disciplines to identify wonderful companies at fair prices.', 'brain.head.profile', '92400E', 'Mental models', true),
-    ('benjamin_graham', 'Benjamin Graham', 'Father of Value Investing', 'Margin of safety above all', 'Deep value investing with strict criteria', 'The original value investor. Focuses on quantitative screens, margin of safety, and balance sheet strength.', 'book.fill', '1E3A5F', 'Deep value', true)
+    ('bill_ackman', 'Bill Ackman', 'Activist Investor', 'Concentrated bets with conviction', 'Activist investing with deep fundamental analysis', 'Takes concentrated positions and advocates for operational and strategic changes.', 'bolt.fill', 'DC2626', 'Activist catalysts', true)
 ON CONFLICT (key) DO NOTHING;
 
 -- =====================================================

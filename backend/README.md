@@ -61,7 +61,7 @@ The backend follows a layered architecture:
 - Pre-market and post-market updates
 
 ✅ **Deep Research Agents** (Section 4.3)
-- Investor persona simulation (Buffett, Ackman, Munger, Lynch, Graham)
+- Investor persona simulation (Buffett, Lynch, Ackman, Wood)
 - Large context window analysis using Gemini 1.5 Pro+
 - Comprehensive company reports (pros, cons, moat analysis)
 - Usage limits per tier (Free: 1, Pro: 10, Premium: unlimited)

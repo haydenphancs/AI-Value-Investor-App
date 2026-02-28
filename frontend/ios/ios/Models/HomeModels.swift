@@ -129,8 +129,7 @@ enum InvestorPersona: String, CaseIterable {
     case warrenBuffett = "Warren Buffett"
     case peterLynch = "Peter Lynch"
     case cathieWood = "Cathie Wood"
-    case charleMunger = "Charlie Munger"
-    case benjaminGraham = "Benjamin Graham"
+    case billAckman = "Bill Ackman"
 
     var displayName: String {
         rawValue
@@ -141,8 +140,7 @@ enum InvestorPersona: String, CaseIterable {
         case .warrenBuffett: return "4F46E5"
         case .peterLynch: return "059669"
         case .cathieWood: return "DC2626"
-        case .charleMunger: return "7C3AED"
-        case .benjaminGraham: return "EA580C"
+        case .billAckman: return "DC2626"
         }
     }
 }

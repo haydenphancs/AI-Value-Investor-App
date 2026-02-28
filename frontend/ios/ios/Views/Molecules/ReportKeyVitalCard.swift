@@ -502,9 +502,9 @@ struct ReportWallStreetVitalCard: View {
                 )
             }
 
-            // Price Target
+            // Fair Value
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text("Price Target")
+                Text("Fair Value")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 HStack(spacing: AppSpacing.xs) {

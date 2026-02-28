@@ -12,22 +12,9 @@ struct WhatYouGetSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header with info icon
-            HStack {
-                Text("What You'll Get")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Button(action: {
-                    // Show info tooltip
-                }) {
-                    Image(systemName: "info.circle")
-                        .font(AppTypography.iconDefault)
-                        .foregroundColor(AppColors.textMuted)
-                }
-            }
+            Text("What You'll Get")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
 
             // Features list
             VStack(spacing: AppSpacing.sm) {

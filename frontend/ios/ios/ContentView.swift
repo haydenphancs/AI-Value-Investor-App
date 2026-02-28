@@ -22,7 +22,8 @@ struct ContentView: View {
             // so their @StateObject instances persist and don't re-trigger data loading.
             HomeViewWithBinding(
                 selectedTab: $selectedTab,
-                researchSubTab: $researchSubTab
+                researchSubTab: $researchSubTab,
+                researchTickerSymbol: $researchTickerSymbol
             )
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)
@@ -67,11 +68,13 @@ struct HomeViewWithBinding: View {
     @StateObject private var viewModel = HomeViewModel()
     @Binding var selectedTab: HomeTab
     @Binding var researchSubTab: ResearchTab
+    @Binding var researchTickerSymbol: String?
     @State private var showSearch = false
     @State private var showProfile = false
     @State private var selectedNewsArticle: NewsArticle?
     @State private var selectedReportTicker: ReportTickerNavigation?
     @State private var selectedMarketTicker: MarketTicker?
+    @State private var selectedTrendingAnalysis: TrendingAnalysis?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -180,6 +183,15 @@ struct HomeViewWithBinding: View {
             }
             .preferredColorScheme(.dark)
         }
+        .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
+            NavigationStack {
+                TrendingAnalysisDetailView(analysis: analysis) { ticker in
+                    researchTickerSymbol = ticker
+                    selectedTab = .research
+                }
+            }
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Action Handlers
@@ -205,6 +217,7 @@ struct ResearchViewWithBinding: View {
     let prefilledTicker: String?
     let initialSubTab: ResearchTab
     @State private var selectedReportTicker: ReportTickerNavigation?
+    @State private var selectedTrendingAnalysis: TrendingAnalysis?
     @State private var showProfile = false
 
     init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil, initialSubTab: ResearchTab = .research) {
@@ -254,6 +267,14 @@ struct ResearchViewWithBinding: View {
                 .environment(appState)
                 .environment(\.appState, appState)
                 .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
+            NavigationStack {
+                TrendingAnalysisDetailView(analysis: analysis) { ticker in
+                    viewModel.searchText = ticker
+                }
+            }
+            .preferredColorScheme(.dark)
         }
     }
 
@@ -375,7 +396,7 @@ struct ResearchViewWithBinding: View {
     }
 
     private func handleTrendingAnalysisTapped(_ analysis: TrendingAnalysis) {
-        viewModel.selectTrendingAnalysis(analysis)
+        selectedTrendingAnalysis = analysis
     }
 
     private func handleReportTapped(_ report: AnalysisReport) {

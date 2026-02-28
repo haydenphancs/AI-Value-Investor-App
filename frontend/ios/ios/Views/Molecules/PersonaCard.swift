@@ -14,7 +14,7 @@ struct PersonaCard: View {
 
     // Fixed card dimensions for consistent sizing
     private let cardWidth: CGFloat = 100
-    private let cardHeight: CGFloat = 150
+    private let cardHeight: CGFloat = 120
 
     var body: some View {
         Button(action: {
@@ -52,23 +52,6 @@ struct PersonaCard: View {
                     .frame(height: 28) // Fixed height for tagline
 
                 Spacer(minLength: 0)
-
-                // Selection indicator
-                Group {
-                    if isSelected {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(AppTypography.iconTiny)
-                            Text("Selected")
-                                .font(AppTypography.caption)
-                        }
-                        .foregroundColor(AppColors.primaryBlue)
-                    } else {
-                        Text("Tap to select")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
-                }
             }
             .frame(width: cardWidth, height: cardHeight)
             .padding(.vertical, AppSpacing.md)

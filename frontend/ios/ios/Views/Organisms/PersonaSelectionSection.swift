@@ -15,28 +15,10 @@ struct PersonaSelectionSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section header
-            HStack {
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text("Select Analysis Persona:")
-                        .font(AppTypography.heading)
-                        .foregroundColor(AppColors.textPrimary)
-
-                    Text("Choose your investment style")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                Spacer()
-
-                Button(action: {
-                    onViewAllTapped?()
-                }) {
-                    Text("View All")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
-            }
-            .padding(.horizontal, AppSpacing.lg)
+            Text("Select Analysis Persona:")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
 
             // Horizontal scroll of persona cards
             ScrollView(.horizontal, showsIndicators: false) {

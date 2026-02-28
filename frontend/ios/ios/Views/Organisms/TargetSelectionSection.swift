@@ -16,34 +16,17 @@ struct TargetSelectionSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section header
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("Select Your Target:")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text("Choose a company or ticker symbol to analyze")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-            }
+            Text("Select Your Target:")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
 
             // Search bar
             SearchBar(
                 text: $searchText,
-                placeholder: "Search stocks, ETFs, or crypto",
+                placeholder: "Find a company...",
                 onSubmit: onSearchSubmit
             )
 
-            // Quick ticker chips
-            HStack(spacing: AppSpacing.sm) {
-                ForEach(quickTickers) { ticker in
-                    TickerChip(
-                        ticker: ticker,
-                        isSelected: searchText.uppercased() == ticker.symbol
-                    ) {
-                        onTickerSelected?(ticker)
-                    }
-                }
-            }
         }
         .padding(.horizontal, AppSpacing.lg)
     }

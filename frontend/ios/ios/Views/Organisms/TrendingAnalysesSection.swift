@@ -14,22 +14,9 @@ struct TrendingAnalysesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header
-            HStack {
-                Text("Trending Analyses")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Button(action: {
-                    onExploreTapped?()
-                }) {
-                    Text("Explore")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
-            }
+            Text("Trending Analyses")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
 
             // Trending list
             VStack(spacing: AppSpacing.sm) {

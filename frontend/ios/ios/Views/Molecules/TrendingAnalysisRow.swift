@@ -34,11 +34,18 @@ struct TrendingAnalysisRow: View {
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
 
-                    Text(analysis.formattedCompaniesCount)
+                    Text(analysis.description)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(2)
 
-                    TrendingInterestBadge(interestPercent: analysis.interestPercent)
+                    HStack(spacing: AppSpacing.sm) {
+                        Text(analysis.formattedCompaniesCount)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+
+                        TrendingInterestBadge(interestPercent: analysis.interestPercent)
+                    }
                 }
 
                 Spacer()

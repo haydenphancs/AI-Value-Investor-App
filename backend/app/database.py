@@ -30,11 +30,24 @@ def get_supabase() -> Client:
 
 
 async def check_supabase_health() -> bool:
-    """Check Supabase connection health."""
+    """Check Supabase connection health via the PostgREST root endpoint."""
     try:
-        client = get_supabase()
-        client.table("users").select("id").limit(1).execute()
-        return True
+        import httpx
+
+        # Eagerly initialise the client singleton
+        get_supabase()
+
+        # Hit the PostgREST schema endpoint — no table permissions needed
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(
+                f"{settings.SUPABASE_URL}/rest/v1/",
+                headers={
+                    "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                timeout=5.0,
+            )
+            return resp.status_code == 200
     except Exception as e:
         logger.error(f"Supabase health check failed: {e}")
         return False

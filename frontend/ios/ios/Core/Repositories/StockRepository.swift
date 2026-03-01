@@ -163,10 +163,12 @@ struct StockSearchResult: Codable, Identifiable {
     let sector: String?
     let logoUrl: String?
 
+    // Backend (FMP) returns: symbol, name, exchange_short_name
     enum CodingKeys: String, CodingKey {
-        case ticker
-        case companyName = "company_name"
-        case exchange, sector
+        case ticker = "symbol"
+        case companyName = "name"
+        case exchange = "exchange_short_name"
+        case sector
         case logoUrl = "logo_url"
     }
 }
@@ -175,7 +177,7 @@ struct StockDetail: Codable, Identifiable {
     var id: String { ticker }
     let ticker: String
     let companyName: String
-    let exchange: String
+    let exchange: String?
     let sector: String?
     let industry: String?
     let description: String?
@@ -190,18 +192,21 @@ struct StockDetail: Codable, Identifiable {
     let high52Week: Double?
     let low52Week: Double?
 
+    // Backend (FMP profile) returns: symbol, company_name, image, changes, vol_avg, market_cap
+    // Fields not in profile response (change_percent, volume, year_high, year_low) will decode as nil
     enum CodingKeys: String, CodingKey {
-        case ticker
+        case ticker = "symbol"
         case companyName = "company_name"
         case exchange, sector, industry, description, website
-        case logoUrl = "logo_url"
+        case logoUrl = "image"
         case marketCap = "market_cap"
-        case price, change
+        case price
+        case change = "changes"
         case changePercent = "change_percent"
         case volume
-        case avgVolume = "avg_volume"
-        case high52Week = "high_52_week"
-        case low52Week = "low_52_week"
+        case avgVolume = "vol_avg"
+        case high52Week = "year_high"
+        case low52Week = "year_low"
     }
 
     var isPositive: Bool {
@@ -240,20 +245,24 @@ struct StockDetail: Codable, Identifiable {
 
 struct StockQuote: Codable {
     let ticker: String
-    let price: Double
-    let change: Double
-    let changePercent: Double
+    let price: Double?
+    let change: Double?
+    let changePercent: Double?
     let open: Double?
     let high: Double?
     let low: Double?
     let previousClose: Double?
     let volume: Double?
-    let timestamp: String
+    let timestamp: Int?
 
+    // Backend (FMP quote) returns: symbol, changes_percentage, day_high, day_low, timestamp (unix int)
     enum CodingKeys: String, CodingKey {
-        case ticker, price, change
-        case changePercent = "change_percent"
-        case open, high, low
+        case ticker = "symbol"
+        case price, change
+        case changePercent = "changes_percentage"
+        case open
+        case high = "day_high"
+        case low = "day_low"
         case previousClose = "previous_close"
         case volume, timestamp
     }
@@ -263,18 +272,22 @@ struct StockNewsArticle: Codable, Identifiable {
     let id: String
     let title: String
     let summary: String?
-    let source: String
-    let publishedAt: String
-    let url: String
+    let source: String?
+    let publishedAt: String?
+    let url: String?
     let imageUrl: String?
     let sentiment: String?
     let relatedTickers: [String]?
 
+    // Backend returns: headline, source_name, thumbnail_url, article_url, published_at
     enum CodingKeys: String, CodingKey {
-        case id, title, summary, source
+        case id
+        case title = "headline"
+        case summary
+        case source = "source_name"
         case publishedAt = "published_at"
-        case url
-        case imageUrl = "image_url"
+        case url = "article_url"
+        case imageUrl = "thumbnail_url"
         case sentiment
         case relatedTickers = "related_tickers"
     }
@@ -325,7 +338,7 @@ final class MockStockRepository: StockRepositoryProtocol {
             low: 172.80,
             previousClose: 173.15,
             volume: 50_000_000,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: Int(Date().timeIntervalSince1970)
         )
     }
 

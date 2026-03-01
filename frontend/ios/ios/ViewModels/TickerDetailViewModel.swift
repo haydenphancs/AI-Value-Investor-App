@@ -34,14 +34,20 @@ class TickerDetailViewModel: ObservableObject {
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
 
+    // MARK: - API Data (live from backend)
+    @Published var stockDetail: StockDetail?
+    @Published var stockQuote: StockQuote?
+
     // MARK: - Private Properties
 
     private let tickerSymbol: String
+    private let stockRepository: StockRepository
 
     // MARK: - Initialization
 
-    init(tickerSymbol: String) {
+    init(tickerSymbol: String, stockRepository: StockRepository? = nil) {
         self.tickerSymbol = tickerSymbol
+        self.stockRepository = stockRepository ?? StockRepository()
     }
 
     // MARK: - Public Methods
@@ -50,34 +56,98 @@ class TickerDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // In production, this would fetch from your backend
         Task { [weak self] in
             guard let self = self else { return }
 
             let ticker = self.tickerSymbol
-            let tickerData = TickerDetailData.sampleApple
-            let news = TickerNewsArticle.sampleDataForTicker(ticker)
-            let analysis = TickerAnalysisData.sampleData
-            let earnings = EarningsData.sampleData
-            let growth = GrowthSectionData.sampleData
-            let profitPower = ProfitPowerSectionData.sampleData
-            let signalOfConfidence = SignalOfConfidenceSectionData.sampleData
-            let revenueBreakdown = RevenueBreakdownData.sampleApple
-            let healthCheck = HealthCheckSectionData.sampleData
-            let holders = HoldersData.sampleData
+            print("📊 TickerDetailVM: Loading data for \(ticker) from API...")
 
-            self.tickerData = tickerData
-            self.newsArticles = news
-            self.analysisData = analysis
-            self.earningsData = earnings
-            self.growthData = growth
-            self.profitPowerData = profitPower
-            self.signalOfConfidenceData = signalOfConfidence
-            self.revenueBreakdownData = revenueBreakdown
-            self.healthCheckData = healthCheck
-            self.holdersData = holders
+            // Fetch API data in parallel, then fall back to mock for sections not served by API
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.fetchStockDetail(ticker) }
+                group.addTask { await self.fetchStockQuote(ticker) }
+                group.addTask { await self.fetchStockNews(ticker) }
+            }
+
+            // Load sample data for rich sections the backend doesn't serve yet
+            self.tickerData = TickerDetailData.sampleApple
+            self.analysisData = TickerAnalysisData.sampleData
+            self.earningsData = EarningsData.sampleData
+            self.growthData = GrowthSectionData.sampleData
+            self.profitPowerData = ProfitPowerSectionData.sampleData
+            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
+            self.revenueBreakdownData = RevenueBreakdownData.sampleApple
+            self.healthCheckData = HealthCheckSectionData.sampleData
+            self.holdersData = HoldersData.sampleData
+
+            // If we don't have API news, load sample news
+            if self.newsArticles.isEmpty {
+                self.newsArticles = TickerNewsArticle.sampleDataForTicker(ticker)
+            }
+
             self.isLoading = false
         }
+    }
+
+    // MARK: - API Fetching
+
+    private func fetchStockDetail(_ ticker: String) async {
+        do {
+            let detail = try await stockRepository.getStock(ticker: ticker)
+            self.stockDetail = detail
+            print("✅ TickerDetailVM: Got stock detail for \(ticker) — price: \(detail.price ?? 0)")
+        } catch {
+            print("⚠️ TickerDetailVM: Failed to fetch stock detail for \(ticker): \(error)")
+            // Non-fatal: we'll use sample data
+        }
+    }
+
+    private func fetchStockQuote(_ ticker: String) async {
+        do {
+            let quote = try await stockRepository.getStockQuote(ticker: ticker)
+            self.stockQuote = quote
+            print("✅ TickerDetailVM: Got quote for \(ticker) — price: \(quote.price ?? 0)")
+        } catch {
+            print("⚠️ TickerDetailVM: Failed to fetch quote for \(ticker): \(error)")
+        }
+    }
+
+    private func fetchStockNews(_ ticker: String) async {
+        do {
+            let apiNews = try await stockRepository.getStockNews(ticker: ticker, limit: 10)
+            print("✅ TickerDetailVM: Got \(apiNews.count) news articles for \(ticker)")
+            // Convert API news to UI news model
+            self.newsArticles = apiNews.map { article in
+                TickerNewsArticle(
+                    headline: article.title,
+                    source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+                    sentiment: mapSentiment(article.sentiment),
+                    publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+                    thumbnailName: nil,
+                    relatedTickers: article.relatedTickers ?? [],
+                    summaryBullets: article.summary != nil ? [article.summary!] : [],
+                    articleURL: article.url.flatMap { URL(string: $0) }
+                )
+            }
+        } catch {
+            print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
+        }
+    }
+
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
+        switch sentiment?.lowercased() {
+        case "positive", "bullish": return .positive
+        case "negative", "bearish": return .negative
+        default: return .neutral
+        }
+    }
+
+    private func parseDate(_ dateString: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: dateString) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: dateString)
     }
 
     func refresh() async {
@@ -86,38 +156,33 @@ class TickerDetailViewModel: ObservableObject {
 
     func toggleFavorite() {
         isFavorite.toggle()
-        // TODO: Persist favorite state to backend/local storage
     }
 
     func handleNotificationTap() {
-        // TODO: Navigate to notification settings for this ticker
         print("Notification settings for \(tickerSymbol)")
     }
 
     func handleMoreOptions() {
-        // TODO: Show more options action sheet
         print("More options for \(tickerSymbol)")
     }
 
     func handleDeepResearch() {
-        // TODO: Navigate to AI Deep Research view
         print("AI Deep Research for \(tickerSymbol)")
     }
 
     func handleWebsiteTap() {
-        guard let website = tickerData?.companyProfile.website,
-              let url = URL(string: "https://\(website)") else { return }
-
+        // Prefer API data for website
+        let website = stockDetail?.website ?? tickerData?.companyProfile.website
+        guard let site = website,
+              let url = URL(string: site.hasPrefix("http") ? site : "https://\(site)") else { return }
         UIApplication.shared.open(url)
     }
 
     func handleRelatedTickerTap(_ ticker: RelatedTicker) {
-        // TODO: Navigate to related ticker detail
         print("Navigate to \(ticker.symbol)")
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        // TODO: Navigate to full news detail view
         print("Open news article: \(article.headline)")
     }
 
@@ -127,7 +192,6 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        // TODO: Navigate to ticker detail for the related ticker
         print("Navigate to ticker: \(ticker)")
     }
 
@@ -137,82 +201,84 @@ class TickerDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        // TODO: Send AI query
         print("AI Query: \(aiInputText)")
         aiInputText = ""
     }
 
     func updateChartRange(_ range: ChartTimeRange) {
         selectedChartRange = range
-        // TODO: Fetch new chart data for selected range
     }
 
     // MARK: - Analysis Tab Handlers
 
     func handleAnalystRatingsMore() {
-        // TODO: Show more analyst ratings options
         print("Analyst ratings more options for \(tickerSymbol)")
     }
 
     func handleSentimentMore() {
-        // TODO: Show more sentiment analysis options
         print("Sentiment analysis more options for \(tickerSymbol)")
     }
 
     func handleTechnicalDetail() {
-        // TODO: Navigate to detailed technical analysis view
         print("Technical analysis detail for \(tickerSymbol)")
     }
 
     // MARK: - Financials Tab Handlers
 
     func handleEarningsDetail() {
-        // TODO: Navigate to detailed earnings view
         print("Earnings detail for \(tickerSymbol)")
     }
 
     func handleGrowthDetail() {
-        // TODO: Navigate to detailed growth view
         print("Growth detail for \(tickerSymbol)")
     }
 
     func handleProfitPowerDetail() {
-        // TODO: Navigate to detailed profit power view
         print("Profit power detail for \(tickerSymbol)")
     }
 
     func handleSignalOfConfidenceDetail() {
-        // TODO: Navigate to detailed signal of confidence view
         print("Signal of confidence detail for \(tickerSymbol)")
     }
 
     func handleRevenueBreakdownDetail() {
-        // TODO: Navigate to detailed revenue breakdown view
         print("Revenue breakdown detail for \(tickerSymbol)")
     }
 
     func handleHealthCheckDetail() {
-        // TODO: Navigate to detailed health check view
         print("Health check detail for \(tickerSymbol)")
     }
 
-    // MARK: - Computed Properties
+    // MARK: - Computed Properties (prefer live API data over sample data)
 
     var formattedPrice: String {
-        tickerData?.formattedPrice ?? "--"
+        if let price = stockQuote?.price ?? stockDetail?.price {
+            return String(format: "$%.2f", price)
+        }
+        return tickerData?.formattedPrice ?? "--"
     }
 
     var formattedChange: String {
-        tickerData?.formattedChange ?? "--"
+        if let change = stockQuote?.change ?? stockDetail?.change {
+            let sign = change >= 0 ? "+" : ""
+            return "\(sign)\(String(format: "%.2f", change))"
+        }
+        return tickerData?.formattedChange ?? "--"
     }
 
     var formattedChangePercent: String {
-        tickerData?.formattedChangePercent ?? "--"
+        if let percent = stockQuote?.changePercent {
+            let sign = percent >= 0 ? "+" : ""
+            return "(\(sign)\(String(format: "%.2f", percent))%)"
+        }
+        return tickerData?.formattedChangePercent ?? "--"
     }
 
     var isPositive: Bool {
-        tickerData?.isPositive ?? true
+        if let change = stockQuote?.change ?? stockDetail?.change {
+            return change >= 0
+        }
+        return tickerData?.isPositive ?? true
     }
 
     var chartData: [Double] {

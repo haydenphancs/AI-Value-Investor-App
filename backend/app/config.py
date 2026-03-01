@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # Financial Modeling Prep
     FMP_API_KEY: str
-    FMP_BASE_URL: str = "https://financialmodelingprep.com/api/v3"
+    FMP_BASE_URL: str = "https://financialmodelingprep.com/stable"
 
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536

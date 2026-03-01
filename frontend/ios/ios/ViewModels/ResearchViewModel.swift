@@ -22,6 +22,8 @@ class ResearchViewModel: ObservableObject {
     @Published var analysisCost: AnalysisCost = .standard
     @Published var isLoading: Bool = false
     @Published var isGeneratingAnalysis: Bool = false
+    @Published var generationProgress: Int = 0
+    @Published var generationStep: String = ""
     @Published var error: String?
 
     // Reports Tab Properties
@@ -33,36 +35,31 @@ class ResearchViewModel: ObservableObject {
     }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
+    // MARK: - Dependencies
+    private let apiClient: APIClient
+    private let pollingManager: TaskPollingManager
+
     // MARK: - Initialization
-    init(prefilledTicker: String? = nil) {
+    init(prefilledTicker: String? = nil, apiClient: APIClient = .shared) {
+        self.apiClient = apiClient
+        self.pollingManager = TaskPollingManager(apiClient: apiClient)
         if let ticker = prefilledTicker {
             _searchText = Published(initialValue: ticker)
         }
-        loadMockData()
+        loadInitialData()
         sortReports()
     }
 
     // MARK: - Data Loading
-    func loadMockData() {
-        isLoading = true
-
-        Task { [weak self] in
-            guard let self = self else { return }
-            let tickers = QuickTicker.defaults
-            let allPersonas = AnalysisPersona.allCases
-            let allFeatures = AnalysisFeature.allFeatures
-            let trending = TrendingAnalysis.mockTrending
-
-            self.quickTickers = tickers
-            self.personas = allPersonas
-            self.features = allFeatures
-            self.trendingAnalyses = trending
-            self.isLoading = false
-        }
+    private func loadInitialData() {
+        quickTickers = QuickTicker.defaults
+        personas = AnalysisPersona.allCases
+        features = AnalysisFeature.allFeatures
+        trendingAnalyses = TrendingAnalysis.mockTrending
     }
 
     func refresh() async {
-        loadMockData()
+        loadInitialData()
     }
 
     // MARK: - Actions
@@ -75,30 +72,81 @@ class ResearchViewModel: ObservableObject {
     }
 
     func generateAnalysis() {
-        guard !searchText.isEmpty else { return }
+        let ticker = searchText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !ticker.isEmpty else { return }
         guard creditBalance.credits >= analysisCost.credits else {
             error = "Insufficient credits"
             return
         }
 
         isGeneratingAnalysis = true
+        generationProgress = 0
+        generationStep = "Starting analysis..."
+        error = nil
+
+        let personaKey = selectedPersona.backendKey
+
+        print("🔬 ResearchVM: Generating analysis for \(ticker) with persona \(personaKey)...")
 
         Task { [weak self] in
-            // Simulate analysis generation delay
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard let self = self else { return }
-            self.isGeneratingAnalysis = false
-            print("Analysis generated for \(self.searchText) using \(self.selectedPersona.rawValue) style")
+
+            do {
+                let stream = await self.pollingManager.generateAndMonitorResearch(
+                    stockId: ticker,
+                    persona: personaKey
+                )
+
+                for try await progress in stream {
+                    switch progress {
+                    case .started(let taskId):
+                        print("🔬 ResearchVM: Research started — report ID: \(taskId)")
+                        self.generationStep = "Research initiated..."
+
+                    case .progress(let percent, let step):
+                        print("🔬 ResearchVM: Progress \(percent)% — \(step)")
+                        self.generationProgress = percent
+                        self.generationStep = step
+
+                    case .completed(let report):
+                        print("✅ ResearchVM: Research complete for \(ticker) — \(report.title ?? "Untitled")")
+                        self.isGeneratingAnalysis = false
+                        self.generationProgress = 100
+                        self.generationStep = "Complete!"
+                        // Add to reports list as a ready report
+                        let newReport = AnalysisReport(
+                            companyName: report.companyName,
+                            ticker: report.ticker,
+                            industry: "",
+                            persona: self.selectedPersona,
+                            status: .ready,
+                            progress: nil,
+                            rating: nil,
+                            ratingLabel: nil,
+                            date: Date(),
+                            isRefunded: false
+                        )
+                        self.reports.insert(newReport, at: 0)
+
+                    case .failed(let appError):
+                        print("❌ ResearchVM: Research failed — \(appError.message)")
+                        self.isGeneratingAnalysis = false
+                        self.error = appError.message
+                    }
+                }
+            } catch {
+                print("❌ ResearchVM: Research stream error — \(error)")
+                self.isGeneratingAnalysis = false
+                self.error = error.localizedDescription
+            }
         }
     }
 
     func addMoreCredits() {
-        // Navigate to purchase flow
         print("Add more credits tapped")
     }
 
     func exploreTrending() {
-        // Navigate to trending analyses
         print("Explore trending tapped")
     }
 

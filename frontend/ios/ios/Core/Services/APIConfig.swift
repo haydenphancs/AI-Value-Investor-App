@@ -41,8 +41,8 @@ enum APIConfig: Sendable {
     nonisolated static var baseURL: URL {
         switch AppEnvironment.current {
         case .development:
-            // Local development server
-            return URL(string: "http://localhost:8000")!
+            // Local development server (use 127.0.0.1 for reliable iOS Simulator connectivity)
+            return URL(string: "http://127.0.0.1:8000")!
         case .staging:
             // Staging server
             return URL(string: "https://staging-api.yourapp.com")!

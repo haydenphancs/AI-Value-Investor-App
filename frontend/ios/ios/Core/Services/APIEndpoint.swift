@@ -232,8 +232,19 @@ enum APIEndpoint: Sendable {
 
     nonisolated var requiresAuth: Bool {
         switch self {
-        case .signIn, .signUp, .refreshToken, .getPersonas:
+        // Auth endpoints
+        case .signIn, .signUp, .refreshToken:
             return false
+        // Stock endpoints are public on the backend
+        case .searchStocks, .getStock, .getStockQuote, .getStockFundamentals, .getStockNews:
+            return false
+        // News endpoints are public
+        case .getNewsFeed, .getNewsArticle:
+            return false
+        // Personas are public
+        case .getPersonas:
+            return false
+        // Everything else requires auth
         default:
             return true
         }

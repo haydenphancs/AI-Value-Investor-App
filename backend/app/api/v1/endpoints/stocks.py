@@ -6,50 +6,66 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
+from app.schemas.stock import StockSearchResult
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 # Major US stock exchanges — used to filter search results.
-# FMP stable API returns these in the "exchange" field.
 _US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 
 
-def _filter_us_stocks(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _get_exchange_short_name(item: Dict[str, Any]) -> Optional[str]:
     """
-    Keep only primary US-listed equities.
+    Extract the short exchange name (NYSE / NASDAQ / AMEX) from an FMP result.
 
-    Filters out:
-    - International listings (APC.F, AAPL.MX, AAPL.DE, etc.)
-    - Stocks on non-US exchanges (XETRA, BMV, LSE, etc.)
-    - OTC / crypto / non-equity instruments
+    FMP APIs return exchange info in varying fields depending on the endpoint
+    and API version (stable vs legacy):
+      - "exchangeShortName" -> short name  (e.g. "NASDAQ")
+      - "exchange"          -> may be short or full
+                               (e.g. "NASDAQ" or "NASDAQ Global Select Market")
+
+    This helper normalises both variants.
     """
-    filtered = []
-    for item in results:
-        symbol = item.get("symbol", "")
-        # FMP stable API uses "exchange", NOT "exchangeShortName"
-        exchange = (item.get("exchange") or "").upper().strip()
+    # Prefer the explicit short-name field
+    short = (item.get("exchangeShortName") or "").strip()
+    if short:
+        return short
 
-        # Skip symbols with dots — international exchange suffixes
-        if "." in symbol:
-            continue
+    # Fall back to the generic "exchange" field
+    exchange = (item.get("exchange") or "").strip()
+    if exchange.upper() in _US_EXCHANGES:
+        return exchange
 
-        # Only keep stocks from major US exchanges
-        if exchange not in _US_EXCHANGES:
-            continue
+    # Check if the full name contains a known US exchange
+    upper = exchange.upper()
+    for ex in _US_EXCHANGES:
+        if ex in upper:
+            return ex
 
-        filtered.append(item)
-    return filtered
+    return exchange or None
 
 
-@router.get("/search")
+def _is_us_stock(item: Dict[str, Any]) -> bool:
+    """Return True if the FMP result is a primary US-listed equity."""
+    symbol = item.get("symbol", "")
+
+    # Skip international suffixes (APC.F, AAPL.MX, etc.)
+    if "." in symbol:
+        return False
+
+    short = _get_exchange_short_name(item)
+    return (short or "").upper() in _US_EXCHANGES
+
+
+@router.get("/search", response_model=List[StockSearchResult])
 async def search_stocks(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, le=50),
@@ -61,10 +77,26 @@ async def search_stocks(
         raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
         if not raw:
             return []
-        us_only = _filter_us_stocks(raw)
-        return normalize_fmp_list(us_only[:limit])
+
+        results: List[StockSearchResult] = []
+        for item in raw:
+            if len(results) >= limit:
+                break
+            if not _is_us_stock(item):
+                continue
+
+            short_name = _get_exchange_short_name(item)
+            results.append(StockSearchResult(
+                symbol=item.get("symbol", ""),
+                name=item.get("name", ""),
+                currency=item.get("currency"),
+                exchange_short_name=short_name,
+                exchange_full_name=item.get("stockExchange") or item.get("exchange"),
+            ))
+
+        return results
     except Exception as e:
-        logger.error(f"Stock search failed: {e}")
+        logger.error(f"Stock search failed for q={q!r}: {e}")
         raise HTTPException(status_code=502, detail="Stock search service unavailable")
 
 

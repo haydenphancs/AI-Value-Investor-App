@@ -23,17 +23,15 @@ APP ENTRY & NAVIGATION
 iosApp.swift                    -> App entry point. Inits AppState, configures
                                    APIClient + AuthService, injects via .environment()
 
-RootContainerView.swift         -> Root container. Layers: MainTabView + global
+RootContainerView.swift         -> Root container. Layers: ContentView + global
                                    audio mini-player + full-screen audio player
 
-MainTabView.swift               -> Native TabView with 5 tabs:
+ContentView.swift               -> Main tab container (custom tab bar) with 5 tabs:
                                    1. Home
                                    2. Updates
                                    3. Research
                                    4. Tracking
                                    5. Wiser (Learn)
-
-ContentView.swift               -> Alternative tab container (custom tab bar version)
 
 ================================================================================
 5 MAIN TABS (SCREENS)

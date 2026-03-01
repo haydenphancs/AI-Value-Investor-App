@@ -6,6 +6,7 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
+from typing import List, Dict, Any
 import logging
 
 from app.database import get_supabase
@@ -16,6 +17,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Major US stock exchanges — used to filter search results.
+# FMP stable API returns these in the "exchange" field.
+_US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
+
+
+def _filter_us_stocks(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Keep only primary US-listed equities.
+
+    Filters out:
+    - International listings (APC.F, AAPL.MX, AAPL.DE, etc.)
+    - Stocks on non-US exchanges (XETRA, BMV, LSE, etc.)
+    - OTC / crypto / non-equity instruments
+    """
+    filtered = []
+    for item in results:
+        symbol = item.get("symbol", "")
+        # FMP stable API uses "exchange", NOT "exchangeShortName"
+        exchange = (item.get("exchange") or "").upper().strip()
+
+        # Skip symbols with dots — international exchange suffixes
+        if "." in symbol:
+            continue
+
+        # Only keep stocks from major US exchanges
+        if exchange not in _US_EXCHANGES:
+            continue
+
+        filtered.append(item)
+    return filtered
+
 
 @router.get("/search")
 async def search_stocks(
@@ -25,8 +57,12 @@ async def search_stocks(
     """Search stocks by ticker or company name via FMP."""
     fmp = get_fmp_client()
     try:
-        results = await fmp.search_stocks(q, limit=limit)
-        return normalize_fmp_list(results) if results else []
+        # Over-fetch to compensate for international/fund results we'll discard
+        raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
+        if not raw:
+            return []
+        us_only = _filter_us_stocks(raw)
+        return normalize_fmp_list(us_only[:limit])
     except Exception as e:
         logger.error(f"Stock search failed: {e}")
         raise HTTPException(status_code=502, detail="Stock search service unavailable")

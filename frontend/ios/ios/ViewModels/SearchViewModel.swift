@@ -19,53 +19,91 @@ class SearchViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
+    // MARK: - Live search results from API
+    @Published var searchResults: [StockSearchResult] = []
+
+    // MARK: - Dependencies
+    private let stockRepository: StockRepository
+
+    // Debounce support for live search
+    private var searchTask: Task<Void, Never>?
+
     // MARK: - Initialization
-    init() {
-        loadMockData()
+    init(stockRepository: StockRepository? = nil) {
+        self.stockRepository = stockRepository ?? StockRepository()
+        loadInitialData()
     }
 
     // MARK: - Data Loading
-    func loadMockData() {
-        isLoading = true
-
-        // Simulate network delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.loadQuerySuggestions()
-            self?.loadRecentSearches()
-            self?.loadLatestNews()
-            self?.loadBooks()
-            self?.isLoading = false
-        }
+    private func loadInitialData() {
+        querySuggestions = SearchQuerySuggestion.sampleData
+        recentSearches = SearchResultItem.sampleData
+        latestNews = SearchNewsItem.sampleData
+        books = SearchBookItem.sampleData
     }
 
     func refresh() async {
         isLoading = true
-        try? await Task.sleep(nanoseconds: 800_000_000)
-        loadMockData()
-    }
-
-    // MARK: - Private Loaders
-    private func loadQuerySuggestions() {
-        querySuggestions = SearchQuerySuggestion.sampleData
-    }
-
-    private func loadRecentSearches() {
-        recentSearches = SearchResultItem.sampleData
-    }
-
-    private func loadLatestNews() {
-        latestNews = SearchNewsItem.sampleData
-    }
-
-    private func loadBooks() {
-        books = SearchBookItem.sampleData
+        loadInitialData()
+        // If there's an active search, re-run it
+        if !searchText.isEmpty {
+            await performSearchAsync()
+        }
+        isLoading = false
     }
 
     // MARK: - Actions
+
+    /// Called when user submits search (press return / tap suggestion)
     func performSearch() {
         guard !searchText.isEmpty else { return }
-        print("Searching for: \(searchText)")
-        // In a real app, this would trigger an API call
+
+        // Cancel any pending search
+        searchTask?.cancel()
+
+        searchTask = Task { [weak self] in
+            await self?.performSearchAsync()
+        }
+    }
+
+    /// Actual async API call for stock search
+    private func performSearchAsync() async {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+
+        isLoading = true
+        error = nil
+
+        print("🔍 SearchViewModel: Searching for '\(query)' via API...")
+
+        do {
+            let results = try await stockRepository.searchStocks(query: query, limit: 10)
+
+            print("🔍 SearchViewModel: Got \(results.count) results for '\(query)'")
+
+            // Store raw API results
+            searchResults = results
+
+            // Convert API results to SearchResultItem for the existing UI
+            recentSearches = results.map { stock in
+                SearchResultItem(
+                    type: .stock,
+                    ticker: stock.ticker,
+                    name: stock.companyName,
+                    subtitle: stock.exchange ?? stock.sector ?? "Stock",
+                    imageName: nil,
+                    isFollowable: false,
+                    isFollowing: false
+                )
+            }
+
+            isLoading = false
+
+        } catch {
+            print("❌ SearchViewModel: Search failed — \(error)")
+            self.error = error.localizedDescription
+            isLoading = false
+        }
     }
 
     func selectSuggestion(_ suggestion: SearchQuerySuggestion) {
@@ -74,8 +112,8 @@ class SearchViewModel: ObservableObject {
     }
 
     func selectSearchResult(_ item: SearchResultItem) {
-        print("Selected: \(item.name)")
-        // Navigate to detail view
+        print("Selected: \(item.name) (\(item.ticker ?? ""))")
+        // Navigation to detail view is handled by the View layer
     }
 
     func toggleFollow(for item: SearchResultItem) {
@@ -95,6 +133,7 @@ class SearchViewModel: ObservableObject {
 
     func clearAllRecentSearches() {
         recentSearches.removeAll()
+        searchResults.removeAll()
     }
 
     func openNewsItem(_ item: SearchNewsItem) {

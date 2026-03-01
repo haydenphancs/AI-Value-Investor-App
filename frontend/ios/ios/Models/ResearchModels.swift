@@ -45,6 +45,16 @@ enum AnalysisPersona: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Snake_case key sent to the backend API
+    var backendKey: String {
+        switch self {
+        case .warrenBuffett: return "warren_buffett"
+        case .cathieWood: return "cathie_wood"
+        case .peterLynch: return "peter_lynch"
+        case .billAckman: return "bill_ackman"
+        }
+    }
+
     var tagline: String {
         switch self {
         case .warrenBuffett: return "Safe, Long-term Value"

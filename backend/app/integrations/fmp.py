@@ -1,13 +1,15 @@
 """
-Financial Modeling Prep (FMP) API Integration
+Financial Modeling Prep (FMP) API Integration — Stable Endpoints
 Handles financial data retrieval for stocks.
 Requirements: Section 3.3 - Financial Modeling Prep API for fundamentals
+
+NOTE: FMP deprecated all /api/v3 ("legacy") endpoints after August 31 2025.
+      This client uses the /stable/ base URL with query-param-based routing.
 """
 
 import httpx
 from typing import Optional, List, Dict, Any
 import logging
-from datetime import datetime
 
 from app.config import settings
 
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class FMPClient:
     """
-    Client for Financial Modeling Prep API.
+    Client for Financial Modeling Prep API (stable endpoints).
     Provides company fundamentals, financials, and market data.
     """
 
@@ -29,24 +31,23 @@ class FMPClient:
     async def _make_request(
         self,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         """
         Make HTTP request to FMP API.
 
         Args:
-            endpoint: API endpoint path
+            endpoint: API endpoint path (relative to base_url)
             params: Optional query parameters
 
         Returns:
-            dict: API response data
+            Parsed JSON response (list or dict)
 
         Raises:
             httpx.HTTPError: If request fails
         """
         url = f"{self.base_url}/{endpoint}"
 
-        # Add API key to params
         if params is None:
             params = {}
         params["apikey"] = self.api_key
@@ -58,286 +59,195 @@ class FMPClient:
                 return response.json()
 
         except httpx.HTTPError as e:
-            logger.error(f"FMP API request failed: {e}")
+            logger.error(f"FMP API request failed: {endpoint} — {e}")
             raise
 
+    # ── Company profile & quote ─────────────────────────────────────
+
     async def get_company_profile(self, ticker: str) -> Dict[str, Any]:
-        """
-        Get company profile and overview.
-
-        Args:
-            ticker: Stock ticker symbol
-
-        Returns:
-            dict: Company profile data
-        """
-        data = await self._make_request(f"profile/{ticker.upper()}")
+        """Get company profile and overview."""
+        data = await self._make_request(
+            "profile", params={"symbol": ticker.upper()}
+        )
         return data[0] if data else {}
 
+    async def get_stock_price_quote(self, ticker: str) -> Dict[str, Any]:
+        """Get real-time stock quote."""
+        data = await self._make_request(
+            "quote", params={"symbol": ticker.upper()}
+        )
+        return data[0] if data else {}
+
+    # ── Financial statements ────────────────────────────────────────
+
     async def get_income_statement(
-        self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """
-        Get income statements.
-
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Income statement data
-        """
+        """Get income statements."""
         return await self._make_request(
-            f"income-statement/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+            "income-statement",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
     async def get_balance_sheet(
-        self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """
-        Get balance sheets.
-
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Balance sheet data
-        """
+        """Get balance sheets."""
         return await self._make_request(
-            f"balance-sheet-statement/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+            "balance-sheet-statement",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
     async def get_cash_flow_statement(
-        self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """
-        Get cash flow statements.
-
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Cash flow data
-        """
+        """Get cash flow statements."""
         return await self._make_request(
-            f"cash-flow-statement/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+            "cash-flow-statement",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
+    # ── Metrics & ratios ────────────────────────────────────────────
+
     async def get_key_metrics(
-        self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """
-        Get key financial metrics and ratios.
-
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Key metrics data
-        """
+        """Get key financial metrics."""
         return await self._make_request(
-            f"key-metrics/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+            "key-metrics",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
     async def get_financial_ratios(
-        self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """
-        Get financial ratios (P/E, P/B, debt-to-equity, etc.).
-
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Financial ratios
-        """
+        """Get financial ratios (P/E, P/B, debt-to-equity, etc.)."""
         return await self._make_request(
-            f"ratios/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+            "ratios",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
-    async def get_earnings_calendar(
-        self,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get earnings calendar.
-
-        Args:
-            from_date: Start date (YYYY-MM-DD)
-            to_date: End date (YYYY-MM-DD)
-
-        Returns:
-            list: Earnings calendar data
-        """
-        params = {}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-
-        return await self._make_request("earning_calendar", params=params)
-
-    async def get_stock_price_quote(self, ticker: str) -> Dict[str, Any]:
-        """
-        Get real-time stock quote.
-
-        Args:
-            ticker: Stock ticker symbol
-
-        Returns:
-            dict: Stock quote data
-        """
-        data = await self._make_request(f"quote/{ticker.upper()}")
-        return data[0] if data else {}
+    # ── Market data ─────────────────────────────────────────────────
 
     async def get_historical_prices(
         self,
         ticker: str,
         from_date: Optional[str] = None,
-        to_date: Optional[str] = None
+        to_date: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Get historical daily price data.
-
-        Args:
-            ticker: Stock ticker symbol
-            from_date: Start date (YYYY-MM-DD)
-            to_date: End date (YYYY-MM-DD)
-
-        Returns:
-            dict: Historical price data
-        """
-        params = {}
+        """Get historical daily price data."""
+        params: Dict[str, Any] = {"symbol": ticker.upper()}
         if from_date:
             params["from"] = from_date
         if to_date:
             params["to"] = to_date
 
-        return await self._make_request(
-            f"historical-price-full/{ticker.upper()}",
-            params=params
-        )
+        return await self._make_request("historical-price-eod/full", params=params)
 
     async def get_analyst_estimates(
+        self, ticker: str, period: str = "annual", limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get analyst estimates."""
+        return await self._make_request(
+            "analyst-estimates",
+            params={"symbol": ticker.upper(), "period": period, "limit": limit},
+        )
+
+    async def get_earnings_calendar(
         self,
-        ticker: str,
-        period: str = "annual",
-        limit: int = 10
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get earnings calendar."""
+        params: Dict[str, Any] = {}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        return await self._make_request("earnings-calendar", params=params)
+
+    # ── Search ──────────────────────────────────────────────────────
+
+    async def search_stocks(
+        self, query: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Get analyst estimates.
+        Search for stocks by name or ticker.
 
-        Args:
-            ticker: Stock ticker symbol
-            period: 'annual' or 'quarter'
-            limit: Number of periods to retrieve
-
-        Returns:
-            list: Analyst estimates
+        Uses the stable search-symbol endpoint.  Falls back to
+        search-name if the first call returns no results (handles
+        cases where the user types a company name instead of a ticker).
         """
-        return await self._make_request(
-            f"analyst-estimates/{ticker.upper()}",
-            params={"period": period, "limit": limit}
+        results = await self._make_request(
+            "search-symbol",
+            params={"query": query, "limit": limit},
         )
+        if results:
+            return results
+
+        # Fallback: search by company name
+        return await self._make_request(
+            "search-name",
+            params={"query": query, "limit": limit},
+        )
+
+    # ── SEC filings (may require higher-tier subscription) ──────────
 
     async def get_sec_filings(
         self,
         ticker: str,
         filing_type: Optional[str] = None,
-        limit: int = 20
+        limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """
         Get SEC filings (10-K, 10-Q, etc.).
-        Section 4.3.3 - REQ-6: Retrieve 10-K reports
 
-        Args:
-            ticker: Stock ticker symbol
-            filing_type: Optional filing type filter (10-K, 10-Q, 8-K, etc.)
-            limit: Number of filings to retrieve
-
-        Returns:
-            list: SEC filings
+        NOTE: This endpoint may not be available on all FMP plans.
         """
-        params = {"limit": limit}
+        params: Dict[str, Any] = {"symbol": ticker.upper(), "limit": limit}
         if filing_type:
             params["type"] = filing_type
 
-        return await self._make_request(
-            f"sec_filings/{ticker.upper()}",
-            params=params
-        )
+        try:
+            return await self._make_request("sec_filings", params=params)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    "SEC filings endpoint unavailable (may require higher plan)"
+                )
+                return []
+            raise
 
-    async def search_stocks(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Search for stocks by name or ticker.
-
-        Args:
-            query: Search query
-            limit: Maximum results
-
-        Returns:
-            list: Matching stocks
-        """
-        return await self._make_request(
-            "search",
-            params={"query": query, "limit": limit}
-        )
+    # ── Company outlook (may require higher-tier subscription) ──────
 
     async def get_company_outlook(self, ticker: str) -> Dict[str, Any]:
         """
         Get comprehensive company outlook (profile + metrics + ratios).
 
-        Args:
-            ticker: Stock ticker symbol
-
-        Returns:
-            dict: Company outlook data
+        NOTE: This endpoint may not be available on all FMP plans.
         """
-        data = await self._make_request(f"company-outlook", params={"symbol": ticker.upper()})
-        return data if isinstance(data, dict) else {}
+        try:
+            data = await self._make_request(
+                "company-outlook", params={"symbol": ticker.upper()}
+            )
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    "Company outlook endpoint unavailable (may require higher plan)"
+                )
+                return {}
+            raise
 
 
-# Global client instance
+# ── Singleton ───────────────────────────────────────────────────────
+
 _fmp_client: Optional[FMPClient] = None
 
 
 def get_fmp_client() -> FMPClient:
-    """
-    Get or create global FMP client instance.
-
-    Returns:
-        FMPClient: FMP client instance
-    """
+    """Get or create global FMP client instance."""
     global _fmp_client
     if _fmp_client is None:
         _fmp_client = FMPClient()

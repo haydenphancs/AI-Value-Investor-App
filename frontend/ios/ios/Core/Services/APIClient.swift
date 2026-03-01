@@ -44,9 +44,12 @@ actor APIClient {
         self.baseURL = baseURL
         self.session = session
 
-        // Configure decoder for backend snake_case
+        // Configure decoder
+        // NOTE: Do NOT use .convertFromSnakeCase here — all DTOs define explicit
+        // CodingKeys with snake_case raw values. Combining both causes a
+        // double-conversion bug where JSON "company_name" → "companyName" but
+        // the CodingKey expects "company_name", resulting in key-not-found errors.
         self.decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
 
         // Configure encoder
@@ -210,10 +213,14 @@ actor APIClient {
     private func logRequest(_ request: URLRequest, endpoint: APIEndpoint) {
         guard isDebugLoggingEnabled else { return }
 
-        print("🌐 API Request: \(endpoint.method.rawValue) \(request.url?.absoluteString ?? "")")
+        print("🌐 [\(endpoint.method.rawValue)] \(request.url?.absoluteString ?? "nil")")
+        if endpoint.requiresAuth {
+            let hasToken = request.value(forHTTPHeaderField: "Authorization") != nil
+            print("   🔑 Auth: \(hasToken ? "Bearer token attached" : "⚠️ NO TOKEN (endpoint requires auth)")")
+        }
         if let body = request.httpBody,
            let bodyString = String(data: body, encoding: .utf8) {
-            print("   Body: \(bodyString.prefix(500))")
+            print("   📦 Body: \(bodyString.prefix(500))")
         }
     }
 
@@ -221,10 +228,14 @@ actor APIClient {
         guard isDebugLoggingEnabled else { return }
 
         let emoji = (200...299).contains(response.statusCode) ? "✅" : "❌"
-        print("\(emoji) API Response: \(response.statusCode)")
+        print("\(emoji) Response \(response.statusCode) from \(response.url?.path ?? "")")
 
         if let bodyString = String(data: data, encoding: .utf8) {
-            print("   Body: \(bodyString.prefix(500))")
+            print("   📄 Body: \(bodyString.prefix(1000))")
+        }
+
+        if !(200...299).contains(response.statusCode) {
+            print("   ⚠️ HTTP error \(response.statusCode) — check backend logs for details")
         }
     }
 }

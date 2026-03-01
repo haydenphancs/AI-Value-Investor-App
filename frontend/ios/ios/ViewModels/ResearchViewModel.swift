@@ -3,6 +3,7 @@
 //  ios
 //
 //  ViewModel for Research screen - MVVM Architecture
+//  Fetches real data from backend for reports, credits, and manages AI generation.
 //
 
 import Foundation
@@ -27,7 +28,7 @@ class ResearchViewModel: ObservableObject {
     @Published var error: String?
 
     // Reports Tab Properties
-    @Published var reports: [AnalysisReport] = AnalysisReport.mockReports
+    @Published var reports: [AnalysisReport] = []
     @Published var reportSortOption: ReportSortOption = .dateNewest {
         didSet {
             sortReports()
@@ -46,20 +47,68 @@ class ResearchViewModel: ObservableObject {
         if let ticker = prefilledTicker {
             _searchText = Published(initialValue: ticker)
         }
-        loadInitialData()
-        sortReports()
-    }
-
-    // MARK: - Data Loading
-    private func loadInitialData() {
+        // Start with static data immediately, then load real data
         quickTickers = QuickTicker.defaults
         personas = AnalysisPersona.allCases
         features = AnalysisFeature.allFeatures
         trendingAnalyses = TrendingAnalysis.mockTrending
+
+        // Fetch real data from backend
+        Task { [weak self] in
+            await self?.loadBackendData()
+        }
+    }
+
+    // MARK: - Backend Data Loading
+
+    /// Load real reports + credits from the backend. Falls back to mock on failure.
+    private func loadBackendData() async {
+        // Load reports and credits in parallel
+        async let reportsTask: () = loadReports()
+        async let creditsTask: () = loadCredits()
+        _ = await (reportsTask, creditsTask)
+    }
+
+    /// Fetch user's research reports from GET /research/reports
+    func loadReports() async {
+        print("📋 ResearchVM: Loading reports from backend...")
+        do {
+            let backendReports: [BackendReportListItem] = try await apiClient.request(
+                endpoint: .getMyReports(limit: 50),
+                responseType: [BackendReportListItem].self
+            )
+            print("✅ ResearchVM: Loaded \(backendReports.count) reports from backend")
+            self.reports = backendReports.map { AnalysisReport.from($0) }
+            sortReports()
+        } catch {
+            print("⚠️ ResearchVM: Failed to load reports — \(error). Using mock data.")
+            if reports.isEmpty {
+                reports = AnalysisReport.mockReports
+                sortReports()
+            }
+        }
+    }
+
+    /// Fetch user's credit balance from GET /users/me/credits
+    func loadCredits() async {
+        print("💳 ResearchVM: Loading credits from backend...")
+        do {
+            let backendCredits: BackendCreditsResponse = try await apiClient.request(
+                endpoint: .getUserCredits,
+                responseType: BackendCreditsResponse.self
+            )
+            print("✅ ResearchVM: Credits loaded — \(backendCredits.remaining) remaining of \(backendCredits.total)")
+            self.creditBalance = CreditBalance.from(backendCredits)
+        } catch {
+            print("⚠️ ResearchVM: Failed to load credits — \(error). Using mock data.")
+            // Keep existing (mock) value
+        }
     }
 
     func refresh() async {
-        loadInitialData()
+        isLoading = true
+        await loadBackendData()
+        isLoading = false
     }
 
     // MARK: - Actions
@@ -113,20 +162,9 @@ class ResearchViewModel: ObservableObject {
                         self.isGeneratingAnalysis = false
                         self.generationProgress = 100
                         self.generationStep = "Complete!"
-                        // Add to reports list as a ready report
-                        let newReport = AnalysisReport(
-                            companyName: report.companyName,
-                            ticker: report.ticker,
-                            industry: "",
-                            persona: self.selectedPersona,
-                            status: .ready,
-                            progress: nil,
-                            rating: nil,
-                            ratingLabel: nil,
-                            date: Date(),
-                            isRefunded: false
-                        )
-                        self.reports.insert(newReport, at: 0)
+                        // Reload reports and credits from backend to get fresh data
+                        await self.loadReports()
+                        await self.loadCredits()
 
                     case .failed(let appError):
                         print("❌ ResearchVM: Research failed — \(appError.message)")
@@ -180,7 +218,10 @@ class ResearchViewModel: ObservableObject {
 
     func retryReport(_ report: AnalysisReport) {
         guard report.status == .failed else { return }
-        print("Retrying report: \(report.companyName)")
+        print("🔄 ResearchVM: Retrying report for \(report.ticker)...")
+        searchText = report.ticker
+        selectedPersona = report.persona
+        generateAnalysis()
     }
 
     func joinDiscussion() {

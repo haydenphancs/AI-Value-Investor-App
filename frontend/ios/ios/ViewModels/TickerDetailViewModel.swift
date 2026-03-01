@@ -42,12 +42,27 @@ class TickerDetailViewModel: ObservableObject {
 
     private let tickerSymbol: String
     private let stockRepository: StockRepository
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
     init(tickerSymbol: String, stockRepository: StockRepository? = nil) {
         self.tickerSymbol = tickerSymbol
         self.stockRepository = stockRepository ?? StockRepository()
+
+        // Observe chart range changes and fetch new chart data
+        $selectedChartRange
+            .dropFirst() // Skip initial value
+            .removeDuplicates()
+            .sink { [weak self] range in
+                guard let self = self else { return }
+                print("📈 TickerDetailVM: Chart range changed to \(range.rawValue)")
+                Task { [weak self] in
+                    guard let self = self else { return }
+                    await self.fetchChartData(self.tickerSymbol, range: range)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -69,8 +84,16 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchStockNews(ticker) }
             }
 
-            // Load sample data for rich sections the backend doesn't serve yet
-            self.tickerData = TickerDetailData.sampleApple
+            // Build TickerDetailData from real API data (falls back gracefully)
+            self.tickerData = self.buildTickerDetailData()
+            print("📊 TickerDetailVM: Built TickerDetailData for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
+
+            // Fetch chart data for the default range (non-blocking, updates UI when done)
+            Task { [weak self] in
+                guard let self = self else { return }
+                await self.fetchChartData(ticker, range: self.selectedChartRange)
+            }
+
             self.analysisData = TickerAnalysisData.sampleData
             self.earningsData = EarningsData.sampleData
             self.growthData = GrowthSectionData.sampleData
@@ -201,12 +224,377 @@ class TickerDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("AI Query: \(aiInputText)")
+        let query = aiInputText
         aiInputText = ""
+        print("🤖 AI Query for \(tickerSymbol): \(query)")
+        // TODO: Navigate to ChatConversationView with stock_id=tickerSymbol and pre-filled query
+        // This requires: 1) Auth token, 2) POST /api/v1/chat/sessions with stock_id
+        // 3) POST /api/v1/chat/sessions/{id}/messages with the query
+        // For now, log the intent — full chat wiring is a separate screen task
     }
 
     func updateChartRange(_ range: ChartTimeRange) {
         selectedChartRange = range
+        // Chart data fetching is handled by the Combine $selectedChartRange observer
+    }
+
+    // MARK: - Chart Data Fetching
+
+    private func fetchChartData(_ ticker: String, range: ChartTimeRange) async {
+        let rangeString = range.rawValue  // e.g. "3M", "1Y", "1D"
+        print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
+        do {
+            let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString)
+            let prices = chartResponse.prices.map { $0.close }
+            print("✅ TickerDetailVM: Got \(prices.count) chart data points for \(ticker)")
+            if !prices.isEmpty, let currentData = self.tickerData {
+                // Rebuild tickerData with new chart prices
+                self.tickerData = TickerDetailData(
+                    symbol: currentData.symbol,
+                    companyName: currentData.companyName,
+                    currentPrice: currentData.currentPrice,
+                    priceChange: currentData.priceChange,
+                    priceChangePercent: currentData.priceChangePercent,
+                    marketStatus: currentData.marketStatus,
+                    chartData: prices,
+                    keyStatistics: currentData.keyStatistics,
+                    keyStatisticsGroups: currentData.keyStatisticsGroups,
+                    performancePeriods: currentData.performancePeriods,
+                    snapshots: currentData.snapshots,
+                    sectorIndustry: currentData.sectorIndustry,
+                    companyProfile: currentData.companyProfile,
+                    relatedTickers: currentData.relatedTickers,
+                    benchmarkSummary: currentData.benchmarkSummary
+                )
+            }
+        } catch {
+            print("⚠️ TickerDetailVM: Failed to fetch chart data for \(ticker): \(error)")
+            // Non-fatal: keep existing chart data
+        }
+    }
+
+    // MARK: - Build TickerDetailData from API
+
+    private func buildTickerDetailData() -> TickerDetailData {
+        let price = stockQuote?.price ?? stockDetail?.price ?? 0
+        let change = stockQuote?.change ?? stockDetail?.change ?? 0
+        let changePercent = stockQuote?.changePercent ?? stockDetail?.changePercent ?? 0
+        let companyName = stockDetail?.companyName ?? tickerSymbol
+
+        print("🔧 buildTickerDetailData: symbol=\(tickerSymbol), companyName=\(companyName), price=\(price), change=\(change)")
+
+        // Build key statistics from real data
+        let keyStats = buildKeyStatistics()
+        let keyStatsGroups = buildKeyStatisticsGroups()
+
+        // Build sector/industry from API data
+        let sectorIndustry = SectorIndustryInfo(
+            sector: stockDetail?.sector ?? "N/A",
+            industry: stockDetail?.industry ?? "N/A",
+            sectorPerformance: 0.0,   // Not available from current API
+            industryRank: "--"        // Not available from current API
+        )
+
+        // Build company profile from API data
+        let hq: String = {
+            if let city = stockDetail?.city, let state = stockDetail?.state {
+                return "\(city), \(state)"
+            }
+            return stockDetail?.country ?? "N/A"
+        }()
+        let companyProfile = CompanyProfile(
+            description: stockDetail?.description ?? "No description available.",
+            ceo: stockDetail?.ceo ?? "N/A",
+            founded: stockDetail?.ipoDate ?? "N/A",
+            employees: stockDetail?.fullTimeEmployees ?? 0,
+            headquarters: hq,
+            website: stockDetail?.website ?? "N/A"
+        )
+
+        // Determine market status based on current time
+        let marketStatus = determineMarketStatus()
+
+        // Use sample chart data as placeholder until chart API is wired
+        let sampleChart: [Double] = TickerDetailData.sampleApple.chartData
+
+        return TickerDetailData(
+            symbol: tickerSymbol,
+            companyName: companyName,
+            currentPrice: price,
+            priceChange: change,
+            priceChangePercent: changePercent,
+            marketStatus: marketStatus,
+            chartData: sampleChart,
+            keyStatistics: keyStats,
+            keyStatisticsGroups: keyStatsGroups,
+            performancePeriods: PerformancePeriod.sampleData,   // No API backing yet
+            snapshots: SnapshotItem.sampleData,                 // No API backing yet
+            sectorIndustry: sectorIndustry,
+            companyProfile: companyProfile,
+            relatedTickers: RelatedTicker.sampleData,           // No API backing yet
+            benchmarkSummary: nil                               // No API backing yet
+        )
+    }
+
+    // MARK: - Build Key Statistics
+
+    private func buildKeyStatistics() -> [KeyStatistic] {
+        var stats: [KeyStatistic] = []
+
+        // Open
+        if let open = stockQuote?.open {
+            stats.append(KeyStatistic(label: "Open", value: String(format: "%.2f", open)))
+        } else {
+            stats.append(KeyStatistic(label: "Open", value: "--"))
+        }
+
+        // Previous Close
+        if let prevClose = stockQuote?.previousClose {
+            stats.append(KeyStatistic(label: "Previous Close", value: String(format: "%.2f", prevClose)))
+        } else {
+            stats.append(KeyStatistic(label: "Previous Close", value: "--"))
+        }
+
+        // Day High
+        if let high = stockQuote?.high {
+            stats.append(KeyStatistic(label: "Day High", value: String(format: "%.2f", high)))
+        } else {
+            stats.append(KeyStatistic(label: "Day High", value: "--"))
+        }
+
+        // Day Low
+        if let low = stockQuote?.low {
+            stats.append(KeyStatistic(label: "Day Low", value: String(format: "%.2f", low)))
+        } else {
+            stats.append(KeyStatistic(label: "Day Low", value: "--"))
+        }
+
+        // Volume
+        if let volume = stockQuote?.volume ?? stockDetail?.volume {
+            stats.append(KeyStatistic(label: "Volume", value: formatLargeNumber(volume)))
+        } else {
+            stats.append(KeyStatistic(label: "Volume", value: "--"))
+        }
+
+        // Avg Volume
+        if let avgVol = stockDetail?.avgVolume {
+            stats.append(KeyStatistic(label: "Avg. Volume (3M)", value: formatLargeNumber(avgVol)))
+        } else {
+            stats.append(KeyStatistic(label: "Avg. Volume (3M)", value: "--"))
+        }
+
+        // Market Cap
+        if let marketCap = stockDetail?.marketCap {
+            stats.append(KeyStatistic(label: "Market Cap", value: formatMarketCap(marketCap)))
+        } else {
+            stats.append(KeyStatistic(label: "Market Cap", value: "--"))
+        }
+
+        // 52-Week High
+        if let high52 = stockDetail?.high52Week {
+            stats.append(KeyStatistic(label: "52-Week High", value: String(format: "%.2f", high52)))
+        } else {
+            stats.append(KeyStatistic(label: "52-Week High", value: "--"))
+        }
+
+        // 52-Week Low
+        if let low52 = stockDetail?.low52Week {
+            stats.append(KeyStatistic(label: "52-Week Low", value: String(format: "%.2f", low52)))
+        } else {
+            stats.append(KeyStatistic(label: "52-Week Low", value: "--"))
+        }
+
+        // P/E from quote
+        if let pe = stockQuote?.pe, pe > 0 {
+            stats.append(KeyStatistic(label: "P/E (TTM)", value: String(format: "%.2f", pe)))
+        } else {
+            stats.append(KeyStatistic(label: "P/E (TTM)", value: "--"))
+        }
+
+        // EPS from quote
+        if let eps = stockQuote?.eps {
+            stats.append(KeyStatistic(label: "EPS (TTM)", value: String(format: "%.2f", eps)))
+        } else {
+            stats.append(KeyStatistic(label: "EPS (TTM)", value: "--"))
+        }
+
+        // Beta from profile
+        if let beta = stockDetail?.beta {
+            stats.append(KeyStatistic(label: "Beta", value: String(format: "%.2f", beta)))
+        } else {
+            stats.append(KeyStatistic(label: "Beta", value: "--"))
+        }
+
+        // Dividend from profile
+        if let lastDiv = stockDetail?.lastDiv, lastDiv > 0, let price = stockQuote?.price ?? stockDetail?.price, price > 0 {
+            let yield = (lastDiv * 4 / price) * 100  // Annualized yield estimate
+            stats.append(KeyStatistic(label: "Dividend & Yield", value: String(format: "%.2f (%.2f%%)", lastDiv, yield)))
+        } else {
+            stats.append(KeyStatistic(label: "Dividend & Yield", value: "--"))
+        }
+
+        return stats
+    }
+
+    // MARK: - Build Key Statistics Groups
+
+    private func buildKeyStatisticsGroups() -> [KeyStatisticsGroup] {
+        // Column 1: Price & Volume
+        let priceVolumeStats: [KeyStatistic] = [
+            KeyStatistic(
+                label: "Open",
+                value: stockQuote?.open != nil ? String(format: "%.2f", stockQuote!.open!) : "--"
+            ),
+            KeyStatistic(
+                label: "Previous Close",
+                value: stockQuote?.previousClose != nil ? String(format: "%.2f", stockQuote!.previousClose!) : "--"
+            ),
+            KeyStatistic(
+                label: "Volume",
+                value: {
+                    if let vol = stockQuote?.volume ?? stockDetail?.volume {
+                        return formatLargeNumber(vol)
+                    }
+                    return "--"
+                }()
+            ),
+            KeyStatistic(
+                label: "Avg. Volume (3M)",
+                value: stockDetail?.avgVolume != nil ? formatLargeNumber(stockDetail!.avgVolume!) : "--"
+            ),
+            KeyStatistic(
+                label: "Market Cap",
+                value: stockDetail?.marketCap != nil ? formatMarketCap(stockDetail!.marketCap!) : "--"
+            )
+        ]
+
+        // Column 2: Day Range & 52-Week
+        let rangeStats: [KeyStatistic] = [
+            KeyStatistic(
+                label: "Day High",
+                value: stockQuote?.high != nil ? String(format: "%.2f", stockQuote!.high!) : "--"
+            ),
+            KeyStatistic(
+                label: "Day Low",
+                value: stockQuote?.low != nil ? String(format: "%.2f", stockQuote!.low!) : "--"
+            ),
+            KeyStatistic(
+                label: "52-Week High",
+                value: stockDetail?.high52Week != nil ? String(format: "%.2f", stockDetail!.high52Week!) : "--"
+            ),
+            KeyStatistic(
+                label: "52-Week Low",
+                value: stockDetail?.low52Week != nil ? String(format: "%.2f", stockDetail!.low52Week!) : "--"
+            )
+        ]
+
+        // Column 3: Valuation (from quote + profile)
+        let peValue: String = {
+            if let pe = stockQuote?.pe, pe > 0 { return String(format: "%.2f", pe) }
+            return "--"
+        }()
+        let epsValue: String = {
+            if let eps = stockQuote?.eps { return String(format: "%.2f", eps) }
+            return "--"
+        }()
+        let betaValue: String = {
+            if let beta = stockDetail?.beta { return String(format: "%.2f", beta) }
+            return "--"
+        }()
+        let divValue: String = {
+            if let lastDiv = stockDetail?.lastDiv, lastDiv > 0,
+               let price = stockQuote?.price ?? stockDetail?.price, price > 0 {
+                let yield = (lastDiv * 4 / price) * 100
+                return String(format: "%.2f (%.2f%%)", lastDiv, yield)
+            }
+            return "--"
+        }()
+        let valuationStats: [KeyStatistic] = [
+            KeyStatistic(label: "P/E (TTM)", value: peValue),
+            KeyStatistic(label: "P/E (FWD)", value: "--"),
+            KeyStatistic(label: "EPS (TTM)", value: epsValue),
+            KeyStatistic(label: "Dividend & Yield", value: divValue),
+            KeyStatistic(label: "Beta", value: betaValue)
+        ]
+
+        // Column 4: Shares & Ownership (from quote)
+        let sharesValue: String = {
+            if let shares = stockQuote?.sharesOutstanding { return formatLargeNumber(shares) }
+            return "--"
+        }()
+        let ownershipStats: [KeyStatistic] = [
+            KeyStatistic(label: "Short % of Float", value: "--"),
+            KeyStatistic(label: "Shares Outstanding", value: sharesValue),
+            KeyStatistic(label: "Float", value: "--"),
+            KeyStatistic(label: "% Held by Insiders", value: "--"),
+            KeyStatistic(label: "% Held Inst.", value: "--")
+        ]
+
+        return [
+            KeyStatisticsGroup(statistics: priceVolumeStats),
+            KeyStatisticsGroup(statistics: rangeStats),
+            KeyStatisticsGroup(statistics: valuationStats),
+            KeyStatisticsGroup(statistics: ownershipStats)
+        ]
+    }
+
+    // MARK: - Market Status
+
+    private func determineMarketStatus() -> MarketStatus {
+        let now = Date()
+        let nyTimeZone = TimeZone(identifier: "America/New_York")!
+
+        var nyCalendar = Calendar.current
+        nyCalendar.timeZone = nyTimeZone
+
+        let weekday = nyCalendar.component(.weekday, from: now)
+        let hour = nyCalendar.component(.hour, from: now)
+        let minute = nyCalendar.component(.minute, from: now)
+        let totalMinutes = hour * 60 + minute
+
+        // Weekend
+        if weekday == 1 || weekday == 7 {
+            return .closed(date: now, time: "4:00 PM", timezone: "EST")
+        }
+
+        let marketOpen = 9 * 60 + 30   // 9:30 AM ET
+        let marketClose = 16 * 60       // 4:00 PM ET
+        let preMarketStart = 4 * 60     // 4:00 AM ET
+        let afterHoursEnd = 20 * 60     // 8:00 PM ET
+
+        if totalMinutes >= marketOpen && totalMinutes < marketClose {
+            return .open
+        } else if totalMinutes >= preMarketStart && totalMinutes < marketOpen {
+            return .preMarket
+        } else if totalMinutes >= marketClose && totalMinutes < afterHoursEnd {
+            return .afterHours
+        } else {
+            return .closed(date: now, time: "4:00 PM", timezone: "EST")
+        }
+    }
+
+    // MARK: - Number Formatting Helpers
+
+    private func formatLargeNumber(_ value: Double) -> String {
+        if value >= 1_000_000_000 {
+            return String(format: "%.2fB", value / 1_000_000_000)
+        } else if value >= 1_000_000 {
+            return String(format: "%.2fM", value / 1_000_000)
+        } else if value >= 1_000 {
+            return String(format: "%.1fK", value / 1_000)
+        }
+        return String(format: "%.0f", value)
+    }
+
+    private func formatMarketCap(_ value: Double) -> String {
+        if value >= 1_000_000_000_000 {
+            return String(format: "$%.2fT", value / 1_000_000_000_000)
+        } else if value >= 1_000_000_000 {
+            return String(format: "$%.2fB", value / 1_000_000_000)
+        } else if value >= 1_000_000 {
+            return String(format: "$%.2fM", value / 1_000_000)
+        }
+        return String(format: "$%.0f", value)
     }
 
     // MARK: - Analysis Tab Handlers

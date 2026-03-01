@@ -1,9 +1,17 @@
 """
-Deep Research Endpoints
-Frontend: POST /research/generate, GET /research/reports/{id}/status,
-          GET /research/reports/{id}, GET /research/reports,
-          POST /research/reports/{id}/rate, DELETE /research/reports/{id},
-          GET /research/personas
+Deep Research Endpoints — aligned with Swift frontend API layer.
+
+Endpoints (matching iOS APIEndpoint enum):
+  POST   /research/generate                    → trigger report generation
+  GET    /research/reports/{report_id}/status   → poll progress
+  GET    /research/reports/{report_id}          → fetch completed report
+  GET    /research/reports                      → list user's reports
+  POST   /research/reports/{report_id}/rate     → rate a report
+  DELETE /research/reports/{report_id}          → soft-delete
+  GET    /research/personas                     → list active personas
+
+iOS sends camelCase via .convertToSnakeCase encoder → backend receives snake_case.
+Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,13 +22,20 @@ import logging
 from app.database import get_supabase
 from app.dependencies import get_current_user, StandardRateLimit
 from app.schemas.research import (
-    GenerateResearchRequest, ResearchGenerationResponse,
-    ResearchStatusResponse, RateReportRequest,
+    GenerateResearchRequest,
+    ResearchGenerationResponse,
+    ResearchStatusResponse,
+    ResearchReportDetail,
+    ResearchReportListItem,
+    RateReportRequest,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ── Trigger Endpoint ─────────────────────────────────────────────────────────
 
 
 @router.post("/generate", response_model=ResearchGenerationResponse)
@@ -31,8 +46,9 @@ async def generate_research_report(
     _rate_limit=StandardRateLimit,
 ):
     """
-    Generate deep research report. Creates DB row, launches async task,
-    returns immediately for frontend polling.
+    Trigger deep research report generation.
+    Validates credits + persona, inserts a 'pending' DB row,
+    launches an async background task, and returns immediately.
     """
     # Check credits
     credits = supabase.table("user_credits").select(
@@ -47,15 +63,18 @@ async def generate_research_report(
 
     # Validate persona exists
     persona_check = supabase.table("agent_personas").select("key").eq(
-        "key", request.persona
+        "key", request.investor_persona
     ).eq("is_active", True).execute()
 
     if not persona_check.data:
-        raise HTTPException(status_code=400, detail=f"Invalid persona: {request.persona}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid persona: {request.investor_persona}",
+        )
 
     ticker = request.stock_id.upper()
 
-    # Fetch company name from FMP
+    # Resolve company name from FMP (non-blocking best-effort)
     company_name = ticker
     try:
         from app.integrations.fmp import get_fmp_client
@@ -66,12 +85,12 @@ async def generate_research_report(
     except Exception:
         pass
 
-    # Create report row
+    # Insert pending report row
     report_data = {
         "user_id": user["id"],
         "ticker": ticker,
         "company_name": company_name,
-        "investor_persona": request.persona,
+        "investor_persona": request.investor_persona,
         "status": "pending",
         "progress": 0,
         "current_step": "Initializing research...",
@@ -83,9 +102,11 @@ async def generate_research_report(
 
     report = result.data[0]
 
-    # Launch async background task
+    # Launch async background task (fire-and-forget)
     asyncio.create_task(
-        _run_research_task(report["id"], ticker, request.persona, user["id"])
+        _run_research_task(
+            report["id"], ticker, request.investor_persona, user["id"]
+        )
     )
 
     return ResearchGenerationResponse(
@@ -96,13 +117,16 @@ async def generate_research_report(
     )
 
 
+# ── Status Polling ───────────────────────────────────────────────────────────
+
+
 @router.get("/reports/{report_id}/status", response_model=ResearchStatusResponse)
 async def get_research_status(
     report_id: str,
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Poll research report status (called every 3s by frontend)."""
+    """Poll report generation status (frontend calls every ~3s)."""
     result = supabase.table("research_reports").select(
         "id, status, progress, current_step, error_message, estimated_time_remaining"
     ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
@@ -120,13 +144,16 @@ async def get_research_status(
     )
 
 
-@router.get("/reports/{report_id}")
+# ── Full Report Retrieval ────────────────────────────────────────────────────
+
+
+@router.get("/reports/{report_id}", response_model=ResearchReportDetail)
 async def get_research_report(
     report_id: str,
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Get full research report detail."""
+    """Fetch the full research report. RLS enforced via user_id check."""
     result = supabase.table("research_reports").select("*").eq(
         "id", report_id
     ).eq("user_id", user["id"]).single().execute()
@@ -134,7 +161,14 @@ async def get_research_report(
     if not result.data:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    return result.data
+    row = result.data
+    # Inject stock_id = ticker so iOS ResearchReportDetail.stockId resolves
+    row["stock_id"] = row["ticker"]
+
+    return row
+
+
+# ── List User Reports ────────────────────────────────────────────────────────
 
 
 @router.get("/reports")
@@ -143,15 +177,27 @@ async def get_my_reports(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Get current user's research reports."""
+    """Get current user's research reports (lightweight list)."""
     result = supabase.table("research_reports").select(
         "id, ticker, company_name, investor_persona, status, title, "
-        "executive_summary, created_at, completed_at, user_rating"
-    ).eq("user_id", user["id"]).order(
+        "executive_summary, overall_score, fair_value_estimate, progress, "
+        "created_at, completed_at, user_rating"
+    ).eq("user_id", user["id"]).neq(
+        "status", "deleted"
+    ).order(
         "created_at", desc=True
     ).limit(limit).execute()
 
-    return result.data
+    # Inject stock_id on each row for iOS compatibility
+    items = []
+    for row in result.data or []:
+        row["stock_id"] = row["ticker"]
+        items.append(row)
+
+    return items
+
+
+# ── Rate Report ──────────────────────────────────────────────────────────────
 
 
 @router.post("/reports/{report_id}/rate")
@@ -161,10 +207,7 @@ async def rate_report(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Rate a research report (1-5 stars)."""
-    if not 1 <= request.rating <= 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
-
+    """Rate a research report (1-5 stars with optional feedback)."""
     update = {"user_rating": request.rating}
     if request.feedback:
         update["user_feedback"] = request.feedback
@@ -176,18 +219,24 @@ async def rate_report(
     return {"message": "Report rated successfully"}
 
 
+# ── Delete Report ────────────────────────────────────────────────────────────
+
+
 @router.delete("/reports/{report_id}")
 async def delete_report(
     report_id: str,
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Soft-delete a research report."""
+    """Soft-delete a research report (sets status = 'deleted')."""
     supabase.table("research_reports").update({
         "status": "deleted"
     }).eq("id", report_id).eq("user_id", user["id"]).execute()
 
     return {"message": "Report deleted successfully"}
+
+
+# ── List Personas ────────────────────────────────────────────────────────────
 
 
 @router.get("/personas")
@@ -203,24 +252,31 @@ async def get_personas(
     return result.data
 
 
-# Background task
+# ── Background Task ──────────────────────────────────────────────────────────
+
+
 async def _run_research_task(
-    report_id: str, ticker: str, persona: str, user_id: str
+    report_id: str, ticker: str, persona_key: str, user_id: str
 ):
-    """Async background task: generate research report, update DB, decrement credits."""
+    """
+    Async background task: runs the full research pipeline.
+    If anything fails, marks the report as 'failed' with error_message.
+    """
     try:
         from app.services.research_service import ResearchService
+
         service = ResearchService()
-        await service.generate_report(report_id, ticker, persona, user_id)
+        await service.generate_report(report_id, ticker, persona_key, user_id)
     except Exception as e:
         logger.error(f"Research task failed for {report_id}: {e}", exc_info=True)
         try:
             from app.database import get_supabase
+
             supabase = get_supabase()
             supabase.table("research_reports").update({
                 "status": "failed",
-                "error_message": str(e),
+                "error_message": str(e)[:500],
                 "progress": 0,
             }).eq("id", report_id).execute()
         except Exception:
-            pass
+            logger.error(f"Failed to update error status for {report_id}")

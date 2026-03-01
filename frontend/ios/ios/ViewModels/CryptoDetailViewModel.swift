@@ -3,6 +3,7 @@
 //  ios
 //
 //  ViewModel for the Crypto Detail screen
+//  Fetches real data from FastAPI backend → FMP + Gemini AI
 //
 
 import Foundation
@@ -30,6 +31,7 @@ class CryptoDetailViewModel: ObservableObject {
     // MARK: - Private Properties
 
     private let cryptoSymbol: String
+    private let apiClient = APIClient.shared
 
     // MARK: - Initialization
 
@@ -37,31 +39,118 @@ class CryptoDetailViewModel: ObservableObject {
         self.cryptoSymbol = cryptoSymbol
     }
 
-    // MARK: - Public Methods
+    // MARK: - Data Loading
 
     func loadCryptoData() {
         isLoading = true
         errorMessage = nil
 
-        // In production, this would fetch from FMP API
         Task { [weak self] in
             guard let self = self else { return }
 
-            let symbol = self.cryptoSymbol
-            let cryptoData = CryptoDetailData.sampleEthereum
-            let news = TickerNewsArticle.sampleDataForTicker(symbol)
-            let analysis = TickerAnalysisData.sampleData
+            do {
+                print("🪙 [CryptoDetail] Fetching data for \(self.cryptoSymbol) range=\(self.selectedChartRange.rawValue)")
 
-            self.cryptoData = cryptoData
-            self.newsArticles = news
-            self.analysisData = analysis
-            self.isLoading = false
+                let response = try await self.apiClient.request(
+                    endpoint: .getCryptoDetail(
+                        symbol: self.cryptoSymbol,
+                        range: self.selectedChartRange.rawValue
+                    ),
+                    responseType: CryptoDetailResponse.self
+                )
+
+                print("✅ [CryptoDetail] Loaded \(response.name) — $\(response.currentPrice)")
+                print("   📊 Chart points: \(response.chartData.count)")
+                print("   📰 News articles: \(response.newsArticles.count)")
+                print("   🔗 Related cryptos: \(response.relatedCryptos.count)")
+                print("   📸 Snapshots: \(response.snapshots.count)")
+
+                // Map API response → UI models
+                self.cryptoData = response.toModel()
+                self.newsArticles = response.newsArticles.map { $0.toModel() }
+
+                // Analysis tab: use sample data for now (will be added to backend later)
+                self.analysisData = TickerAnalysisData.sampleData
+
+                self.isLoading = false
+                self.errorMessage = nil
+
+            } catch {
+                print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
+                self.handleLoadError(error)
+            }
         }
     }
 
     func refresh() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            print("🪙 [CryptoDetail] Refreshing \(cryptoSymbol)...")
+            let response = try await apiClient.request(
+                endpoint: .getCryptoDetail(
+                    symbol: cryptoSymbol,
+                    range: selectedChartRange.rawValue
+                ),
+                responseType: CryptoDetailResponse.self
+            )
+            print("✅ [CryptoDetail] Refreshed \(response.name)")
+            self.cryptoData = response.toModel()
+            self.newsArticles = response.newsArticles.map { $0.toModel() }
+            self.analysisData = TickerAnalysisData.sampleData
+            self.isLoading = false
+        } catch {
+            print("❌ [CryptoDetail] Refresh failed: \(error)")
+            handleLoadError(error)
+        }
+    }
+
+    // MARK: - Chart Range Change
+
+    func updateChartRange(_ range: ChartTimeRange) {
+        guard range != selectedChartRange else { return }
+        selectedChartRange = range
+        // Reload with new chart range
         loadCryptoData()
     }
+
+    // MARK: - Error Handling
+
+    private func handleLoadError(_ error: Error) {
+        self.isLoading = false
+
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .networkError:
+                self.errorMessage = "Unable to connect. Check your internet connection."
+                print("   🌐 Network error — is the backend running at 127.0.0.1:8000?")
+            case .serverError(let code):
+                self.errorMessage = "Server error (\(code)). Please try again."
+                print("   🖥️ Server returned HTTP \(code)")
+            case .notFound:
+                self.errorMessage = "Crypto data not found for \(cryptoSymbol)."
+                print("   🔍 404 — symbol may not be supported")
+            case .decodingError(let decodingError):
+                self.errorMessage = "Failed to parse crypto data."
+                print("   🧩 Decoding error: \(decodingError)")
+            default:
+                self.errorMessage = "Something went wrong. Please try again."
+                print("   ⚠️ API error: \(apiError)")
+            }
+        } else {
+            self.errorMessage = "Unexpected error. Please try again."
+            print("   ⚠️ Unexpected: \(error.localizedDescription)")
+        }
+
+        // Fallback to sample data so the screen isn't completely empty
+        print("   🔄 Falling back to sample data for \(cryptoSymbol)")
+        self.cryptoData = CryptoDetailData.sampleEthereum
+        self.newsArticles = TickerNewsArticle.sampleDataForTicker(cryptoSymbol)
+        self.analysisData = TickerAnalysisData.sampleData
+    }
+
+    // MARK: - User Actions
 
     func toggleFavorite() {
         isFavorite.toggle()
@@ -108,10 +197,6 @@ class CryptoDetailViewModel: ObservableObject {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         print("AI Query: \(aiInputText)")
         aiInputText = ""
-    }
-
-    func updateChartRange(_ range: ChartTimeRange) {
-        selectedChartRange = range
     }
 
     // MARK: - Analysis Tab Handlers

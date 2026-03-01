@@ -27,6 +27,7 @@ protocol StockRepositoryProtocol {
     func getStock(ticker: String) async throws -> StockDetail
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> [StockNewsArticle]
+    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse
 }
 
 // MARK: - Stock Repository
@@ -123,6 +124,25 @@ final class StockRepository: StockRepositoryProtocol {
         return news
     }
 
+    // MARK: - Chart
+
+    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse {
+        let cacheKey = "chart_\(ticker)_\(range)"
+
+        // Cache chart data for 5 minutes
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let chart = try await apiClient.request(
+            endpoint: .getStockChart(ticker: ticker, range: range),
+            responseType: StockChartResponse.self
+        )
+
+        setCache(cacheKey, value: chart)
+        return chart
+    }
+
     // MARK: - Cache Helpers
 
     private struct CacheEntry {
@@ -192,9 +212,19 @@ struct StockDetail: Codable, Identifiable {
     let avgVolume: Double?
     let high52Week: Double?
     let low52Week: Double?
+    // Additional fields from FMP profile
+    let beta: Double?
+    let lastDiv: Double?
+    let ceo: String?
+    let fullTimeEmployees: Int?
+    let country: String?
+    let city: String?
+    let state: String?
+    let ipoDate: String?
+    let dcf: Double?
 
-    // Backend (FMP profile) returns: symbol, company_name, image, changes, vol_avg, market_cap
-    // Fields not in profile response (change_percent, volume, year_high, year_low) will decode as nil
+    // Backend (FMP profile) returns: symbol, company_name, image, changes, vol_avg, market_cap,
+    // beta, last_div, ceo, full_time_employees, country, city, state, ipo_date, dcf
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case companyName = "company_name"
@@ -208,6 +238,13 @@ struct StockDetail: Codable, Identifiable {
         case avgVolume = "vol_avg"
         case high52Week = "year_high"
         case low52Week = "year_low"
+        case beta
+        case lastDiv = "last_div"
+        case ceo
+        case fullTimeEmployees = "full_time_employees"
+        case country, city, state
+        case ipoDate = "ipo_date"
+        case dcf
     }
 
     var isPositive: Bool {
@@ -255,8 +292,14 @@ struct StockQuote: Codable {
     let previousClose: Double?
     let volume: Double?
     let timestamp: Int?
+    // Additional fields from FMP quote
+    let eps: Double?
+    let pe: Double?
+    let sharesOutstanding: Double?
+    let avgVolume: Double?
 
-    // Backend (FMP quote) returns: symbol, changes_percentage, day_high, day_low, timestamp (unix int)
+    // Backend (FMP quote) returns: symbol, changes_percentage, day_high, day_low, timestamp (unix int),
+    // eps, pe, shares_outstanding, avg_volume
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case price, change
@@ -266,6 +309,9 @@ struct StockQuote: Codable {
         case low = "day_low"
         case previousClose = "previous_close"
         case volume, timestamp
+        case eps, pe
+        case sharesOutstanding = "shares_outstanding"
+        case avgVolume = "avg_volume"
     }
 }
 
@@ -292,6 +338,22 @@ struct StockNewsArticle: Codable, Identifiable {
         case sentiment
         case relatedTickers = "related_tickers"
     }
+}
+
+// MARK: - Stock Chart Response
+
+struct StockChartResponse: Codable {
+    let symbol: String
+    let prices: [StockPricePoint]
+}
+
+struct StockPricePoint: Codable {
+    let date: String
+    let close: Double
+    let open: Double?
+    let high: Double?
+    let low: Double?
+    let volume: Double?
 }
 
 // MARK: - Mock Repository for Previews
@@ -324,7 +386,16 @@ final class MockStockRepository: StockRepositoryProtocol {
             volume: 50_000_000,
             avgVolume: 55_000_000,
             high52Week: 199.62,
-            low52Week: 124.17
+            low52Week: 124.17,
+            beta: 1.25,
+            lastDiv: 0.24,
+            ceo: "Tim Cook",
+            fullTimeEmployees: 161000,
+            country: "US",
+            city: "Cupertino",
+            state: "CA",
+            ipoDate: "1980-12-12",
+            dcf: 185.00
         )
     }
 
@@ -339,7 +410,11 @@ final class MockStockRepository: StockRepositoryProtocol {
             low: 172.80,
             previousClose: 173.15,
             volume: 50_000_000,
-            timestamp: Int(Date().timeIntervalSince1970)
+            timestamp: Int(Date().timeIntervalSince1970),
+            eps: 6.75,
+            pe: 26.0,
+            sharesOutstanding: 15_638_000_000,
+            avgVolume: 55_000_000
         )
     }
 
@@ -357,6 +432,17 @@ final class MockStockRepository: StockRepositoryProtocol {
                 relatedTickers: ["AAPL"]
             )
         ]
+    }
+
+    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse {
+        StockChartResponse(
+            symbol: ticker,
+            prices: [
+                StockPricePoint(date: "2024-01-01", close: 170.0, open: 168.0, high: 171.0, low: 167.0, volume: 50_000_000),
+                StockPricePoint(date: "2024-01-02", close: 172.0, open: 170.0, high: 173.0, low: 169.0, volume: 48_000_000),
+                StockPricePoint(date: "2024-01-03", close: 175.0, open: 172.0, high: 176.0, low: 171.0, volume: 52_000_000)
+            ]
+        )
     }
 }
 #endif

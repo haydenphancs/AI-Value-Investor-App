@@ -4,6 +4,9 @@
 //
 //  ViewModel for the Index Detail screen
 //
+//  Fetches aggregated index data from GET /api/v1/indices/{symbol}.
+//  Falls back to local sample data when the backend is unreachable.
+//
 
 import Foundation
 import SwiftUI
@@ -30,11 +33,24 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - Private Properties
 
     private let indexSymbol: String
+    private var chartRangeCancellable: AnyCancellable?
 
     // MARK: - Initialization
 
     init(indexSymbol: String) {
         self.indexSymbol = indexSymbol
+
+        // Observe chart range changes and reload chart data
+        chartRangeCancellable = $selectedChartRange
+            .dropFirst() // Skip initial value
+            .removeDuplicates()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] newRange in
+                guard let self = self else { return }
+                Task {
+                    await self.loadChartData(range: newRange)
+                }
+            }
     }
 
     // MARK: - Public Methods
@@ -43,24 +59,15 @@ class IndexDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // In production, this would fetch from FMP API
         Task { [weak self] in
             guard let self = self else { return }
-
-            let symbol = self.indexSymbol
-            let indexData = IndexDetailData.sampleSP500
-            let news = TickerNewsArticle.sampleDataForTicker(symbol)
-            let analysis = TickerAnalysisData.sampleData
-
-            self.indexData = indexData
-            self.newsArticles = news
-            self.analysisData = analysis
-            self.isLoading = false
+            await self.fetchIndexDetail()
         }
     }
 
     func refresh() async {
-        loadIndexData()
+        errorMessage = nil
+        await fetchIndexDetail()
     }
 
     func toggleFavorite() {
@@ -68,7 +75,7 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func handleNotificationTap() {
-        print("Notification settings for \(indexSymbol)")
+        print("🔔 [IndexDetailVM] Notification settings for \(indexSymbol)")
     }
 
     func handleWebsiteTap() {
@@ -79,7 +86,7 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("Open news article: \(article.headline)")
+        print("📰 [IndexDetailVM] Open news article: \(article.headline)")
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -88,7 +95,7 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
+        print("🔗 [IndexDetailVM] Navigate to ticker: \(ticker)")
     }
 
     func handleSuggestionTap(_ suggestion: IndexAISuggestion) {
@@ -97,7 +104,7 @@ class IndexDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("AI Query: \(aiInputText)")
+        print("🤖 [IndexDetailVM] AI Query for \(indexSymbol): \(aiInputText)")
         aiInputText = ""
     }
 
@@ -108,15 +115,15 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - Analysis Tab Handlers
 
     func handleAnalystRatingsMore() {
-        print("Analyst ratings more options for \(indexSymbol)")
+        print("📊 [IndexDetailVM] Analyst ratings more options for \(indexSymbol)")
     }
 
     func handleSentimentMore() {
-        print("Sentiment analysis more options for \(indexSymbol)")
+        print("💬 [IndexDetailVM] Sentiment analysis more options for \(indexSymbol)")
     }
 
     func handleTechnicalDetail() {
-        print("Technical analysis detail for \(indexSymbol)")
+        print("📈 [IndexDetailVM] Technical analysis detail for \(indexSymbol)")
     }
 
     // MARK: - Computed Properties
@@ -143,5 +150,101 @@ class IndexDetailViewModel: ObservableObject {
 
     var aiSuggestions: [IndexAISuggestion] {
         IndexAISuggestion.defaultSuggestions
+    }
+
+    // MARK: - Network
+
+    private func fetchIndexDetail() async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let range = selectedChartRange.rawValue
+        let endpoint = APIEndpoint.getIndexDetail(symbol: indexSymbol, range: range)
+
+        print("📡 [IndexDetailVM] Fetching index detail for \(indexSymbol) (range: \(range)) from \(APIConfig.baseURL.absoluteString)\(endpoint.path) ...")
+
+        do {
+            let response = try await APIClient.shared.request(
+                endpoint: endpoint,
+                responseType: IndexDetailResponse.self
+            )
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+
+            // Clear previous error on success
+            self.errorMessage = nil
+
+            // Map DTOs → display models
+            self.indexData = response.toDisplayModel()
+            self.newsArticles = response.toNewsArticles()
+
+            // Analysis data is not yet served by the backend — use sample
+            self.analysisData = TickerAnalysisData.sampleData
+
+            self.isLoading = false
+
+            print("✅ [IndexDetailVM] Index detail loaded in \(elapsed)s")
+            print("   💰 Price: \(response.currentPrice) | Change: \(response.priceChange) (\(response.priceChangePercent)%)")
+            print("   📊 Chart points: \(response.chartData.count)")
+            print("   📰 News: \(response.newsArticles.count) articles")
+            print("   🏢 Profile: \(response.indexName) (\(response.indexProfile.numberOfConstituents) constituents)")
+            if let snap = indexData?.snapshotsData {
+                print("   📈 Valuation: P/E \(snap.valuation.peRatio)x | Level: \(snap.valuation.level.rawValue)")
+                print("   🌍 Sectors: \(snap.sectorPerformance.sectors.count) sectors loaded")
+                print("   🏛️ Macro: \(snap.macroForecast.indicators.count) indicators")
+            }
+
+        } catch {
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            print("❌ [IndexDetailVM] Fetch failed after \(elapsed)s: \(error)")
+            if let apiError = error as? APIError {
+                print("   🔍 API Error detail: \(apiError)")
+            }
+
+            self.errorMessage = "Unable to load index data. Pull to refresh."
+            loadFallbackData()
+            self.isLoading = false
+        }
+    }
+
+    /// Reload only the chart data when the user changes time range.
+    private func loadChartData(range: ChartTimeRange) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        print("📡 [IndexDetailVM] Reloading chart for \(indexSymbol) range: \(range.rawValue)")
+
+        do {
+            let response = try await APIClient.shared.request(
+                endpoint: .getIndexDetail(symbol: indexSymbol, range: range.rawValue),
+                responseType: IndexDetailResponse.self
+            )
+
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+
+            // Update all data — the backend returns a fresh snapshot
+            self.indexData = response.toDisplayModel()
+            if !response.newsArticles.isEmpty {
+                self.newsArticles = response.toNewsArticles()
+            }
+
+            print("✅ [IndexDetailVM] Chart reloaded in \(elapsed)s — \(response.chartData.count) data points")
+
+        } catch {
+            print("❌ [IndexDetailVM] Chart reload failed: \(error)")
+            // Keep existing data — don't wipe the screen on a chart range failure
+        }
+    }
+
+    // MARK: - Fallback
+
+    private func loadFallbackData() {
+        if indexData == nil {
+            indexData = IndexDetailData.sampleSP500
+            print("🔄 [IndexDetailVM] Using fallback sample data for index")
+        }
+        if newsArticles.isEmpty {
+            newsArticles = TickerNewsArticle.sampleDataForTicker(indexSymbol)
+            print("🔄 [IndexDetailVM] Using fallback sample news")
+        }
+        if analysisData == nil {
+            analysisData = TickerAnalysisData.sampleData
+            print("🔄 [IndexDetailVM] Using fallback sample analysis")
+        }
     }
 }

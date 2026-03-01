@@ -1,12 +1,33 @@
-"""Research schemas matching DB research_reports + frontend polling models."""
+"""
+Research schemas — aligned with Supabase research_reports table and Swift frontend models.
 
-from pydantic import BaseModel
+Swift frontend uses .convertFromSnakeCase / .convertToSnakeCase on its JSONDecoder/Encoder,
+so all field names here are snake_case and map 1-to-1 with iOS property names.
+
+Key alignment points:
+  - iOS GenerateResearchRequest sends: stock_id, investor_persona
+  - iOS ResearchReportDetail expects: stock_id (= ticker alias), overall_score, fair_value_estimate
+  - DB report_status enum: pending | processing | completed | failed
+"""
+
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 
 
+# ── Request Models ───────────────────────────────────────────────────────────
+
+
 class GenerateResearchRequest(BaseModel):
-    stock_id: str  # ticker symbol
-    persona: str   # e.g. "warren_buffett"
+    stock_id: str = Field(description="Ticker symbol (e.g. AAPL)")
+    investor_persona: str = Field(description="Persona key (e.g. warren_buffett)")
+
+
+class RateReportRequest(BaseModel):
+    rating: int = Field(ge=1, le=5, description="Star rating 1-5")
+    feedback: Optional[str] = None
+
+
+# ── Response Models ──────────────────────────────────────────────────────────
 
 
 class ResearchGenerationResponse(BaseModel):
@@ -25,6 +46,9 @@ class ResearchStatusResponse(BaseModel):
     estimated_time_remaining: Optional[int] = None
 
 
+# ── Structured Sub-Models (JSONB columns in DB) ─────────────────────────────
+
+
 class InvestmentThesis(BaseModel):
     summary: Optional[str] = None
     key_drivers: Optional[List[str]] = None
@@ -38,7 +62,7 @@ class MoatAnalysis(BaseModel):
     moat_sources: Optional[List[str]] = None
     moat_sustainability: Optional[str] = None
     competitive_position: Optional[str] = None
-    barriers_to_entry: Optional[str] = None
+    barriers_to_entry: Optional[List[str]] = None
 
 
 class ValuationAnalysis(BaseModel):
@@ -55,18 +79,19 @@ class RiskAssessment(BaseModel):
     market_risks: Optional[List[str]] = None
 
 
-class RateReportRequest(BaseModel):
-    rating: int  # 1-5
-    feedback: Optional[str] = None
+# ── Full Report Detail (matches DB research_reports + iOS ResearchReportDetail) ─
 
 
 class ResearchReportDetail(BaseModel):
     id: str
     user_id: str
+    stock_id: Optional[str] = None  # mirrors ticker for iOS stockId
     ticker: str
     company_name: Optional[str] = None
     investor_persona: str
     status: str
+
+    # Report content
     title: Optional[str] = None
     executive_summary: Optional[str] = None
     investment_thesis: Optional[InvestmentThesis] = None
@@ -78,22 +103,37 @@ class ResearchReportDetail(BaseModel):
     full_report: Optional[str] = None
     key_takeaways: Optional[List[str]] = None
     action_recommendation: Optional[str] = None
+
+    # Scoring (from home_feed migration)
+    overall_score: Optional[float] = None  # 0-100
+    fair_value_estimate: Optional[float] = None
+
+    # Generation metadata
     generation_time_seconds: Optional[int] = None
     tokens_used: Optional[int] = None
+
+    # Timestamps
     created_at: str
     completed_at: Optional[str] = None
+
+    # User feedback
     user_rating: Optional[int] = None
     user_feedback: Optional[str] = None
 
 
 class ResearchReportListItem(BaseModel):
+    """Lightweight model for the reports list (GET /research/reports)."""
     id: str
+    stock_id: Optional[str] = None
     ticker: str
     company_name: Optional[str] = None
     investor_persona: str
     status: str
     title: Optional[str] = None
     executive_summary: Optional[str] = None
+    overall_score: Optional[float] = None
+    fair_value_estimate: Optional[float] = None
+    progress: Optional[int] = None
     created_at: str
     completed_at: Optional[str] = None
     user_rating: Optional[int] = None

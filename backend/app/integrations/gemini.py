@@ -123,6 +123,53 @@ class GeminiClient:
             raise
 
     @async_retry(max_attempts=3, delay=2.0)
+    async def generate_json(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate structured JSON using Gemini with response_mime_type.
+        Forces Gemini to output valid JSON, eliminating markdown fences.
+
+        Args:
+            prompt: User prompt requesting JSON output
+            system_instruction: Optional system instruction
+            model_name: Optional model name override
+
+        Returns:
+            dict: Response with text (guaranteed JSON) and metadata
+        """
+        try:
+            json_config = {
+                **self.generation_config,
+                "response_mime_type": "application/json",
+            }
+
+            model = genai.GenerativeModel(
+                model_name=model_name or self.model_name,
+                generation_config=json_config,
+                system_instruction=system_instruction or None,
+            )
+
+            response = await asyncio.to_thread(
+                model.generate_content,
+                prompt
+            )
+
+            return {
+                "text": response.text,
+                "model": self.model_name,
+                "tokens_used": response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else None,
+                "finish_reason": response.candidates[0].finish_reason.name if response.candidates else None
+            }
+
+        except Exception as e:
+            logger.error(f"Gemini JSON generation failed: {e}", exc_info=True)
+            raise
+
+    @async_retry(max_attempts=3, delay=2.0)
     async def generate_with_context(
         self,
         prompt: str,

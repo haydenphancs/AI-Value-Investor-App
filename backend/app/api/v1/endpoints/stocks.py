@@ -1,12 +1,15 @@
 """
 Stock Endpoints — All data from FMP API (no local stocks table).
 Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
-          /stocks/{ticker}/fundamentals, /stocks/{ticker}/news
+          /stocks/{ticker}/fundamentals, /stocks/{ticker}/chart,
+          /stocks/{ticker}/financials-full, /stocks/{ticker}/news
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
+import asyncio
 import logging
 
 from app.database import get_supabase
@@ -137,8 +140,10 @@ async def get_stock_fundamentals(ticker: str):
     """Get key financial metrics and ratios from FMP."""
     fmp = get_fmp_client()
     try:
-        metrics = await fmp.get_key_metrics(ticker, period="annual", limit=5)
-        ratios = await fmp.get_financial_ratios(ticker, period="annual", limit=5)
+        metrics, ratios = await asyncio.gather(
+            fmp.get_key_metrics(ticker, period="annual", limit=5),
+            fmp.get_financial_ratios(ticker, period="annual", limit=5),
+        )
         return {
             "key_metrics": normalize_fmp_list(metrics) if metrics else [],
             "financial_ratios": normalize_fmp_list(ratios) if ratios else [],
@@ -146,6 +151,153 @@ async def get_stock_fundamentals(ticker: str):
     except Exception as e:
         logger.error(f"Fundamentals failed: {e}")
         raise HTTPException(status_code=502, detail="Fundamentals service unavailable")
+
+
+# ── Date-range helpers for the chart endpoint ──────────────────────
+
+_RANGE_DELTAS = {
+    "1W": timedelta(weeks=1),
+    "3M": timedelta(days=90),
+    "6M": timedelta(days=180),
+    "1Y": timedelta(days=365),
+    "5Y": timedelta(days=365 * 5),
+}
+
+
+def _chart_date_range(range_code: str):
+    """Return (from_date, to_date) ISO strings for the given range code."""
+    today = datetime.utcnow().date()
+    to_date = today.isoformat()
+
+    if range_code == "ALL":
+        # FMP will return the full history when no from_date is supplied
+        return None, to_date
+
+    delta = _RANGE_DELTAS.get(range_code)
+    if delta is None:
+        # 1D — no intraday data at this FMP tier
+        return None, None
+
+    from_date = (today - delta).isoformat()
+    return from_date, to_date
+
+
+# ── Chart endpoint ─────────────────────────────────────────────────
+
+@router.get("/{ticker}/chart")
+async def get_stock_chart(
+    ticker: str,
+    range: str = Query("3M", regex="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+):
+    """
+    Get historical price data for charting.
+
+    Supported ranges: 1D, 1W, 3M, 6M, 1Y, 5Y, ALL.
+    1D returns an empty list (FMP historical endpoint has no intraday data
+    at the current subscription tier).
+    """
+    if range == "1D":
+        return {"symbol": ticker.upper(), "prices": []}
+
+    fmp = get_fmp_client()
+    from_date, to_date = _chart_date_range(range)
+
+    try:
+        raw = await fmp.get_historical_prices(ticker, from_date, to_date)
+
+        # FMP returns {"symbol": "...", "historical": [{...}, ...]}
+        historical = []
+        if isinstance(raw, dict):
+            historical = raw.get("historical", [])
+        elif isinstance(raw, list):
+            historical = raw
+
+        # Normalize keys and keep only the fields we need
+        prices = []
+        for item in historical:
+            if isinstance(item, dict):
+                normalized = normalize_fmp_response(item)
+                prices.append({
+                    "date": normalized.get("date"),
+                    "open": normalized.get("open"),
+                    "high": normalized.get("high"),
+                    "low": normalized.get("low"),
+                    "close": normalized.get("close"),
+                    "volume": normalized.get("volume"),
+                })
+
+        # FMP returns newest-first; sort chronologically (oldest first)
+        prices.sort(key=lambda p: p["date"] or "")
+
+        return {"symbol": ticker.upper(), "prices": prices}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chart data failed for {ticker}: {e}")
+        raise HTTPException(status_code=502, detail="Chart data service unavailable")
+
+
+# ── Full financials endpoint ───────────────────────────────────────
+
+@router.get("/{ticker}/financials-full")
+async def get_stock_financials_full(ticker: str):
+    """
+    Get comprehensive financial data for a ticker.
+
+    Returns income statements, balance sheets, cash flow statements (each with
+    annual and quarterly periods), plus key metrics, financial ratios, and
+    analyst estimates.  All FMP calls are made in parallel for performance.
+    """
+    fmp = get_fmp_client()
+
+    try:
+        (
+            income_annual,
+            income_quarterly,
+            balance_annual,
+            balance_quarterly,
+            cashflow_annual,
+            cashflow_quarterly,
+            key_metrics,
+            fin_ratios,
+            analyst_est,
+        ) = await asyncio.gather(
+            fmp.get_income_statement(ticker, period="annual", limit=5),
+            fmp.get_income_statement(ticker, period="quarter", limit=8),
+            fmp.get_balance_sheet(ticker, period="annual", limit=5),
+            fmp.get_balance_sheet(ticker, period="quarter", limit=8),
+            fmp.get_cash_flow_statement(ticker, period="annual", limit=5),
+            fmp.get_cash_flow_statement(ticker, period="quarter", limit=8),
+            fmp.get_key_metrics(ticker, period="annual", limit=5),
+            fmp.get_financial_ratios(ticker, period="annual", limit=5),
+            fmp.get_analyst_estimates(ticker, period="annual", limit=3),
+        )
+
+        return {
+            "symbol": ticker.upper(),
+            "income_statement": {
+                "annual": normalize_fmp_list(income_annual) if income_annual else [],
+                "quarterly": normalize_fmp_list(income_quarterly) if income_quarterly else [],
+            },
+            "balance_sheet": {
+                "annual": normalize_fmp_list(balance_annual) if balance_annual else [],
+                "quarterly": normalize_fmp_list(balance_quarterly) if balance_quarterly else [],
+            },
+            "cash_flow": {
+                "annual": normalize_fmp_list(cashflow_annual) if cashflow_annual else [],
+                "quarterly": normalize_fmp_list(cashflow_quarterly) if cashflow_quarterly else [],
+            },
+            "key_metrics": normalize_fmp_list(key_metrics) if key_metrics else [],
+            "financial_ratios": normalize_fmp_list(fin_ratios) if fin_ratios else [],
+            "analyst_estimates": normalize_fmp_list(analyst_est) if analyst_est else [],
+        }
+
+    except Exception as e:
+        logger.error(f"Financials-full failed for {ticker}: {e}")
+        raise HTTPException(
+            status_code=502, detail="Financial data service unavailable"
+        )
 
 
 @router.get("/{ticker}/news")

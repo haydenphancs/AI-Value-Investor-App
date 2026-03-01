@@ -432,3 +432,91 @@ enum ReportSortOption: String, CaseIterable {
     case ratingHigh = "Highest Rated"
     case ratingLow = "Lowest Rated"
 }
+
+// MARK: - Backend → UI Mapping
+
+extension AnalysisReport {
+    /// Map a backend report list item to a local AnalysisReport for UI.
+    static func from(_ item: BackendReportListItem) -> AnalysisReport {
+        // Map backend persona key to enum
+        let persona: AnalysisPersona = {
+            switch item.investorPersona {
+            case "warren_buffett": return .warrenBuffett
+            case "cathie_wood": return .cathieWood
+            case "peter_lynch": return .peterLynch
+            case "bill_ackman": return .billAckman
+            default: return .warrenBuffett
+            }
+        }()
+
+        // Map backend status string to enum
+        let status: ReportStatus = {
+            switch item.status {
+            case "completed": return .ready
+            case "failed": return .failed
+            default: return .processing // "pending" or "processing"
+            }
+        }()
+
+        // Parse ISO 8601 date
+        let date: Date = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = formatter.date(from: item.createdAt) { return d }
+            // Retry without fractional seconds
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: item.createdAt) ?? Date()
+        }()
+
+        // Progress: backend sends 0-100 int, UI expects 0.0-1.0 Double
+        let progress: Double? = {
+            if status == .processing, let p = item.progress {
+                return Double(p) / 100.0
+            }
+            return nil
+        }()
+
+        // Rating label from overall_score
+        let ratingLabel: String? = {
+            guard let score = item.overallScore else { return nil }
+            switch score {
+            case 81...100: return "Excellent Quality Business"
+            case 61...80: return "Strong Quality Business"
+            case 41...60: return "Average Quality Business"
+            case 21...40: return "Below Average"
+            default: return "Avoid"
+            }
+        }()
+
+        return AnalysisReport(
+            companyName: item.companyName ?? item.ticker,
+            ticker: item.ticker,
+            industry: "",
+            persona: persona,
+            status: status,
+            progress: progress,
+            rating: item.overallScore,
+            ratingLabel: ratingLabel,
+            date: date,
+            isRefunded: false
+        )
+    }
+}
+
+extension CreditBalance {
+    /// Map backend credits response to CreditBalance.
+    static func from(_ response: BackendCreditsResponse) -> CreditBalance {
+        let renewalDate: Date = {
+            guard let resetsAt = response.resetsAt else {
+                return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
+            }
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = formatter.date(from: resetsAt) { return d }
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: resetsAt) ?? Date()
+        }()
+
+        return CreditBalance(credits: response.remaining, renewalDate: renewalDate)
+    }
+}

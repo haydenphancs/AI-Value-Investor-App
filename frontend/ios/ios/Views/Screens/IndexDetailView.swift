@@ -61,6 +61,19 @@ struct IndexDetailView: View {
                     tickerPrice: isTabBarPinned ? viewModel.indexData?.formattedPrice : nil
                 )
 
+                // Error banner (shown when using fallback data)
+                if let error = viewModel.errorMessage {
+                    HStack(spacing: AppSpacing.sm) {
+                        Image(systemName: "wifi.slash")
+                            .font(.caption)
+                        Text(error)
+                            .font(AppTypography.caption)
+                    }
+                    .foregroundColor(AppColors.alertOrange)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.xs)
+                }
+
                 // Scrollable Content with pinned tab bar
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {

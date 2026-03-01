@@ -190,6 +190,135 @@ class FMPClient:
 
         return await self._make_request("earnings-calendar", params=params)
 
+    # ── Sector & market data ────────────────────────────────────────
+
+    async def get_sector_performance(self) -> List[Dict[str, Any]]:
+        """
+        Get today's sector performance percentages.
+
+        Returns list of dicts with keys like:
+          {"sector": "Technology", "changesPercentage": "2.13"}
+        """
+        try:
+            return await self._make_request("sectors-performance")
+        except Exception as e:
+            logger.warning(f"Sector performance endpoint failed: {e}")
+            return []
+
+    async def get_stock_news(
+        self,
+        ticker: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get stock or general news from FMP.
+
+        Args:
+            ticker: Optional stock/index symbol. If None, returns general news.
+            limit: Max articles to return.
+
+        Returns:
+            List of news article dicts.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["symbol"] = ticker.upper()
+
+        try:
+            return await self._make_request("stock-news", params=params)
+        except Exception as e:
+            logger.warning(f"Stock news request failed: {e}")
+            return []
+
+    # ── ETF-specific endpoints ───────────────────────────────────────
+
+    async def get_etf_info(self, ticker: str) -> Dict[str, Any]:
+        """
+        Get ETF-specific info (expense ratio, AUM, holdings count, etc.).
+
+        NOTE: May not be available on all FMP plans.
+        """
+        try:
+            data = await self._make_request(
+                "etf-info", params={"symbol": ticker.upper()}
+            )
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"ETF info endpoint unavailable for {ticker} (may require higher plan)"
+                )
+                return {}
+            raise
+
+    async def get_etf_holders(
+        self, ticker: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Get ETF top holdings with weights."""
+        try:
+            data = await self._make_request(
+                "etf-holder", params={"symbol": ticker.upper()}
+            )
+            if isinstance(data, list):
+                return data[:limit]
+            return []
+        except Exception as e:
+            logger.warning(f"ETF holders request failed for {ticker}: {e}")
+            return []
+
+    async def get_etf_sector_weightings(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """Get ETF sector weightings."""
+        try:
+            data = await self._make_request(
+                "etf-sector-weightings", params={"symbol": ticker.upper()}
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"ETF sector weightings failed for {ticker}: {e}")
+            return []
+
+    async def get_dividend_history(
+        self, ticker: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Get dividend payment history for a stock/ETF."""
+        try:
+            data = await self._make_request(
+                "stock-dividend", params={"symbol": ticker.upper()}
+            )
+            if isinstance(data, dict):
+                historical = data.get("historical", [])
+                return historical[:limit]
+            if isinstance(data, list):
+                return data[:limit]
+            return []
+        except Exception as e:
+            logger.warning(f"Dividend history failed for {ticker}: {e}")
+            return []
+
+    # ── Batch / crypto helpers ───────────────────────────────────────
+
+    async def get_batch_quotes(
+        self, symbols: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Get quotes for multiple symbols in a single request."""
+        if not symbols:
+            return []
+        symbol_str = ",".join(s.upper() for s in symbols)
+        try:
+            data = await self._make_request(
+                "quote", params={"symbol": symbol_str}
+            )
+            if isinstance(data, list):
+                return data
+            return [data] if data else []
+        except Exception as e:
+            logger.warning(f"Batch quote request failed: {e}")
+            return []
+
     # ── Search ──────────────────────────────────────────────────────
 
     async def search_stocks(

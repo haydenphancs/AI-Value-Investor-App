@@ -48,6 +48,17 @@ enum APIEndpoint: Sendable {
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
+    case getStockChart(ticker: String, range: String)
+    case getTickerReport(ticker: String, persona: String)
+
+    // MARK: - Indices
+    case getIndexDetail(symbol: String, range: String)
+
+    // MARK: - Crypto
+    case getCryptoDetail(symbol: String, range: String)
+
+    // MARK: - ETFs
+    case getETFDetail(symbol: String, range: String)
 
     // MARK: - Watchlist
     case getWatchlist
@@ -70,6 +81,9 @@ enum APIEndpoint: Sendable {
     case createChatSession(stockId: String?)
     case sendChatMessage(sessionId: String, message: String)
     case getChatHistory(sessionId: String)
+
+    // MARK: - Ticker Report Chat
+    case chatWithTickerReport(ticker: String, message: String, persona: String)
 
     // MARK: - Home
     case getHomeFeed
@@ -110,6 +124,22 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/fundamentals"
         case .getStockNews(let ticker, _):
             return "/api/v1/stocks/\(ticker)/news"
+        case .getStockChart(let ticker, _):
+            return "/api/v1/stocks/\(ticker)/chart"
+        case .getTickerReport(let ticker, _):
+            return "/api/v1/stocks/\(ticker)/report"
+
+        // Crypto
+        case .getCryptoDetail(let symbol, _):
+            return "/api/v1/crypto/\(symbol)"
+
+        // Indices
+        case .getIndexDetail(let symbol, _):
+            return "/api/v1/indices/\(symbol)"
+
+        // ETFs
+        case .getETFDetail(let symbol, _):
+            return "/api/v1/etfs/\(symbol)"
 
         // Watchlist
         case .getWatchlist:
@@ -145,6 +175,10 @@ enum APIEndpoint: Sendable {
         case .getChatHistory(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
 
+        // Ticker Report Chat
+        case .chatWithTickerReport(let ticker, _, _):
+            return "/api/v1/stocks/\(ticker)/report/chat"
+
         // Home
         case .getHomeFeed:
             return "/api/v1/home/feed"
@@ -161,7 +195,8 @@ enum APIEndpoint: Sendable {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
-             .createChatSession, .sendChatMessage:
+             .createChatSession, .sendChatMessage,
+             .chatWithTickerReport:
             return .POST
 
         case .updateProfile:
@@ -184,6 +219,21 @@ enum APIEndpoint: Sendable {
 
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
+
+        case .getStockChart(_, let range):
+            return ["range": range]
+
+        case .getTickerReport(_, let persona):
+            return ["persona": persona]
+
+        case .getCryptoDetail(_, let range):
+            return ["range": range]
+
+        case .getIndexDetail(_, let range):
+            return ["range": range]
+
+        case .getETFDetail(_, let range):
+            return ["range": range]
 
         case .getMyReports(let limit):
             return ["limit": String(limit)]
@@ -230,6 +280,9 @@ enum APIEndpoint: Sendable {
         case .sendChatMessage(_, let message):
             return SendChatMessageRequest(message: message)
 
+        case .chatWithTickerReport(let ticker, let message, let persona):
+            return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
+
         default:
             return nil
         }
@@ -242,8 +295,9 @@ enum APIEndpoint: Sendable {
         // Auth endpoints
         case .signIn, .signUp, .refreshToken:
             return false
-        // Stock endpoints are public on the backend
-        case .searchStocks, .getStock, .getStockQuote, .getStockFundamentals, .getStockNews:
+        // Stock/crypto endpoints are public on the backend
+        case .searchStocks, .getStock, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
+             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
@@ -261,10 +315,12 @@ enum APIEndpoint: Sendable {
 
     nonisolated var timeout: TimeInterval {
         switch self {
-        case .generateResearch:
+        case .generateResearch, .getTickerReport:
             return 120 // 2 minutes for AI generation
-        case .sendChatMessage:
+        case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
+        case .getCryptoDetail, .getIndexDetail, .getETFDetail:
+            return 60 // 1 minute for AI snapshot generation
         default:
             return 30 // 30 seconds default
         }
@@ -317,4 +373,10 @@ nonisolated struct CreateChatSessionRequest: Encodable, Sendable {
 
 nonisolated struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
+}
+
+nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {
+    let ticker: String
+    let message: String
+    let persona: String
 }

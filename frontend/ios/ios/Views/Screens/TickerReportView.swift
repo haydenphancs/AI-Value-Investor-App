@@ -11,7 +11,6 @@ import SwiftUI
 struct TickerReportView: View {
     @StateObject private var viewModel: TickerReportViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var aiInputText: String = ""
 
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
@@ -28,13 +27,15 @@ struct TickerReportView: View {
     var body: some View {
         ZStack {
             // Background
-            AppColors.background    
+            AppColors.background
                 .ignoresSafeArea()
 
             if viewModel.isLoading {
                 loadingView
             } else if let report = viewModel.reportData {
                 reportContent(report)
+            } else if let error = viewModel.error {
+                errorView(error)
             }
         }
         .navigationBarHidden(true)
@@ -103,7 +104,7 @@ struct TickerReportView: View {
 
                 // Floating chat bar
                 CaudexAIChatBar(
-                    inputText: $aiInputText,
+                    inputText: $viewModel.aiInputText,
                     placeholder: "Chat with the report...",
                     onSend: viewModel.chatWithReport
                 )
@@ -220,6 +221,45 @@ struct TickerReportView: View {
             .padding(.vertical, AppSpacing.lg)
         }
         .padding(.horizontal, AppSpacing.lg)
+    }
+
+    // MARK: - Error View
+
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: AppSpacing.lg) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 40))
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Unable to Load Report")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(message)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xxl)
+
+            Button(action: { viewModel.loadReport() }) {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "arrow.clockwise")
+                    Text("Retry")
+                }
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.primaryBlue)
+                .padding(.horizontal, AppSpacing.xxl)
+                .padding(.vertical, AppSpacing.md)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                        .stroke(AppColors.primaryBlue, lineWidth: 1)
+                )
+            }
+
+            Button("Go Back") { dismiss() }
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+        }
     }
 
     // MARK: - Disclaimer

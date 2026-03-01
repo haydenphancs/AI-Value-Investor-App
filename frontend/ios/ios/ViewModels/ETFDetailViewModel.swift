@@ -2,7 +2,9 @@
 //  ETFDetailViewModel.swift
 //  ios
 //
-//  ViewModel for the ETF Detail screen
+//  ViewModel for the ETF Detail screen.
+//  Fetches real data from GET /api/v1/etfs/{symbol}?range=3M
+//  and maps the response DTO to display models.
 //
 
 import Foundation
@@ -24,7 +26,7 @@ class ETFDetailViewModel: ObservableObject {
 
     // MARK: - Private Properties
 
-    private let etfSymbol: String
+    let etfSymbol: String
 
     // MARK: - Initialization
 
@@ -32,50 +34,125 @@ class ETFDetailViewModel: ObservableObject {
         self.etfSymbol = etfSymbol
     }
 
-    // MARK: - Public Methods
+    // MARK: - Data Loading
 
     func loadETFData() {
         isLoading = true
         errorMessage = nil
 
-        // In production, this would fetch from FMP API
         Task { [weak self] in
             guard let self = self else { return }
-
-            let symbol = self.etfSymbol
-            let etfData = ETFDetailData.sampleSPY
-            let news = TickerNewsArticle.sampleDataForTicker(symbol)
-
-            self.etfData = etfData
-            self.newsArticles = news
-            self.isLoading = false
+            await self.fetchETFDetail()
         }
     }
 
     func refresh() async {
-        loadETFData()
+        await fetchETFDetail()
     }
+
+    /// Fetches ETF detail from the backend and maps to display models.
+    private func fetchETFDetail() async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        do {
+            print("[ETFDetailVM] Fetching ETF detail for \(etfSymbol), range: \(selectedChartRange.rawValue)")
+
+            let response = try await APIClient.shared.request(
+                endpoint: .getETFDetail(
+                    symbol: etfSymbol,
+                    range: selectedChartRange.rawValue
+                ),
+                responseType: ETFDetailResponseDTO.self
+            )
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            print("[ETFDetailVM] ✅ ETF detail loaded in \(String(format: "%.2f", elapsed))s — \(response.symbol) @ $\(response.currentPrice)")
+
+            self.errorMessage = nil
+            self.etfData = response.toDisplayModel()
+            self.newsArticles = response.toNewsArticles()
+            self.isLoading = false
+
+        } catch {
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            print("[ETFDetailVM] ❌ ETF detail failed after \(String(format: "%.2f", elapsed))s — \(error)")
+
+            if let apiError = error as? APIError {
+                print("[ETFDetailVM] API Error detail: \(apiError)")
+            }
+
+            self.errorMessage = "Unable to load ETF data. Pull to refresh."
+            self.isLoading = false
+
+            // Load fallback data so the screen isn't empty
+            loadFallbackData()
+        }
+    }
+
+    /// Reload chart data when user changes the time range.
+    func updateChartRange(_ range: ChartTimeRange) {
+        guard range != selectedChartRange else { return }
+        selectedChartRange = range
+
+        Task { [weak self] in
+            guard let self = self else { return }
+
+            print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
+
+            do {
+                let response = try await APIClient.shared.request(
+                    endpoint: .getETFDetail(
+                        symbol: self.etfSymbol,
+                        range: range.rawValue
+                    ),
+                    responseType: ETFDetailResponseDTO.self
+                )
+
+                print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
+
+                let updated = response.toDisplayModel()
+                self.etfData = updated
+                self.newsArticles = response.toNewsArticles()
+
+            } catch {
+                print("[ETFDetailVM] ⚠️ Chart range update failed, keeping existing data — \(error)")
+                // Keep existing data on failure
+            }
+        }
+    }
+
+    // MARK: - Fallback Data
+
+    private func loadFallbackData() {
+        print("[ETFDetailVM] Loading fallback sample data")
+        self.etfData = ETFDetailData.sampleSPY
+        self.newsArticles = TickerNewsArticle.sampleDataForTicker(etfSymbol)
+    }
+
+    // MARK: - User Actions
 
     func toggleFavorite() {
         isFavorite.toggle()
+        print("[ETFDetailVM] Favorite toggled: \(isFavorite) for \(etfSymbol)")
     }
 
     func handleNotificationTap() {
-        print("Notification settings for \(etfSymbol)")
+        print("[ETFDetailVM] Notification settings for \(etfSymbol)")
     }
 
     func handleWebsiteTap() {
         guard let website = etfData?.etfProfile.website,
+              !website.isEmpty,
               let url = URL(string: "https://\(website)") else { return }
         UIApplication.shared.open(url)
     }
 
     func handleRelatedETFTap(_ ticker: RelatedTicker) {
-        print("Navigate to \(ticker.symbol)")
+        print("[ETFDetailVM] Navigate to related ETF: \(ticker.symbol)")
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("Open news article: \(article.headline)")
+        print("[ETFDetailVM] Open news article: \(article.headline)")
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -84,7 +161,7 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
+        print("[ETFDetailVM] Navigate to ticker: \(ticker)")
     }
 
     func handleSuggestionTap(_ suggestion: ETFAISuggestion) {
@@ -93,12 +170,8 @@ class ETFDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("AI Query: \(aiInputText)")
+        print("[ETFDetailVM] AI Query: \(aiInputText)")
         aiInputText = ""
-    }
-
-    func updateChartRange(_ range: ChartTimeRange) {
-        selectedChartRange = range
     }
 
     // MARK: - Computed Properties

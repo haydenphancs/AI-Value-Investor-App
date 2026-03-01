@@ -163,7 +163,8 @@ struct StockSearchResult: Codable, Identifiable {
     let sector: String?
     let logoUrl: String?
 
-    // Backend (FMP) returns: symbol, name, exchange_short_name
+    // Backend GET /api/v1/stocks/search returns: symbol, name, exchange_short_name, exchange_full_name, currency
+    // sector and logo_url are not in search results (Optional — decode as nil)
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case companyName = "name"

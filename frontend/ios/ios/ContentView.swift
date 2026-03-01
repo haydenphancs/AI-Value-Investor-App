@@ -93,6 +93,24 @@ struct HomeViewWithBinding: View {
 
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xl) {
+                        // Error banner — visible when backend is unreachable
+                        if let errorMessage = viewModel.error {
+                            HStack(spacing: 8) {
+                                Image(systemName: "wifi.exclamationmark")
+                                    .foregroundColor(AppColors.neutral)
+                                Text(errorMessage)
+                                    .font(AppTypography.bodySmall)
+                                    .foregroundColor(AppColors.textSecondary)
+                                Spacer()
+                            }
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.vertical, AppSpacing.sm)
+                            .background(AppColors.cardBackground.opacity(0.6))
+                            .cornerRadius(AppCornerRadius.medium)
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.top, AppSpacing.xs)
+                        }
+
                         MarketTickersRow(
                             tickers: viewModel.marketTickers,
                             onTickerTap: { ticker in

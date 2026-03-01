@@ -159,7 +159,7 @@ struct HomeContentView: View {
 // MARK: - Legacy HomeView (for backward compatibility)
 struct HomeView: View {
     var body: some View {
-        MainTabView()
+        ContentView()
     }
 }
 

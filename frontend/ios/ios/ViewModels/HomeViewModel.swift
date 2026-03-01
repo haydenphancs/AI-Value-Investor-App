@@ -4,6 +4,9 @@
 //
 //  ViewModel for Home screen - MVVM Architecture
 //
+//  Fetches aggregated home feed from GET /api/v1/home/feed.
+//  Falls back to local mock data when the backend is unreachable.
+//
 
 import Foundation
 import Combine
@@ -19,7 +22,7 @@ class HomeViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
-    // Pre-computed sparkline data so it isn't regenerated on every load
+    // Pre-computed sparkline data for fallback mock data
     private lazy var cachedSparklines: (pos1: [Double], pos2: [Double], neg1: [Double], neg2: [Double]) = {
         (
             pos1: Self.generateSparklineData(positive: true),
@@ -31,44 +34,89 @@ class HomeViewModel: ObservableObject {
 
     // MARK: - Initialization
     init() {
-        // Defer data loading to onAppear via Task to avoid blocking view init
         Task { [weak self] in
             await self?.loadInitialData()
         }
     }
 
     // MARK: - Data Loading
+
     private func loadInitialData() async {
         isLoading = true
-        // Build mock data off the main actor, then assign on main
-        let tickers = buildMarketTickers()
-        let insight = buildMarketInsight()
-        let briefings = buildDailyBriefings()
-        let research = buildRecentResearch()
-
-        marketTickers = tickers
-        marketInsight = insight
-        dailyBriefings = briefings
-        recentResearch = research
+        error = nil
+        await fetchHomeFeed()
         isLoading = false
     }
 
     func refresh() async {
-        isLoading = true
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        let tickers = buildMarketTickers()
-        let insight = buildMarketInsight()
-        let briefings = buildDailyBriefings()
-        let research = buildRecentResearch()
-
-        marketTickers = tickers
-        marketInsight = insight
-        dailyBriefings = briefings
-        recentResearch = research
-        isLoading = false
+        error = nil
+        await fetchHomeFeed()
     }
 
-    // MARK: - Data Builders (pure functions that return values)
+    // MARK: - Network
+
+    private func fetchHomeFeed() async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        print("📡 [HomeVM] Fetching home feed from \(APIConfig.baseURL.absoluteString)/api/v1/home/feed ...")
+
+        do {
+            let response = try await APIClient.shared.request(
+                endpoint: .getHomeFeed,
+                responseType: HomeFeedResponse.self
+            )
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+
+            // Clear previous error on success
+            self.error = nil
+
+            marketTickers = response.marketTickers
+            marketInsight = response.marketInsight
+            dailyBriefings = response.dailyBriefings
+            recentResearch = response.recentResearch
+
+            print("✅ [HomeVM] Feed loaded in \(elapsed)s — \(response.marketTickers.count) tickers, insight: \(response.marketInsight != nil), \(response.dailyBriefings.count) briefings, \(response.recentResearch.count) research")
+            if let insight = response.marketInsight {
+                print("   📊 Insight: \(insight.headline) [\(insight.sentiment.rawValue)]")
+            }
+            for ticker in response.marketTickers {
+                print("   📈 \(ticker.symbol): $\(ticker.formattedPrice) (\(ticker.formattedChange))")
+            }
+
+        } catch {
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            print("❌ [HomeVM] Feed failed after \(elapsed)s: \(error)")
+            if let apiError = error as? APIError {
+                print("   🔍 API Error detail: \(apiError)")
+            }
+            self.error = "Unable to load market data. Pull to refresh."
+            // Fill any empty sections with fallback data
+            loadFallbackData()
+        }
+    }
+
+    // MARK: - Fallback Mock Data
+
+    private func loadFallbackData() {
+        if marketTickers.isEmpty {
+            marketTickers = buildMarketTickers()
+            print("🔄 [HomeVM] Using fallback market tickers")
+        }
+        if marketInsight == nil {
+            marketInsight = buildMarketInsight()
+            print("🔄 [HomeVM] Using fallback market insight")
+        }
+        if dailyBriefings.isEmpty {
+            dailyBriefings = buildDailyBriefings()
+            print("🔄 [HomeVM] Using fallback daily briefings")
+        }
+        if recentResearch.isEmpty {
+            recentResearch = buildRecentResearch()
+            print("🔄 [HomeVM] Using fallback research reports")
+        }
+    }
+
+    // MARK: - Mock Data Builders (fallback when backend is unreachable)
+
     private func buildMarketTickers() -> [MarketTicker] {
         [
             MarketTicker(

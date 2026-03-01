@@ -32,6 +32,11 @@ struct SearchView: View {
                 // Scrollable Content
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
+                        // Error banner (if any)
+                        if let error = viewModel.error {
+                            errorBanner(message: error)
+                        }
+
                         // Recent Searches Section
                         RecentSearchesSection(
                             items: viewModel.recentSearches,
@@ -71,6 +76,9 @@ struct SearchView: View {
             }
         }
         .navigationBarHidden(true)
+        .task {
+            await viewModel.loadInitialData()
+        }
         .gesture(
             DragGesture()
                 .onEnded { gesture in
@@ -84,6 +92,32 @@ struct SearchView: View {
             NewsDetailView(article: article)
                 .preferredColorScheme(.dark)
         }
+    }
+
+    // MARK: - Error Banner
+    private func errorBanner(message: String) -> some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.yellow)
+
+            Text(message)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Spacer()
+
+            Button {
+                viewModel.dismissError()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+        }
+        .padding(AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
+        .padding(.horizontal, AppSpacing.lg)
     }
 
     // MARK: - Action Handlers
@@ -163,6 +197,27 @@ struct SearchContentView: View {
                 // Scrollable Content
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
+                        // Error banner (if any)
+                        if let error = viewModel.error {
+                            HStack(spacing: AppSpacing.sm) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.yellow)
+                                Text(error)
+                                    .font(AppTypography.bodySmall)
+                                    .foregroundColor(AppColors.textPrimary)
+                                Spacer()
+                                Button { viewModel.dismissError() } label: {
+                                    Image(systemName: "xmark")
+                                        .font(AppTypography.caption)
+                                        .foregroundColor(AppColors.textMuted)
+                                }
+                            }
+                            .padding(AppSpacing.md)
+                            .background(AppColors.cardBackground)
+                            .cornerRadius(AppCornerRadius.medium)
+                            .padding(.horizontal, AppSpacing.lg)
+                        }
+
                         // Recent Searches Section
                         RecentSearchesSection(
                             items: viewModel.recentSearches,
@@ -220,6 +275,9 @@ struct SearchContentView: View {
             if viewModel.isLoading {
                 LoadingOverlay()
             }
+        }
+        .task {
+            await viewModel.loadInitialData()
         }
         .gesture(
             DragGesture()

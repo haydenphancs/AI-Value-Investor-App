@@ -8,8 +8,8 @@ class StockSearchResult(BaseModel):
     symbol: str
     name: str
     currency: Optional[str] = None
+    exchange_short_name: Optional[str] = None
     exchange_full_name: Optional[str] = None
-    exchange: Optional[str] = None
 
 
 class StockProfile(BaseModel):

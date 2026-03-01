@@ -71,6 +71,9 @@ enum APIEndpoint: Sendable {
     case sendChatMessage(sessionId: String, message: String)
     case getChatHistory(sessionId: String)
 
+    // MARK: - Home
+    case getHomeFeed
+
     // MARK: - Personas
     case getPersonas
 
@@ -141,6 +144,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/chat/sessions/\(sessionId)/messages"
         case .getChatHistory(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
+
+        // Home
+        case .getHomeFeed:
+            return "/api/v1/home/feed"
 
         // Personas
         case .getPersonas:

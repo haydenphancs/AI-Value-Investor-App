@@ -20,6 +20,9 @@ class FMPClient:
     """
     Client for Financial Modeling Prep API (stable endpoints).
     Provides company fundamentals, financials, and market data.
+
+    Uses a persistent httpx.AsyncClient with connection pooling for
+    efficient connection reuse across concurrent requests.
     """
 
     def __init__(self):
@@ -27,6 +30,26 @@ class FMPClient:
         self.base_url = settings.FMP_BASE_URL
         self.api_key = settings.FMP_API_KEY
         self.timeout = settings.HTTP_TIMEOUT_SECONDS
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the persistent AsyncClient with connection pooling."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=30,
+                ),
+            )
+        return self._client
+
+    async def close(self):
+        """Close the persistent HTTP client. Call on app shutdown."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def _make_request(
         self,
@@ -34,7 +57,7 @@ class FMPClient:
         params: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
-        Make HTTP request to FMP API.
+        Make HTTP request to FMP API using the persistent client.
 
         Args:
             endpoint: API endpoint path (relative to base_url)
@@ -53,10 +76,10 @@ class FMPClient:
         params["apikey"] = self.api_key
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                return response.json()
+            client = await self._get_client()
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
 
         except httpx.HTTPError as e:
             logger.error(f"FMP API request failed: {endpoint} — {e}")
@@ -252,3 +275,11 @@ def get_fmp_client() -> FMPClient:
     if _fmp_client is None:
         _fmp_client = FMPClient()
     return _fmp_client
+
+
+async def close_fmp_client():
+    """Close the global FMP client. Call from app lifespan shutdown."""
+    global _fmp_client
+    if _fmp_client is not None:
+        await _fmp_client.close()
+        _fmp_client = None

@@ -15,6 +15,7 @@ from typing import Any
 from app.config import settings
 from app.database import check_supabase_health
 from app.api.v1.api import api_router
+from app.integrations.fmp import close_fmp_client
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -36,6 +37,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Graceful shutdown: close persistent HTTP clients
+    await close_fmp_client()
     logger.info("Shutting down")
 
 

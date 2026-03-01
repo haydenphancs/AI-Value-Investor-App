@@ -64,10 +64,109 @@ struct SearchNewsItem: Identifiable {
     let headline: String
     let summary: String
     let imageName: String
+    let imageURL: URL?
     let readMoreAction: String
+
+    /// True when imageName is a remote URL (backend data) vs a local asset name
+    var isRemoteImage: Bool {
+        imageURL != nil
+    }
 
     var formattedMeta: String {
         "\(source)  \(timeAgo)"
+    }
+
+    /// Create from a backend API article
+    init(from article: SearchNewsAPIArticle) {
+        self.source = article.sourceName ?? "Unknown"
+        self.timeAgo = Self.formatTimeAgo(article.publishedAt)
+        self.headline = article.headline
+        self.summary = article.summary ?? ""
+        self.imageName = article.thumbnailUrl ?? ""
+        self.imageURL = URL(string: article.thumbnailUrl ?? "")
+        self.readMoreAction = "Read More"
+    }
+
+    /// Create with explicit values (sample data / legacy)
+    init(source: String, timeAgo: String, headline: String, summary: String,
+         imageName: String, readMoreAction: String) {
+        self.source = source
+        self.timeAgo = timeAgo
+        self.headline = headline
+        self.summary = summary
+        self.imageName = imageName
+        self.imageURL = nil
+        self.readMoreAction = readMoreAction
+    }
+
+    private static func formatTimeAgo(_ dateString: String?) -> String {
+        guard let dateString = dateString else { return "" }
+
+        // Try ISO 8601 with fractional seconds first, then without
+        let formatters: [ISO8601DateFormatter] = {
+            let f1 = ISO8601DateFormatter()
+            f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let f2 = ISO8601DateFormatter()
+            f2.formatOptions = [.withInternetDateTime]
+            return [f1, f2]
+        }()
+
+        var parsedDate: Date?
+        for formatter in formatters {
+            if let date = formatter.date(from: dateString) {
+                parsedDate = date
+                break
+            }
+        }
+        guard let date = parsedDate else { return "" }
+
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 60 { return "Just now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        let days = hours / 24
+        if days == 1 { return "Yesterday" }
+        return "\(days)d ago"
+    }
+}
+
+// MARK: - News API Response Models (Codable — matches backend /api/v1/news)
+
+struct SearchNewsFeedResponse: Codable {
+    let articles: [SearchNewsAPIArticle]
+    let page: Int
+    let perPage: Int
+    let total: Int?
+    let hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case articles, page, total
+        case perPage = "per_page"
+        case hasMore = "has_more"
+    }
+}
+
+struct SearchNewsAPIArticle: Codable, Identifiable {
+    let id: String
+    let headline: String
+    let summary: String?
+    let sourceName: String?
+    let publishedAt: String?
+    let thumbnailUrl: String?
+    let articleUrl: String?
+    let sentiment: String?
+    let relatedTickers: [String]?
+    let category: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, headline, summary, sentiment, category
+        case sourceName = "source_name"
+        case publishedAt = "published_at"
+        case thumbnailUrl = "thumbnail_url"
+        case articleUrl = "article_url"
+        case relatedTickers = "related_tickers"
     }
 }
 

@@ -18,17 +18,42 @@ struct SearchNewsCard: View {
         }) {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 HStack(alignment: .top, spacing: AppSpacing.md) {
-                    // News thumbnail
+                    // News thumbnail (supports remote URLs and local assets)
                     ZStack {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                             .fill(AppColors.cardBackgroundLight)
                             .frame(width: 80, height: 80)
 
-                        Image(item.imageName)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
+                        if let url = item.imageURL {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                case .failure:
+                                    Image(systemName: "newspaper.fill")
+                                        .font(.title2)
+                                        .foregroundColor(AppColors.textMuted)
+                                default:
+                                    ProgressView()
+                                        .tint(AppColors.textMuted)
+                                }
+                            }
                             .frame(width: 80, height: 80)
                             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+                        } else if !item.imageName.isEmpty {
+                            Image(item.imageName)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+                        } else {
+                            Image(systemName: "newspaper.fill")
+                                .font(.title2)
+                                .foregroundColor(AppColors.textMuted)
+                                .frame(width: 80, height: 80)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: AppSpacing.xs) {

@@ -22,6 +22,8 @@ class TickerReportViewModel: ObservableObject {
     // Chat response state
     @Published var chatResponse: String?
     @Published var isChatLoading: Bool = false
+    @Published var chatUserQuestion: String?
+    @Published var showChatResponse: Bool = false
 
     // Deep Dive Section Expansion States
     @Published var expandedSections: Set<DeepDiveModuleType> = []
@@ -67,43 +69,48 @@ class TickerReportViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
-
-            let attempt = self.loadAttempts
-            print("📊 [TickerReport] Loading report for \(self.ticker) with persona \(self.persona) (attempt \(attempt))...")
-
-            do {
-                let response: TickerReportAPIResponse = try await APIClient.shared.request(
-                    endpoint: .getTickerReport(ticker: self.ticker, persona: self.persona),
-                    responseType: TickerReportAPIResponse.self
-                )
-
-                print("✅ [TickerReport] Report loaded successfully for \(response.symbol)")
-                print("   Quality Score: \(response.qualityScore)")
-                print("   Agent: \(response.agent)")
-                print("   Vitals: valuation=\(response.keyVitals.valuation != nil), moat=\(response.keyVitals.moat != nil)")
-                print("   Sections: fundamentals=\(response.fundamentalMetrics.count), criticalFactors=\(response.criticalFactors.count)")
-
-                let reportData = response.toTickerReportData()
-                self.reportData = reportData
-                self.error = nil
-                self.isLoading = false
-
-            } catch {
-                print("❌ [TickerReport] Failed to load report: \(error)")
-                if let apiError = error as? APIError {
-                    print("   API Error: \(apiError)")
-                }
-                print("   Error details: \(error.localizedDescription)")
-
-                self.isLoading = false
-                self.error = self.userFriendlyError(error)
-                // Don't set reportData — let the error view show with retry button
-            }
+            await self._fetchReport()
         }
     }
 
+    /// Async refresh that properly awaits completion (used by .refreshable)
     func refresh() async {
-        loadReport()
+        await _fetchReport()
+    }
+
+    /// Core fetch logic — shared by loadReport() and refresh()
+    private func _fetchReport() async {
+        let attempt = self.loadAttempts
+        print("📊 [TickerReport] Loading report for \(self.ticker) with persona \(self.persona) (attempt \(attempt))...")
+
+        do {
+            let response: TickerReportAPIResponse = try await APIClient.shared.request(
+                endpoint: .getTickerReport(ticker: self.ticker, persona: self.persona),
+                responseType: TickerReportAPIResponse.self
+            )
+
+            print("✅ [TickerReport] Report loaded successfully for \(response.symbol)")
+            print("   Quality Score: \(response.qualityScore)")
+            print("   Agent: \(response.agent)")
+            print("   Vitals: valuation=\(response.keyVitals.valuation != nil), moat=\(response.keyVitals.moat != nil)")
+            print("   Sections: fundamentals=\(response.fundamentalMetrics.count), criticalFactors=\(response.criticalFactors.count)")
+
+            let reportData = response.toTickerReportData()
+            self.reportData = reportData
+            self.error = nil
+            self.isLoading = false
+
+        } catch {
+            print("❌ [TickerReport] Failed to load report: \(error)")
+            if let apiError = error as? APIError {
+                print("   API Error: \(apiError)")
+            }
+            print("   Error details: \(error.localizedDescription)")
+
+            self.isLoading = false
+            self.error = self.userFriendlyError(error)
+            // Don't set reportData — let the error view show with retry button
+        }
     }
 
     // MARK: - Section Toggle
@@ -135,8 +142,10 @@ class TickerReportViewModel: ObservableObject {
 
         print("💬 [TickerReport] Chat with report: \"\(message)\" for \(ticker)")
 
+        chatUserQuestion = message
         isChatLoading = true
         chatResponse = nil
+        showChatResponse = true
 
         Task { [weak self] in
             guard let self = self else { return }
@@ -160,6 +169,12 @@ class TickerReportViewModel: ObservableObject {
                 self.isChatLoading = false
             }
         }
+    }
+
+    func dismissChatResponse() {
+        showChatResponse = false
+        chatResponse = nil
+        chatUserQuestion = nil
     }
 
     // MARK: - Error Helpers

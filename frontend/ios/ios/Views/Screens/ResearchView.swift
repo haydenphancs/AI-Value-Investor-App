@@ -8,10 +8,13 @@
 import SwiftUI
 
 struct ResearchContentView: View {
+    @Environment(AppState.self) private var appState
     @StateObject private var viewModel: ResearchViewModel
     @State private var navigationPath = NavigationPath()
-    
+
     init(prefilledTicker: String? = nil) {
+        // Note: appState isn't available yet in init; auth check is injected as a closure
+        // that captures nothing — it will be replaced in .onAppear
         _viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
     }
 
@@ -63,6 +66,16 @@ struct ResearchContentView: View {
                 Button("OK") { viewModel.error = nil }
             } message: {
                 Text(viewModel.error ?? "")
+            }
+            .alert("Sign In Required", isPresented: $viewModel.showSignInPrompt) {
+                Button("OK") { }
+            } message: {
+                Text("Please sign in to generate research reports.")
+            }
+            .onAppear {
+                viewModel.setAuthCheck { [weak appState] in
+                    appState?.auth.isAuthenticated ?? false
+                }
             }
         }
     }

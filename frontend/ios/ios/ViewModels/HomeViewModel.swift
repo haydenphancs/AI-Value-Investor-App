@@ -88,9 +88,12 @@ class HomeViewModel: ObservableObject {
             if let apiError = error as? APIError {
                 print("   🔍 API Error detail: \(apiError)")
             }
-            self.error = "Unable to load market data. Pull to refresh."
             // Fill any empty sections with fallback data
             loadFallbackData()
+            // Only show error if fallback data is also empty
+            if marketTickers.isEmpty {
+                self.error = "Unable to load market data. Pull to refresh."
+            }
         }
     }
 

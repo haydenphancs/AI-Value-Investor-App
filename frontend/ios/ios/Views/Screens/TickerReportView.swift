@@ -39,6 +39,9 @@ struct TickerReportView: View {
             }
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $viewModel.showChatResponse) {
+            chatResponseSheet
+        }
     }
 
     // MARK: - Loading View
@@ -260,6 +263,72 @@ struct TickerReportView: View {
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textMuted)
         }
+    }
+
+    // MARK: - Chat Response Sheet
+
+    private var chatResponseSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // User question
+                    if let question = viewModel.chatUserQuestion {
+                        HStack {
+                            Spacer()
+                            Text(question)
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.md)
+                                .background(AppColors.primaryBlue)
+                                .cornerRadius(AppCornerRadius.large)
+                        }
+                        .padding(.horizontal, AppSpacing.lg)
+                    }
+
+                    // AI response or loading
+                    HStack(alignment: .top, spacing: AppSpacing.md) {
+                        Image(systemName: "sparkles")
+                            .font(AppTypography.iconSmall)
+                            .foregroundColor(AppColors.primaryBlue)
+                            .padding(.top, 2)
+
+                        if viewModel.isChatLoading {
+                            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                                ProgressView()
+                                    .tint(AppColors.primaryBlue)
+                                Text("Thinking...")
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textMuted)
+                            }
+                        } else if let response = viewModel.chatResponse {
+                            Text(response)
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.textPrimary)
+                                .lineSpacing(4)
+                                .textSelection(.enabled)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                }
+                .padding(.top, AppSpacing.lg)
+            }
+            .background(AppColors.background)
+            .navigationTitle("AI Insight")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        viewModel.dismissChatResponse()
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     // MARK: - Disclaimer

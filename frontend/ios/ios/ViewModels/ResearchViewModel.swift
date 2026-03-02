@@ -36,14 +36,19 @@ class ResearchViewModel: ObservableObject {
     }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
+    // Auth gate: set to true when user is signed in
+    @Published var showSignInPrompt: Bool = false
+
     // MARK: - Dependencies
     private let apiClient: APIClient
     private let pollingManager: TaskPollingManager
+    private var isAuthenticated: () -> Bool = { false }
 
     // MARK: - Initialization
-    init(prefilledTicker: String? = nil, apiClient: APIClient = .shared) {
+    init(prefilledTicker: String? = nil, apiClient: APIClient = .shared, isAuthenticated: @escaping () -> Bool = { false }) {
         self.apiClient = apiClient
         self.pollingManager = TaskPollingManager(apiClient: apiClient)
+        self.isAuthenticated = isAuthenticated
         if let ticker = prefilledTicker {
             _searchText = Published(initialValue: ticker)
         }
@@ -111,6 +116,11 @@ class ResearchViewModel: ObservableObject {
         isLoading = false
     }
 
+    // MARK: - Auth Configuration
+    func setAuthCheck(_ check: @escaping () -> Bool) {
+        self.isAuthenticated = check
+    }
+
     // MARK: - Actions
     func selectPersona(_ persona: AnalysisPersona) {
         selectedPersona = persona
@@ -121,6 +131,11 @@ class ResearchViewModel: ObservableObject {
     }
 
     func generateAnalysis() {
+        guard isAuthenticated() else {
+            showSignInPrompt = true
+            return
+        }
+
         let ticker = searchText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !ticker.isEmpty else { return }
         guard creditBalance.credits >= analysisCost.credits else {

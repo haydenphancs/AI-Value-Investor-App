@@ -78,9 +78,12 @@ enum APIEndpoint: Sendable {
     case getNewsArticle(articleId: String)
 
     // MARK: - Chat
+    case listChatSessions(limit: Int, offset: Int)
     case createChatSession(stockId: String?)
     case sendChatMessage(sessionId: String, message: String)
     case getChatHistory(sessionId: String)
+    case updateChatSession(sessionId: String, title: String?, isSaved: Bool?)
+    case deleteChatSession(sessionId: String)
 
     // MARK: - Ticker Report Chat
     case chatWithTickerReport(ticker: String, message: String, persona: String)
@@ -168,11 +171,17 @@ enum APIEndpoint: Sendable {
             return "/api/v1/news/\(articleId)"
 
         // Chat
+        case .listChatSessions:
+            return "/api/v1/chat/sessions"
         case .createChatSession:
             return "/api/v1/chat/sessions"
         case .sendChatMessage(let sessionId, _):
             return "/api/v1/chat/sessions/\(sessionId)/messages"
         case .getChatHistory(let sessionId):
+            return "/api/v1/chat/sessions/\(sessionId)"
+        case .updateChatSession(let sessionId, _, _):
+            return "/api/v1/chat/sessions/\(sessionId)"
+        case .deleteChatSession(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
 
         // Ticker Report Chat
@@ -199,10 +208,10 @@ enum APIEndpoint: Sendable {
              .chatWithTickerReport:
             return .POST
 
-        case .updateProfile:
+        case .updateProfile, .updateChatSession:
             return .PATCH
 
-        case .removeFromWatchlist, .deleteReport:
+        case .removeFromWatchlist, .deleteReport, .deleteChatSession:
             return .DELETE
 
         default:
@@ -240,6 +249,9 @@ enum APIEndpoint: Sendable {
 
         case .getNewsFeed(let page, let perPage):
             return ["page": String(page), "per_page": String(perPage)]
+
+        case .listChatSessions(let limit, let offset):
+            return ["limit": String(limit), "offset": String(offset)]
 
         default:
             return nil
@@ -279,6 +291,9 @@ enum APIEndpoint: Sendable {
 
         case .sendChatMessage(_, let message):
             return SendChatMessageRequest(message: message)
+
+        case .updateChatSession(_, let title, let isSaved):
+            return UpdateChatSessionRequestBody(title: title, isSaved: isSaved)
 
         case .chatWithTickerReport(let ticker, let message, let persona):
             return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
@@ -373,6 +388,11 @@ nonisolated struct CreateChatSessionRequest: Encodable, Sendable {
 
 nonisolated struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
+}
+
+nonisolated struct UpdateChatSessionRequestBody: Encodable, Sendable {
+    let title: String?
+    let isSaved: Bool?
 }
 
 nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {

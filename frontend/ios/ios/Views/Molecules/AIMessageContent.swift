@@ -38,6 +38,9 @@ struct AIMessageContent: View {
         case .stockPerformance(let performance):
             StockPerformanceCard(performance: performance)
 
+        case .stockChart(let widgetData):
+            ChatStockWidgetView(widget: widgetData)
+
         case .riskFactors(let data):
             RiskFactorsCard(data: data)
 

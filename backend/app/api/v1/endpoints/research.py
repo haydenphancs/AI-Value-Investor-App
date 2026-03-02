@@ -112,7 +112,7 @@ async def generate_research_report(
     return ResearchGenerationResponse(
         report_id=report["id"],
         status="pending",
-        estimated_seconds=60,
+        estimated_seconds=90,
         poll_url=f"/api/v1/research/reports/{report['id']}/status",
     )
 
@@ -166,6 +166,40 @@ async def get_research_report(
     row["stock_id"] = row["ticker"]
 
     return row
+
+
+# ── Ticker Report Data for completed research ────────────────────────────────
+
+
+@router.get("/reports/{report_id}/ticker-report")
+async def get_research_ticker_report(
+    report_id: str,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Get the full TickerReportResponse data from a completed research report.
+    This endpoint returns the same JSON shape as GET /stocks/{ticker}/report,
+    enabling the iOS app to display it in TickerReportView.
+    """
+    result = supabase.table("research_reports").select(
+        "id, status, ticker_report_data"
+    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    if result.data["status"] != "completed":
+        raise HTTPException(status_code=409, detail="Report is not yet completed")
+
+    ticker_report = result.data.get("ticker_report_data")
+    if not ticker_report:
+        raise HTTPException(
+            status_code=404,
+            detail="Full ticker report data not available for this report",
+        )
+
+    return ticker_report
 
 
 # ── List User Reports ────────────────────────────────────────────────────────
@@ -259,7 +293,7 @@ async def _run_research_task(
     report_id: str, ticker: str, persona_key: str, user_id: str
 ):
     """
-    Async background task: runs the full research pipeline.
+    Async background task: runs the full multi-agent research pipeline.
     If anything fails, marks the report as 'failed' with error_message.
     """
     try:

@@ -317,6 +317,9 @@ enum APIEndpoint: Sendable {
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
             return false
+        // Home feed uses optional auth on the backend
+        case .getHomeFeed:
+            return false
         // Personas are public
         case .getPersonas:
             return false

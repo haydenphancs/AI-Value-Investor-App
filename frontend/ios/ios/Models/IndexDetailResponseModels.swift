@@ -36,11 +36,11 @@ struct IndexDetailResponse: Decodable {
     let priceChangePercent: Double
     let marketStatus: MarketStatusDTO
     let chartData: [Double]
-    let keyStatisticsGroups: [KeyStatisticsGroupDTO]
-    let performancePeriods: [PerformancePeriodDTO]
+    let keyStatisticsGroups: [IndexKeyStatisticsGroupDTO]
+    let performancePeriods: [IndexPerformancePeriodDTO]
     let snapshotsData: IndexSnapshotsDataDTO
     let indexProfile: IndexProfileDTO
-    let benchmarkSummary: BenchmarkSummaryDTO?
+    let benchmarkSummary: IndexBenchmarkSummaryDTO?
     let newsArticles: [IndexNewsArticleDTO]
 
     enum CodingKeys: String, CodingKey {
@@ -82,13 +82,13 @@ struct KeyStatisticItemDTO: Decodable {
     }
 }
 
-struct KeyStatisticsGroupDTO: Decodable {
+struct IndexKeyStatisticsGroupDTO: Decodable {
     let statistics: [KeyStatisticItemDTO]
 }
 
 // MARK: - Performance
 
-struct PerformancePeriodDTO: Decodable {
+struct IndexPerformancePeriodDTO: Decodable {
     let label: String
     let changePercent: Double
     let vsMarketPercent: Double?
@@ -100,7 +100,7 @@ struct PerformancePeriodDTO: Decodable {
     }
 }
 
-struct BenchmarkSummaryDTO: Decodable {
+struct IndexBenchmarkSummaryDTO: Decodable {
     let avgAnnualReturn: Double
     let spBenchmark: Double
 

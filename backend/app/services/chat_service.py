@@ -1,21 +1,61 @@
 """
 Chat Service — RAG pipeline using Supabase pgvector + Gemini.
+
+Supports *Rich Media Chat*: when the user asks about a specific stock,
+Gemini may invoke the ``get_stock_chart_data`` function-calling tool.
+The service then fetches real-time quote + historical prices from FMP
+and returns a structured ``StockChartWidget`` alongside Gemini's text
+analysis so the SwiftUI frontend can render a native chart widget.
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
+
+import google.generativeai as genai
 
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
+from app.integrations.fmp import get_fmp_client
 from app.config import settings
+from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 
 logger = logging.getLogger(__name__)
+
+# ── Gemini Function-Calling tool declaration ────────────────────────
+
+_STOCK_CHART_TOOL = genai.protos.Tool(
+    function_declarations=[
+        genai.protos.FunctionDeclaration(
+            name="get_stock_chart_data",
+            description=(
+                "Fetch current stock quote and 30-day historical price data "
+                "for a given ticker symbol. Call this tool whenever the user "
+                "asks about a specific stock's price, performance, chart, or "
+                "whether they should buy/sell a stock."
+            ),
+            parameters=genai.protos.Schema(
+                type=genai.protos.Type.OBJECT,
+                properties={
+                    "ticker": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    ]
+)
 
 
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
         self.gemini = get_gemini_client()
+        self.fmp = get_fmp_client()
+
+    # ── Public entry-point ──────────────────────────────────────────
 
     async def generate_response(
         self,
@@ -25,31 +65,24 @@ class ChatService:
         stock_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Generate AI response with RAG context retrieval.
-        1. Generate embedding of user message
-        2. Search relevant chunks via Supabase RPC
-        3. Build context-enhanced prompt
-        4. Generate response with Gemini
-        5. Return content + citations
+        Generate AI response with RAG context retrieval and optional
+        rich-media stock chart widget via Gemini Function Calling.
         """
-        # Step 1: Get conversation history for context
+        # Step 1: Conversation history
         history = self._get_recent_messages(session_id, limit=10)
 
-        # Step 2: Retrieve RAG context
-        chunks = []
-        citations = []
+        # Step 2: RAG context
+        chunks: List[Dict] = []
+        citations: List[Dict] = []
         try:
             query_embedding = await self.gemini.generate_embedding(
                 user_message, model_name="models/text-embedding-004"
             )
-
-            # Search relevant chunks based on session type
             if stock_id:
                 chunks = self._search_filing_chunks(query_embedding, stock_id)
             else:
                 chunks = self._search_all_chunks(query_embedding)
 
-            # Build citations
             for i, chunk in enumerate(chunks):
                 citations.append({
                     "index": i + 1,
@@ -59,21 +92,109 @@ class ChatService:
         except Exception as e:
             logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
 
-        # Step 3: Build prompt
+        # Step 3: Build prompt (includes RAG context + history)
         system_instruction = self._build_system_instruction(session_type, stock_id)
         prompt = self._build_prompt(user_message, history, chunks)
 
-        # Step 4: Generate response
-        response = await self.gemini.generate_text(
-            prompt=prompt,
-            system_instruction=system_instruction,
-        )
+        # Step 4: Generate with function-calling tools
+        widget: Optional[Dict[str, Any]] = None
 
-        return {
+        async def _handle_stock_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Called when Gemini decides it needs stock data."""
+            ticker = args.get("ticker", "").upper()
+            return await self._fetch_stock_widget_data(ticker)
+
+        try:
+            response = await self.gemini.generate_with_tools(
+                prompt=prompt,
+                tools=[_STOCK_CHART_TOOL],
+                tool_handlers={"get_stock_chart_data": _handle_stock_tool},
+                system_instruction=system_instruction,
+            )
+
+            # If the tool was invoked, extract the widget payload
+            tool_results = response.get("tool_results", [])
+            if tool_results:
+                raw = tool_results[0]
+                if raw and raw.get("widget_type") == "stock_chart":
+                    widget = raw
+
+        except Exception as e:
+            logger.warning(
+                f"Function-calling generation failed, falling back to plain text: {e}"
+            )
+            # Graceful fallback — plain text without widget
+            response = await self.gemini.generate_text(
+                prompt=prompt,
+                system_instruction=system_instruction,
+            )
+
+        result: Dict[str, Any] = {
             "content": response["text"],
             "citations": citations if citations else None,
             "tokens_used": response.get("tokens_used"),
         }
+        if widget:
+            result["widget"] = widget
+
+        return result
+
+    # ── FMP data fetching for the stock widget ──────────────────────
+
+    async def _fetch_stock_widget_data(self, ticker: str) -> Dict[str, Any]:
+        """
+        Fetch real-time quote + 30-day historical prices from FMP and
+        return them as a dict matching ``StockChartWidget``.
+        """
+        try:
+            quote = await self.fmp.get_stock_price_quote(ticker)
+            if not quote:
+                return {"error": f"No quote data found for {ticker}"}
+
+            # Historical 30-day chart
+            to_date = datetime.utcnow().strftime("%Y-%m-%d")
+            from_date = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+            hist_raw = await self.fmp.get_historical_prices(
+                ticker, from_date=from_date, to_date=to_date
+            )
+
+            historical_data: List[Dict[str, Any]] = []
+            hist_list = hist_raw.get("historical", []) if isinstance(hist_raw, dict) else []
+            for day in sorted(hist_list, key=lambda d: d.get("date", "")):
+                historical_data.append({
+                    "date": day.get("date", ""),
+                    "open": day.get("open", 0),
+                    "high": day.get("high", 0),
+                    "low": day.get("low", 0),
+                    "close": day.get("close", 0),
+                    "volume": int(day.get("volume", 0)),
+                })
+
+            widget = StockChartWidget(
+                ticker=ticker,
+                company_name=quote.get("name", ticker),
+                current_price=quote.get("price", 0),
+                change=quote.get("change", 0),
+                change_percent=quote.get("changesPercentage", 0),
+                day_high=quote.get("dayHigh", 0),
+                day_low=quote.get("dayLow", 0),
+                volume=int(quote.get("volume", 0)),
+                avg_volume=int(quote.get("avgVolume", 0)),
+                market_cap=quote.get("marketCap"),
+                pe_ratio=quote.get("pe"),
+                year_high=quote.get("yearHigh"),
+                year_low=quote.get("yearLow"),
+                historical_data=[
+                    HistoricalDataPoint(**d) for d in historical_data
+                ],
+            )
+            return widget.model_dump()
+
+        except Exception as e:
+            logger.error(f"FMP stock widget fetch failed for {ticker}: {e}")
+            return {"error": str(e)}
+
+    # ── Helpers (unchanged) ─────────────────────────────────────────
 
     def _get_recent_messages(self, session_id: str, limit: int = 10) -> List[Dict]:
         try:
@@ -88,7 +209,6 @@ class ChatService:
             return []
 
     def _search_filing_chunks(self, embedding: List[float], ticker: str) -> List[Dict]:
-        """Search company filing chunks for a specific ticker."""
         try:
             result = self.supabase.rpc("search_filing_chunks", {
                 "query_embedding": embedding,
@@ -102,7 +222,6 @@ class ChatService:
             return []
 
     def _search_all_chunks(self, embedding: List[float]) -> List[Dict]:
-        """Search all chunk types (books, articles, filings)."""
         try:
             result = self.supabase.rpc("search_all_chunks", {
                 "query_embedding": embedding,
@@ -118,10 +237,16 @@ class ChatService:
         base = (
             "You are Caydex, an AI assistant specializing in value investing education. "
             "Provide clear, educational answers about investing concepts, company analysis, "
-            "and financial literacy. Always remind users this is educational, not financial advice."
+            "and financial literacy. Always remind users this is educational, not financial advice. "
+            "When you have access to real stock data from the get_stock_chart_data tool, "
+            "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
+            "analysis. Write your response in clean markdown."
         )
         if stock_id:
-            base += f"\nYou are currently helping analyze {stock_id}. Use the provided financial data and filings context."
+            base += (
+                f"\nYou are currently helping analyze {stock_id}. "
+                "Use the provided financial data and filings context."
+            )
         return base
 
     def _build_prompt(
@@ -129,18 +254,16 @@ class ChatService:
     ) -> str:
         parts = []
 
-        # Add RAG context
         if chunks:
             context_text = "\n\n---\n\n".join(
                 c.get("chunk_text", "") for c in chunks[:5]
             )
             parts.append(f"RELEVANT CONTEXT:\n{context_text}\n\n---\n")
 
-        # Add conversation history
         if history:
             conv = "\n".join(
                 f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:300]}"
-                for m in history[-6:]  # last 6 messages
+                for m in history[-6:]
             )
             parts.append(f"CONVERSATION HISTORY:\n{conv}\n\n---\n")
 

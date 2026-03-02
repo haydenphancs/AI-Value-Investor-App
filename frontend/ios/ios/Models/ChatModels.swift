@@ -139,11 +139,32 @@ enum ChatHistoryItemType: String, CaseIterable {
 // MARK: - Chat History Item
 struct ChatHistoryItem: Identifiable {
     let id = UUID()
+    let sessionId: String?  // Backend session UUID for API calls
     let type: ChatHistoryItemType
     let title: String
     let preview: String
     let timestamp: Date
     let isSaved: Bool
+
+    /// Convenience init without sessionId (for sample data)
+    init(type: ChatHistoryItemType, title: String, preview: String, timestamp: Date, isSaved: Bool) {
+        self.sessionId = nil
+        self.type = type
+        self.title = title
+        self.preview = preview
+        self.timestamp = timestamp
+        self.isSaved = isSaved
+    }
+
+    /// Full init with sessionId (for real data from backend)
+    init(sessionId: String, type: ChatHistoryItemType, title: String, preview: String, timestamp: Date, isSaved: Bool) {
+        self.sessionId = sessionId
+        self.type = type
+        self.title = title
+        self.preview = preview
+        self.timestamp = timestamp
+        self.isSaved = isSaved
+    }
 
     var timeAgo: String {
         let calendar = Calendar.current

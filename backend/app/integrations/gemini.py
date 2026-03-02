@@ -5,7 +5,8 @@ Requirements: Section 3.3, 4.3.1 - Google Gemini API for deep research
 """
 
 import google.generativeai as genai
-from typing import Optional, List, Dict, Any
+from google.generativeai.types import content_types
+from typing import Optional, List, Dict, Any, Callable
 import logging
 import asyncio
 from functools import wraps
@@ -342,6 +343,136 @@ Provide ONLY the bullet points, no additional commentary."""
             "bullets": bullets[:max_bullets],
             **response
         }
+
+    @async_retry(max_attempts=2, delay=2.0)
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: List[Any],
+        tool_handlers: Dict[str, Callable],
+        system_instruction: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a response using Gemini Function Calling.
+
+        Gemini may decide to call one of the declared tools.  When it does,
+        this method executes the matching handler, feeds the result back to
+        Gemini, and returns the final text + any structured data the handler
+        produced (stashed under the ``tool_results`` key).
+
+        Args:
+            prompt: User prompt.
+            tools: List of genai Tool objects (see genai.protos.Tool).
+            tool_handlers: ``{function_name: async_callable}`` map.  Each
+                callable receives the function-call args dict and must return
+                a dict that Gemini will see as the tool response.
+            system_instruction: Optional system instruction.
+            model_name: Optional model override.
+
+        Returns:
+            dict with keys: text, model, tokens_used, finish_reason,
+            tool_results (list of dicts returned by handlers, may be empty).
+        """
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name or self.model_name,
+                generation_config=self.generation_config,
+                system_instruction=system_instruction,
+                tools=tools,
+            )
+
+            response = await asyncio.to_thread(
+                model.generate_content, prompt
+            )
+
+            tool_results: List[Dict[str, Any]] = []
+
+            # Check if Gemini wants to call a function
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate and candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    fn_call = part.function_call
+                    if fn_call and fn_call.name:
+                        handler = tool_handlers.get(fn_call.name)
+                        if handler is None:
+                            logger.warning(
+                                f"Gemini called unknown tool: {fn_call.name}"
+                            )
+                            continue
+
+                        # Execute the handler with the args Gemini provided
+                        args = dict(fn_call.args) if fn_call.args else {}
+                        logger.info(
+                            f"Gemini invoked tool '{fn_call.name}' "
+                            f"with args: {args}"
+                        )
+                        handler_result = await handler(args)
+                        tool_results.append(handler_result)
+
+                        # Feed the tool result back to Gemini so it can
+                        # compose a final natural-language answer.
+                        import google.generativeai.protos as protos
+
+                        function_response = protos.Part(
+                            function_response=protos.FunctionResponse(
+                                name=fn_call.name,
+                                response={"result": handler_result},
+                            )
+                        )
+                        follow_up = await asyncio.to_thread(
+                            model.generate_content,
+                            [
+                                protos.Content(
+                                    role="user",
+                                    parts=[protos.Part(text=prompt)],
+                                ),
+                                protos.Content(
+                                    role="model",
+                                    parts=[part],
+                                ),
+                                protos.Content(
+                                    role="function",
+                                    parts=[function_response],
+                                ),
+                            ],
+                        )
+                        return {
+                            "text": follow_up.text,
+                            "model": self.model_name,
+                            "tokens_used": (
+                                follow_up.usage_metadata.total_token_count
+                                if hasattr(follow_up, "usage_metadata")
+                                else None
+                            ),
+                            "finish_reason": (
+                                follow_up.candidates[0].finish_reason.name
+                                if follow_up.candidates
+                                else None
+                            ),
+                            "tool_results": tool_results,
+                        }
+
+            # No function call — return normal text response
+            return {
+                "text": response.text,
+                "model": self.model_name,
+                "tokens_used": (
+                    response.usage_metadata.total_token_count
+                    if hasattr(response, "usage_metadata")
+                    else None
+                ),
+                "finish_reason": (
+                    candidate.finish_reason.name if candidate else None
+                ),
+                "tool_results": tool_results,
+            }
+
+        except Exception as e:
+            logger.error(
+                f"Gemini tool-calling generation failed: {e}", exc_info=True
+            )
+            raise
 
     async def chat_completion(
         self,

@@ -36,17 +36,26 @@ class ResearchViewModel: ObservableObject {
     }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
+    // Search results (as-you-type)
+    @Published var searchResults: [StockSearchResult] = []
+    @Published var isSearching: Bool = false
+    @Published var showSearchResults: Bool = false
+
     // Auth gate: set to true when user is signed in
     @Published var showSignInPrompt: Bool = false
 
     // MARK: - Dependencies
     private let apiClient: APIClient
+    private let stockRepository: StockRepository
     private let pollingManager: TaskPollingManager
     private var isAuthenticated: () -> Bool = { false }
+    private var searchTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
     init(prefilledTicker: String? = nil, apiClient: APIClient = .shared, isAuthenticated: @escaping () -> Bool = { false }) {
         self.apiClient = apiClient
+        self.stockRepository = StockRepository(apiClient: apiClient)
         self.pollingManager = TaskPollingManager(apiClient: apiClient)
         self.isAuthenticated = isAuthenticated
         if let ticker = prefilledTicker {
@@ -57,6 +66,9 @@ class ResearchViewModel: ObservableObject {
         personas = AnalysisPersona.allCases
         features = AnalysisFeature.allFeatures
         trendingAnalyses = TrendingAnalysis.mockTrending
+
+        // Set up debounced search as user types
+        setupSearchDebounce()
 
         // Fetch real data from backend
         Task { [weak self] in
@@ -121,6 +133,57 @@ class ResearchViewModel: ObservableObject {
         self.isAuthenticated = check
     }
 
+    // MARK: - Search
+
+    private func setupSearchDebounce() {
+        $searchText
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] query in
+                guard let self else { return }
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    self.searchResults = []
+                    self.showSearchResults = false
+                    self.searchTask?.cancel()
+                    return
+                }
+                self.performSearch(query: trimmed)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func performSearch(query: String) {
+        searchTask?.cancel()
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            self.isSearching = true
+            self.showSearchResults = true
+            do {
+                let results = try await self.stockRepository.searchStocks(query: query, limit: 8)
+                if !Task.isCancelled {
+                    self.searchResults = results
+                    self.isSearching = false
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self.searchResults = []
+                    self.isSearching = false
+                }
+            }
+        }
+    }
+
+    func selectSearchResult(_ result: StockSearchResult) {
+        searchText = result.ticker
+        searchResults = []
+        showSearchResults = false
+    }
+
+    func dismissSearchResults() {
+        showSearchResults = false
+    }
+
     // MARK: - Actions
     func selectPersona(_ persona: AnalysisPersona) {
         selectedPersona = persona
@@ -128,6 +191,8 @@ class ResearchViewModel: ObservableObject {
 
     func selectQuickTicker(_ ticker: QuickTicker) {
         searchText = ticker.symbol
+        searchResults = []
+        showSearchResults = false
     }
 
     func generateAnalysis() {

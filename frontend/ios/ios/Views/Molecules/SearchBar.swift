@@ -27,6 +27,16 @@ struct SearchBar: View {
                 .onSubmit {
                     onSubmit?()
                 }
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.md)

@@ -68,6 +68,36 @@ def _is_us_stock(item: Dict[str, Any]) -> bool:
     return (short or "").upper() in _US_EXCHANGES
 
 
+# Keywords in the company name that indicate non-company securities
+_NON_COMPANY_KEYWORDS = {
+    "etf", "fund", "index", "trust", "proshares", "ishares", "vanguard",
+    "spdr", "direxion", "wisdomtree", "vaneck", "invesco", "schwab",
+    "fidelity", "grayscale", "bitcoin", "ethereum", "crypto", "commodity",
+    "bond", "treasury", "municipal", "reit", "futures", "leveraged",
+    "inverse", "ultra", "3x", "2x", "-x", "short", "bear", "bull",
+}
+
+
+def _is_company(item: Dict[str, Any]) -> bool:
+    """Return True if the result looks like an operating company (not ETF/fund/index/crypto)."""
+    name = (item.get("name") or "").lower()
+    symbol = (item.get("symbol") or "").upper()
+
+    # Check name for non-company keywords
+    for kw in _NON_COMPANY_KEYWORDS:
+        if kw in name:
+            return False
+
+    # Common ETF symbol patterns: 3-5 letter symbols that are known ETF-like
+    # Skip symbols that end with common ETF suffixes
+    if symbol.endswith(("X", "Q")) and len(symbol) <= 4:
+        # Many mutual funds end in X, but so do real companies (e.g., SLX, NVAX)
+        # Only filter if name also looks fund-like
+        pass
+
+    return True
+
+
 @router.get("/search", response_model=List[StockSearchResult])
 async def search_stocks(
     q: str = Query(..., min_length=1),
@@ -86,6 +116,8 @@ async def search_stocks(
             if len(results) >= limit:
                 break
             if not _is_us_stock(item):
+                continue
+            if not _is_company(item):
                 continue
 
             short_name = _get_exchange_short_name(item)

@@ -65,6 +65,13 @@ enum APIEndpoint: Sendable {
     case addToWatchlist(stockId: String)
     case removeFromWatchlist(stockId: String)
 
+    // MARK: - Tracking
+    case getTrackingAssets
+    case getHoldings
+    case addHolding(ticker: String, companyName: String?, marketValue: Double, assetType: String?)
+    case updateHolding(ticker: String, marketValue: Double)
+    case deleteHolding(ticker: String)
+
     // MARK: - Research
     case generateResearch(stockId: String, persona: String)
     case getResearchStatus(reportId: String)
@@ -150,6 +157,18 @@ enum APIEndpoint: Sendable {
         case .addToWatchlist, .removeFromWatchlist:
             return "/api/v1/watchlist"
 
+        // Tracking
+        case .getTrackingAssets:
+            return "/api/v1/tracking/assets"
+        case .getHoldings:
+            return "/api/v1/tracking/holdings"
+        case .addHolding:
+            return "/api/v1/tracking/holdings"
+        case .updateHolding(let ticker, _):
+            return "/api/v1/tracking/holdings/\(ticker)"
+        case .deleteHolding(let ticker):
+            return "/api/v1/tracking/holdings/\(ticker)"
+
         // Research
         case .generateResearch:
             return "/api/v1/research/generate"
@@ -205,13 +224,16 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport:
+             .chatWithTickerReport, .addHolding:
             return .POST
 
         case .updateProfile, .updateChatSession:
             return .PATCH
 
-        case .removeFromWatchlist, .deleteReport, .deleteChatSession:
+        case .updateHolding:
+            return .PUT
+
+        case .removeFromWatchlist, .deleteReport, .deleteChatSession, .deleteHolding:
             return .DELETE
 
         default:
@@ -297,6 +319,12 @@ enum APIEndpoint: Sendable {
 
         case .chatWithTickerReport(let ticker, let message, let persona):
             return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
+
+        case .addHolding(let ticker, let companyName, let marketValue, let assetType):
+            return AddHoldingRequestBody(ticker: ticker, companyName: companyName, marketValue: marketValue, assetType: assetType)
+
+        case .updateHolding(_, let marketValue):
+            return UpdateHoldingRequestBody(marketValue: marketValue)
 
         default:
             return nil
@@ -402,4 +430,15 @@ nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {
     let ticker: String
     let message: String
     let persona: String
+}
+
+nonisolated struct AddHoldingRequestBody: Encodable, Sendable {
+    let ticker: String
+    let companyName: String?
+    let marketValue: Double
+    let assetType: String?
+}
+
+nonisolated struct UpdateHoldingRequestBody: Encodable, Sendable {
+    let marketValue: Double
 }

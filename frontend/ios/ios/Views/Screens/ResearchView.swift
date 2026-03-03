@@ -136,8 +136,12 @@ struct ResearchContentView: View {
                 TargetSelectionSection(
                     searchText: $viewModel.searchText,
                     quickTickers: viewModel.quickTickers,
+                    searchResults: viewModel.searchResults,
+                    isSearching: viewModel.isSearching,
+                    showSearchResults: viewModel.showSearchResults,
                     onTickerSelected: handleTickerSelected,
-                    onSearchSubmit: handleSearchSubmit
+                    onSearchSubmit: handleSearchSubmit,
+                    onResultSelected: handleSearchResultSelected
                 )
                 .padding(.top, AppSpacing.md)
 
@@ -226,7 +230,11 @@ struct ResearchContentView: View {
     }
 
     private func handleSearchSubmit() {
-        print("Search submitted: \(viewModel.searchText)")
+        viewModel.dismissSearchResults()
+    }
+
+    private func handleSearchResultSelected(_ result: StockSearchResult) {
+        viewModel.selectSearchResult(result)
     }
 
     private func handleViewAllPersonas() {

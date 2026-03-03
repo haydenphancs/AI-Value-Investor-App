@@ -171,13 +171,47 @@ struct SectorAllocation: Identifiable {
     }
 }
 
+// MARK: - Diversification Sub-Scores
+
+/// Breakdown of the three scoring buckets.
+struct DiversificationSubScores {
+    let concentrationScore: Int     // Bucket 1: out of 40
+    let sectorScore: Int            // Bucket 2: out of 40
+    let diversityScore: Int         // Bucket 3: out of 20
+
+    let concentrationMax: Int = 40
+    let sectorMax: Int = 40
+    let diversityMax: Int = 20
+
+    var concentrationLabel: String { "Asset Concentration" }
+    var sectorLabel: String { "Sector Balance" }
+    var diversityLabel: String { "Asset & Geo Diversity" }
+}
+
 // MARK: - Diversification Score
 struct DiversificationScore: Identifiable {
-    let id = UUID()
+    let id: UUID
     let score: Int
     let message: String
     let sectorCount: Int
     let allocations: [SectorAllocation]
+    let subScores: DiversificationSubScores?
+
+    init(
+        id: UUID = UUID(),
+        score: Int,
+        message: String,
+        sectorCount: Int,
+        allocations: [SectorAllocation],
+        subScores: DiversificationSubScores? = nil
+    ) {
+        self.id = id
+        self.score = score
+        self.message = message
+        self.sectorCount = sectorCount
+        self.allocations = allocations
+        self.subScores = subScores
+    }
 
     var formattedScore: String {
         "\(score)%"
@@ -185,6 +219,98 @@ struct DiversificationScore: Identifiable {
 
     var progressValue: Double {
         Double(score) / 100.0
+    }
+}
+
+// MARK: - API Response DTOs (Codable)
+
+/// Top-level response from GET /api/v1/tracking/assets
+struct TrackingFeedResponse: Codable {
+    let assets: [TrackedAssetDTO]
+    let alerts: [EarningsAlertDTO]
+}
+
+/// A watchlist item enriched with real-time price data from the backend.
+struct TrackedAssetDTO: Codable, Identifiable {
+    var id: String { ticker }
+    let ticker: String
+    let companyName: String
+    let price: Double
+    let changePercent: Double
+    let sparklineData: [Double]
+    let logoUrl: String?
+    let sector: String?
+    let country: String?
+    let marketCap: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker
+        case companyName = "company_name"
+        case price
+        case changePercent = "change_percent"
+        case sparklineData = "sparkline_data"
+        case logoUrl = "logo_url"
+        case sector, country
+        case marketCap = "market_cap"
+    }
+
+    /// Map to the view-layer model used by AssetsListSection
+    func toTrackedAsset() -> TrackedAsset {
+        TrackedAsset(
+            ticker: ticker,
+            companyName: companyName,
+            price: price,
+            changePercent: changePercent,
+            sparklineData: sparklineData
+        )
+    }
+}
+
+/// An alert or event from the backend (earnings, market, smart money).
+struct EarningsAlertDTO: Codable, Identifiable {
+    var id: String { "\(type)_\(ticker ?? "")_\(day ?? 0)" }
+    let type: String
+    let ticker: String?
+    let companyName: String?
+    let title: String
+    let description: String
+    let day: Int?
+    let month: String?
+    let reportTime: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, ticker
+        case companyName = "company_name"
+        case title, description, day, month
+        case reportTime = "report_time"
+    }
+
+    /// Map to the AppAlert enum used by AlertsEventsSection
+    func toAppAlert() -> AppAlert {
+        switch type {
+        case "earnings":
+            return .earnings(AppAlert.EarningsData(
+                ticker: ticker ?? "",
+                companyName: companyName ?? "",
+                reportTime: reportTime == "after_close" ? .afterClose : .beforeOpen,
+                consensus: description,
+                day: day ?? 0,
+                month: month ?? ""
+            ))
+        case "smart_money":
+            return .smartMoney(AppAlert.SmartMoneyData(
+                ticker: ticker ?? "",
+                fundCount: 0,
+                positionSize: ""
+            ))
+        default:
+            return .market(AppAlert.MarketData(
+                eventName: title,
+                description: description,
+                day: day ?? 0,
+                month: month ?? ""
+            ))
+        }
     }
 }
 
@@ -388,17 +514,20 @@ extension AppAlert {
 }
 
 extension DiversificationScore {
-    static let sampleData: DiversificationScore = DiversificationScore(
-        score: 78,
-        message: "Your portfolio is well-diversified across 5 sectors",
-        sectorCount: 5,
-        allocations: [
-            SectorAllocation(name: "Tech", percentage: 45),
-            SectorAllocation(name: "Consumer", percentage: 22),
-            SectorAllocation(name: "Finance", percentage: 18),
-            SectorAllocation(name: "Energy", percentage: 15)
-        ]
-    )
+    static let sampleData: DiversificationScore = {
+        if let calculated = DiversificationCalculator.calculate(
+            holdings: PortfolioHolding.sampleData
+        ) {
+            return calculated
+        }
+        // Fallback (should never reach here with valid sample data)
+        return DiversificationScore(
+            score: 0,
+            message: "Add assets to see your diversification score",
+            sectorCount: 0,
+            allocations: []
+        )
+    }()
 }
 
 extension WhaleActivity {

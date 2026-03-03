@@ -13,6 +13,7 @@ import Combine
 class TrackingViewModel: ObservableObject {
     // MARK: - Private
     private var cancellables = Set<AnyCancellable>()
+    private let apiClient: APIClient
 
     // MARK: - Published Properties
 
@@ -21,17 +22,18 @@ class TrackingViewModel: ObservableObject {
     @Published var searchText: String = ""
 
     // Assets Tab
-    @Published var trackedAssets: [TrackedAsset] = TrackedAsset.sampleData
+    @Published var trackedAssets: [TrackedAsset] = []
     @Published var sortOption: AssetSortOption = .name
     @Published var sortAscending: Bool = true
 
     // Alerts & Events
-    @Published var alerts: [AppAlert] = AppAlert.sampleData
+    @Published var alerts: [AppAlert] = []
 
     // Portfolio Insights
-    @Published var diversificationScore: DiversificationScore? = DiversificationScore.sampleData
+    @Published var portfolioHoldings: [PortfolioHolding] = []
+    @Published var diversificationScore: DiversificationScore?
 
-    // Whales Tab
+    // Whales Tab (unchanged — stays as sample data)
     @Published var selectedWhaleCategory: WhaleCategory = .investors
     @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
     @Published var trackedWhales: [TrendingWhale] = TrendingWhale.trackedWhalesData
@@ -51,7 +53,7 @@ class TrackingViewModel: ObservableObject {
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
-    
+
     // Navigation States
     @Published var selectedTickerSymbol: String?
     @Published var selectedWhaleId: String?
@@ -60,13 +62,32 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Init
 
-    init() {
+    init(apiClient: APIClient = .shared) {
+        self.apiClient = apiClient
+
+        // Recalculate diversification score whenever holdings change
+        $portfolioHoldings
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] holdings in
+                self?.recalculateDiversification(holdings)
+            }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: .whaleFollowStateChanged)
             .receive(on: RunLoop.main)
             .sink { [weak self] notification in
                 self?.handleFollowStateChange(notification)
             }
             .store(in: &cancellables)
+
+        // Load real data on init
+        Task { [weak self] in
+            await self?.loadData()
+        }
+    }
+
+    private func recalculateDiversification(_ holdings: [PortfolioHolding]) {
+        diversificationScore = DiversificationCalculator.calculate(holdings: holdings)
     }
 
     // MARK: - Computed Properties
@@ -104,25 +125,64 @@ class TrackingViewModel: ObservableObject {
         whaleActivities
     }
 
-    // MARK: - Actions
-
-    func refresh() async {
-        isRefreshing = true
-        // Simulate network delay
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
-
-        // In a real app, fetch data from API here
-        // For now, we use sample data
-
-        isRefreshing = false
-    }
+    // MARK: - Data Loading (Real API)
 
     func loadData() async {
         isLoading = true
-        // Simulate initial load
-        try? await Task.sleep(nanoseconds: 800_000_000)
-        isLoading = false
+        defer { isLoading = false }
+
+        // Load assets feed and holdings in parallel
+        async let feedTask: () = loadTrackingFeed()
+        async let holdingsTask: () = loadHoldings()
+
+        _ = await (feedTask, holdingsTask)
     }
+
+    private func loadTrackingFeed() async {
+        do {
+            let feed = try await apiClient.request(
+                endpoint: .getTrackingAssets,
+                responseType: TrackingFeedResponse.self
+            )
+            self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
+            self.alerts = feed.alerts.map { $0.toAppAlert() }
+            print("[TrackingVM] ✅ Loaded \(feed.assets.count) assets, \(feed.alerts.count) alerts from API")
+        } catch {
+            print("[TrackingVM] ❌ Tracking feed failed: \(error)")
+            // Fallback to sample data on first load if empty
+            if trackedAssets.isEmpty {
+                trackedAssets = TrackedAsset.sampleData
+                alerts = AppAlert.sampleData
+                print("[TrackingVM] ⚠️ Using sample data as fallback")
+            }
+        }
+    }
+
+    private func loadHoldings() async {
+        do {
+            let holdings = try await apiClient.request(
+                endpoint: .getHoldings,
+                responseType: [PortfolioHolding].self
+            )
+            self.portfolioHoldings = holdings
+            print("[TrackingVM] ✅ Loaded \(holdings.count) portfolio holdings from API")
+        } catch {
+            print("[TrackingVM] ❌ Holdings load failed: \(error)")
+            // Fallback to sample data
+            if portfolioHoldings.isEmpty {
+                portfolioHoldings = PortfolioHolding.sampleData
+                print("[TrackingVM] ⚠️ Using sample holdings as fallback")
+            }
+        }
+    }
+
+    func refresh() async {
+        isRefreshing = true
+        await loadData()
+        isRefreshing = false
+    }
+
+    // MARK: - Asset Actions
 
     func addNewAsset() {
         showAddAssetSheet = true
@@ -142,12 +202,37 @@ class TrackingViewModel: ObservableObject {
     }
 
     func removeAsset(_ asset: TrackedAsset) {
+        // Optimistic UI removal
         trackedAssets.removeAll { $0.id == asset.id }
+
+        // Fire-and-forget backend call
+        Task {
+            do {
+                try await apiClient.request(
+                    endpoint: .removeFromWatchlist(stockId: asset.ticker)
+                )
+                print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist")
+            } catch {
+                print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from watchlist: \(error)")
+                // Could re-add on failure, but for now just log
+            }
+        }
     }
+
+    // MARK: - Navigation
+
+    func viewAssetDetail(_ asset: TrackedAsset) {
+        selectedTickerSymbol = asset.ticker
+    }
+
+    func viewAlertDetail(_ alert: AppAlert) {
+        selectedAlert = alert
+    }
+
+    // MARK: - Whale Actions (unchanged)
 
     func selectWhaleCategory(_ category: WhaleCategory) {
         selectedWhaleCategory = category
-        // Reload whale activities based on category
     }
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
@@ -175,12 +260,10 @@ class TrackingViewModel: ObservableObject {
         }
 
         if newFollowing {
-            // Add to tracked whales if not already there
             if !trackedWhales.contains(where: { $0.name == whale.name }) {
                 trackedWhales.append(updatedWhale)
             }
         } else {
-            // Remove from tracked whales
             trackedWhales.removeAll { $0.name == whale.name }
         }
     }
@@ -194,7 +277,6 @@ class TrackingViewModel: ObservableObject {
         let whaleId = userInfo["whaleId"] as? String ?? ""
         let whaleName = userInfo["whaleName"] as? String ?? ""
 
-        // Match whale by ID (slug) first, then fall back to name
         func nameToId(_ name: String) -> String {
             name.lowercased().replacingOccurrences(of: " ", with: "-")
         }
@@ -202,7 +284,6 @@ class TrackingViewModel: ObservableObject {
             nameToId(whale.name) == whaleId || whale.name == whaleName
         }
 
-        // Helper to create an updated whale with new follow state
         func makeUpdated(_ whale: TrendingWhale, following: Bool) -> TrendingWhale {
             TrendingWhale(
                 name: whale.name,
@@ -216,7 +297,6 @@ class TrackingViewModel: ObservableObject {
             )
         }
 
-        // Update isFollowing in-place across all discovery lists
         if let index = popularWhales.firstIndex(where: { matches($0) }) {
             popularWhales[index] = makeUpdated(popularWhales[index], following: isFollowing)
         }
@@ -228,16 +308,13 @@ class TrackingViewModel: ObservableObject {
         }
 
         if isFollowing {
-            // Already tracked — nothing to do
             guard !trackedWhales.contains(where: { matches($0) }) else { return }
 
-            // Find whale data from any list to copy into tracked
             if let whale = allPopularWhales.first(where: { matches($0) }) {
                 trackedWhales.append(makeUpdated(whale, following: true))
             } else if let whale = heroWhales.first(where: { matches($0) }) {
                 trackedWhales.append(makeUpdated(whale, following: true))
             } else {
-                // Whale not in any list — create from notification data
                 let title = userInfo["whaleTitle"] as? String ?? ""
                 let newWhale = TrendingWhale(
                     name: whaleName,
@@ -250,7 +327,6 @@ class TrackingViewModel: ObservableObject {
                 trackedWhales.append(newWhale)
             }
         } else {
-            // Unfollowing — remove from tracked
             trackedWhales.removeAll { matches($0) }
         }
     }
@@ -263,16 +339,7 @@ class TrackingViewModel: ObservableObject {
         showAllTrades = true
     }
 
-    func viewAssetDetail(_ asset: TrackedAsset) {
-        selectedTickerSymbol = asset.ticker
-    }
-
-    func viewAlertDetail(_ alert: AppAlert) {
-        selectedAlert = alert
-    }
-
     func viewWhaleDetail(_ activity: WhaleActivity) {
-        // Convert entity name to whale ID format
         selectedWhaleId = activity.entityName.lowercased().replacingOccurrences(of: " ", with: "-")
     }
 
@@ -281,10 +348,6 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewTradeGroupDetail(_ activity: WhaleTradeGroupActivity) {
-        // Create a WhaleTradeGroup from the activity
-        // In a real app, you'd fetch the full trade group data from your API
-        // For now, we'll create sample data based on the activity
-        
         let tradeGroup = WhaleTradeGroup(
             id: UUID().uuidString,
             date: activity.date,
@@ -295,14 +358,13 @@ class TrackingViewModel: ObservableObject {
             insights: generateInsights(for: activity),
             trades: generateSampleTrades(for: activity)
         )
-        
+
         selectedTradeGroup = TradeGroupNavigation(tradeGroup: tradeGroup, whaleName: activity.entityName)
     }
-    
-    // Helper to parse amount string like "$4.34B" to Double
+
     private func parseAmount(_ amountString: String) -> Double {
         let cleaned = amountString.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "")
-        
+
         if let value = Double(cleaned.dropLast()) {
             let suffix = cleaned.last
             switch suffix {
@@ -314,30 +376,27 @@ class TrackingViewModel: ObservableObject {
         }
         return 0
     }
-    
-    // Generate sample insights
+
     private func generateInsights(for activity: WhaleTradeGroupActivity) -> [String] {
         var insights: [String] = []
-        
+
         if activity.tradeCount > 5 {
             insights.append("High trading activity detected")
         }
-        
+
         if activity.action == .bought {
             insights.append("Bullish positioning in this sector")
         } else {
             insights.append("Portfolio rebalancing activity")
         }
-        
+
         return insights
     }
-    
-    // Generate sample trades
+
     private func generateSampleTrades(for activity: WhaleTradeGroupActivity) -> [WhaleTrade] {
-        // Generate sample trades based on the activity
         let tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"]
         let companies = ["Apple Inc.", "Microsoft", "Alphabet Inc.", "Amazon", "Tesla", "NVIDIA"]
-        
+
         return (0..<min(activity.tradeCount, 6)).map { index in
             let tradeType: WhaleTradeType = {
                 let random = Int.random(in: 0...3)
@@ -348,10 +407,10 @@ class TrackingViewModel: ObservableObject {
                 default: return .closed
                 }
             }()
-            
+
             let previousAllocation = Double.random(in: 0...15)
             let newAllocation: Double
-            
+
             switch tradeType {
             case .new:
                 newAllocation = Double.random(in: 1...10)
@@ -362,7 +421,7 @@ class TrackingViewModel: ObservableObject {
             case .closed:
                 newAllocation = 0
             }
-            
+
             return WhaleTrade(
                 id: UUID().uuidString,
                 ticker: tickers[index % tickers.count],

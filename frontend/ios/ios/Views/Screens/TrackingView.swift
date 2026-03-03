@@ -71,9 +71,14 @@ struct TrackingContentView: View {
                 }
             }
             .sheet(isPresented: $viewModel.showAddAssetSheet) {
-                AddAssetSheet(onDismiss: {
-                    viewModel.showAddAssetSheet = false
-                })
+                AddAssetSheet(
+                    onAssetAdded: { _ in
+                        Task { await viewModel.refresh() }
+                    },
+                    onDismiss: {
+                        viewModel.showAddAssetSheet = false
+                    }
+                )
             }
             .sheet(isPresented: $viewModel.showSortSheet) {
                 SortOptionsSheet(
@@ -166,9 +171,14 @@ struct TrackingContentViewWithBinding: View {
                 }
             }
             .sheet(isPresented: $viewModel.showAddAssetSheet) {
-                AddAssetSheet(onDismiss: {
-                    viewModel.showAddAssetSheet = false
-                })
+                AddAssetSheet(
+                    onAssetAdded: { _ in
+                        Task { await viewModel.refresh() }
+                    },
+                    onDismiss: {
+                        viewModel.showAddAssetSheet = false
+                    }
+                )
             }
             .sheet(isPresented: $viewModel.showSortSheet) {
                 SortOptionsSheet(
@@ -812,7 +822,16 @@ struct WhaleCard: View {
 // MARK: - Add Asset Sheet
 struct AddAssetSheet: View {
     @State private var searchText = ""
+    @State private var searchResults: [StockSearchResult] = []
+    @State private var isSearching = false
+    @State private var isAdding = false
+    @State private var addError: String?
+    @State private var searchTask: Task<Void, Never>?
+
+    var onAssetAdded: ((String) -> Void)?
     var onDismiss: (() -> Void)?
+
+    private let stockRepository = StockRepository()
 
     var body: some View {
         NavigationView {
@@ -827,8 +846,15 @@ struct AddAssetSheet: View {
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
-                    // Search Results (placeholder)
-                    if searchText.isEmpty {
+                    if isAdding {
+                        VStack(spacing: AppSpacing.md) {
+                            ProgressView()
+                            Text("Adding to watchlist...")
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if searchText.isEmpty {
                         VStack(spacing: AppSpacing.md) {
                             Image(systemName: "magnifyingglass")
                                 .font(AppTypography.iconHero)
@@ -840,11 +866,71 @@ struct AddAssetSheet: View {
                                 .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        // Results would go here
-                        Text("Searching for \"\(searchText)\"...")
-                            .foregroundColor(AppColors.textSecondary)
+                    } else if isSearching {
+                        ProgressView()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if searchResults.isEmpty {
+                        VStack(spacing: AppSpacing.md) {
+                            Image(systemName: "magnifyingglass")
+                                .font(AppTypography.iconLarge)
+                                .foregroundColor(AppColors.textMuted)
+
+                            Text("No results found for \"\(searchText)\"")
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: AppSpacing.sm) {
+                                ForEach(searchResults) { result in
+                                    Button {
+                                        addAsset(result)
+                                    } label: {
+                                        HStack(spacing: AppSpacing.md) {
+                                            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                                                Text(result.ticker)
+                                                    .font(AppTypography.bodyEmphasis)
+                                                    .foregroundColor(AppColors.textPrimary)
+
+                                                Text(result.companyName)
+                                                    .font(AppTypography.caption)
+                                                    .foregroundColor(AppColors.textSecondary)
+                                                    .lineLimit(1)
+                                            }
+
+                                            Spacer()
+
+                                            if let exchange = result.exchange {
+                                                Text(exchange)
+                                                    .font(AppTypography.captionSmall)
+                                                    .foregroundColor(AppColors.textMuted)
+                                                    .padding(.horizontal, AppSpacing.sm)
+                                                    .padding(.vertical, AppSpacing.xxs)
+                                                    .background(AppColors.cardBackgroundLight)
+                                                    .cornerRadius(AppCornerRadius.small)
+                                            }
+
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(AppTypography.iconLarge)
+                                                .foregroundColor(AppColors.primaryBlue)
+                                        }
+                                        .padding(AppSpacing.md)
+                                        .background(AppColors.cardBackground)
+                                        .cornerRadius(AppCornerRadius.medium)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, AppSpacing.lg)
+                        }
+                    }
+
+                    if let error = addError {
+                        Text(error)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.bearish)
+                            .padding(.horizontal, AppSpacing.lg)
                     }
 
                     Spacer()
@@ -862,6 +948,54 @@ struct AddAssetSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .onChange(of: searchText) { _, newValue in
+            debounceSearch(newValue)
+        }
+    }
+
+    private func debounceSearch(_ query: String) {
+        searchTask?.cancel()
+        addError = nil
+
+        guard !query.isEmpty else {
+            searchResults = []
+            return
+        }
+
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
+            guard !Task.isCancelled else { return }
+
+            isSearching = true
+            do {
+                searchResults = try await stockRepository.searchStocks(query: query, limit: 10)
+                print("[AddAsset] ✅ Search returned \(searchResults.count) results for '\(query)'")
+            } catch {
+                print("[AddAsset] ❌ Search failed: \(error)")
+                searchResults = []
+            }
+            isSearching = false
+        }
+    }
+
+    private func addAsset(_ result: StockSearchResult) {
+        isAdding = true
+        addError = nil
+
+        Task { @MainActor in
+            do {
+                try await APIClient.shared.request(
+                    endpoint: .addToWatchlist(stockId: result.ticker)
+                )
+                print("[AddAsset] ✅ Added \(result.ticker) to watchlist")
+                onAssetAdded?(result.ticker)
+                onDismiss?()
+            } catch {
+                print("[AddAsset] ❌ Failed to add \(result.ticker): \(error)")
+                addError = "Failed to add \(result.ticker). It may already be in your watchlist."
+                isAdding = false
+            }
+        }
     }
 }
 

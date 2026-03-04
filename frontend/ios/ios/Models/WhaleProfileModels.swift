@@ -92,6 +92,24 @@ enum WhaleRiskProfile: String, Codable {
             return "bolt.fill"
         }
     }
+
+    /// Maps backend risk_profile label strings to the enum
+    static func fromBackend(_ value: String) -> WhaleRiskProfile {
+        // Try raw value init first
+        if let profile = WhaleRiskProfile(rawValue: value) {
+            return profile
+        }
+        // Map known backend labels
+        switch value.lowercased() {
+        case "conservative": return .conservative
+        case "moderate": return .moderate
+        case "aggressive": return .aggressive
+        case "very_aggressive", "high risk": return .highRisk
+        case "growth focused", "growth_focused": return .growthFocused
+        case "safe, long-term value": return .safeLongTermValue
+        default: return .moderate
+        }
+    }
 }
 
 // MARK: - Whale Sector Allocation

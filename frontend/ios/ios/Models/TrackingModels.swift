@@ -320,6 +320,27 @@ enum WhaleCategory: String, CaseIterable {
     case institutions = "Institutions"
     case politicians = "Politicians"
     case cryptoWhales = "Crypto"
+
+    /// Maps lowercase backend category strings to the enum
+    static func fromBackend(_ value: String) -> WhaleCategory {
+        switch value.lowercased() {
+        case "investors": return .investors
+        case "institutions": return .institutions
+        case "politicians": return .politicians
+        case "crypto": return .cryptoWhales
+        default: return .investors
+        }
+    }
+
+    /// Returns lowercase category string for API queries
+    var backendValue: String {
+        switch self {
+        case .investors: return "investors"
+        case .institutions: return "institutions"
+        case .politicians: return "politicians"
+        case .cryptoWhales: return "crypto"
+        }
+    }
 }
 
 // MARK: - Whale Action
@@ -355,7 +376,7 @@ struct WhaleActivity: Identifiable {
 
 // MARK: - Trending Whale
 struct TrendingWhale: Identifiable {
-    let id = UUID()
+    let id: String
     let name: String
     let category: WhaleCategory
     let avatarName: String
@@ -365,7 +386,8 @@ struct TrendingWhale: Identifiable {
     let description: String
     let recentTradeCount: Int
 
-    init(name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0) {
+    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0) {
+        self.id = id
         self.name = name
         self.category = category
         self.avatarName = avatarName
@@ -393,7 +415,7 @@ struct TrendingWhale: Identifiable {
 
 // MARK: - Whale Trade Group Activity (for Recent Trades timeline)
 struct WhaleTradeGroupActivity: Identifiable {
-    let id = UUID()
+    let id: String
     let entityName: String
     let entityAvatarName: String
     let action: WhaleAction
@@ -401,6 +423,17 @@ struct WhaleTradeGroupActivity: Identifiable {
     let totalAmount: String
     let summary: String?
     let date: Date
+
+    init(id: String = UUID().uuidString, entityName: String, entityAvatarName: String, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
+        self.id = id
+        self.entityName = entityName
+        self.entityAvatarName = entityAvatarName
+        self.action = action
+        self.tradeCount = tradeCount
+        self.totalAmount = totalAmount
+        self.summary = summary
+        self.date = date
+    }
 
     var formattedDate: String {
         let calendar = Calendar.current

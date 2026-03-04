@@ -95,6 +95,15 @@ enum APIEndpoint: Sendable {
     // MARK: - Ticker Report Chat
     case chatWithTickerReport(ticker: String, message: String, persona: String)
 
+    // MARK: - Whales
+    case getWhaleList(category: String?)
+    case getWhaleActivity
+    case getWhaleProfile(whaleId: String)
+    case getWhaleTradeGroups(whaleId: String)
+    case getWhaleTradeGroupDetail(whaleId: String, groupId: String)
+    case followWhale(whaleId: String)
+    case unfollowWhale(whaleId: String)
+
     // MARK: - Home
     case getHomeFeed
 
@@ -207,6 +216,22 @@ enum APIEndpoint: Sendable {
         case .chatWithTickerReport(let ticker, _, _):
             return "/api/v1/stocks/\(ticker)/report/chat"
 
+        // Whales
+        case .getWhaleList:
+            return "/api/v1/whales"
+        case .getWhaleActivity:
+            return "/api/v1/whales/activity"
+        case .getWhaleProfile(let whaleId):
+            return "/api/v1/whales/\(whaleId)/profile"
+        case .getWhaleTradeGroups(let whaleId):
+            return "/api/v1/whales/\(whaleId)/trade-groups"
+        case .getWhaleTradeGroupDetail(let whaleId, let groupId):
+            return "/api/v1/whales/\(whaleId)/trade-groups/\(groupId)"
+        case .followWhale(let whaleId):
+            return "/api/v1/whales/\(whaleId)/follow"
+        case .unfollowWhale(let whaleId):
+            return "/api/v1/whales/\(whaleId)/follow"
+
         // Home
         case .getHomeFeed:
             return "/api/v1/home/feed"
@@ -224,7 +249,8 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport, .addHolding:
+             .chatWithTickerReport, .addHolding,
+             .followWhale:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -233,7 +259,8 @@ enum APIEndpoint: Sendable {
         case .updateHolding:
             return .PUT
 
-        case .removeFromWatchlist, .deleteReport, .deleteChatSession, .deleteHolding:
+        case .removeFromWatchlist, .deleteReport, .deleteChatSession, .deleteHolding,
+             .unfollowWhale:
             return .DELETE
 
         default:
@@ -274,6 +301,12 @@ enum APIEndpoint: Sendable {
 
         case .listChatSessions(let limit, let offset):
             return ["limit": String(limit), "offset": String(offset)]
+
+        case .getWhaleList(let category):
+            if let category = category {
+                return ["category": category]
+            }
+            return nil
 
         default:
             return nil
@@ -345,6 +378,9 @@ enum APIEndpoint: Sendable {
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
             return false
+        // Whale list/profile/trade-groups use optional auth (token sent if available)
+        case .getWhaleList, .getWhaleProfile, .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
+            return false
         // Home feed uses optional auth on the backend
         case .getHomeFeed:
             return false
@@ -367,6 +403,8 @@ enum APIEndpoint: Sendable {
             return 60 // 1 minute for chat
         case .getCryptoDetail, .getIndexDetail, .getETFDetail:
             return 60 // 1 minute for AI snapshot generation
+        case .getWhaleProfile:
+            return 60 // 1 minute for whale profile (may fetch from FMP)
         default:
             return 30 // 30 seconds default
         }

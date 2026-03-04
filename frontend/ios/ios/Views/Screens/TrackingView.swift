@@ -314,6 +314,9 @@ struct WhalesTabContent: View {
                     .frame(height: 100)
             }
         }
+        .onAppear {
+            viewModel.retryWhaleListIfNeeded()
+        }
         .refreshable {
             await viewModel.refresh()
         }

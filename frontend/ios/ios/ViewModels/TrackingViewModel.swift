@@ -35,7 +35,7 @@ class TrackingViewModel: ObservableObject {
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
-    @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
+    @Published var whaleActivities: [WhaleActivity] = []
     @Published var trackedWhales: [TrendingWhale] = []
     @Published var popularWhales: [TrendingWhale] = []
     @Published var heroWhales: [TrendingWhale] = []
@@ -185,38 +185,40 @@ class TrackingViewModel: ObservableObject {
         _ = await (listTask, activityTask)
     }
 
-    private func loadWhaleList() async {
-        do {
-            let dtos = try await apiClient.request(
-                endpoint: .getWhaleList(category: nil),
-                responseType: [TrendingWhaleDTO].self
-            )
-            let allWhales = dtos.map { $0.toTrendingWhale() }
+    private func loadWhaleList(retryCount: Int = 3) async {
+        for attempt in 1...retryCount {
+            do {
+                let dtos = try await apiClient.request(
+                    endpoint: .getWhaleList(category: nil),
+                    responseType: [TrendingWhaleDTO].self
+                )
+                let allWhales = dtos.map { $0.toTrendingWhale() }
 
-            // Sync follow state from API
-            WhaleService.shared.syncFromAPIResponse(allWhales)
+                // Sync follow state from API
+                WhaleService.shared.syncFromAPIResponse(allWhales)
 
-            // Split into followed vs not-followed
-            self.trackedWhales = allWhales.filter { $0.isFollowing }
-            self.popularWhales = Array(allWhales.filter { !$0.isFollowing }.prefix(5))
-            self.allPopularWhales = allWhales
+                // Split into followed vs not-followed
+                self.trackedWhales = allWhales.filter { $0.isFollowing }
+                self.popularWhales = Array(allWhales.filter { !$0.isFollowing }.prefix(5))
+                self.allPopularWhales = allWhales
 
-            // Hero whales: first 4 with descriptions (or top 4 overall)
-            let whalesWithDesc = allWhales.filter { !$0.description.isEmpty }
-            self.heroWhales = Array((whalesWithDesc.isEmpty ? allWhales : whalesWithDesc).prefix(4))
+                // Hero whales: first 4 with descriptions (or top 4 overall)
+                let whalesWithDesc = allWhales.filter { !$0.description.isEmpty }
+                self.heroWhales = Array((whalesWithDesc.isEmpty ? allWhales : whalesWithDesc).prefix(4))
 
-            print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
-        } catch {
-            print("[TrackingVM] ❌ Whale list failed: \(error)")
-            // Fallback to sample data
-            if trackedWhales.isEmpty {
-                trackedWhales = TrendingWhale.trackedWhalesData
-                popularWhales = TrendingWhale.topPopularWhalesData
-                heroWhales = TrendingWhale.heroWhalesData
-                allPopularWhales = TrendingWhale.allPopularWhalesData
-                print("[TrackingVM] ⚠️ Using sample whale data as fallback")
+                print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
+                return // success — exit loop
+            } catch {
+                print("[TrackingVM] ❌ Whale list attempt \(attempt)/\(retryCount) failed: \(error)")
+                if attempt < retryCount {
+                    let delay = UInt64(attempt) * 2_000_000_000 // 2s, 4s backoff
+                    try? await Task.sleep(nanoseconds: delay)
+                }
             }
         }
+        // All retries exhausted — leave lists empty so UI shows empty state.
+        // Never fall back to sample data (sample UUIDs cause 404s on profile fetch).
+        print("[TrackingVM] ⚠️ Whale list unavailable after \(retryCount) attempts. Pull to refresh to retry.")
     }
 
     private func loadWhaleActivityFeed() async {
@@ -239,12 +241,7 @@ class TrackingViewModel: ObservableObject {
             print("[TrackingVM] ✅ Loaded \(activities.count) whale activity items from API")
         } catch {
             print("[TrackingVM] ❌ Whale activity failed: \(error)")
-            // Fallback to sample data
-            if groupedWhaleTrades.isEmpty {
-                groupedWhaleTrades = WhaleTradeGroupActivity.groupedSampleData
-                allWhaleTrades = WhaleTradeGroupActivity.allGroupedSampleData
-                print("[TrackingVM] ⚠️ Using sample whale activity as fallback")
-            }
+            // No sample fallback — leave empty so UI shows empty state
         }
     }
 
@@ -252,6 +249,14 @@ class TrackingViewModel: ObservableObject {
         isRefreshing = true
         await loadData()
         isRefreshing = false
+    }
+
+    /// Called when the Whales tab appears — retries loading if the list is still empty.
+    func retryWhaleListIfNeeded() {
+        guard allPopularWhales.isEmpty, !isLoading else { return }
+        Task { [weak self] in
+            await self?.loadWhaleList()
+        }
     }
 
     // MARK: - Asset Actions
@@ -415,7 +420,9 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewWhaleDetail(_ activity: WhaleActivity) {
-        selectedWhaleId = activity.entityName.lowercased().replacingOccurrences(of: " ", with: "-")
+        if let whale = allPopularWhales.first(where: { $0.name == activity.entityName }) {
+            selectedWhaleId = whale.id
+        }
     }
 
     func viewWhaleProfile(_ whale: TrendingWhale) {

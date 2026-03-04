@@ -208,27 +208,40 @@ class WhaleService:
         sb = get_supabase()
 
         # Fetch whale record
-        result = (
-            sb.table("whales").select("*").eq("id", whale_id).execute()
-        )
+        try:
+            result = (
+                sb.table("whales").select("*").eq("id", whale_id).execute()
+            )
+        except Exception as e:
+            logger.error("Failed to fetch whale record %s: %s", whale_id, e)
+            return None
         if not result.data:
             return None
         whale = result.data[0]
 
         # Route to correct source and process
-        snapshot = await self._get_or_process_latest(whale_id, whale)
+        snapshot: Optional[Dict[str, Any]] = None
+        try:
+            snapshot = await self._get_or_process_latest(whale_id, whale)
+        except Exception as e:
+            logger.error(
+                "All data sources failed for whale %s: %s", whale_id, e
+            )
 
         # Fetch follow state
         is_following = False
         if user_id:
-            follow_result = (
-                sb.table("whale_follows")
-                .select("id")
-                .eq("user_id", user_id)
-                .eq("whale_id", whale_id)
-                .execute()
-            )
-            is_following = bool(follow_result.data)
+            try:
+                follow_result = (
+                    sb.table("whale_follows")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .eq("whale_id", whale_id)
+                    .execute()
+                )
+                is_following = bool(follow_result.data)
+            except Exception as e:
+                logger.warning("Failed to fetch follow state: %s", e)
 
         # Build profile response
         risk_label = RISK_PROFILE_LABELS.get(
@@ -381,7 +394,8 @@ class WhaleService:
             is_following=is_following,
         )
 
-        _cache_set(_whale_profile_cache, cache_key, profile)
+        if snapshot:
+            _cache_set(_whale_profile_cache, cache_key, profile)
         return profile
 
     async def get_whale_activity_feed(
@@ -586,7 +600,15 @@ class WhaleService:
                 data_source,
                 e,
             )
-            return await self._read_from_supabase(whale_id)
+            try:
+                return await self._read_from_supabase(whale_id)
+            except Exception as fallback_err:
+                logger.error(
+                    "Supabase fallback also failed for whale %s: %s",
+                    whale_id,
+                    fallback_err,
+                )
+                return None
 
     # ── 13F Processing Path ──────────────────────────────────────────
 
@@ -776,16 +798,24 @@ class WhaleService:
         self, whale_id: str
     ) -> Optional[Dict[str, Any]]:
         """Read the most recent snapshot from Supabase, or return None."""
-        sb = get_supabase()
-        result = (
-            sb.table("whale_filing_snapshots")
-            .select("*")
-            .eq("whale_id", whale_id)
-            .order("processed_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
+        try:
+            sb = get_supabase()
+            result = (
+                sb.table("whale_filing_snapshots")
+                .select("*")
+                .eq("whale_id", whale_id)
+                .order("processed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Failed to read snapshot from Supabase for whale %s: %s",
+                whale_id,
+                e,
+            )
+            return None
 
     # ── Quarter Diffing (13F) ────────────────────────────────────────
 

@@ -68,9 +68,16 @@ async def get_whale_profile(
 ):
     """Get full whale profile with holdings, trades, and summaries."""
     service = WhaleService()
-    profile = await service.get_whale_profile(
-        whale_id=whale_id, user_id=user_id
-    )
+    try:
+        profile = await service.get_whale_profile(
+            whale_id=whale_id, user_id=user_id
+        )
+    except Exception as e:
+        logger.error("Unexpected error in whale profile %s: %s", whale_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail="Whale profile temporarily unavailable",
+        )
     if not profile:
         raise HTTPException(status_code=404, detail="Whale not found")
     return profile

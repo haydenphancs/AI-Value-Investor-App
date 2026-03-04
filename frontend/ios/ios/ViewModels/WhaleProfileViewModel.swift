@@ -155,38 +155,9 @@ class WhaleProfileViewModel: ObservableObject {
     }
 
     private func loadSampleProfile() {
-        var loadedProfile: WhaleProfile?
-        switch whaleId {
-        case "warren-buffett":
-            loadedProfile = WhaleProfile.warrenBuffett
-        case "cathie-wood":
-            loadedProfile = WhaleProfile.cathieWood
-        default:
-            loadedProfile = WhaleProfile.warrenBuffett
-        }
-
-        if var p = loadedProfile {
-            let isFollowing = whaleService.isFollowing(whaleId)
-            p = WhaleProfile(
-                id: p.id,
-                name: p.name,
-                title: p.title,
-                description: p.description,
-                avatarURL: p.avatarURL,
-                riskProfile: p.riskProfile,
-                portfolioValue: p.portfolioValue,
-                ytdReturn: p.ytdReturn,
-                sectorExposure: p.sectorExposure,
-                currentHoldings: p.currentHoldings,
-                recentTradeGroups: p.recentTradeGroups,
-                recentTrades: p.recentTrades,
-                behaviorSummary: p.behaviorSummary,
-                sentimentSummary: p.sentimentSummary,
-                isFollowing: isFollowing
-            )
-            profile = p
-            print("[WhaleProfileVM] ⚠️ Using sample data fallback for \(whaleId)")
-        }
+        // No sample fallback — real UUIDs won't match slug-based sample data.
+        // The error state is shown via errorMessage instead.
+        print("[WhaleProfileVM] ⚠️ No sample fallback available for whale \(whaleId)")
     }
 
     func refresh() async {

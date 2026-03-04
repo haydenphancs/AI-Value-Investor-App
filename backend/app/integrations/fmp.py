@@ -371,6 +371,109 @@ class FMPClient:
                 return []
             raise
 
+    # ── 13F Institutional ownership ─────────────────────────────────
+
+    async def get_institutional_filing_dates(
+        self, cik: str
+    ) -> List[Dict[str, Any]]:
+        """Get available 13F filing dates for a CIK."""
+        try:
+            return await self._make_request(
+                "institutional-ownership/dates",
+                params={"cik": cik},
+            )
+        except Exception as e:
+            logger.warning(f"13F filing dates failed for CIK {cik}: {e}")
+            return []
+
+    async def get_institutional_holdings(
+        self, cik: str, year: int, quarter: int
+    ) -> List[Dict[str, Any]]:
+        """Get raw 13F holdings for a specific CIK/quarter."""
+        try:
+            return await self._make_request(
+                "institutional-ownership/extract",
+                params={"cik": cik, "year": year, "quarter": quarter},
+            )
+        except Exception as e:
+            logger.warning(
+                f"13F holdings failed for CIK {cik} {year}Q{quarter}: {e}"
+            )
+            return []
+
+    async def get_institutional_industry_breakdown(
+        self, cik: str
+    ) -> List[Dict[str, Any]]:
+        """Get industry/sector allocation breakdown for a 13F holder."""
+        try:
+            return await self._make_request(
+                "institutional-ownership/holder-industry-breakdown",
+                params={"cik": cik},
+            )
+        except Exception as e:
+            logger.warning(f"Industry breakdown failed for CIK {cik}: {e}")
+            return []
+
+    async def get_institutional_performance(
+        self, cik: str
+    ) -> Dict[str, Any]:
+        """Get performance summary (ytdReturn, etc.) for a 13F holder."""
+        try:
+            data = await self._make_request(
+                "institutional-ownership/holder-performance-summary",
+                params={"cik": cik},
+            )
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"Performance summary failed for CIK {cik}: {e}")
+            return {}
+
+    # ── Congressional trading ────────────────────────────────────────
+
+    async def get_senate_trades_by_name(
+        self, name: str
+    ) -> List[Dict[str, Any]]:
+        """Get senate trades by politician name."""
+        try:
+            return await self._make_request(
+                "senate-trading-by-name",
+                params={"name": name},
+            )
+        except Exception as e:
+            logger.warning(f"Senate trades failed for '{name}': {e}")
+            return []
+
+    async def get_house_trades_by_name(
+        self, name: str
+    ) -> List[Dict[str, Any]]:
+        """Get house trades by politician name."""
+        try:
+            return await self._make_request(
+                "house-trading-by-name",
+                params={"name": name},
+            )
+        except Exception as e:
+            logger.warning(f"House trades failed for '{name}': {e}")
+            return []
+
+    async def get_company_profiles_batch(
+        self, tickers: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Get company profiles for multiple tickers in one call."""
+        if not tickers:
+            return []
+        try:
+            symbol_str = ",".join(t.upper() for t in tickers[:50])
+            data = await self._make_request(
+                "profile", params={"symbol": symbol_str}
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Batch profiles failed: {e}")
+            return []
+
     # ── Company outlook (may require higher-tier subscription) ──────
 
     async def get_company_outlook(self, ticker: str) -> Dict[str, Any]:

@@ -149,8 +149,8 @@ actor APIClient {
         request.setValue("iOS", forHTTPHeaderField: "X-Platform")
         request.setValue(Bundle.main.appVersion, forHTTPHeaderField: "X-App-Version")
 
-        // Auth token
-        if endpoint.requiresAuth, let token = authToken {
+        // Auth token — always send when available (supports optional-auth endpoints)
+        if let token = authToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 

@@ -18,6 +18,7 @@ from app.api.v1.endpoints import (
     crypto,
     ticker_report,
     tracking,
+    whales,
 )
 
 api_router = APIRouter()
@@ -35,3 +36,4 @@ api_router.include_router(research.router, prefix="/research", tags=["Research"]
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
+api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])

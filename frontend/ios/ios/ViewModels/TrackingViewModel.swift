@@ -33,17 +33,17 @@ class TrackingViewModel: ObservableObject {
     @Published var portfolioHoldings: [PortfolioHolding] = []
     @Published var diversificationScore: DiversificationScore?
 
-    // Whales Tab (unchanged — stays as sample data)
+    // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
     @Published var whaleActivities: [WhaleActivity] = WhaleActivity.sampleData
-    @Published var trackedWhales: [TrendingWhale] = TrendingWhale.trackedWhalesData
-    @Published var popularWhales: [TrendingWhale] = TrendingWhale.topPopularWhalesData
-    @Published var heroWhales: [TrendingWhale] = TrendingWhale.heroWhalesData
-    @Published var allPopularWhales: [TrendingWhale] = TrendingWhale.allPopularWhalesData
+    @Published var trackedWhales: [TrendingWhale] = []
+    @Published var popularWhales: [TrendingWhale] = []
+    @Published var heroWhales: [TrendingWhale] = []
+    @Published var allPopularWhales: [TrendingWhale] = []
     @Published var showAllWhales: Bool = false
     @Published var showAllTrades: Bool = false
-    @Published var groupedWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.groupedSampleData
-    @Published var allWhaleTrades: [GroupedWhaleTrades] = WhaleTradeGroupActivity.allGroupedSampleData
+    @Published var groupedWhaleTrades: [GroupedWhaleTrades] = []
+    @Published var allWhaleTrades: [GroupedWhaleTrades] = []
     @Published var whaleAlertBanner: WhaleAlertBanner? = WhaleAlertBanner.sampleData
 
     // Loading States
@@ -131,11 +131,12 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets feed and holdings in parallel
+        // Load assets, holdings, AND whale data in parallel
         async let feedTask: () = loadTrackingFeed()
         async let holdingsTask: () = loadHoldings()
+        async let whalesTask: () = loadWhaleData()
 
-        _ = await (feedTask, holdingsTask)
+        _ = await (feedTask, holdingsTask, whalesTask)
     }
 
     private func loadTrackingFeed() async {
@@ -172,6 +173,77 @@ class TrackingViewModel: ObservableObject {
             if portfolioHoldings.isEmpty {
                 portfolioHoldings = PortfolioHolding.sampleData
                 print("[TrackingVM] ⚠️ Using sample holdings as fallback")
+            }
+        }
+    }
+
+    // MARK: - Whale Data Loading (Real API)
+
+    private func loadWhaleData() async {
+        async let listTask: () = loadWhaleList()
+        async let activityTask: () = loadWhaleActivityFeed()
+        _ = await (listTask, activityTask)
+    }
+
+    private func loadWhaleList() async {
+        do {
+            let dtos = try await apiClient.request(
+                endpoint: .getWhaleList(category: nil),
+                responseType: [TrendingWhaleDTO].self
+            )
+            let allWhales = dtos.map { $0.toTrendingWhale() }
+
+            // Sync follow state from API
+            WhaleService.shared.syncFromAPIResponse(allWhales)
+
+            // Split into followed vs not-followed
+            self.trackedWhales = allWhales.filter { $0.isFollowing }
+            self.popularWhales = Array(allWhales.filter { !$0.isFollowing }.prefix(5))
+            self.allPopularWhales = allWhales
+
+            // Hero whales: first 4 with descriptions (or top 4 overall)
+            let whalesWithDesc = allWhales.filter { !$0.description.isEmpty }
+            self.heroWhales = Array((whalesWithDesc.isEmpty ? allWhales : whalesWithDesc).prefix(4))
+
+            print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
+        } catch {
+            print("[TrackingVM] ❌ Whale list failed: \(error)")
+            // Fallback to sample data
+            if trackedWhales.isEmpty {
+                trackedWhales = TrendingWhale.trackedWhalesData
+                popularWhales = TrendingWhale.topPopularWhalesData
+                heroWhales = TrendingWhale.heroWhalesData
+                allPopularWhales = TrendingWhale.allPopularWhalesData
+                print("[TrackingVM] ⚠️ Using sample whale data as fallback")
+            }
+        }
+    }
+
+    private func loadWhaleActivityFeed() async {
+        do {
+            let dtos = try await apiClient.request(
+                endpoint: .getWhaleActivity,
+                responseType: [WhaleTradeGroupActivityDTO].self
+            )
+            let activities = dtos.map { $0.toWhaleTradeGroupActivity() }
+
+            // Group into timeline sections
+            self.groupedWhaleTrades = activities.map { activity in
+                GroupedWhaleTrades(
+                    sectionTitle: activity.formattedDate,
+                    activities: [activity]
+                )
+            }
+            self.allWhaleTrades = self.groupedWhaleTrades
+
+            print("[TrackingVM] ✅ Loaded \(activities.count) whale activity items from API")
+        } catch {
+            print("[TrackingVM] ❌ Whale activity failed: \(error)")
+            // Fallback to sample data
+            if groupedWhaleTrades.isEmpty {
+                groupedWhaleTrades = WhaleTradeGroupActivity.groupedSampleData
+                allWhaleTrades = WhaleTradeGroupActivity.allGroupedSampleData
+                print("[TrackingVM] ⚠️ Using sample whale activity as fallback")
             }
         }
     }
@@ -229,7 +301,7 @@ class TrackingViewModel: ObservableObject {
         selectedAlert = alert
     }
 
-    // MARK: - Whale Actions (unchanged)
+    // MARK: - Whale Actions
 
     func selectWhaleCategory(_ category: WhaleCategory) {
         selectedWhaleCategory = category
@@ -238,6 +310,7 @@ class TrackingViewModel: ObservableObject {
     func toggleFollowWhale(_ whale: TrendingWhale) {
         let newFollowing = !whale.isFollowing
         let updatedWhale = TrendingWhale(
+            id: whale.id,
             name: whale.name,
             category: whale.category,
             avatarName: whale.avatarName,
@@ -248,24 +321,27 @@ class TrackingViewModel: ObservableObject {
             recentTradeCount: whale.recentTradeCount
         )
 
-        // Update isFollowing in-place across all lists (don't remove)
-        if let index = popularWhales.firstIndex(where: { $0.name == whale.name }) {
+        // Update isFollowing in-place across all lists
+        if let index = popularWhales.firstIndex(where: { $0.id == whale.id }) {
             popularWhales[index] = updatedWhale
         }
-        if let index = allPopularWhales.firstIndex(where: { $0.name == whale.name }) {
+        if let index = allPopularWhales.firstIndex(where: { $0.id == whale.id }) {
             allPopularWhales[index] = updatedWhale
         }
-        if let index = heroWhales.firstIndex(where: { $0.name == whale.name }) {
+        if let index = heroWhales.firstIndex(where: { $0.id == whale.id }) {
             heroWhales[index] = updatedWhale
         }
 
         if newFollowing {
-            if !trackedWhales.contains(where: { $0.name == whale.name }) {
+            if !trackedWhales.contains(where: { $0.id == whale.id }) {
                 trackedWhales.append(updatedWhale)
             }
         } else {
-            trackedWhales.removeAll { $0.name == whale.name }
+            trackedWhales.removeAll { $0.id == whale.id }
         }
+
+        // Sync to backend via WhaleService
+        WhaleService.shared.toggleFollow(whale.id)
     }
 
     // MARK: - Follow State Sync
@@ -277,15 +353,13 @@ class TrackingViewModel: ObservableObject {
         let whaleId = userInfo["whaleId"] as? String ?? ""
         let whaleName = userInfo["whaleName"] as? String ?? ""
 
-        func nameToId(_ name: String) -> String {
-            name.lowercased().replacingOccurrences(of: " ", with: "-")
-        }
         func matches(_ whale: TrendingWhale) -> Bool {
-            nameToId(whale.name) == whaleId || whale.name == whaleName
+            whale.id == whaleId || whale.name == whaleName
         }
 
         func makeUpdated(_ whale: TrendingWhale, following: Bool) -> TrendingWhale {
             TrendingWhale(
+                id: whale.id,
                 name: whale.name,
                 category: whale.category,
                 avatarName: whale.avatarName,
@@ -317,6 +391,7 @@ class TrackingViewModel: ObservableObject {
             } else {
                 let title = userInfo["whaleTitle"] as? String ?? ""
                 let newWhale = TrendingWhale(
+                    id: whaleId,
                     name: whaleName,
                     category: .investors,
                     avatarName: "",
@@ -344,7 +419,7 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewWhaleProfile(_ whale: TrendingWhale) {
-        selectedWhaleId = whale.name.lowercased().replacingOccurrences(of: " ", with: "-")
+        selectedWhaleId = whale.id
     }
 
     func viewTradeGroupDetail(_ activity: WhaleTradeGroupActivity) {

@@ -30,6 +30,7 @@ class WhaleProfileViewModel: ObservableObject {
     private let maxVisibleHoldings: Int = 10
     private let maxVisibleTrades: Int = 5
     private let whaleService = WhaleService.shared
+    private let apiClient: APIClient
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Computed Properties
@@ -58,27 +59,27 @@ class WhaleProfileViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(whaleId: String) {
+    init(whaleId: String, apiClient: APIClient = .shared) {
         self.whaleId = whaleId
+        self.apiClient = apiClient
         loadProfile()
         observeFollowChanges()
     }
-    
+
     // MARK: - Observation
-    
+
     private func observeFollowChanges() {
-        // Update profile when follow status changes in the shared service
         whaleService.$followedWhaleIds
             .sink { [weak self] _ in
                 self?.updateFollowStatus()
             }
             .store(in: &cancellables)
     }
-    
+
     private func updateFollowStatus() {
         guard var currentProfile = profile else { return }
         let isFollowing = whaleService.isFollowing(whaleId)
-        
+
         if currentProfile.isFollowing != isFollowing {
             currentProfile = WhaleProfile(
                 id: currentProfile.id,
@@ -107,57 +108,91 @@ class WhaleProfileViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Simulate network delay and load mock data
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
 
-            // In a real app, fetch from API based on whaleId
-            var loadedProfile: WhaleProfile?
-            switch self.whaleId {
-            case "warren-buffett":
-                loadedProfile = WhaleProfile.warrenBuffett
-            case "cathie-wood":
-                loadedProfile = WhaleProfile.cathieWood
-            default:
-                loadedProfile = WhaleProfile.warrenBuffett
-            }
-            
-            // Update follow status from shared service
-            if var profile = loadedProfile {
-                let isFollowing = self.whaleService.isFollowing(self.whaleId)
-                profile = WhaleProfile(
-                    id: profile.id,
-                    name: profile.name,
-                    title: profile.title,
-                    description: profile.description,
-                    avatarURL: profile.avatarURL,
-                    riskProfile: profile.riskProfile,
-                    portfolioValue: profile.portfolioValue,
-                    ytdReturn: profile.ytdReturn,
-                    sectorExposure: profile.sectorExposure,
-                    currentHoldings: profile.currentHoldings,
-                    recentTradeGroups: profile.recentTradeGroups,
-                    recentTrades: profile.recentTrades,
-                    behaviorSummary: profile.behaviorSummary,
-                    sentimentSummary: profile.sentimentSummary,
-                    isFollowing: isFollowing
+            do {
+                let dto = try await self.apiClient.request(
+                    endpoint: .getWhaleProfile(whaleId: self.whaleId),
+                    responseType: WhaleProfileDTO.self
                 )
-                self.profile = profile
-            }
+                var loadedProfile = dto.toWhaleProfile()
 
-            self.isLoading = false
+                // Merge local follow state from WhaleService
+                let isFollowing = self.whaleService.isFollowing(self.whaleId)
+                if loadedProfile.isFollowing != isFollowing {
+                    loadedProfile = WhaleProfile(
+                        id: loadedProfile.id,
+                        name: loadedProfile.name,
+                        title: loadedProfile.title,
+                        description: loadedProfile.description,
+                        avatarURL: loadedProfile.avatarURL,
+                        riskProfile: loadedProfile.riskProfile,
+                        portfolioValue: loadedProfile.portfolioValue,
+                        ytdReturn: loadedProfile.ytdReturn,
+                        sectorExposure: loadedProfile.sectorExposure,
+                        currentHoldings: loadedProfile.currentHoldings,
+                        recentTradeGroups: loadedProfile.recentTradeGroups,
+                        recentTrades: loadedProfile.recentTrades,
+                        behaviorSummary: loadedProfile.behaviorSummary,
+                        sentimentSummary: loadedProfile.sentimentSummary,
+                        isFollowing: isFollowing
+                    )
+                }
+
+                self.profile = loadedProfile
+                self.isLoading = false
+                print("[WhaleProfileVM] ✅ Loaded profile for \(loadedProfile.name) from API")
+            } catch {
+                print("[WhaleProfileVM] ❌ API profile load failed: \(error)")
+
+                // Fallback to sample data
+                self.loadSampleProfile()
+                self.isLoading = false
+                self.errorMessage = "Failed to load profile. Showing cached data."
+            }
+        }
+    }
+
+    private func loadSampleProfile() {
+        var loadedProfile: WhaleProfile?
+        switch whaleId {
+        case "warren-buffett":
+            loadedProfile = WhaleProfile.warrenBuffett
+        case "cathie-wood":
+            loadedProfile = WhaleProfile.cathieWood
+        default:
+            loadedProfile = WhaleProfile.warrenBuffett
+        }
+
+        if var p = loadedProfile {
+            let isFollowing = whaleService.isFollowing(whaleId)
+            p = WhaleProfile(
+                id: p.id,
+                name: p.name,
+                title: p.title,
+                description: p.description,
+                avatarURL: p.avatarURL,
+                riskProfile: p.riskProfile,
+                portfolioValue: p.portfolioValue,
+                ytdReturn: p.ytdReturn,
+                sectorExposure: p.sectorExposure,
+                currentHoldings: p.currentHoldings,
+                recentTradeGroups: p.recentTradeGroups,
+                recentTrades: p.recentTrades,
+                behaviorSummary: p.behaviorSummary,
+                sentimentSummary: p.sentimentSummary,
+                isFollowing: isFollowing
+            )
+            profile = p
+            print("[WhaleProfileVM] ⚠️ Using sample data fallback for \(whaleId)")
         }
     }
 
     func refresh() async {
         isRefreshing = true
-
-        // Simulate network delay
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-
-        // Reload profile data
         loadProfile()
-
+        try? await Task.sleep(nanoseconds: 500_000_000)
         isRefreshing = false
     }
 
@@ -166,6 +201,8 @@ class WhaleProfileViewModel: ObservableObject {
     func toggleFollow() {
         guard let currentProfile = profile else { return }
         let newFollowState = !currentProfile.isFollowing
+
+        // Optimistic UI update
         let updatedProfile = WhaleProfile(
             id: currentProfile.id,
             name: currentProfile.name,
@@ -184,6 +221,9 @@ class WhaleProfileViewModel: ObservableObject {
             isFollowing: newFollowState
         )
         profile = updatedProfile
+
+        // Sync to backend via WhaleService (handles optimistic + revert)
+        whaleService.toggleFollow(whaleId)
 
         // Notify TrackingViewModel so the followed whales row stays in sync
         NotificationCenter.default.post(
@@ -211,7 +251,6 @@ class WhaleProfileViewModel: ObservableObject {
     }
 
     func showOptionsMenu() {
-        // Handle options menu
         print("Options menu tapped")
     }
 }

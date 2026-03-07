@@ -33,7 +33,7 @@ struct ETFDetailView: View {
             \(etfData.name) (\(etfData.symbol))
             \(etfData.formattedPrice) \(etfData.formattedChange) \(etfData.formattedChangePercent)
 
-            Check it out on Caudex!
+            Check it out on Caydex!
             """
             items.append(shareText)
         }

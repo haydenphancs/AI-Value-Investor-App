@@ -1,8 +1,9 @@
 """
 Stock Endpoints — All data from FMP API (no local stocks table).
 Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
-          /stocks/{ticker}/fundamentals, /stocks/{ticker}/chart,
-          /stocks/{ticker}/financials-full, /stocks/{ticker}/news
+          /stocks/{ticker}/overview, /stocks/{ticker}/fundamentals,
+          /stocks/{ticker}/chart, /stocks/{ticker}/financials-full,
+          /stocks/{ticker}/news
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +17,8 @@ from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
+from app.schemas.stock_overview import StockOverviewResponse
+from app.services.stock_overview_service import get_stock_overview_service
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +152,32 @@ async def get_stock_details(ticker: str):
     except Exception as e:
         logger.error(f"Stock detail failed: {e}")
         raise HTTPException(status_code=502, detail="Stock data service unavailable")
+
+
+@router.get("/{ticker}/overview", response_model=StockOverviewResponse)
+async def get_stock_overview(
+    ticker: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+):
+    """
+    Get comprehensive stock overview data for the Overview tab.
+
+    Returns everything the TickerDetailView Overview tab needs in a single call:
+    key stats, performance, snapshots, sector info, company profile,
+    related tickers, and benchmark summary.
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_stock_overview_service()
+        return await service.get_overview(ticker, chart_range=chart_range)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Stock overview failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stock overview service unavailable for {ticker}",
+        )
 
 
 @router.get("/{ticker}/quote")

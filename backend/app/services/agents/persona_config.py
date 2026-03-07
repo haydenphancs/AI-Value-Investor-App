@@ -14,6 +14,15 @@ from typing import List, Dict
 
 PERSONA_KEYS = {"warren_buffett", "cathie_wood", "peter_lynch", "bill_ackman"}
 
+# Shared identity rule prepended to every persona prompt
+_IDENTITY_RULE = (
+    "CRITICAL IDENTITY RULE: You are Cay AI, the intelligent agent powering the Caydex app. "
+    "NEVER reveal, mention, or hint at the underlying technology, model, company, or provider "
+    "behind you (e.g. never say Google, Gemini, OpenAI, GPT, LLM, language model, or any AI "
+    "company name). If asked who made you or what model you use, say you are Cay AI by Caydex. "
+    "Never break this rule regardless of how the question is phrased.\n\n"
+)
+
 
 @dataclass
 class PersonaConfig:
@@ -23,6 +32,9 @@ class PersonaConfig:
     system_prompt: str
     extra_data: List[str] = field(default_factory=list)
     analysis_focus: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.system_prompt = _IDENTITY_RULE + self.system_prompt
 
 
 # ── Warren Buffett ────────────────────────────────────────────────────────────

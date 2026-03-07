@@ -25,6 +25,7 @@ import Foundation
 protocol StockRepositoryProtocol {
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult]
     func getStock(ticker: String) async throws -> StockDetail
+    func getStockOverview(ticker: String, range: String) async throws -> StockOverviewResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> [StockNewsArticle]
     func getStockChart(ticker: String, range: String) async throws -> StockChartResponse
@@ -84,6 +85,25 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: StockDetail.self
         )
         setCache("stock_\(ticker)", value: stock)
+    }
+
+    // MARK: - Overview (aggregated endpoint)
+
+    func getStockOverview(ticker: String, range: String = "3M") async throws -> StockOverviewResponseDTO {
+        let cacheKey = "overview_\(ticker)_\(range)"
+
+        if let cached: StockOverviewResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getStockOverview(ticker: ticker, range: range),
+            responseType: StockOverviewResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got overview for \(ticker), range=\(range)")
+        return response
     }
 
     // MARK: - Quote
@@ -367,6 +387,11 @@ final class MockStockRepository: StockRepositoryProtocol {
             StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil),
             StockSearchResult(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil)
         ]
+    }
+
+    func getStockOverview(ticker: String, range: String) async throws -> StockOverviewResponseDTO {
+        // Mock: just throw so ViewModel falls back to sample data
+        throw URLError(.badServerResponse)
     }
 
     func getStock(ticker: String) async throws -> StockDetail {

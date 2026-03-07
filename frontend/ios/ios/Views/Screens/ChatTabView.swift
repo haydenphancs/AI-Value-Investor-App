@@ -23,9 +23,9 @@ struct ChatTabView: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                // Chat content (slides right when history is shown)
+                // Chat content (hidden when history is shown)
                 chatContent
-                    .offset(x: showingHistory ? geometry.size.width * 0.85 : 0)
+                    .opacity(showingHistory ? 0 : 1)
 
                 // History panel (slides in from left)
                 if showingHistory {
@@ -101,7 +101,7 @@ struct ChatTabView: View {
             }
 
             // AI Chat Bar with suggestion pills
-            CaudexAIChatBar(
+            CaydexAIChatBar(
                 inputText: $inputText,
                 suggestions: viewModel.isInConversation ? [] : suggestions.map(\.text),
                 onSuggestionTap: { text in
@@ -135,7 +135,7 @@ struct ChatTabView: View {
             TypingDot(delay: 0.0)
             TypingDot(delay: 0.2)
             TypingDot(delay: 0.4)
-            Text("Caudex is thinking...")
+            Text("Cay AI is thinking...")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
@@ -173,27 +173,13 @@ struct ChatTabView: View {
     private func historyPanel(width: CGFloat) -> some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                // Header with new-chat + close buttons
+                // Header with close button
                 HStack {
                     Text("History")
                         .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
-
-                    // New chat button
-                    Button {
-                        viewModel.resetConversation()
-                        inputText = ""
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showingHistory = false
-                        }
-                    } label: {
-                        Image(systemName: "plus.message")
-                            .font(AppTypography.iconDefault).fontWeight(.semibold)
-                            .foregroundColor(AppColors.primaryBlue)
-                    }
-                    .buttonStyle(.plain)
 
                     Button {
                         handleHistoryTap()
@@ -232,10 +218,8 @@ struct ChatTabView: View {
                     }
                 )
             }
-            .frame(width: width * 0.85)
+            .frame(width: width)
             .background(AppColors.background)
-
-            Spacer()
         }
     }
 

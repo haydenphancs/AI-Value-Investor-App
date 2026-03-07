@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-1.5-pro"
     GEMINI_MAX_TOKENS: int = 8192
     GEMINI_TEMPERATURE: float = 0.7
+    GEMINI_CACHE_TTL: int = 3600  # seconds to cache API responses (saves quota)
 
     # Financial Modeling Prep
     FMP_API_KEY: str

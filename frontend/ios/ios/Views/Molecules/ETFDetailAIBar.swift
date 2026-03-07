@@ -15,7 +15,7 @@ struct ETFDetailAIBar: View {
     var onSend: (() -> Void)?
 
     var body: some View {
-        CaudexAIChatBar(
+        CaydexAIChatBar(
             inputText: $inputText,
             suggestions: suggestions.map(\.text),
             onSuggestionTap: { text in

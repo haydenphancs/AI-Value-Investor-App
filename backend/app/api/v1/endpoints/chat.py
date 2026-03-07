@@ -14,7 +14,7 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user, StandardRateLimit
+from app.dependencies import get_current_user_or_guest
 from app.schemas.chat import (
     CreateChatSessionRequest,
     SendChatMessageRequest,
@@ -72,7 +72,7 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
 async def list_chat_sessions(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """List all chat sessions for the current user, newest first."""
@@ -92,7 +92,7 @@ async def list_chat_sessions(
 @router.post("/sessions", response_model=ChatSessionResponse)
 async def create_chat_session(
     request: CreateChatSessionRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Create a new chat session."""
@@ -117,9 +117,8 @@ async def create_chat_session(
 async def send_chat_message(
     session_id: str,
     request: SendChatMessageRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
-    _rate_limit=StandardRateLimit,
 ):
     """Send a message and get AI response with RAG."""
     # Verify session ownership
@@ -202,7 +201,7 @@ async def send_chat_message(
 @router.get("/sessions/{session_id}", response_model=ChatHistoryResponse)
 async def get_chat_history(
     session_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Get chat session with full message history."""
@@ -236,7 +235,7 @@ async def get_chat_history(
 async def update_chat_session(
     session_id: str,
     request: UpdateChatSessionRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Update a chat session (title, is_saved)."""
@@ -277,7 +276,7 @@ async def update_chat_session(
 @router.delete("/sessions/{session_id}")
 async def delete_chat_session(
     session_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Delete a chat session and all its messages."""

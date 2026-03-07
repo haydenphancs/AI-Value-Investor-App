@@ -34,7 +34,7 @@ struct CommodityDetailView: View {
             \(commodityData.name) (\(commodityData.symbol))
             \(commodityData.formattedPrice) \(commodityData.formattedChange) \(commodityData.formattedChangePercent)
 
-            Check it out on Caudex!
+            Check it out on Caydex!
             """
             items.append(shareText)
         }

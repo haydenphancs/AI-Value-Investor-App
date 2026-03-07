@@ -50,15 +50,11 @@ struct iosApp: App {
                     let authService = AuthService(apiClient: apiClient)
 
                     // Configure AppState with services
+                    // Token restoration is handled inside restoreAuthState()
                     appState.configure(
                         apiClient: apiClient,
                         authService: authService
                     )
-
-                    // Restore auth token to API client
-                    if let token = authService.getStoredToken() {
-                        await apiClient.setAuthToken(token)
-                    }
                 }
         }
     }

@@ -36,7 +36,7 @@ struct CryptoDetailView: View {
             \(cryptoData.name) (\(cryptoData.symbol))
             \(cryptoData.formattedPrice) \(cryptoData.formattedChange) \(cryptoData.formattedChangePercent)
 
-            Check it out on Caudex!
+            Check it out on Caydex!
             """
             items.append(shareText)
         }

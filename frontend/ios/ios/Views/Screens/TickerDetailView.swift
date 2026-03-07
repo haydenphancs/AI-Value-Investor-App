@@ -15,8 +15,10 @@ struct TickerDetailView: View {
     @State private var showTechnicalAnalysisDetail = false
     @State private var showSearch = false
     @State private var showShareSheet = false
+    @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
+    @StateObject private var chatViewModel = ChatViewModel()
 
     let tickerSymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -37,7 +39,7 @@ struct TickerDetailView: View {
             \(tickerData.companyName) (\(tickerData.symbol))
             \(tickerData.formattedPrice) \(tickerData.formattedChange) \(tickerData.formattedChangePercent)
             
-            Check it out on Caudex!
+            Check it out on Caydex!
             """
             items.append(shareText)
         }
@@ -195,6 +197,27 @@ struct TickerDetailView: View {
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
                 .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showAIChat) {
+            NavigationStack {
+                ChatConversationView(viewModel: chatViewModel)
+                    .navigationTitle("Ask Cay AI")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { showAIChat = false }
+                        }
+                    }
+            }
+            .preferredColorScheme(.dark)
+        }
+        .onChange(of: viewModel.pendingAIQuery) { query in
+            if let query = query {
+                print("🤖 TickerDetailView: Opening AI chat for \(tickerSymbol) with query: \(query)")
+                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol)
+                viewModel.pendingAIQuery = nil
+                showAIChat = true
+            }
         }
     }
 

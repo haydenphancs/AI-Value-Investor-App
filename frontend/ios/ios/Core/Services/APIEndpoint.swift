@@ -45,6 +45,7 @@ enum APIEndpoint: Sendable {
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
+    case getStockOverview(ticker: String, range: String)
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
@@ -137,6 +138,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/search"
         case .getStock(let ticker):
             return "/api/v1/stocks/\(ticker)"
+        case .getStockOverview(let ticker, _):
+            return "/api/v1/stocks/\(ticker)/overview"
         case .getStockQuote(let ticker):
             return "/api/v1/stocks/\(ticker)/quote"
         case .getStockFundamentals(let ticker):
@@ -278,6 +281,9 @@ enum APIEndpoint: Sendable {
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
 
+        case .getStockOverview(_, let range):
+            return ["range": range]
+
         case .getStockChart(_, let range):
             return ["range": range]
 
@@ -372,7 +378,7 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken:
             return false
         // Stock/crypto endpoints are public on the backend
-        case .searchStocks, .getStock, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
+        case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail:
             return false
         // News endpoints are public
@@ -386,6 +392,10 @@ enum APIEndpoint: Sendable {
             return false
         // Personas are public
         case .getPersonas:
+            return false
+        // Chat endpoints use optional auth (guest access)
+        case .listChatSessions, .createChatSession, .sendChatMessage, .getChatHistory,
+             .updateChatSession, .deleteChatSession:
             return false
         // Everything else requires auth
         default:
@@ -401,6 +411,8 @@ enum APIEndpoint: Sendable {
             return 120 // 2 minutes for AI generation
         case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
+        case .getStockOverview:
+            return 60 // 1 minute for aggregated overview (many FMP calls)
         case .getCryptoDetail, .getIndexDetail, .getETFDetail:
             return 60 // 1 minute for AI snapshot generation
         case .getWhaleProfile:

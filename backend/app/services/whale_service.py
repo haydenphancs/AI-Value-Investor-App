@@ -580,7 +580,18 @@ class WhaleService:
     async def _get_or_process_latest(
         self, whale_id: str, whale: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """Route to correct FMP source based on data_source column."""
+        """Route to correct FMP source based on data_source column.
+
+        Prefers pre-hydrated snapshots when available (set by
+        scripts/hydrate_whales.py). Falls through to live FMP
+        processing only if no snapshot exists.
+        """
+        # Prefer pre-hydrated snapshot if the hydration engine has run
+        if whale.get("last_hydrated_at"):
+            snapshot = await self._read_from_supabase(whale_id)
+            if snapshot:
+                return snapshot
+
         data_source = whale.get("data_source", "manual")
 
         try:

@@ -9,20 +9,28 @@ from google.generativeai.types import content_types
 from typing import Optional, List, Dict, Any, Callable
 import logging
 import asyncio
+import hashlib
+import time
 from functools import wraps
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ── Quota-error detection ──────────────────────────────────────────
+_QUOTA_ERROR_STRINGS = ("429", "resource_exhausted", "quota", "rate limit")
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """Return True if the exception looks like a quota/rate-limit error."""
+    msg = str(exc).lower()
+    return any(s in msg for s in _QUOTA_ERROR_STRINGS)
+
 
 def async_retry(max_attempts: int = 3, delay: float = 1.0):
     """
     Decorator for retrying async functions on failure.
-
-    Args:
-        max_attempts: Maximum retry attempts
-        delay: Delay between retries in seconds
+    Skips retries for quota errors (429) to avoid burning more quota.
     """
     def decorator(func):
         @wraps(func)
@@ -31,6 +39,9 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                 try:
                     return await func(*args, **kwargs)
                 except Exception as e:
+                    if _is_quota_error(e):
+                        logger.error(f"Quota/rate-limit error — skipping retries: {e}")
+                        raise
                     if attempt == max_attempts - 1:
                         raise
                     logger.warning(
@@ -40,6 +51,46 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
             return None
         return wrapper
     return decorator
+
+
+# ── In-memory LRU cache with TTL ──────────────────────────────────
+
+class _TTLCache:
+    """Simple in-memory cache with max-size eviction and TTL expiry."""
+
+    def __init__(self, max_size: int = 128, ttl_seconds: int = 3600):
+        self._store: Dict[str, Any] = {}
+        self._timestamps: Dict[str, float] = {}
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+
+    def get(self, key: str) -> Any:
+        if key in self._store:
+            if time.time() - self._timestamps[key] < self._ttl:
+                return self._store[key]
+            # Expired
+            del self._store[key]
+            del self._timestamps[key]
+        return None
+
+    def set(self, key: str, value: Any):
+        # Evict oldest if full
+        if len(self._store) >= self._max_size and key not in self._store:
+            oldest = min(self._timestamps, key=self._timestamps.get)
+            del self._store[oldest]
+            del self._timestamps[oldest]
+        self._store[key] = value
+        self._timestamps[key] = time.time()
+
+    @property
+    def size(self) -> int:
+        return len(self._store)
+
+
+def _cache_key(*parts: str) -> str:
+    """Build a deterministic cache key from string parts."""
+    raw = "|".join(str(p) for p in parts if p)
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 class GeminiClient:
@@ -56,6 +107,9 @@ class GeminiClient:
             "temperature": settings.GEMINI_TEMPERATURE,
             "max_output_tokens": settings.GEMINI_MAX_TOKENS,
         }
+        cache_ttl = getattr(settings, "GEMINI_CACHE_TTL", 3600)
+        self._response_cache = _TTLCache(max_size=256, ttl_seconds=cache_ttl)
+        self._embedding_cache = _TTLCache(max_size=512, ttl_seconds=cache_ttl)
 
     def _get_model(self, model_name: Optional[str] = None):
         """
@@ -72,7 +126,7 @@ class GeminiClient:
             generation_config=self.generation_config
         )
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def generate_text(
         self,
         prompt: str,
@@ -80,22 +134,16 @@ class GeminiClient:
         model_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate text using Gemini.
-
-        Args:
-            prompt: User prompt
-            system_instruction: Optional system instruction
-            model_name: Optional model name override
-
-        Returns:
-            dict: Response with text and metadata
-
-        Example:
-            response = await client.generate_text(
-                prompt="Analyze Apple Inc.",
-                system_instruction="You are a value investing expert."
-            )
+        Generate text using Gemini.  Results are cached by (prompt, system_instruction)
+        for GEMINI_CACHE_TTL seconds to avoid duplicate API calls.
         """
+        # ── Cache lookup ──
+        key = _cache_key(prompt, system_instruction or "", model_name or "")
+        cached = self._response_cache.get(key)
+        if cached is not None:
+            logger.debug("Gemini generate_text cache HIT")
+            return cached
+
         try:
             model = self._get_model(model_name)
 
@@ -106,24 +154,25 @@ class GeminiClient:
                     system_instruction=system_instruction
                 )
 
-            # Use asyncio to run synchronous API call in executor
             response = await asyncio.to_thread(
                 model.generate_content,
                 prompt
             )
 
-            return {
+            result = {
                 "text": response.text,
                 "model": self.model_name,
                 "tokens_used": response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else None,
                 "finish_reason": response.candidates[0].finish_reason.name if response.candidates else None
             }
+            self._response_cache.set(key, result)
+            return result
 
         except Exception as e:
             logger.error(f"Gemini text generation failed: {e}", exc_info=True)
             raise
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def generate_json(
         self,
         prompt: str,
@@ -132,16 +181,14 @@ class GeminiClient:
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
-        Forces Gemini to output valid JSON, eliminating markdown fences.
-
-        Args:
-            prompt: User prompt requesting JSON output
-            system_instruction: Optional system instruction
-            model_name: Optional model name override
-
-        Returns:
-            dict: Response with text (guaranteed JSON) and metadata
+        Results are cached.
         """
+        key = _cache_key("json", prompt, system_instruction or "", model_name or "")
+        cached = self._response_cache.get(key)
+        if cached is not None:
+            logger.debug("Gemini generate_json cache HIT")
+            return cached
+
         try:
             json_config = {
                 **self.generation_config,
@@ -159,18 +206,20 @@ class GeminiClient:
                 prompt
             )
 
-            return {
+            result = {
                 "text": response.text,
                 "model": self.model_name,
                 "tokens_used": response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else None,
                 "finish_reason": response.candidates[0].finish_reason.name if response.candidates else None
             }
+            self._response_cache.set(key, result)
+            return result
 
         except Exception as e:
             logger.error(f"Gemini JSON generation failed: {e}", exc_info=True)
             raise
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def generate_with_context(
         self,
         prompt: str,
@@ -178,18 +227,9 @@ class GeminiClient:
         system_instruction: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate text with additional context documents.
-        Useful for RAG-based generation.
-
-        Args:
-            prompt: User prompt
-            context_documents: List of context documents/chunks
-            system_instruction: Optional system instruction
-
-        Returns:
-            dict: Response with text and metadata
+        Generate text with additional context documents (RAG).
+        Delegates to generate_text which handles caching.
         """
-        # Build context-enhanced prompt
         context_text = "\n\n---\n\n".join(context_documents)
         enhanced_prompt = f"""Context Information:
 {context_text}
@@ -207,38 +247,39 @@ Provide a comprehensive answer with citations to the context where appropriate."
             system_instruction=system_instruction
         )
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def generate_embedding(
         self,
         text: str,
-        model_name: str = "models/text-embedding-004"
+        model_name: str = "models/gemini-embedding-001"
     ) -> List[float]:
         """
         Generate embedding vector for text.
-        Section 4.4 - RAG System embeddings
-
-        Args:
-            text: Text to embed
-            model_name: Embedding model name
-
-        Returns:
-            List[float]: Embedding vector
+        Embeddings are cached — identical text won't hit the API twice.
         """
+        key = _cache_key("emb", text, model_name)
+        cached = self._embedding_cache.get(key)
+        if cached is not None:
+            logger.debug("Embedding cache HIT")
+            return cached
+
         try:
             result = await asyncio.to_thread(
                 genai.embed_content,
                 model=model_name,
                 content=text,
-                task_type="retrieval_document"
+                task_type="retrieval_document",
+                output_dimensionality=settings.EMBEDDING_DIMENSION,
             )
-
-            return result['embedding']
+            embedding = result['embedding']
+            self._embedding_cache.set(key, embedding)
+            return embedding
 
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}", exc_info=True)
             raise
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def analyze_sentiment(
         self,
         text: str
@@ -291,7 +332,7 @@ Focus on fundamental factors, not short-term price movements."""
             **response
         }
 
-    @async_retry(max_attempts=3, delay=2.0)
+    @async_retry(max_attempts=2, delay=2.0)
     async def summarize_text(
         self,
         text: str,
@@ -481,17 +522,12 @@ Provide ONLY the bullet points, no additional commentary."""
     ) -> Dict[str, Any]:
         """
         Multi-turn chat completion.
-        Used for chat sessions.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            system_instruction: Optional system instruction
-
-        Returns:
-            dict: Response with text and metadata
+        Passes history as Content objects (1 API call) instead of replaying
+        each message individually (which burned N API calls).
         """
-        model = self._get_model()
+        import google.generativeai.protos as protos
 
+        model = self._get_model()
         if system_instruction:
             model = genai.GenerativeModel(
                 model_name=self.model_name,
@@ -499,15 +535,19 @@ Provide ONLY the bullet points, no additional commentary."""
                 system_instruction=system_instruction
             )
 
-        # Convert messages to Gemini format
-        chat = model.start_chat(history=[])
-
-        # Add previous messages to context
+        # Build history as Content objects — zero API calls
+        history = []
+        role_map = {"user": "user", "assistant": "model", "model": "model"}
         for msg in messages[:-1]:
-            if msg["role"] == "user":
-                chat.send_message(msg["content"])
+            gemini_role = role_map.get(msg["role"], "user")
+            history.append(protos.Content(
+                role=gemini_role,
+                parts=[protos.Part(text=msg["content"])],
+            ))
 
-        # Send final user message and get response
+        chat = model.start_chat(history=history)
+
+        # Only 1 API call for the final message
         final_message = messages[-1]["content"]
         response = await asyncio.to_thread(chat.send_message, final_message)
 

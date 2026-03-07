@@ -1,5 +1,5 @@
 //
-//  CaudexAIChatBar.swift
+//  CaydexAIChatBar.swift
 //  ios
 //
 //  Molecule: Shared bottom AI chat bar used across all detail screens.
@@ -8,9 +8,9 @@
 
 import SwiftUI
 
-struct CaudexAIChatBar: View {
+struct CaydexAIChatBar: View {
     @Binding var inputText: String
-    var placeholder: String = "Ask Caudex AI..."
+    var placeholder: String = "Ask Cay AI..."
     var suggestions: [String] = []
     var onSuggestionTap: ((String) -> Void)?
     var onSend: (() -> Void)?
@@ -26,7 +26,7 @@ struct CaudexAIChatBar: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AppSpacing.sm) {
                         ForEach(suggestions, id: \.self) { suggestion in
-                            CaudexAISuggestionChip(text: suggestion) {
+                            CaydexAISuggestionChip(text: suggestion) {
                                 onSuggestionTap?(suggestion)
                             }
                         }
@@ -84,7 +84,7 @@ struct CaudexAIChatBar: View {
 }
 
 // MARK: - Suggestion Chip
-struct CaudexAISuggestionChip: View {
+struct CaydexAISuggestionChip: View {
     let text: String
     var onTap: (() -> Void)?
 
@@ -120,13 +120,13 @@ struct CaudexAISuggestionChip: View {
                 Spacer()
 
                 // With suggestions
-                CaudexAIChatBar(
+                CaydexAIChatBar(
                     inputText: $text,
                     suggestions: ["What's the P/E ratio?", "Why does it move?", "Should I buy?"]
                 )
 
                 // Without suggestions
-                CaudexAIChatBar(
+                CaydexAIChatBar(
                     inputText: $text
                 )
             }

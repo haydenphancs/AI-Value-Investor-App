@@ -102,11 +102,13 @@ final class AppState {
     // MARK: - Auth Actions
 
     private func restoreAuthState() async {
-        guard authService.getStoredToken() != nil else {
+        guard let token = authService.getStoredToken() else {
             auth.status = .unauthenticated
             return
         }
 
+        // Set token on API client BEFORE making any authenticated request
+        await apiClient.setAuthToken(token)
         auth.status = .loading
 
         do {
@@ -119,6 +121,7 @@ final class AppState {
         } catch {
             // Token invalid, clear it
             authService.clearToken()
+            await apiClient.setAuthToken(nil)
             auth.status = .unauthenticated
         }
     }

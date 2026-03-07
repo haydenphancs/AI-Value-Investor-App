@@ -38,7 +38,7 @@ struct TappableSearchBar: View {
 #Preview {
     VStack {
         TappableSearchBar()
-        TappableSearchBar(placeholder: "Search or ask Caudex AI...")
+        TappableSearchBar(placeholder: "Search or ask Cay AI...")
     }
     .padding()
     .background(AppColors.background)

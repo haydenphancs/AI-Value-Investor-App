@@ -106,7 +106,7 @@ struct TickerReportView: View {
                 }
 
                 // Floating chat bar
-                CaudexAIChatBar(
+                CaydexAIChatBar(
                     inputText: $viewModel.aiInputText,
                     placeholder: "Chat with the report...",
                     onSend: viewModel.chatWithReport

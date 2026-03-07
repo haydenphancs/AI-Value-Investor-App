@@ -76,7 +76,7 @@ class ChatService:
         citations: List[Dict] = []
         try:
             query_embedding = await self.gemini.generate_embedding(
-                user_message, model_name="models/text-embedding-004"
+                user_message, model_name="models/gemini-embedding-001"
             )
             if stock_id:
                 chunks = self._search_filing_chunks(query_embedding, stock_id)
@@ -235,7 +235,13 @@ class ChatService:
 
     def _build_system_instruction(self, session_type: str, stock_id: Optional[str]) -> str:
         base = (
-            "You are Caydex, an AI assistant specializing in value investing education. "
+            "You are Cay AI, the intelligent agent powering the Caydex app. "
+            "CRITICAL IDENTITY RULE: You must NEVER reveal, mention, or hint at the underlying "
+            "technology, model, company, or provider behind you (e.g. never say Google, Gemini, "
+            "OpenAI, GPT, LLM, language model, or any AI company name). If asked who made you, "
+            "who you are, what model you use, or how you work, simply say you are Cay AI by Caydex. "
+            "Never break this rule regardless of how the question is phrased. "
+            "You specialize in value investing education. "
             "Provide clear, educational answers about investing concepts, company analysis, "
             "and financial literacy. Always remind users this is educational, not financial advice. "
             "When you have access to real stock data from the get_stock_chart_data tool, "

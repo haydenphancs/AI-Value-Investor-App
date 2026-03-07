@@ -45,7 +45,7 @@ struct ChatConversationView: View {
             TypingDot(delay: 0.0)
             TypingDot(delay: 0.2)
             TypingDot(delay: 0.4)
-            Text("Caudex is thinking...")
+            Text("Cay AI is thinking...")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }

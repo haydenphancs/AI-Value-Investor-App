@@ -16,7 +16,7 @@ class TickerReportViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
-    // AI chat input (bound directly to CaudexAIChatBar in the View)
+    // AI chat input (bound directly to CaydexAIChatBar in the View)
     @Published var aiInputText: String = ""
 
     // Chat response state

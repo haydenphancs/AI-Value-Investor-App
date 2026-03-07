@@ -33,7 +33,7 @@ struct IndexDetailView: View {
             \(indexData.indexName) (\(indexData.symbol))
             \(indexData.formattedPrice) \(indexData.formattedChange) \(indexData.formattedChangePercent)
 
-            Check it out on Caudex!
+            Check it out on Caydex!
             """
             items.append(shareText)
         }

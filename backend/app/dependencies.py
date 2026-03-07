@@ -84,6 +84,38 @@ async def get_optional_user_id(
             return None
 
 
+GUEST_USER_ID = "00000000-0000-0000-0000-000000000000"
+
+
+async def get_current_user_or_guest(
+    authorization: Optional[str] = Header(None),
+    supabase: Client = Depends(get_supabase),
+) -> dict:
+    """Return authenticated user if token present, otherwise a guest user dict."""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+        user_id = None
+        try:
+            payload = decode_token(token)
+            user_id = payload.get("sub")
+        except Exception:
+            try:
+                payload = verify_supabase_token(token)
+                user_id = payload.get("sub") if payload else None
+            except Exception:
+                pass
+
+        if user_id:
+            try:
+                result = supabase.table("users").select("*").eq("id", user_id).single().execute()
+                if result.data:
+                    return result.data
+            except Exception:
+                pass
+
+    return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+
+
 class RateLimitChecker:
     def __init__(self, max_requests: int = 60, window_seconds: int = 60):
         self.max_requests = max_requests

@@ -109,7 +109,7 @@ struct BookDetailView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CaudexAIChatBar(inputText: $aiInputText)
+                CaydexAIChatBar(inputText: $aiInputText)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         }

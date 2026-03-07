@@ -474,6 +474,23 @@ class FMPClient:
             logger.warning(f"Batch profiles failed: {e}")
             return []
 
+    # ── Stock peers ────────────────────────────────────────────────
+
+    async def get_stock_peers(self, ticker: str) -> List[str]:
+        """Get peer stock symbols for a given ticker."""
+        try:
+            data = await self._make_request(
+                "stock_peers", params={"symbol": ticker.upper()}
+            )
+            if isinstance(data, list) and data:
+                peers = data[0].get("peersList", [])
+                # Filter out the ticker itself
+                return [p for p in peers if p.upper() != ticker.upper()]
+            return []
+        except Exception as e:
+            logger.warning(f"Stock peers failed for {ticker}: {e}")
+            return []
+
     # ── Company outlook (may require higher-tier subscription) ──────
 
     async def get_company_outlook(self, ticker: str) -> Dict[str, Any]:

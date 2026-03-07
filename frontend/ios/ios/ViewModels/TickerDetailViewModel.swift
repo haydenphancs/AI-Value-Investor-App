@@ -29,6 +29,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var pendingAIQuery: String?
 
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
@@ -77,22 +78,26 @@ class TickerDetailViewModel: ObservableObject {
             let ticker = self.tickerSymbol
             print("📊 TickerDetailVM: Loading data for \(ticker) from API...")
 
-            // Fetch API data in parallel, then fall back to mock for sections not served by API
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await self.fetchStockDetail(ticker) }
-                group.addTask { await self.fetchStockQuote(ticker) }
-                group.addTask { await self.fetchStockNews(ticker) }
+            // Try the aggregated overview endpoint first (all Overview tab data in one call)
+            do {
+                let response = try await self.stockRepository.getStockOverview(
+                    ticker: ticker, range: self.selectedChartRange.rawValue
+                )
+                self.tickerData = response.toDisplayModel()
+                print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
+            } catch {
+                print("⚠️ TickerDetailVM: Overview failed, falling back to separate calls: \(error)")
+                // Fallback: use existing separate API calls + sample data for missing sections
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await self.fetchStockDetail(ticker) }
+                    group.addTask { await self.fetchStockQuote(ticker) }
+                }
+                self.tickerData = self.buildTickerDetailData()
+                print("📊 TickerDetailVM: Built fallback TickerDetailData for \(ticker)")
             }
 
-            // Build TickerDetailData from real API data (falls back gracefully)
-            self.tickerData = self.buildTickerDetailData()
-            print("📊 TickerDetailVM: Built TickerDetailData for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
-
-            // Fetch chart data for the default range (non-blocking, updates UI when done)
-            Task { [weak self] in
-                guard let self = self else { return }
-                await self.fetchChartData(ticker, range: self.selectedChartRange)
-            }
+            // Fetch news in parallel (not included in overview endpoint)
+            await self.fetchStockNews(ticker)
 
             self.analysisData = TickerAnalysisData.sampleData
             self.earningsData = EarningsData.sampleData
@@ -220,6 +225,7 @@ class TickerDetailViewModel: ObservableObject {
 
     func handleSuggestionTap(_ suggestion: TickerAISuggestion) {
         aiInputText = suggestion.text
+        handleAISend()
     }
 
     func handleAISend() {
@@ -227,10 +233,7 @@ class TickerDetailViewModel: ObservableObject {
         let query = aiInputText
         aiInputText = ""
         print("🤖 AI Query for \(tickerSymbol): \(query)")
-        // TODO: Navigate to ChatConversationView with stock_id=tickerSymbol and pre-filled query
-        // This requires: 1) Auth token, 2) POST /api/v1/chat/sessions with stock_id
-        // 3) POST /api/v1/chat/sessions/{id}/messages with the query
-        // For now, log the intent — full chat wiring is a separate screen task
+        pendingAIQuery = query
     }
 
     func updateChartRange(_ range: ChartTimeRange) {
@@ -640,33 +643,46 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Computed Properties (prefer live API data over sample data)
 
     var formattedPrice: String {
+        // Prefer tickerData (from overview endpoint), then fallback to separate API data
+        if let data = tickerData, data.currentPrice > 0 {
+            return data.formattedPrice
+        }
         if let price = stockQuote?.price ?? stockDetail?.price {
             return String(format: "$%.2f", price)
         }
-        return tickerData?.formattedPrice ?? "--"
+        return "--"
     }
 
     var formattedChange: String {
+        if let data = tickerData {
+            return data.formattedChange
+        }
         if let change = stockQuote?.change ?? stockDetail?.change {
             let sign = change >= 0 ? "+" : ""
             return "\(sign)\(String(format: "%.2f", change))"
         }
-        return tickerData?.formattedChange ?? "--"
+        return "--"
     }
 
     var formattedChangePercent: String {
+        if let data = tickerData {
+            return data.formattedChangePercent
+        }
         if let percent = stockQuote?.changePercent {
             let sign = percent >= 0 ? "+" : ""
             return "(\(sign)\(String(format: "%.2f", percent))%)"
         }
-        return tickerData?.formattedChangePercent ?? "--"
+        return "--"
     }
 
     var isPositive: Bool {
+        if let data = tickerData {
+            return data.isPositive
+        }
         if let change = stockQuote?.change ?? stockDetail?.change {
             return change >= 0
         }
-        return tickerData?.isPositive ?? true
+        return true
     }
 
     var chartData: [Double] {

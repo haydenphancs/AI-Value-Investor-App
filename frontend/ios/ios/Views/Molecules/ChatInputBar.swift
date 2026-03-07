@@ -9,7 +9,7 @@ import SwiftUI
 
 struct ChatInputBar: View {
     @Binding var text: String
-    var placeholder: String = "Ask Caudex anything..."
+    var placeholder: String = "Ask Cay AI anything..."
     var onAttachmentTap: (() -> Void)?
     var onSend: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?

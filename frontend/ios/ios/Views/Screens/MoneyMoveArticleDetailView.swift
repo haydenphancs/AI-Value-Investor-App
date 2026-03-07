@@ -106,7 +106,7 @@ struct MoneyMoveArticleDetailView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CaudexAIChatBar(inputText: $aiInputText)
+                CaydexAIChatBar(inputText: $aiInputText)
             }
 
             // Full Screen Player (modal overlay)

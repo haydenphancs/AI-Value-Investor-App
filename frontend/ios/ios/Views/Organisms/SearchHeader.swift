@@ -35,7 +35,7 @@ struct SearchHeader: View {
                         .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.primaryBlue)
 
-                    TextField("", text: $searchText, prompt: Text("Search or ask Caudex AI...")
+                    TextField("", text: $searchText, prompt: Text("Search or ask Cay AI...")
                         .foregroundColor(AppColors.textMuted))
                         .font(AppTypography.body)
                         .foregroundColor(AppColors.textPrimary)

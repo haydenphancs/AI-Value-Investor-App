@@ -1,10 +1,11 @@
 """
 Crypto Endpoints — Aggregated data for the CryptoDetailView screen.
 
-Frontend: GET /crypto/{symbol}?range=3M
+Frontend: GET /crypto/{symbol}?range=3M&interval=daily
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 import logging
 
 from app.services.crypto_service import get_crypto_service
@@ -22,6 +23,11 @@ async def get_crypto_detail(
         "3M",
         alias="range",
         pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$",
+    ),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
     ),
 ):
     """
@@ -41,7 +47,9 @@ async def get_crypto_detail(
 
     try:
         service = get_crypto_service()
-        result = await service.get_crypto_detail(symbol, chart_range=chart_range)
+        result = await service.get_crypto_detail(
+            symbol, chart_range=chart_range, interval=interval
+        )
         return result
 
     except HTTPException:

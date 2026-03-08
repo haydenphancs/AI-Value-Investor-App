@@ -18,13 +18,23 @@ struct TickerChartView: View {
 
     @State private var showSettingsSheet = false
     @StateObject private var crosshairState = CrosshairState()
+    @StateObject private var viewportState = ChartViewportState()
+
+    /// Slice of price points visible in the current viewport
+    private var visiblePoints: [StockPricePoint] {
+        guard !pricePoints.isEmpty else { return [] }
+        let start = max(0, viewportState.visibleStart)
+        let end = min(pricePoints.count - 1, viewportState.visibleEnd)
+        guard start <= end else { return pricePoints }
+        return Array(pricePoints[start...end])
+    }
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
             // Scrubbing price overlay (shows selected point's price when dragging)
             if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
-               idx >= 0, idx < pricePoints.count {
-                let point = pricePoints[idx]
+               idx >= 0, idx < visiblePoints.count {
+                let point = visiblePoints[idx]
                 HStack(spacing: AppSpacing.xs) {
                     Text(formatPrice(point.close))
                         .font(AppTypography.heading)
@@ -48,63 +58,88 @@ struct TickerChartView: View {
             // Main price chart with crosshair gesture
             ZStack {
                 MainChartCanvas(
-                    pricePoints: pricePoints,
+                    pricePoints: visiblePoints,
                     isPositive: isPositive,
                     chartType: chartSettings.chartType,
                     overlays: chartSettings.activeOverlays
                 )
 
                 ChartCrosshairGesture(
-                    pricePoints: pricePoints,
+                    pricePoints: visiblePoints,
                     selectedRange: selectedRange,
-                    crosshairState: crosshairState
+                    crosshairState: crosshairState,
+                    viewportState: viewportState
                 )
             }
             .frame(height: 140)
             .padding(.horizontal, AppSpacing.lg)
 
             // X-axis date labels
-            if pricePoints.count > 1 {
-                ChartXAxisLabels(pricePoints: pricePoints, selectedRange: selectedRange)
+            if visiblePoints.count > 1 {
+                ChartXAxisLabels(pricePoints: visiblePoints, selectedRange: selectedRange)
                     .padding(.horizontal, AppSpacing.lg)
             }
 
             // Sub-charts (Volume, RSI, MACD, Stoch)
+            // Pass full data for indicator warm-up, visible slice for rendering
             ForEach(chartSettings.activeSubCharts) { indicator in
-                SubChartCanvas(indicator: indicator, pricePoints: pricePoints)
+                SubChartCanvas(
+                    indicator: indicator,
+                    pricePoints: visiblePoints,
+                    allPricePoints: pricePoints,
+                    visibleStartIndex: viewportState.visibleStart
+                )
             }
 
             // Time range selector + icons
-            HStack(spacing: 2) {
-                ForEach(ChartTimeRange.allCases, id: \.rawValue) { range in
-                    TimeRangeButton(range: range, isSelected: selectedRange == range) {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selectedRange = range
+            HStack(spacing: 4) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(ChartTimeRange.allCases, id: \.rawValue) { range in
+                            TimeRangeButton(range: range, isSelected: selectedRange == range) {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    selectedRange = range
+                                }
+                            }
                         }
                     }
                 }
 
-                Spacer()
-
-                // Chart type selector (Menu)
-                Menu {
-                    ForEach(ChartType.allCases) { type in
-                        Button {
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) {
-                                chartSettings.chartType = type
+                // Interval selector — only show when multiple intervals are available
+                if selectedRange.allowedIntervals.count > 1 {
+                    Menu {
+                        ForEach(selectedRange.allowedIntervals) { interval in
+                            Button {
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    chartSettings.selectedInterval = interval
+                                }
+                            } label: {
+                                HStack {
+                                    Text(interval.displayName)
+                                    if chartSettings.selectedInterval == interval {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
                             }
-                        } label: {
-                            Label(type.rawValue, systemImage: type.iconName)
                         }
-                    }
-                } label: {
-                    Image(systemName: chartSettings.chartType.iconName)
-                        .font(AppTypography.iconDefault)
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 10))
+                            Text(chartSettings.selectedInterval.displayName)
+                                .font(AppTypography.labelSmall)
+                        }
+                        .fixedSize()
                         .foregroundColor(AppColors.textMuted)
-                        .padding(.leading, 4)
-                        .padding(.trailing, 8)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                        )
+                    }
                 }
 
                 // Settings icon
@@ -124,9 +159,15 @@ struct TickerChartView: View {
                 .transaction { $0.disablesAnimations = true }
         }
         .onChange(of: selectedRange) { _ in
-            // Clear crosshair when range changes
             crosshairState.selectedIndex = nil
             crosshairState.isDragging = false
+        }
+        .onChange(of: pricePoints.count) { newCount in
+            // Reset viewport when new data is loaded
+            viewportState.reset(totalCount: newCount)
+        }
+        .onAppear {
+            viewportState.reset(totalCount: pricePoints.count)
         }
     }
 

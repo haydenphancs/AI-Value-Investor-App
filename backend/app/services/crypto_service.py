@@ -357,7 +357,7 @@ class CryptoService:
         self.fmp: FMPClient = get_fmp_client()
 
     async def get_crypto_detail(
-        self, symbol: str, chart_range: str = "3M"
+        self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CryptoDetailResponse:
         """
         Fetch and assemble complete crypto detail data.
@@ -444,7 +444,12 @@ class CryptoService:
         )
 
         # ── Step 4: Build chart data ──────────────────────────────
-        chart_data = self._extract_chart_data(historical, chart_range)
+        from app.services.chart_helper import fetch_chart_data, resolve_interval
+        resolved = resolve_interval(chart_range, interval)
+        if resolved != "daily" or chart_range == "ALL":
+            chart_data = await fetch_chart_data(self.fmp, fmp_symbol, chart_range, interval)
+        else:
+            chart_data = self._extract_chart_data(historical, chart_range)
 
         # ── Step 5: Build key statistics ──────────────────────────
         max_supply = profile_meta.get("max_supply")

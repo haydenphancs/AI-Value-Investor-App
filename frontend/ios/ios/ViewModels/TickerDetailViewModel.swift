@@ -54,16 +54,30 @@ class TickerDetailViewModel: ObservableObject {
         self.tickerSymbol = tickerSymbol
         self.stockRepository = stockRepository ?? StockRepository()
 
-        // Observe chart range changes and fetch new chart data
+        // Observe chart range changes: auto-set default interval and fetch new chart data
         $selectedChartRange
             .dropFirst() // Skip initial value
             .removeDuplicates()
             .sink { [weak self] range in
                 guard let self = self else { return }
                 print("📈 TickerDetailVM: Chart range changed to \(range.rawValue)")
+                self.chartSettings.selectedInterval = range.defaultInterval
                 Task { [weak self] in
                     guard let self = self else { return }
                     await self.fetchChartData(self.tickerSymbol, range: range)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Observe interval changes and re-fetch chart data
+        chartSettings.$selectedInterval
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task { [weak self] in
+                    guard let self = self else { return }
+                    await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)
                 }
             }
             .store(in: &cancellables)
@@ -84,7 +98,8 @@ class TickerDetailViewModel: ObservableObject {
             // Try the aggregated overview endpoint first (all Overview tab data in one call)
             do {
                 let response = try await self.stockRepository.getStockOverview(
-                    ticker: ticker, range: self.selectedChartRange.rawValue
+                    ticker: ticker, range: self.selectedChartRange.rawValue,
+                    interval: self.chartSettings.selectedInterval.rawValue
                 )
                 self.tickerData = response.toDisplayModel()
                 print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
@@ -263,7 +278,8 @@ class TickerDetailViewModel: ObservableObject {
         let rangeString = range.rawValue  // e.g. "3M", "1Y", "1D"
         print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
         do {
-            let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString)
+            let intervalString = chartSettings.selectedInterval.rawValue
+            let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString)
             let pricePoints = chartResponse.prices
             print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
             if !pricePoints.isEmpty, let currentData = self.tickerData {

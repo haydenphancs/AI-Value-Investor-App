@@ -236,12 +236,12 @@ class StockOverviewService:
         self.fmp: FMPClient = get_fmp_client()
 
     async def get_overview(
-        self, ticker: str, chart_range: str = "3M"
+        self, ticker: str, chart_range: str = "3M", interval: str = None
     ) -> StockOverviewResponse:
         ticker = ticker.upper()
 
         # Check full overview cache
-        cache_key = f"stock_overview:{ticker}:{chart_range}"
+        cache_key = f"stock_overview:{ticker}:{chart_range}:{interval or 'default'}"
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
@@ -319,7 +319,14 @@ class StockOverviewService:
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
         # ── Step 3: Chart data ────────────────────────────────────
-        chart_data = _extract_chart_data(stock_historical, chart_range)
+        from app.services.chart_helper import fetch_chart_data, resolve_interval
+        resolved = resolve_interval(chart_range, interval)
+        if resolved != "daily" or chart_range == "ALL":
+            # Intraday/aggregated intervals or ALL range: use chart_helper
+            chart_data = await fetch_chart_data(self.fmp, ticker, chart_range, interval)
+        else:
+            # Daily with bounded range: slice from already-fetched 10yr history
+            chart_data = _extract_chart_data(stock_historical, chart_range)
 
         # ── Step 4: Key statistics ────────────────────────────────
         key_statistics, key_statistics_groups = self._build_key_statistics(

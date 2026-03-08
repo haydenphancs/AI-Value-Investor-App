@@ -34,7 +34,7 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - Private Properties
 
     private let indexSymbol: String
-    private var chartRangeCancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
@@ -42,16 +42,29 @@ class IndexDetailViewModel: ObservableObject {
         self.indexSymbol = indexSymbol
 
         // Observe chart range changes and reload chart data
-        chartRangeCancellable = $selectedChartRange
-            .dropFirst() // Skip initial value
+        $selectedChartRange
+            .dropFirst()
             .removeDuplicates()
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] newRange in
                 guard let self = self else { return }
+                self.chartSettings.selectedInterval = newRange.defaultInterval
                 Task {
                     await self.loadChartData(range: newRange)
                 }
             }
+            .store(in: &cancellables)
+
+        // Observe interval changes and re-fetch chart data
+        chartSettings.$selectedInterval
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task {
+                    await self.loadChartData(range: self.selectedChartRange)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -162,7 +175,7 @@ class IndexDetailViewModel: ObservableObject {
     private func fetchIndexDetail() async {
         let startTime = CFAbsoluteTimeGetCurrent()
         let range = selectedChartRange.rawValue
-        let endpoint = APIEndpoint.getIndexDetail(symbol: indexSymbol, range: range)
+        let endpoint = APIEndpoint.getIndexDetail(symbol: indexSymbol, range: range, interval: chartSettings.selectedInterval.rawValue)
 
         print("📡 [IndexDetailVM] Fetching index detail for \(indexSymbol) (range: \(range)) from \(APIConfig.baseURL.absoluteString)\(endpoint.path) ...")
 
@@ -216,7 +229,7 @@ class IndexDetailViewModel: ObservableObject {
 
         do {
             let response = try await APIClient.shared.request(
-                endpoint: .getIndexDetail(symbol: indexSymbol, range: range.rawValue),
+                endpoint: .getIndexDetail(symbol: indexSymbol, range: range.rawValue, interval: chartSettings.selectedInterval.rawValue),
                 responseType: IndexDetailResponse.self
             )
 

@@ -45,21 +45,24 @@ enum APIEndpoint: Sendable {
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
-    case getStockOverview(ticker: String, range: String)
+    case getStockOverview(ticker: String, range: String, interval: String? = nil)
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
-    case getStockChart(ticker: String, range: String)
+    case getStockChart(ticker: String, range: String, interval: String? = nil)
     case getTickerReport(ticker: String, persona: String)
 
     // MARK: - Indices
-    case getIndexDetail(symbol: String, range: String)
+    case getIndexDetail(symbol: String, range: String, interval: String? = nil)
 
     // MARK: - Crypto
-    case getCryptoDetail(symbol: String, range: String)
+    case getCryptoDetail(symbol: String, range: String, interval: String? = nil)
 
     // MARK: - ETFs
-    case getETFDetail(symbol: String, range: String)
+    case getETFDetail(symbol: String, range: String, interval: String? = nil)
+
+    // MARK: - Commodities
+    case getCommodityDetail(symbol: String, range: String, interval: String? = nil)
 
     // MARK: - Watchlist
     case getWatchlist
@@ -138,7 +141,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/search"
         case .getStock(let ticker):
             return "/api/v1/stocks/\(ticker)"
-        case .getStockOverview(let ticker, _):
+        case .getStockOverview(let ticker, _, _):
             return "/api/v1/stocks/\(ticker)/overview"
         case .getStockQuote(let ticker):
             return "/api/v1/stocks/\(ticker)/quote"
@@ -146,22 +149,26 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/fundamentals"
         case .getStockNews(let ticker, _):
             return "/api/v1/stocks/\(ticker)/news"
-        case .getStockChart(let ticker, _):
+        case .getStockChart(let ticker, _, _):
             return "/api/v1/stocks/\(ticker)/chart"
         case .getTickerReport(let ticker, _):
             return "/api/v1/stocks/\(ticker)/report"
 
         // Crypto
-        case .getCryptoDetail(let symbol, _):
+        case .getCryptoDetail(let symbol, _, _):
             return "/api/v1/crypto/\(symbol)"
 
         // Indices
-        case .getIndexDetail(let symbol, _):
+        case .getIndexDetail(let symbol, _, _):
             return "/api/v1/indices/\(symbol)"
 
         // ETFs
-        case .getETFDetail(let symbol, _):
+        case .getETFDetail(let symbol, _, _):
             return "/api/v1/etfs/\(symbol)"
+
+        // Commodities
+        case .getCommodityDetail(let symbol, _, _):
+            return "/api/v1/commodities/\(symbol)"
 
         // Watchlist
         case .getWatchlist:
@@ -281,23 +288,38 @@ enum APIEndpoint: Sendable {
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
 
-        case .getStockOverview(_, let range):
-            return ["range": range]
+        case .getStockOverview(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
 
-        case .getStockChart(_, let range):
-            return ["range": range]
+        case .getStockChart(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
 
         case .getTickerReport(_, let persona):
             return ["persona": persona]
 
-        case .getCryptoDetail(_, let range):
-            return ["range": range]
+        case .getCryptoDetail(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
 
-        case .getIndexDetail(_, let range):
-            return ["range": range]
+        case .getIndexDetail(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
 
-        case .getETFDetail(_, let range):
-            return ["range": range]
+        case .getETFDetail(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
+
+        case .getCommodityDetail(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
 
         case .getMyReports(let limit):
             return ["limit": String(limit)]
@@ -377,9 +399,9 @@ enum APIEndpoint: Sendable {
         // Auth endpoints
         case .signIn, .signUp, .refreshToken:
             return false
-        // Stock/crypto endpoints are public on the backend
+        // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
-             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail:
+             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
@@ -413,8 +435,8 @@ enum APIEndpoint: Sendable {
             return 60 // 1 minute for chat
         case .getStockOverview:
             return 60 // 1 minute for aggregated overview (many FMP calls)
-        case .getCryptoDetail, .getIndexDetail, .getETFDetail:
-            return 60 // 1 minute for AI snapshot generation
+        case .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+            return 60 // 1 minute for aggregated detail
         case .getWhaleProfile:
             return 60 // 1 minute for whale profile (may fetch from FMP)
         default:

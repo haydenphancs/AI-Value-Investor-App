@@ -2,14 +2,30 @@
 //  SubChartCanvas.swift
 //  ios
 //
-//  Container for sub-chart indicator panes (Volume, RSI, MACD, Stoch)
+//  Container for sub-chart indicator panes (Volume, RSI, MACD, Stoch).
+//  Indicators are computed from the full dataset to avoid warm-up gaps,
+//  then only the visible portion is rendered.
 //
 
 import SwiftUI
 
 struct SubChartCanvas: View {
     let indicator: TechnicalIndicatorType
-    let pricePoints: [StockPricePoint]
+    let pricePoints: [StockPricePoint]          // visible slice (for rendering positions)
+    var allPricePoints: [StockPricePoint]? = nil // full dataset (for indicator computation)
+    var visibleStartIndex: Int = 0               // where visible slice starts in allPricePoints
+
+    /// The data used for indicator calculation (full dataset if available)
+    private var computePoints: [StockPricePoint] {
+        allPricePoints ?? pricePoints
+    }
+
+    /// The range of indices (in computePoints) that correspond to the visible slice
+    private var visibleRange: Range<Int> {
+        let start = visibleStartIndex
+        let end = min(start + pricePoints.count, computePoints.count)
+        return start..<end
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,21 +43,37 @@ struct SubChartCanvas: View {
                 let size = geometry.size
                 switch indicator {
                 case .volume:
-                    VolumeBarRenderer(pricePoints: pricePoints, size: size)
+                    VolumeBarRenderer(
+                        pricePoints: pricePoints,
+                        size: size
+                    )
                 case .rsi14:
-                    RSIRenderer(pricePoints: pricePoints, size: size)
+                    RSIRenderer(
+                        allCloses: computePoints.map { $0.close },
+                        visibleRange: visibleRange,
+                        size: size
+                    )
                 case .macd:
-                    MACDRenderer(pricePoints: pricePoints, size: size)
+                    MACDRenderer(
+                        allCloses: computePoints.map { $0.close },
+                        visibleRange: visibleRange,
+                        size: size
+                    )
                 case .stochastic:
-                    StochasticRenderer(pricePoints: pricePoints, size: size)
+                    StochasticRenderer(
+                        allPricePoints: computePoints,
+                        visibleRange: visibleRange,
+                        size: size
+                    )
                 default:
                     EmptyView()
                 }
             }
-            .frame(height: 50)
+            .frame(height: 60)
+            .clipped()
             .padding(.horizontal, AppSpacing.lg)
         }
-        .frame(height: 65)
+        .frame(height: 78)
     }
 }
 
@@ -86,13 +118,14 @@ struct VolumeBarRenderer: View {
 // MARK: - RSI Renderer
 
 struct RSIRenderer: View {
-    let pricePoints: [StockPricePoint]
+    let allCloses: [Double]
+    let visibleRange: Range<Int>
     let size: CGSize
 
     var body: some View {
-        let closes = pricePoints.map { $0.close }
-        let rsiData = TechnicalIndicatorCalculator.rsi(closes: closes, period: 14)
-        let count = rsiData.values.count
+        let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
+        let visibleValues = Array(rsiData.values[visibleRange])
+        let count = visibleValues.count
 
         Canvas { context, canvasSize in
             guard count > 0 else { return }
@@ -120,7 +153,7 @@ struct RSIRenderer: View {
             // RSI line
             var rsiPath = Path()
             var started = false
-            for (index, value) in rsiData.values.enumerated() {
+            for (index, value) in visibleValues.enumerated() {
                 guard let v = value else { continue }
                 let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
                 let y = canvasSize.height * (1 - CGFloat(v) / 100.0)
@@ -139,18 +172,21 @@ struct RSIRenderer: View {
 // MARK: - MACD Renderer
 
 struct MACDRenderer: View {
-    let pricePoints: [StockPricePoint]
+    let allCloses: [Double]
+    let visibleRange: Range<Int>
     let size: CGSize
 
     var body: some View {
-        let closes = pricePoints.map { $0.close }
-        let macdData = TechnicalIndicatorCalculator.macd(closes: closes)
-        let count = macdData.macdLine.count
+        let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
+        let visibleMACD = Array(macdData.macdLine[visibleRange])
+        let visibleSignal = Array(macdData.signalLine[visibleRange])
+        let visibleHistogram = Array(macdData.histogram[visibleRange])
+        let count = visibleMACD.count
 
         Canvas { context, canvasSize in
             guard count > 0 else { return }
 
-            let allValues = (macdData.macdLine + macdData.signalLine + macdData.histogram).compactMap { $0 }
+            let allValues = (visibleMACD + visibleSignal + visibleHistogram).compactMap { $0 }
             guard !allValues.isEmpty else { return }
             let maxVal = allValues.map { abs($0) }.max() ?? 1
             let midY = canvasSize.height / 2
@@ -167,7 +203,7 @@ struct MACDRenderer: View {
 
             // Histogram bars
             let barWidth = max(1, canvasSize.width / CGFloat(count) * 0.5)
-            for (index, value) in macdData.histogram.enumerated() {
+            for (index, value) in visibleHistogram.enumerated() {
                 guard let v = value else { continue }
                 let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
                 let barY = yPos(v)
@@ -182,10 +218,10 @@ struct MACDRenderer: View {
             }
 
             // MACD line
-            drawLine(context: context, values: macdData.macdLine, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .green, lineWidth: 1.5)
+            drawLine(context: context, values: visibleMACD, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .green, lineWidth: 1.5)
 
             // Signal line
-            drawLine(context: context, values: macdData.signalLine, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .red, lineWidth: 1)
+            drawLine(context: context, values: visibleSignal, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .red, lineWidth: 1)
         }
     }
 
@@ -210,15 +246,18 @@ struct MACDRenderer: View {
 // MARK: - Stochastic Renderer
 
 struct StochasticRenderer: View {
-    let pricePoints: [StockPricePoint]
+    let allPricePoints: [StockPricePoint]
+    let visibleRange: Range<Int>
     let size: CGSize
 
     var body: some View {
-        let closes = pricePoints.map { $0.close }
-        let highs = pricePoints.map { $0.high ?? $0.close }
-        let lows = pricePoints.map { $0.low ?? $0.close }
+        let closes = allPricePoints.map { $0.close }
+        let highs = allPricePoints.map { $0.high ?? $0.close }
+        let lows = allPricePoints.map { $0.low ?? $0.close }
         let stochData = TechnicalIndicatorCalculator.stochastic(highs: highs, lows: lows, closes: closes)
-        let count = stochData.kValues.count
+        let visibleK = Array(stochData.kValues[visibleRange])
+        let visibleD = Array(stochData.dValues[visibleRange])
+        let count = visibleK.count
 
         Canvas { context, canvasSize in
             guard count > 0 else { return }
@@ -238,10 +277,10 @@ struct StochasticRenderer: View {
             context.stroke(line80, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             // %K line (blue)
-            drawStochLine(context: context, values: stochData.kValues, count: count, canvasSize: canvasSize, color: .blue, lineWidth: 1.5)
+            drawStochLine(context: context, values: visibleK, count: count, canvasSize: canvasSize, color: .blue, lineWidth: 1.5)
 
             // %D line (orange)
-            drawStochLine(context: context, values: stochData.dValues, count: count, canvasSize: canvasSize, color: .orange, lineWidth: 1)
+            drawStochLine(context: context, values: visibleD, count: count, canvasSize: canvasSize, color: .orange, lineWidth: 1)
         }
     }
 

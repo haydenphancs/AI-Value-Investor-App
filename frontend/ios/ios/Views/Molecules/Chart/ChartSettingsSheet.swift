@@ -17,6 +17,52 @@ struct ChartSettingsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: AppSpacing.xl) {
 
+                    // Chart type section
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Text("Chart Type")
+                            .font(AppTypography.headingSmall)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        HStack(spacing: AppSpacing.sm) {
+                            ForEach(ChartType.allCases) { type in
+                                Button {
+                                    var transaction = Transaction()
+                                    transaction.disablesAnimations = true
+                                    withTransaction(transaction) {
+                                        chartSettings.chartType = type
+                                    }
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: type.iconName)
+                                            .font(.system(size: 18))
+                                        Text(type.rawValue)
+                                            .font(AppTypography.caption)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, AppSpacing.sm)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                            .fill(chartSettings.chartType == type
+                                                  ? AppColors.primaryBlue.opacity(0.15)
+                                                  : AppColors.cardBackgroundLight.opacity(0.5))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                            .stroke(chartSettings.chartType == type
+                                                    ? AppColors.primaryBlue
+                                                    : Color.clear, lineWidth: 1)
+                                    )
+                                    .foregroundColor(chartSettings.chartType == type
+                                                     ? AppColors.primaryBlue
+                                                     : AppColors.textMuted)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                        }
+                    }
+
+                    Divider()
+
                     // Overlays section
                     VStack(alignment: .leading, spacing: AppSpacing.sm) {
                         Text("Overlays")

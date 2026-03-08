@@ -25,10 +25,10 @@ import Foundation
 protocol StockRepositoryProtocol {
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult]
     func getStock(ticker: String) async throws -> StockDetail
-    func getStockOverview(ticker: String, range: String) async throws -> StockOverviewResponseDTO
+    func getStockOverview(ticker: String, range: String, interval: String?) async throws -> StockOverviewResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
-    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse
+    func getStockChart(ticker: String, range: String, interval: String?) async throws -> StockChartResponse
 }
 
 // MARK: - Stock Repository
@@ -89,20 +89,20 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - Overview (aggregated endpoint)
 
-    func getStockOverview(ticker: String, range: String = "3M") async throws -> StockOverviewResponseDTO {
-        let cacheKey = "overview_\(ticker)_\(range)"
+    func getStockOverview(ticker: String, range: String = "3M", interval: String? = nil) async throws -> StockOverviewResponseDTO {
+        let cacheKey = "overview_\(ticker)_\(range)_\(interval ?? "default")"
 
         if let cached: StockOverviewResponseDTO = getCached(cacheKey, maxAge: 300) {
             return cached
         }
 
         let response = try await apiClient.request(
-            endpoint: .getStockOverview(ticker: ticker, range: range),
+            endpoint: .getStockOverview(ticker: ticker, range: range, interval: interval),
             responseType: StockOverviewResponseDTO.self
         )
 
         setCache(cacheKey, value: response)
-        print("✅ StockRepository: Got overview for \(ticker), range=\(range)")
+        print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default")")
         return response
     }
 
@@ -146,8 +146,8 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - Chart
 
-    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse {
-        let cacheKey = "chart_\(ticker)_\(range)"
+    func getStockChart(ticker: String, range: String, interval: String? = nil) async throws -> StockChartResponse {
+        let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")"
 
         // Cache chart data for 5 minutes
         if let cached: StockChartResponse = getCached(cacheKey, maxAge: 300) {
@@ -155,7 +155,7 @@ final class StockRepository: StockRepositoryProtocol {
         }
 
         let chart = try await apiClient.request(
-            endpoint: .getStockChart(ticker: ticker, range: range),
+            endpoint: .getStockChart(ticker: ticker, range: range, interval: interval),
             responseType: StockChartResponse.self
         )
 
@@ -410,7 +410,7 @@ final class MockStockRepository: StockRepositoryProtocol {
         ]
     }
 
-    func getStockOverview(ticker: String, range: String) async throws -> StockOverviewResponseDTO {
+    func getStockOverview(ticker: String, range: String, interval: String? = nil) async throws -> StockOverviewResponseDTO {
         // Mock: just throw so ViewModel falls back to sample data
         throw URLError(.badServerResponse)
     }
@@ -492,7 +492,7 @@ final class MockStockRepository: StockRepositoryProtocol {
         )
     }
 
-    func getStockChart(ticker: String, range: String) async throws -> StockChartResponse {
+    func getStockChart(ticker: String, range: String, interval: String? = nil) async throws -> StockChartResponse {
         StockChartResponse(
             symbol: ticker,
             prices: [

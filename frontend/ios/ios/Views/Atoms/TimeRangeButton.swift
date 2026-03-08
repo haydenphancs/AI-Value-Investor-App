@@ -18,6 +18,7 @@ struct TimeRangeButton: View {
         }) {
             Text(range.displayName)
                 .font(AppTypography.labelSmallEmphasis)
+                .fixedSize()
                 .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, AppSpacing.sm)

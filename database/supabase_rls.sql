@@ -117,6 +117,10 @@ CREATE POLICY "ticker_news_cache_service_all"
     ON ticker_news_cache FOR ALL
     USING (auth.role() = 'service_role');
 
+GRANT ALL ON TABLE public.ticker_news_cache TO service_role;
+GRANT SELECT ON TABLE public.ticker_news_cache TO anon;
+GRANT SELECT ON TABLE public.ticker_news_cache TO authenticated;
+
 -- =====================================================
 -- AGENT PERSONAS (public read, service writes)
 -- =====================================================

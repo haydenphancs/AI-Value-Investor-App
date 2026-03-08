@@ -49,6 +49,7 @@ enum APIEndpoint: Sendable {
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
+    case enrichStockNews(ticker: String, articleIds: [String])
     case getStockChart(ticker: String, range: String, interval: String? = nil)
     case getTickerReport(ticker: String, persona: String)
 
@@ -149,6 +150,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/fundamentals"
         case .getStockNews(let ticker, _):
             return "/api/v1/stocks/\(ticker)/news"
+        case .enrichStockNews(let ticker, _):
+            return "/api/v1/stocks/\(ticker)/news/enrich"
         case .getStockChart(let ticker, _, _):
             return "/api/v1/stocks/\(ticker)/chart"
         case .getTickerReport(let ticker, _):
@@ -260,7 +263,7 @@ enum APIEndpoint: Sendable {
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport, .addHolding,
-             .followWhale:
+             .followWhale, .enrichStockNews:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -386,6 +389,9 @@ enum APIEndpoint: Sendable {
 
         case .updateHolding(_, let marketValue):
             return UpdateHoldingRequestBody(marketValue: marketValue)
+
+        case .enrichStockNews(_, let articleIds):
+            return EnrichStockNewsRequest(articleIds: articleIds)
 
         default:
             return nil
@@ -513,4 +519,12 @@ nonisolated struct AddHoldingRequestBody: Encodable, Sendable {
 
 nonisolated struct UpdateHoldingRequestBody: Encodable, Sendable {
     let marketValue: Double
+}
+
+nonisolated struct EnrichStockNewsRequest: Encodable, Sendable {
+    let articleIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case articleIds = "article_ids"
+    }
 }

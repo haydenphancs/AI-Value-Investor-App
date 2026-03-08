@@ -14,7 +14,10 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var tickerData: TickerDetailData?
-    @Published var newsArticles: [TickerNewsArticle] = []
+    @Published var newsArticles: [TickerNewsArticle] = []  // displayed (paginated)
+    @Published var isNewsLoading: Bool = false
+    @Published var hasMoreNews: Bool = false
+    @Published var isLoadingMoreNews: Bool = false
     @Published var analysisData: TickerAnalysisData?
     @Published var earningsData: EarningsData?
     @Published var growthData: GrowthSectionData?
@@ -47,6 +50,9 @@ class TickerDetailViewModel: ObservableObject {
     private let tickerSymbol: String
     private let stockRepository: StockRepository
     private var cancellables = Set<AnyCancellable>()
+    private var allNewsArticles: [TickerNewsArticle] = []  // full set from API
+    private var newsDisplayCount: Int = 10
+    private let newsPageSize: Int = 10
 
     // MARK: - Initialization
 
@@ -159,38 +165,109 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     private func fetchStockNews(_ ticker: String) async {
+        self.isNewsLoading = true
         do {
-            let response = try await stockRepository.getStockNews(ticker: ticker, limit: 10)
+            let response = try await stockRepository.getStockNews(ticker: ticker, limit: 50)
             let apiNews = response.articles
             let cached = response.cached ?? false
             print("✅ TickerDetailVM: Got \(apiNews.count) news articles for \(ticker) (cached: \(cached))")
-            // Convert API news to UI news model
-            self.newsArticles = apiNews.map { article in
-                // Use AI-generated bullets if available, fall back to summary
-                let bullets: [String] = {
-                    if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
-                        return aiBullets
-                    }
-                    if let summary = article.summary, !summary.isEmpty {
-                        return [summary]
-                    }
-                    return []
-                }()
 
-                return TickerNewsArticle(
-                    headline: article.title,
-                    source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
-                    sentiment: mapSentiment(article.sentiment),
-                    publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
-                    thumbnailName: nil,
-                    relatedTickers: article.relatedTickers ?? [],
-                    summaryBullets: bullets,
-                    articleURL: article.url.flatMap { URL(string: $0) }
-                )
-            }
+            // Convert all API news to UI models
+            self.allNewsArticles = apiNews.map { mapApiToUiArticle($0) }
+
+            // Show first page
+            self.newsDisplayCount = newsPageSize
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+
+            // Enrich the visible batch
+            await enrichVisibleArticles()
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
         }
+        self.isNewsLoading = false
+    }
+
+    func loadMoreNews() {
+        guard !isLoadingMoreNews, hasMoreNews else { return }
+        isLoadingMoreNews = true
+
+        newsDisplayCount += newsPageSize
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        hasMoreNews = allNewsArticles.count > newsDisplayCount
+        isLoadingMoreNews = false
+
+        // Enrich newly visible articles in the background
+        Task {
+            await enrichVisibleArticles()
+        }
+    }
+
+    private func enrichVisibleArticles() async {
+        // Find un-enriched articles in the visible set
+        let unenriched = newsArticles.filter { !$0.aiProcessed }
+        guard !unenriched.isEmpty else { return }
+
+        let ids = unenriched.map { $0.apiId }.filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+        guard !ids.isEmpty else { return }
+
+        do {
+            let response = try await stockRepository.enrichStockNews(
+                ticker: tickerSymbol,
+                articleIds: ids
+            )
+            print("✅ TickerDetailVM: Enriched \(response.articles.count) articles")
+
+            // Merge enriched data back into our models
+            let enrichedById = Dictionary(
+                response.articles.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            for i in allNewsArticles.indices {
+                if let enriched = enrichedById[allNewsArticles[i].apiId] {
+                    let bullets: [String] = {
+                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                        if let s = enriched.summary, !s.isEmpty { return [s] }
+                        return allNewsArticles[i].summaryBullets
+                    }()
+                    allNewsArticles[i].summaryBullets = bullets
+                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                    allNewsArticles[i].aiProcessed = true
+                }
+            }
+
+            // Refresh displayed articles
+            newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        } catch {
+            print("⚠️ TickerDetailVM: Enrichment failed: \(error)")
+        }
+    }
+
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
+        let bullets: [String] = {
+            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
+                return aiBullets
+            }
+            if let summary = article.summary, !summary.isEmpty {
+                return [summary]
+            }
+            return []
+        }()
+
+        return TickerNewsArticle(
+            apiId: article.id,
+            headline: article.title,
+            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            sentiment: mapSentiment(article.sentiment),
+            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            thumbnailName: nil,
+            imageURL: article.imageUrl.flatMap { URL(string: $0) },
+            relatedTickers: article.relatedTickers ?? [],
+            summaryBullets: bullets,
+            articleURL: article.url.flatMap { URL(string: $0) },
+            aiProcessed: article.aiProcessed ?? false
+        )
     }
 
     private func mapSentiment(_ sentiment: String?) -> NewsSentiment {

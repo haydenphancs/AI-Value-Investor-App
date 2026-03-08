@@ -241,21 +241,22 @@ class FMPClient:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """
-        Get stock or general news from FMP.
+        Get stock or general news from FMP (stable API: news/stock).
 
         Args:
             ticker: Optional stock/index symbol. If None, returns general news.
             limit: Max articles to return.
 
         Returns:
-            List of news article dicts.
+            List of news article dicts with keys: symbol, publishedDate,
+            publisher, title, image, site, text, url.
         """
         params: Dict[str, Any] = {"limit": limit}
         if ticker:
-            params["symbol"] = ticker.upper()
+            params["tickers"] = ticker.upper()
 
         try:
-            return await self._make_request("stock-news", params=params)
+            return await self._make_request("news/stock", params=params)
         except Exception as e:
             logger.warning(f"Stock news request failed: {e}")
             return []

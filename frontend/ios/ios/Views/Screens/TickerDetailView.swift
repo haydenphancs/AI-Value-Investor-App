@@ -243,9 +243,12 @@ struct TickerDetailView: View {
             TickerNewsContent(
                 articles: viewModel.newsArticles,
                 currentTicker: tickerSymbol,
+                isLoading: viewModel.isNewsLoading,
+                hasMoreNews: viewModel.hasMoreNews,
                 onArticleTap: viewModel.handleNewsArticleTap,
                 onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap
+                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onLoadMore: { viewModel.loadMoreNews() }
             )
         case .analysis:
             if let analysisData = viewModel.analysisData {

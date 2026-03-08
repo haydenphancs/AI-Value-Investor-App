@@ -447,9 +447,11 @@ extension ETFDetailResponseDTO {
                 sentiment: sentiment,
                 publishedAt: publishedDate,
                 thumbnailName: nil,
+                imageURL: dto.thumbnailUrl.flatMap { URL(string: $0) },
                 relatedTickers: dto.relatedTickers,
                 summaryBullets: dto.summaryBullets,
-                articleURL: dto.articleUrl.flatMap { URL(string: $0) }
+                articleURL: dto.articleUrl.flatMap { URL(string: $0) },
+                aiProcessed: !dto.summaryBullets.isEmpty
             )
         }
     }

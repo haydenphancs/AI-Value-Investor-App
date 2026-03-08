@@ -9,30 +9,55 @@ import SwiftUI
 
 struct NewsThumbnail: View {
     let imageName: String?
+    var imageURL: URL? = nil
     var width: CGFloat = 100
     var height: CGFloat = 70
 
     var body: some View {
         Group {
-            if let name = imageName {
+            if let url = imageURL {
+                // Remote image via AsyncImage
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .failure:
+                        placeholder
+                    default:
+                        ZStack {
+                            AppColors.cardBackgroundLight
+                            ProgressView()
+                                .tint(AppColors.textMuted)
+                        }
+                    }
+                }
+                .frame(width: width, height: height)
+                .clipped()
+            } else if let name = imageName {
+                // Local asset image
                 Image(name)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: width, height: height)
                     .clipped()
             } else {
-                // Placeholder
-                ZStack {
-                    AppColors.cardBackgroundLight
-
-                    Image(systemName: "photo")
-                        .font(AppTypography.iconXL)
-                        .foregroundColor(AppColors.textMuted)
-                }
-                .frame(width: width, height: height)
+                placeholder
             }
         }
         .cornerRadius(AppCornerRadius.medium)
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            AppColors.cardBackgroundLight
+
+            Image(systemName: "photo")
+                .font(AppTypography.iconXL)
+                .foregroundColor(AppColors.textMuted)
+        }
+        .frame(width: width, height: height)
     }
 }
 

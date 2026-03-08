@@ -716,7 +716,7 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                     "You are a senior market strategist providing concise, insightful commentary. "
                     "Keep stories to 2-3 sentences. Use the placeholder tokens exactly as given."
                 ),
-                model_name="gemini-2.0-flash",
+                model_name="gemini-2.5-flash",
             )
 
             text = ai_response.get("text", "")

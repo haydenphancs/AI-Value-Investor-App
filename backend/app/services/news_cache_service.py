@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_HOURS = 6
 
 # Gemini model for news enrichment (fast + cheap)
-NEWS_AI_MODEL = "gemini-2.0-flash"
+NEWS_AI_MODEL = "gemini-2.5-flash"
 
 
 class NewsCacheService:

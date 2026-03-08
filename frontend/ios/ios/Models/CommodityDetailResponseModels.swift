@@ -101,6 +101,7 @@ struct CommodityNewsArticleDTO: Decodable {
         }
 
         return TickerNewsArticle(
+            apiId: articleUrl ?? UUID().uuidString,
             headline: headline,
             source: newsSource,
             sentiment: newsSentiment,

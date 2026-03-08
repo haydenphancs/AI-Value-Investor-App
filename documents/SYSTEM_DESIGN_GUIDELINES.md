@@ -1,9 +1,9 @@
 # AI Value Investor - System Design Guidelines
 
-**Version:** 1.0
+**Version:** 1.1
 **Author:** Principal Architect
-**Date:** January 2026
-**Status:** DRAFT - For Review
+**Date:** March 2026 (Updated)
+**Status:** CURRENT - Verified against codebase March 2026
 
 ---
 
@@ -158,9 +158,9 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 │                               │                                              │
 │  6. Service layer             ▼                                              │
 │     ┌─────────────────────────────────────────┐                             │
-│     │ Check Redis cache                        │                             │
+│     │ Check Supabase DB cache (e.g. news)      │                             │
 │     │   ├── HIT → Return cached response      │                             │
-│     │   └── MISS → Query Supabase ───────────►│                             │
+│     │   └── MISS → Query external APIs ──────►│                             │
 │     └─────────────────────────────────────────┘                             │
 │                               │                                              │
 │  7. Data aggregation          ▼                                              │
@@ -174,10 +174,7 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 │  8. Transform to schema       ▼                                              │
 │     schemas/stock.py: StockDetailResponse                                    │
 │                               │                                              │
-│  9. Cache result              ▼                                              │
-│     cache.set(key, response, ttl=300)                                        │
-│                               │                                              │
-│  10. Return JSON              ▼                                              │
+│  9. Return JSON              ▼                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼ JSON Response
@@ -272,28 +269,23 @@ class StockService:
         self,
         supabase: Client,
         fmp_client: FMPClient,
-        cache_manager: CacheManager
     ):
         self.supabase = supabase
         self.fmp = fmp_client
-        self.cache = cache_manager
 
     async def get_stock_detail(self, ticker: str) -> StockDetail:
         """
-        Get comprehensive stock details with caching.
+        Get comprehensive stock details.
 
         Data Flow:
-        1. Check Redis cache
+        1. Check Supabase DB cache (for applicable data like news)
         2. Parallel fetch from Supabase + FMP
         3. Aggregate and transform
-        4. Cache result
-        """
-        cache_key = f"stock:{ticker}"
+        4. Return result
 
-        # Check cache
-        cached = await self.cache.get(cache_key)
-        if cached:
-            return StockDetail(**cached)
+        Note: Backend uses Supabase DB-level caching (e.g. news_articles table
+        with TTL) rather than Redis. No dedicated in-memory cache layer.
+        """
 
         # Parallel fetch
         db_stock, profile, quote = await asyncio.gather(
@@ -830,8 +822,14 @@ final class ResearchViewModel {
 
 ### 6.2 Backend Error Response Standard
 
+> **Current Implementation Note (March 2026):** The backend currently uses basic
+> FastAPI `HTTPException` and `RequestValidationError` handlers (see `main.py`
+> lines 112-126). The structured `ErrorCode`/`APIError` pattern below is the
+> **recommended target** but has not yet been fully implemented. The iOS client
+> already handles errors robustly via `AppError` (see Section 6.3).
+
 ```python
-# schemas/common.py
+# schemas/common.py — RECOMMENDED (not yet implemented)
 
 class ErrorCode(str, Enum):
     """Standardized error codes for client handling."""
@@ -1077,14 +1075,16 @@ extension APIService {
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                     BACKEND                                          │    │
 │  │                                                                       │    │
-│  │  L1: Redis Cache                                                      │    │
-│  │      ├── Stock quotes: TTL 1 min                                     │    │
-│  │      ├── Company profiles: TTL 24 hours                              │    │
-│  │      ├── News feed: TTL 5 min                                        │    │
-│  │      └── User sessions: TTL 7 days                                   │    │
+│  │  L1: Supabase DB Cache (PostgreSQL tables as cache)                  │    │
+│  │      ├── News articles: TTL 6 hours (news_articles table)           │    │
+│  │      ├── Background pre-warmer for popular tickers                  │    │
+│  │      └── Automatic cleanup of expired cache entries                  │    │
 │  │                                                                       │    │
 │  │  L2: Supabase (PostgreSQL)                                           │    │
 │  │      └── Persistent data store                                        │    │
+│  │                                                                       │    │
+│  │  Note: No Redis. Services call Supabase and external APIs directly. │    │
+│  │  Consider adding Redis if caching needs grow beyond DB-level cache.  │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1137,7 +1137,11 @@ enum CacheKey {
 }
 ```
 
-### 7.3 Backend Caching Decorators
+### 7.3 Backend Caching Decorators (Recommended — Not Yet Implemented)
+
+> **Current state:** Backend uses Supabase DB-level caching (e.g. `news_articles`
+> table with 6-hour TTL, background pre-warmer in `main.py`). The decorator
+> pattern below is a recommended future enhancement if Redis is added.
 
 ```python
 # cache_decorators.py
@@ -1353,65 +1357,76 @@ Retry-After: 60                 # Seconds to wait (on 429)
 
 | Issue | Current State | Recommendation |
 |-------|---------------|----------------|
-| **Background Tasks** | Using FastAPI BackgroundTasks | Consider Celery/Redis Queue for production scale. BackgroundTasks don't survive server restarts. |
-| **No Status Updates** | Report status stored but no real-time push | Add WebSocket endpoint or SSE for live progress updates |
-| **Circular Imports** | `generate_report_task` has inline imports | Move task functions to separate `tasks/` module |
+| **Background Tasks** | Using FastAPI `asyncio.create_task()` | Consider Celery/Redis Queue for production scale. Tasks don't survive server restarts. |
+| **No Status Updates** | Report status stored, polled by client | Add WebSocket endpoint or SSE for live progress updates |
+| **No Repository Pattern** | Services call Supabase directly | Consider adding a repository/data-access layer for testability |
 | **Missing Middleware** | No request ID propagation | Add correlation ID middleware for distributed tracing |
-| **Error Granularity** | Generic error messages | Implement structured error codes (see Section 6.2) |
+| **Error Granularity** | Basic FastAPI HTTPException only | Implement structured error codes (see Section 6.2) |
+| **No Redis Cache** | DB-level caching only (news_articles table) | Add Redis for high-frequency endpoints if needed at scale |
 
-#### Frontend (iOS)
+#### Frontend (iOS) — Largely Addressed
 
-| Issue | Current State | Recommendation |
+| Issue | Previous State | Current State (March 2026) |
 |-------|---------------|----------------|
-| **No Networking Layer** | ViewModels use mock data | Implement Repository pattern with URLSession |
-| **Isolated State** | Each ViewModel manages own state | Centralized AppState (see Section 4) |
-| **No Offline Support** | Assumed always online | Add Core Data + offline-first caching |
-| **No Retry Logic** | Single request attempts | Implement exponential backoff (see Section 6.4) |
-| **Hardcoded Personas** | Some mismatch with backend | Sync personas from backend config |
+| **No Networking Layer** | ViewModels use mock data | ✅ Implemented: Repository pattern with URLSession (`StockRepository`, `ResearchRepository`) |
+| **Isolated State** | Each ViewModel manages own state | ✅ Implemented: Centralized `AppState` with `@Observable` and sub-states |
+| **No Retry Logic** | Single request attempts | ✅ Implemented: Exponential backoff in error handling framework |
+| **Error Handling** | Generic errors | ✅ Implemented: Comprehensive `AppError` enum with `suggestedAction`, `isRetryable` |
+| **Task Polling** | No polling mechanism | ✅ Implemented: `TaskPollingManager` with `AsyncThrowingStream` |
+| **Offline Support** | Assumed always online | Partial: In-memory caching in `StockRepository`, no Core Data persistence yet |
+| **Hardcoded Personas** | Some mismatch with backend | ✅ Synced from backend via `/research/personas` endpoint |
 
 ### 10.3 Architecture Evolution Roadmap
 
 ```
-Phase 1 (Current): Foundation
+Phase 1: Foundation ✅ COMPLETE
 ├── ✅ Basic MVVM structure
 ├── ✅ Atomic Design components
 ├── ✅ Backend layered architecture
-└── 🔲 Repository pattern (iOS)
+└── ✅ Repository pattern (iOS) — StockRepository, ResearchRepository
 
-Phase 2: Networking & State
-├── 🔲 Centralized AppState
-├── 🔲 API Service layer (iOS)
-├── 🔲 Multi-layer caching
-└── 🔲 Error handling framework
+Phase 2: Networking & State ✅ COMPLETE
+├── ✅ Centralized AppState (@Observable with sub-states)
+├── ✅ API Service layer (iOS) — APIService + TaskPollingManager
+├── ✅ Multi-layer caching (iOS in-memory + backend DB-level)
+└── ✅ Error handling framework (AppError with suggestedAction)
 
-Phase 3: Real-time & Offline
+Phase 3: Real-time & Offline (PARTIAL)
+├── ✅ Task polling for research reports (AsyncThrowingStream)
 ├── 🔲 WebSocket for live updates
 ├── 🔲 Core Data persistence
 ├── 🔲 Offline-first sync
 └── 🔲 Background refresh (iOS)
 
 Phase 4: Scale & Observability
+├── 🔲 Redis cache (Backend)
 ├── 🔲 Celery task queue (Backend)
+├── 🔲 Structured backend error codes (Section 6.2)
 ├── 🔲 Distributed tracing
 ├── 🔲 Performance monitoring
 └── 🔲 A/B testing infrastructure
 ```
 
-### 10.4 Immediate Action Items
+### 10.4 Action Items
 
-1. **High Priority**
-   - [ ] Create `Services/` folder in iOS with `APIService` and `CacheManager`
-   - [ ] Implement `AppState` observable container
-   - [ ] Add structured error handling to backend endpoints
-   - [ ] Create polling mechanism for report generation status
+1. **Completed** (as of March 2026)
+   - [x] Create `Services/` folder in iOS with `APIService` and `CacheManager`
+   - [x] Implement `AppState` observable container
+   - [x] Create polling mechanism for report generation status (`TaskPollingManager`)
+   - [x] Implement Repository pattern (StockRepository, ResearchRepository)
+   - [x] iOS error handling framework (`AppError`)
 
-2. **Medium Priority**
-   - [ ] Add Redis caching decorators to frequently-called endpoints
-   - [ ] Implement token refresh interceptor in iOS
-   - [ ] Create Core Data models for offline persistence
+2. **High Priority** (remaining)
+   - [ ] Add structured error handling to backend endpoints (Section 6.2)
+   - [ ] Add backend repository/data-access layer for testability
    - [ ] Add request/response logging middleware
 
-3. **Nice to Have**
+3. **Medium Priority**
+   - [ ] Add Redis caching for high-frequency endpoints
+   - [ ] Create Core Data models for offline persistence
+   - [ ] Implement token refresh interceptor in iOS
+
+4. **Nice to Have**
    - [ ] WebSocket endpoint for real-time progress
    - [ ] Push notifications for completed reports
    - [ ] Background app refresh for watchlist updates
@@ -1509,7 +1524,9 @@ backend/
 | Jan 2026 | Use polling over WebSocket for v1 | Simpler implementation, works offline | WebSocket, SSE, Push Notifications |
 | Jan 2026 | Centralized AppState over distributed | Consistency, simpler debugging | Multiple @Observable objects, Redux-like |
 | Jan 2026 | Repository pattern | Testability, abstraction | Direct API calls in ViewModels |
-| Jan 2026 | FastAPI BackgroundTasks for v1 | Quick implementation | Celery, Redis Queue, Dramatiq |
+| Jan 2026 | FastAPI asyncio.create_task for v1 | Quick implementation | Celery, Redis Queue, Dramatiq |
+| Feb 2026 | Supabase DB caching over Redis | Simpler infra, sufficient for current scale | Redis, Memcached |
+| Feb 2026 | Backend services call Supabase directly | Faster development, fewer abstractions | Repository pattern on backend |
 
 ---
 

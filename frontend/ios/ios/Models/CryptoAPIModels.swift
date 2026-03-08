@@ -247,6 +247,7 @@ struct CryptoNewsArticleDTO: Codable {
         }
 
         return TickerNewsArticle(
+            apiId: articleUrl ?? UUID().uuidString,
             headline: headline,
             source: newsSource,
             sentiment: newsSentiment,

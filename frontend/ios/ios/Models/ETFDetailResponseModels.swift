@@ -442,6 +442,7 @@ extension ETFDetailResponseDTO {
             let publishedDate = ETFResponseFormatters.parseISO8601(dto.publishedAt) ?? Date()
 
             return TickerNewsArticle(
+                apiId: dto.articleUrl ?? UUID().uuidString,
                 headline: dto.headline,
                 source: NewsSource(name: dto.sourceName, iconName: dto.sourceIcon),
                 sentiment: sentiment,

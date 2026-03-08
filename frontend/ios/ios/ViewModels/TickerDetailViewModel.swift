@@ -174,14 +174,31 @@ class TickerDetailViewModel: ObservableObject {
 
             // Convert all API news to UI models
             self.allNewsArticles = apiNews.map { mapApiToUiArticle($0) }
-
-            // Show first page
             self.newsDisplayCount = newsPageSize
-            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             self.hasMoreNews = allNewsArticles.count > newsDisplayCount
 
-            // Enrich the visible batch
-            await enrichVisibleArticles()
+            // Enrich the first batch BEFORE showing articles
+            let firstBatch = Array(allNewsArticles.prefix(newsDisplayCount))
+            let unenrichedIds = firstBatch
+                .filter { !$0.aiProcessed }
+                .map { $0.apiId }
+                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+
+            if !unenrichedIds.isEmpty {
+                do {
+                    let enrichResponse = try await stockRepository.enrichStockNews(
+                        ticker: ticker,
+                        articleIds: unenrichedIds
+                    )
+                    print("✅ TickerDetailVM: Enriched \(enrichResponse.articles.count) articles")
+                    mergeEnrichment(enrichResponse.articles)
+                } catch {
+                    print("⚠️ TickerDetailVM: Enrichment failed: \(error)")
+                }
+            }
+
+            // NOW show articles (enriched or raw fallback)
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
         }
@@ -217,30 +234,30 @@ class TickerDetailViewModel: ObservableObject {
                 articleIds: ids
             )
             print("✅ TickerDetailVM: Enriched \(response.articles.count) articles")
-
-            // Merge enriched data back into our models
-            let enrichedById = Dictionary(
-                response.articles.map { ($0.id, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
-
-            for i in allNewsArticles.indices {
-                if let enriched = enrichedById[allNewsArticles[i].apiId] {
-                    let bullets: [String] = {
-                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
-                        if let s = enriched.summary, !s.isEmpty { return [s] }
-                        return allNewsArticles[i].summaryBullets
-                    }()
-                    allNewsArticles[i].summaryBullets = bullets
-                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
-                    allNewsArticles[i].aiProcessed = true
-                }
-            }
-
-            // Refresh displayed articles
+            mergeEnrichment(response.articles)
             newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         } catch {
             print("⚠️ TickerDetailVM: Enrichment failed: \(error)")
+        }
+    }
+
+    private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
+        let enrichedById = Dictionary(
+            enrichedArticles.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        for i in allNewsArticles.indices {
+            if let enriched = enrichedById[allNewsArticles[i].apiId] {
+                let bullets: [String] = {
+                    if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                    if let s = enriched.summary, !s.isEmpty { return [s] }
+                    return allNewsArticles[i].summaryBullets
+                }()
+                allNewsArticles[i].summaryBullets = bullets
+                allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                allNewsArticles[i].aiProcessed = true
+            }
         }
     }
 

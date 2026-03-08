@@ -27,16 +27,27 @@ class CryptoDetailViewModel: ObservableObject {
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
+    @Published var chartSettings = ChartSettings()
 
     // MARK: - Private Properties
 
     private let cryptoSymbol: String
     private let apiClient = APIClient.shared
+    private var chartRangeCancellable: AnyCancellable?
 
     // MARK: - Initialization
 
     init(cryptoSymbol: String) {
         self.cryptoSymbol = cryptoSymbol
+
+        chartRangeCancellable = $selectedChartRange
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task { await self.fetchChartForRange() }
+            }
     }
 
     // MARK: - Data Loading
@@ -109,10 +120,29 @@ class CryptoDetailViewModel: ObservableObject {
     // MARK: - Chart Range Change
 
     func updateChartRange(_ range: ChartTimeRange) {
-        guard range != selectedChartRange else { return }
         selectedChartRange = range
-        // Reload with new chart range
-        loadCryptoData()
+    }
+
+    /// Called by Combine observer when selectedChartRange changes.
+    private func fetchChartForRange() async {
+        let range = selectedChartRange
+        print("🪙 [CryptoDetail] Updating chart range to \(range.rawValue)")
+
+        do {
+            let response = try await apiClient.request(
+                endpoint: .getCryptoDetail(
+                    symbol: cryptoSymbol,
+                    range: range.rawValue
+                ),
+                responseType: CryptoDetailResponse.self
+            )
+
+            self.cryptoData = response.toModel()
+            self.newsArticles = response.newsArticles.map { $0.toModel() }
+            print("✅ [CryptoDetail] Chart range updated — \(response.chartData.count) data points")
+        } catch {
+            print("⚠️ [CryptoDetail] Chart range update failed — \(error)")
+        }
     }
 
     // MARK: - Error Handling
@@ -233,6 +263,10 @@ class CryptoDetailViewModel: ObservableObject {
 
     var chartData: [Double] {
         cryptoData?.chartData ?? []
+    }
+
+    var chartPricePoints: [StockPricePoint] {
+        cryptoData?.chartPricePoints ?? []
     }
 
     var aiSuggestions: [CryptoAISuggestion] {

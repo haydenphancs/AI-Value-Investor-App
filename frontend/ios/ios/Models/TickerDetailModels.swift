@@ -64,6 +64,103 @@ enum ChartTimeRange: String, CaseIterable {
     case all = "ALL"
 
     var displayName: String { rawValue }
+
+    /// Number of evenly-spaced x-axis labels to show
+    var xAxisLabelCount: Int {
+        switch self {
+        case .oneDay:       return 4
+        case .oneWeek:      return 5
+        case .threeMonths:  return 4
+        case .sixMonths:    return 4
+        case .oneYear:      return 4
+        case .fiveYears:    return 5
+        case .all:          return 4
+        }
+    }
+
+    /// Format a date string ("yyyy-MM-dd") into the appropriate x-axis label
+    func formatDateForXAxis(_ dateString: String) -> String {
+        guard let date = ChartDateFormatters.parseDate(dateString) else { return "" }
+        switch self {
+        case .oneDay:
+            return ChartDateFormatters.dayMonth.string(from: date)           // "Mar 7"
+        case .oneWeek:
+            return ChartDateFormatters.weekday.string(from: date)            // "Mon"
+        case .threeMonths, .sixMonths:
+            return ChartDateFormatters.dayMonth.string(from: date)           // "Jan 15"
+        case .oneYear:
+            return ChartDateFormatters.monthYear.string(from: date)          // "Mar '25"
+        case .fiveYears:
+            return ChartDateFormatters.year.string(from: date)               // "2023"
+        case .all:
+            return ChartDateFormatters.year.string(from: date)               // "2020"
+        }
+    }
+
+    /// Format a date string for the crosshair tooltip
+    func formatDateForCrosshair(_ dateString: String) -> String {
+        guard let date = ChartDateFormatters.parseDate(dateString) else { return dateString }
+        switch self {
+        case .oneDay:
+            return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
+        case .oneWeek:
+            return ChartDateFormatters.weekdayFull.string(from: date)        // "Monday, Mar 7"
+        case .threeMonths, .sixMonths:
+            return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
+        case .oneYear, .fiveYears, .all:
+            return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
+        }
+    }
+}
+
+// MARK: - Chart Date Formatters (cached, thread-safe)
+enum ChartDateFormatters {
+    static let inputFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    static let weekday: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE"   // "Mon"
+        return f
+    }()
+
+    static let weekdayFull: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE, MMM d"   // "Monday, Mar 7"
+        return f
+    }()
+
+    static let dayMonth: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"   // "Jan 15"
+        return f
+    }()
+
+    static let monthYear: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM ''yy"   // "Mar '25"
+        return f
+    }()
+
+    static let year: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy"   // "2025"
+        return f
+    }()
+
+    static let fullDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"   // "Mar 7, 2025"
+        return f
+    }()
+
+    static func parseDate(_ string: String) -> Date? {
+        inputFormatter.date(from: string)
+    }
 }
 
 // MARK: - Market Status
@@ -287,7 +384,7 @@ struct TickerDetailData: Identifiable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartData: [Double]
+    let chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
@@ -296,6 +393,10 @@ struct TickerDetailData: Identifiable {
     let companyProfile: CompanyProfile
     let relatedTickers: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
+
+    var chartData: [Double] {
+        chartPricePoints.map { $0.close }
+    }
 
     var isPositive: Bool {
         priceChange >= 0
@@ -342,7 +443,23 @@ extension TickerDetailData {
             time: "4:00 PM",
             timezone: "EST"
         ),
-        chartData: [165, 168, 170, 172, 169, 174, 171, 175, 173, 178, 176, 180, 177, 182, 178],
+        chartPricePoints: [
+            StockPricePoint(date: "2024-12-01", close: 165, open: 163, high: 166, low: 162, volume: 45_000_000),
+            StockPricePoint(date: "2024-12-02", close: 168, open: 165, high: 169, low: 164, volume: 48_000_000),
+            StockPricePoint(date: "2024-12-03", close: 170, open: 168, high: 171, low: 167, volume: 50_000_000),
+            StockPricePoint(date: "2024-12-04", close: 172, open: 170, high: 173, low: 169, volume: 47_000_000),
+            StockPricePoint(date: "2024-12-05", close: 169, open: 172, high: 173, low: 168, volume: 52_000_000),
+            StockPricePoint(date: "2024-12-06", close: 174, open: 169, high: 175, low: 168, volume: 55_000_000),
+            StockPricePoint(date: "2024-12-09", close: 171, open: 174, high: 175, low: 170, volume: 46_000_000),
+            StockPricePoint(date: "2024-12-10", close: 175, open: 171, high: 176, low: 170, volume: 49_000_000),
+            StockPricePoint(date: "2024-12-11", close: 173, open: 175, high: 176, low: 172, volume: 44_000_000),
+            StockPricePoint(date: "2024-12-12", close: 178, open: 173, high: 179, low: 172, volume: 58_000_000),
+            StockPricePoint(date: "2024-12-13", close: 176, open: 178, high: 179, low: 175, volume: 42_000_000),
+            StockPricePoint(date: "2024-12-14", close: 180, open: 176, high: 181, low: 175, volume: 60_000_000),
+            StockPricePoint(date: "2024-12-15", close: 177, open: 180, high: 181, low: 176, volume: 43_000_000),
+            StockPricePoint(date: "2024-12-16", close: 182, open: 177, high: 183, low: 176, volume: 56_000_000),
+            StockPricePoint(date: "2024-12-17", close: 178, open: 182, high: 183, low: 177, volume: 51_000_000),
+        ],
         keyStatistics: KeyStatistic.sampleData,
         keyStatisticsGroups: KeyStatisticsGroup.sampleData,
         performancePeriods: PerformancePeriod.sampleData,

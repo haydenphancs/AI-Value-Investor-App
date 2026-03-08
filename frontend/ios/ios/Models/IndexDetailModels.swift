@@ -278,12 +278,16 @@ struct IndexDetailData: Identifiable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartData: [Double]
+    let chartPricePoints: [StockPricePoint]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let snapshotsData: IndexSnapshotsData
     let indexProfile: IndexProfile
     let benchmarkSummary: PerformanceBenchmarkSummary?
+
+    var chartData: [Double] {
+        chartPricePoints.map { $0.close }
+    }
 
     var isPositive: Bool {
         priceChange >= 0
@@ -401,7 +405,9 @@ extension IndexDetailData {
             time: "4:00 PM",
             timezone: "EST"
         ),
-        chartData: [5850, 5880, 5920, 5890, 5950, 5980, 5940, 6000, 5970, 6030, 6010, 6060, 6025],
+        chartPricePoints: [5850, 5880, 5920, 5890, 5950, 5980, 5940, 6000, 5970, 6030, 6010, 6060, 6025].enumerated().map { i, c in
+            StockPricePoint(date: "2026-02-\(String(format: "%02d", i+1))", close: c, open: c - 10, high: c + 15, low: c - 15, volume: 3_000_000_000)
+        },
         keyStatisticsGroups: KeyStatisticsGroup.indexSampleData,
         performancePeriods: PerformancePeriod.indexSampleData,
         snapshotsData: IndexSnapshotsData.sampleData,

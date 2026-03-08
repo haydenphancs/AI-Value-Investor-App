@@ -81,9 +81,11 @@ struct CommodityDetailView: View {
 
                             // Chart
                             TickerChartView(
-                                chartData: commodityData.chartData,
+                                pricePoints: commodityData.chartPricePoints,
                                 isPositive: commodityData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange
+                                selectedRange: $viewModel.selectedChartRange,
+                                chartSettings: viewModel.chartSettings,
+                                assetContext: .commodity
                             )
                             .padding(.top, AppSpacing.lg)
                         }

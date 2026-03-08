@@ -29,6 +29,7 @@ class IndexDetailViewModel: ObservableObject {
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
+    @Published var chartSettings = ChartSettings()
 
     // MARK: - Private Properties
 
@@ -146,6 +147,10 @@ class IndexDetailViewModel: ObservableObject {
 
     var chartData: [Double] {
         indexData?.chartData ?? []
+    }
+
+    var chartPricePoints: [StockPricePoint] {
+        indexData?.chartPricePoints ?? []
     }
 
     var aiSuggestions: [IndexAISuggestion] {

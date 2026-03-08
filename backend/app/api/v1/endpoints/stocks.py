@@ -6,14 +6,12 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
           /stocks/{ticker}/news
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from supabase import Client
+from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import asyncio
 import logging
 
-from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
@@ -217,6 +215,7 @@ async def get_stock_fundamentals(ticker: str):
 # ── Date-range helpers for the chart endpoint ──────────────────────
 
 _RANGE_DELTAS = {
+    "1D": timedelta(days=5),   # Fetch ~5 calendar days to guarantee 2 trading days
     "1W": timedelta(weeks=1),
     "3M": timedelta(days=90),
     "6M": timedelta(days=180),
@@ -236,7 +235,6 @@ def _chart_date_range(range_code: str):
 
     delta = _RANGE_DELTAS.get(range_code)
     if delta is None:
-        # 1D — no intraday data at this FMP tier
         return None, None
 
     from_date = (today - delta).isoformat()
@@ -254,12 +252,8 @@ async def get_stock_chart(
     Get historical price data for charting.
 
     Supported ranges: 1D, 1W, 3M, 6M, 1Y, 5Y, ALL.
-    1D returns an empty list (FMP historical endpoint has no intraday data
-    at the current subscription tier).
+    1D returns the last 2 trading days for a minimal chart line.
     """
-    if range == "1D":
-        return {"symbol": ticker.upper(), "prices": []}
-
     fmp = get_fmp_client()
     from_date, to_date = _chart_date_range(range)
 
@@ -365,15 +359,20 @@ async def get_stock_financials_full(ticker: str):
 async def get_stock_news(
     ticker: str,
     limit: int = Query(10, le=50),
-    supabase: Client = Depends(get_supabase),
 ):
-    """Get news articles related to a specific ticker from DB."""
-    try:
-        result = supabase.table("news_articles").select("*").contains(
-            "related_tickers", [ticker.upper()]
-        ).order("published_at", desc=True).limit(limit).execute()
+    """
+    Get AI-enriched news for a specific ticker.
 
-        return result.data
+    Uses a hybrid caching architecture:
+    - Cache hit: returns instantly from ticker_news_cache table
+    - Cache miss: fetches from FMP, enriches with Gemini AI (summary bullets
+      + sentiment), caches in Supabase, then returns
+    """
+    from app.services.news_cache_service import get_news_cache_service
+
+    try:
+        service = get_news_cache_service()
+        return await service.get_ticker_news(ticker.upper(), limit)
     except Exception as e:
-        logger.error(f"Stock news failed: {e}")
+        logger.error(f"Stock news failed for {ticker}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="News service unavailable")

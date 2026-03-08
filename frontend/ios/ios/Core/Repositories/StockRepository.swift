@@ -27,7 +27,7 @@ protocol StockRepositoryProtocol {
     func getStock(ticker: String) async throws -> StockDetail
     func getStockOverview(ticker: String, range: String) async throws -> StockOverviewResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
-    func getStockNews(ticker: String, limit: Int) async throws -> [StockNewsArticle]
+    func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
     func getStockChart(ticker: String, range: String) async throws -> StockChartResponse
 }
 
@@ -127,21 +127,21 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - News
 
-    func getStockNews(ticker: String, limit: Int = 10) async throws -> [StockNewsArticle] {
+    func getStockNews(ticker: String, limit: Int = 10) async throws -> TickerNewsFeedResponse {
         let cacheKey = "news_\(ticker)"
 
         // Cache news for 5 minutes
-        if let cached: [StockNewsArticle] = getCached(cacheKey, maxAge: 300) {
+        if let cached: TickerNewsFeedResponse = getCached(cacheKey, maxAge: 300) {
             return cached
         }
 
-        let news = try await apiClient.request(
+        let response = try await apiClient.request(
             endpoint: .getStockNews(ticker: ticker, limit: limit),
-            responseType: [StockNewsArticle].self
+            responseType: TickerNewsFeedResponse.self
         )
 
-        setCache(cacheKey, value: news)
-        return news
+        setCache(cacheKey, value: response)
+        return response
     }
 
     // MARK: - Chart
@@ -339,24 +339,45 @@ struct StockNewsArticle: Codable, Identifiable {
     let id: String
     let title: String
     let summary: String?
+    let summaryBullets: [String]?
     let source: String?
     let publishedAt: String?
     let url: String?
     let imageUrl: String?
     let sentiment: String?
+    let sentimentConfidence: Int?
     let relatedTickers: [String]?
+    let aiProcessed: Bool?
 
-    // Backend returns: headline, source_name, thumbnail_url, article_url, published_at
+    // Backend returns: headline, source_name, thumbnail_url, article_url, published_at,
+    // summary_bullets, sentiment_confidence, ai_processed (from ticker_news_cache)
     enum CodingKeys: String, CodingKey {
         case id
         case title = "headline"
         case summary
+        case summaryBullets = "summary_bullets"
         case source = "source_name"
         case publishedAt = "published_at"
         case url = "article_url"
         case imageUrl = "thumbnail_url"
         case sentiment
+        case sentimentConfidence = "sentiment_confidence"
         case relatedTickers = "related_tickers"
+        case aiProcessed = "ai_processed"
+    }
+}
+
+// MARK: - Ticker News Feed Response (wrapper from /stocks/{ticker}/news)
+
+struct TickerNewsFeedResponse: Codable {
+    let articles: [StockNewsArticle]
+    let ticker: String
+    let cached: Bool?
+    let cacheAgeSeconds: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case articles, ticker, cached
+        case cacheAgeSeconds = "cache_age_seconds"
     }
 }
 
@@ -443,20 +464,32 @@ final class MockStockRepository: StockRepositoryProtocol {
         )
     }
 
-    func getStockNews(ticker: String, limit: Int) async throws -> [StockNewsArticle] {
-        [
-            StockNewsArticle(
-                id: "1",
-                title: "Apple Reports Strong Q4 Earnings",
-                summary: "Apple exceeded analyst expectations...",
-                source: "Reuters",
-                publishedAt: ISO8601DateFormatter().string(from: Date()),
-                url: "https://example.com/news/1",
-                imageUrl: nil,
-                sentiment: "positive",
-                relatedTickers: ["AAPL"]
-            )
-        ]
+    func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse {
+        TickerNewsFeedResponse(
+            articles: [
+                StockNewsArticle(
+                    id: "1",
+                    title: "Apple Reports Strong Q4 Earnings",
+                    summary: "Apple exceeded analyst expectations...",
+                    summaryBullets: [
+                        "Apple beat Wall Street estimates with strong iPhone and Services revenue growth",
+                        "Services segment reached all-time high, signaling successful diversification",
+                        "Management guided for continued growth despite broader economic uncertainty"
+                    ],
+                    source: "Reuters",
+                    publishedAt: ISO8601DateFormatter().string(from: Date()),
+                    url: "https://example.com/news/1",
+                    imageUrl: nil,
+                    sentiment: "bullish",
+                    sentimentConfidence: 85,
+                    relatedTickers: ["AAPL"],
+                    aiProcessed: true
+                )
+            ],
+            ticker: ticker,
+            cached: true,
+            cacheAgeSeconds: 0
+        )
     }
 
     func getStockChart(ticker: String, range: String) async throws -> StockChartResponse {

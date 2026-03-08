@@ -31,6 +31,9 @@ class TickerDetailViewModel: ObservableObject {
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
 
+    // Chart settings
+    @Published var chartSettings = ChartSettings()
+
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
@@ -142,18 +145,31 @@ class TickerDetailViewModel: ObservableObject {
 
     private func fetchStockNews(_ ticker: String) async {
         do {
-            let apiNews = try await stockRepository.getStockNews(ticker: ticker, limit: 10)
-            print("✅ TickerDetailVM: Got \(apiNews.count) news articles for \(ticker)")
+            let response = try await stockRepository.getStockNews(ticker: ticker, limit: 10)
+            let apiNews = response.articles
+            let cached = response.cached ?? false
+            print("✅ TickerDetailVM: Got \(apiNews.count) news articles for \(ticker) (cached: \(cached))")
             // Convert API news to UI news model
             self.newsArticles = apiNews.map { article in
-                TickerNewsArticle(
+                // Use AI-generated bullets if available, fall back to summary
+                let bullets: [String] = {
+                    if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
+                        return aiBullets
+                    }
+                    if let summary = article.summary, !summary.isEmpty {
+                        return [summary]
+                    }
+                    return []
+                }()
+
+                return TickerNewsArticle(
                     headline: article.title,
                     source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
                     sentiment: mapSentiment(article.sentiment),
                     publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
                     thumbnailName: nil,
                     relatedTickers: article.relatedTickers ?? [],
-                    summaryBullets: article.summary != nil ? [article.summary!] : [],
+                    summaryBullets: bullets,
                     articleURL: article.url.flatMap { URL(string: $0) }
                 )
             }
@@ -248,9 +264,9 @@ class TickerDetailViewModel: ObservableObject {
         print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
         do {
             let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString)
-            let prices = chartResponse.prices.map { $0.close }
-            print("✅ TickerDetailVM: Got \(prices.count) chart data points for \(ticker)")
-            if !prices.isEmpty, let currentData = self.tickerData {
+            let pricePoints = chartResponse.prices
+            print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
+            if !pricePoints.isEmpty, let currentData = self.tickerData {
                 // Rebuild tickerData with new chart prices
                 self.tickerData = TickerDetailData(
                     symbol: currentData.symbol,
@@ -259,7 +275,7 @@ class TickerDetailViewModel: ObservableObject {
                     priceChange: currentData.priceChange,
                     priceChangePercent: currentData.priceChangePercent,
                     marketStatus: currentData.marketStatus,
-                    chartData: prices,
+                    chartPricePoints: pricePoints,
                     keyStatistics: currentData.keyStatistics,
                     keyStatisticsGroups: currentData.keyStatisticsGroups,
                     performancePeriods: currentData.performancePeriods,
@@ -318,7 +334,7 @@ class TickerDetailViewModel: ObservableObject {
         let marketStatus = determineMarketStatus()
 
         // Use sample chart data as placeholder until chart API is wired
-        let sampleChart: [Double] = TickerDetailData.sampleApple.chartData
+        let sampleChart = TickerDetailData.sampleApple.chartPricePoints
 
         return TickerDetailData(
             symbol: tickerSymbol,
@@ -327,7 +343,7 @@ class TickerDetailViewModel: ObservableObject {
             priceChange: change,
             priceChangePercent: changePercent,
             marketStatus: marketStatus,
-            chartData: sampleChart,
+            chartPricePoints: sampleChart,
             keyStatistics: keyStats,
             keyStatisticsGroups: keyStatsGroups,
             performancePeriods: PerformancePeriod.sampleData,   // No API backing yet
@@ -687,6 +703,10 @@ class TickerDetailViewModel: ObservableObject {
 
     var chartData: [Double] {
         tickerData?.chartData ?? []
+    }
+
+    var chartPricePoints: [StockPricePoint] {
+        tickerData?.chartPricePoints ?? []
     }
 
     var aiSuggestions: [TickerAISuggestion] {

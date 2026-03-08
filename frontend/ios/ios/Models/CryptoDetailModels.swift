@@ -90,11 +90,15 @@ struct CryptoDetailData: Identifiable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: CryptoMarketStatus
-    let chartData: [Double]
+    let chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let snapshots: [CryptoSnapshotItem]
+
+    var chartData: [Double] {
+        chartPricePoints.map { $0.close }
+    }
     let cryptoProfile: CryptoProfile
     let relatedCryptos: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
@@ -149,7 +153,9 @@ extension CryptoDetailData {
         priceChange: 78.32,
         priceChangePercent: 2.32,
         marketStatus: .trading,
-        chartData: [3120, 3180, 3250, 3210, 3320, 3280, 3350, 3410, 3380, 3420, 3390, 3456],
+        chartPricePoints: [3120, 3180, 3250, 3210, 3320, 3280, 3350, 3410, 3380, 3420, 3390, 3456].enumerated().map { i, c in
+            StockPricePoint(date: "2026-02-\(String(format: "%02d", i+1))", close: c, open: c - 20, high: c + 30, low: c - 30, volume: 15_000_000_000)
+        },
         keyStatistics: CryptoKeyStatistic.sampleETH,
         keyStatisticsGroups: CryptoKeyStatisticsGroup.sampleETH,
         performancePeriods: CryptoPerformance.sampleETH,

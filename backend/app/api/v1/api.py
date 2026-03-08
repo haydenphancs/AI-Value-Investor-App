@@ -16,6 +16,7 @@ from app.api.v1.endpoints import (
     indices,
     etfs,
     crypto,
+    commodities,
     ticker_report,
     tracking,
     whales,
@@ -34,6 +35,7 @@ api_router.include_router(watchlist.router, prefix="/watchlist", tags=["Watchlis
 api_router.include_router(news.router, prefix="/news", tags=["News"])
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
+api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
 api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])

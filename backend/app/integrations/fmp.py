@@ -167,6 +167,36 @@ class FMPClient:
 
         return await self._make_request("historical-price-eod/full", params=params)
 
+    async def get_intraday_prices(
+        self,
+        ticker: str,
+        interval: str = "5min",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get intraday price data at the specified interval.
+
+        Args:
+            ticker: Symbol (e.g. "AAPL", "BTCUSD")
+            interval: One of "1min", "5min", "15min", "30min", "1hour", "4hour"
+            from_date: Start date YYYY-MM-DD
+            to_date: End date YYYY-MM-DD
+
+        Returns:
+            List of price dicts with datetime stamps (e.g. "2025-03-07 10:30:00")
+        """
+        params: Dict[str, Any] = {"symbol": ticker.upper()}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        data = await self._make_request(
+            f"historical-chart/{interval}", params=params
+        )
+        return data if isinstance(data, list) else []
+
     async def get_analyst_estimates(
         self, ticker: str, period: str = "annual", limit: int = 10
     ) -> List[Dict[str, Any]]:

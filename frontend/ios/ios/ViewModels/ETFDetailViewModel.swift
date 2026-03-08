@@ -28,21 +28,32 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - Private Properties
 
     let etfSymbol: String
-    private var chartRangeCancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
 
-        chartRangeCancellable = $selectedChartRange
+        $selectedChartRange
             .dropFirst()
             .removeDuplicates()
-            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .sink { [weak self] newRange in
                 guard let self = self else { return }
+                self.chartSettings.selectedInterval = newRange.defaultInterval
                 Task { await self.fetchChartForRange(newRange) }
             }
+            .store(in: &cancellables)
+
+        // Observe interval changes and re-fetch chart data
+        chartSettings.$selectedInterval
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task { await self.fetchChartForRange(self.selectedChartRange) }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -71,7 +82,8 @@ class ETFDetailViewModel: ObservableObject {
             let response = try await APIClient.shared.request(
                 endpoint: .getETFDetail(
                     symbol: etfSymbol,
-                    range: selectedChartRange.rawValue
+                    range: selectedChartRange.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue
                 ),
                 responseType: ETFDetailResponseDTO.self
             )
@@ -113,7 +125,8 @@ class ETFDetailViewModel: ObservableObject {
             let response = try await APIClient.shared.request(
                 endpoint: .getETFDetail(
                     symbol: self.etfSymbol,
-                    range: range.rawValue
+                    range: range.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue
                 ),
                 responseType: ETFDetailResponseDTO.self
             )

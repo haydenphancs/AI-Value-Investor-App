@@ -65,6 +65,32 @@ enum ChartTimeRange: String, CaseIterable {
 
     var displayName: String { rawValue }
 
+    /// The valid intervals for this time range
+    var allowedIntervals: [ChartInterval] {
+        switch self {
+        case .oneDay:       return [.oneMin, .fiveMin, .fifteenMin, .thirtyMin, .oneHour]
+        case .oneWeek:      return [.fiveMin, .fifteenMin, .thirtyMin, .oneHour]
+        case .threeMonths:  return [.daily, .weekly]
+        case .sixMonths:    return [.daily, .weekly]
+        case .oneYear:      return [.daily, .weekly, .monthly]
+        case .fiveYears:    return [.weekly, .monthly]
+        case .all:          return [.weekly, .monthly]
+        }
+    }
+
+    /// The default interval when switching to this time range
+    var defaultInterval: ChartInterval {
+        switch self {
+        case .oneDay:       return .fiveMin
+        case .oneWeek:      return .oneHour
+        case .threeMonths:  return .daily
+        case .sixMonths:    return .daily
+        case .oneYear:      return .daily
+        case .fiveYears:    return .weekly
+        case .all:          return .monthly
+        }
+    }
+
     /// Number of evenly-spaced x-axis labels to show
     var xAxisLabelCount: Int {
         switch self {
@@ -78,13 +104,20 @@ enum ChartTimeRange: String, CaseIterable {
         }
     }
 
-    /// Format a date string ("yyyy-MM-dd") into the appropriate x-axis label
+    /// Format a date string into the appropriate x-axis label
     func formatDateForXAxis(_ dateString: String) -> String {
         guard let date = ChartDateFormatters.parseDate(dateString) else { return "" }
+        let isIntraday = ChartDateFormatters.isIntraday(dateString)
         switch self {
         case .oneDay:
+            if isIntraday {
+                return ChartDateFormatters.timeOnly.string(from: date)       // "10:30 AM"
+            }
             return ChartDateFormatters.dayMonth.string(from: date)           // "Mar 7"
         case .oneWeek:
+            if isIntraday {
+                return ChartDateFormatters.weekdayTime.string(from: date)    // "Mon 10 AM"
+            }
             return ChartDateFormatters.weekday.string(from: date)            // "Mon"
         case .threeMonths, .sixMonths:
             return ChartDateFormatters.dayMonth.string(from: date)           // "Jan 15"
@@ -100,6 +133,10 @@ enum ChartTimeRange: String, CaseIterable {
     /// Format a date string for the crosshair tooltip
     func formatDateForCrosshair(_ dateString: String) -> String {
         guard let date = ChartDateFormatters.parseDate(dateString) else { return dateString }
+        let isIntraday = ChartDateFormatters.isIntraday(dateString)
+        if isIntraday {
+            return ChartDateFormatters.fullDateTime.string(from: date)       // "Mar 7, 2025 10:30 AM"
+        }
         switch self {
         case .oneDay:
             return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
@@ -118,6 +155,13 @@ enum ChartDateFormatters {
     static let inputFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    static let inputDateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
@@ -158,8 +202,35 @@ enum ChartDateFormatters {
         return f
     }()
 
+    static let timeOnly: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"   // "10:30 AM"
+        return f
+    }()
+
+    static let weekdayTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE h a"   // "Mon 10 AM"
+        return f
+    }()
+
+    static let fullDateTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy h:mm a"   // "Mar 7, 2025 10:30 AM"
+        return f
+    }()
+
+    /// Parse both "yyyy-MM-dd" and "yyyy-MM-dd HH:mm:ss" date strings
     static func parseDate(_ string: String) -> Date? {
-        inputFormatter.date(from: string)
+        if let date = inputFormatter.date(from: string) {
+            return date
+        }
+        return inputDateTimeFormatter.date(from: string)
+    }
+
+    /// Check if a date string contains a time component (intraday data)
+    static func isIntraday(_ string: String) -> Bool {
+        string.count > 10 // "yyyy-MM-dd HH:mm:ss" is longer than "yyyy-MM-dd"
     }
 }
 

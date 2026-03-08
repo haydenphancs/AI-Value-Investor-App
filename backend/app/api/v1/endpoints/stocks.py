@@ -156,6 +156,11 @@ async def get_stock_details(ticker: str):
 async def get_stock_overview(
     ticker: str,
     chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
 ):
     """
     Get comprehensive stock overview data for the Overview tab.
@@ -167,7 +172,7 @@ async def get_stock_overview(
     ticker = ticker.upper()
     try:
         service = get_stock_overview_service()
-        return await service.get_overview(ticker, chart_range=chart_range)
+        return await service.get_overview(ticker, chart_range=chart_range, interval=interval)
     except HTTPException:
         raise
     except Exception as e:
@@ -230,8 +235,8 @@ def _chart_date_range(range_code: str):
     to_date = today.isoformat()
 
     if range_code == "ALL":
-        # FMP will return the full history when no from_date is supplied
-        return None, to_date
+        # FMP caps results when from_date is omitted; use explicit old date
+        return "1970-01-01", to_date
 
     delta = _RANGE_DELTAS.get(range_code)
     if delta is None:
@@ -247,45 +252,25 @@ def _chart_date_range(range_code: str):
 async def get_stock_chart(
     ticker: str,
     range: str = Query("3M", regex="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
 ):
     """
     Get historical price data for charting.
 
     Supported ranges: 1D, 1W, 3M, 6M, 1Y, 5Y, ALL.
-    1D returns the last 2 trading days for a minimal chart line.
+    Optional interval: 1min, 5min, 15min, 30min, 1hour, 4hour, daily, weekly, monthly, quarterly.
+    Defaults: 1D→5min, 1W→1hour, others→daily.
     """
+    from app.services.chart_helper import fetch_chart_data
+
     fmp = get_fmp_client()
-    from_date, to_date = _chart_date_range(range)
-
     try:
-        raw = await fmp.get_historical_prices(ticker, from_date, to_date)
-
-        # FMP returns {"symbol": "...", "historical": [{...}, ...]}
-        historical = []
-        if isinstance(raw, dict):
-            historical = raw.get("historical", [])
-        elif isinstance(raw, list):
-            historical = raw
-
-        # Normalize keys and keep only the fields we need
-        prices = []
-        for item in historical:
-            if isinstance(item, dict):
-                normalized = normalize_fmp_response(item)
-                prices.append({
-                    "date": normalized.get("date"),
-                    "open": normalized.get("open"),
-                    "high": normalized.get("high"),
-                    "low": normalized.get("low"),
-                    "close": normalized.get("close"),
-                    "volume": normalized.get("volume"),
-                })
-
-        # FMP returns newest-first; sort chronologically (oldest first)
-        prices.sort(key=lambda p: p["date"] or "")
-
+        prices = await fetch_chart_data(fmp, ticker.upper(), range, interval)
         return {"symbol": ticker.upper(), "prices": prices}
-
     except HTTPException:
         raise
     except Exception as e:

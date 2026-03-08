@@ -1,11 +1,11 @@
 """
 Index Endpoints — Aggregated data for the IndexDetailView screen.
 
-Frontend: GET /indices/{symbol}
-          GET /indices/{symbol}/chart?range=3M
+Frontend: GET /indices/{symbol}?range=3M&interval=daily
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 import logging
 
 from app.services.index_service import get_index_service
@@ -20,18 +20,14 @@ router = APIRouter()
 async def get_index_detail(
     symbol: str,
     chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
 ):
     """
     Get comprehensive index detail data.
-
-    Returns everything the IndexDetailView needs:
-    - Real-time quote (price, change, %)
-    - Chart data for the selected range
-    - Key statistics (4 groups)
-    - Performance periods (1M to 5Y)
-    - AI-enhanced snapshots (valuation, sector, macro)
-    - Static index profile
-    - News articles
     """
     # Normalize symbol
     if not symbol.startswith("^") and not symbol.startswith("%5E"):
@@ -40,7 +36,9 @@ async def get_index_detail(
 
     try:
         service = get_index_service()
-        result = await service.get_index_detail(symbol, chart_range=chart_range)
+        result = await service.get_index_detail(
+            symbol, chart_range=chart_range, interval=interval
+        )
         return result
 
     except HTTPException:

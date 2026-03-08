@@ -33,21 +33,32 @@ class CryptoDetailViewModel: ObservableObject {
 
     private let cryptoSymbol: String
     private let apiClient = APIClient.shared
-    private var chartRangeCancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
     init(cryptoSymbol: String) {
         self.cryptoSymbol = cryptoSymbol
 
-        chartRangeCancellable = $selectedChartRange
+        $selectedChartRange
             .dropFirst()
             .removeDuplicates()
-            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .sink { [weak self] range in
+                guard let self = self else { return }
+                self.chartSettings.selectedInterval = range.defaultInterval
+                Task { await self.fetchChartForRange() }
+            }
+            .store(in: &cancellables)
+
+        // Observe interval changes and re-fetch chart data
+        chartSettings.$selectedInterval
+            .dropFirst()
+            .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 Task { await self.fetchChartForRange() }
             }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -65,7 +76,8 @@ class CryptoDetailViewModel: ObservableObject {
                 let response = try await self.apiClient.request(
                     endpoint: .getCryptoDetail(
                         symbol: self.cryptoSymbol,
-                        range: self.selectedChartRange.rawValue
+                        range: self.selectedChartRange.rawValue,
+                        interval: self.chartSettings.selectedInterval.rawValue
                     ),
                     responseType: CryptoDetailResponse.self
                 )
@@ -102,7 +114,8 @@ class CryptoDetailViewModel: ObservableObject {
             let response = try await apiClient.request(
                 endpoint: .getCryptoDetail(
                     symbol: cryptoSymbol,
-                    range: selectedChartRange.rawValue
+                    range: selectedChartRange.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue
                 ),
                 responseType: CryptoDetailResponse.self
             )
@@ -132,7 +145,8 @@ class CryptoDetailViewModel: ObservableObject {
             let response = try await apiClient.request(
                 endpoint: .getCryptoDetail(
                     symbol: cryptoSymbol,
-                    range: range.rawValue
+                    range: range.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue
                 ),
                 responseType: CryptoDetailResponse.self
             )

@@ -2,8 +2,8 @@
 //  ChartCrosshair.swift
 //  ios
 //
-//  Interactive crosshair overlay — drag on chart to see exact date+price.
-//  Publishes the selected index so the price header can update.
+//  Interactive crosshair overlay with pinch-to-zoom and pan support.
+//  Single-finger drag = crosshair, pinch = zoom, two-finger drag = pan.
 //
 
 import Combine
@@ -15,38 +15,77 @@ class CrosshairState: ObservableObject {
     @Published var isDragging: Bool = false
 }
 
-/// Transparent gesture overlay that captures drag on the chart area
+/// Transparent gesture overlay that captures drag, pinch-to-zoom, and pan
 struct ChartCrosshairGesture: View {
     let pricePoints: [StockPricePoint]
     let selectedRange: ChartTimeRange
     @ObservedObject var crosshairState: CrosshairState
+    @ObservedObject var viewportState: ChartViewportState
+
+    /// Tracks the viewport snapshot at the start of a pinch gesture
+    @State private var zoomAnchorStart: Int = 0
+    @State private var zoomAnchorEnd: Int = 0
+
+    /// Tracks the viewport snapshot at the start of a pan gesture
+    @State private var panAnchorStart: Int = 0
+    @State private var panAnchorEnd: Int = 0
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
 
             ZStack {
-                // Invisible touch surface
+                // Invisible touch surface with gestures
                 Color.clear
                     .contentShape(Rectangle())
+                    // Single-finger long-press + drag = crosshair
                     .gesture(
-                        DragGesture(minimumDistance: 0)
+                        LongPressGesture(minimumDuration: 0.15)
+                            .sequenced(before: DragGesture(minimumDistance: 0))
                             .onChanged { value in
-                                let count = pricePoints.count
-                                guard count > 1 else { return }
-                                let x = min(max(value.location.x, 0), size.width)
-                                let idx = Int(round(x / size.width * CGFloat(count - 1)))
-                                let clampedIdx = min(max(idx, 0), count - 1)
-                                if crosshairState.selectedIndex != clampedIdx {
-                                    crosshairState.selectedIndex = clampedIdx
-                                }
-                                if !crosshairState.isDragging {
-                                    crosshairState.isDragging = true
+                                switch value {
+                                case .second(true, let drag):
+                                    guard let drag = drag else { return }
+                                    updateCrosshair(at: drag.location, in: size)
+                                default:
+                                    break
                                 }
                             }
                             .onEnded { _ in
                                 crosshairState.isDragging = false
                                 crosshairState.selectedIndex = nil
+                            }
+                    )
+                    // Pinch-to-zoom
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { scale in
+                                if zoomAnchorStart == 0 && zoomAnchorEnd == 0 {
+                                    zoomAnchorStart = viewportState.visibleStart
+                                    zoomAnchorEnd = viewportState.visibleEnd
+                                }
+                                applyZoom(scale: scale)
+                            }
+                            .onEnded { _ in
+                                zoomAnchorStart = 0
+                                zoomAnchorEnd = 0
+                            }
+                    )
+                    // Two-finger pan (only when zoomed)
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 5)
+                            .onChanged { value in
+                                // Only pan when not showing crosshair and zoomed in
+                                guard !crosshairState.isDragging, viewportState.isZoomed else { return }
+                                if panAnchorStart == 0 && panAnchorEnd == 0 {
+                                    panAnchorStart = viewportState.visibleStart
+                                    panAnchorEnd = viewportState.visibleEnd
+                                }
+                                applyPan(translation: value.translation.width, in: size)
+                            }
+                            .onEnded { _ in
+                                panAnchorStart = 0
+                                panAnchorEnd = 0
                             }
                     )
 
@@ -103,6 +142,71 @@ struct ChartCrosshairGesture: View {
             }
         }
     }
+
+    // MARK: - Crosshair
+
+    private func updateCrosshair(at location: CGPoint, in size: CGSize) {
+        let count = pricePoints.count
+        guard count > 1 else { return }
+        let x = min(max(location.x, 0), size.width)
+        let idx = Int(round(x / size.width * CGFloat(count - 1)))
+        let clampedIdx = min(max(idx, 0), count - 1)
+        if crosshairState.selectedIndex != clampedIdx {
+            crosshairState.selectedIndex = clampedIdx
+        }
+        if !crosshairState.isDragging {
+            crosshairState.isDragging = true
+        }
+    }
+
+    // MARK: - Zoom
+
+    private func applyZoom(scale: CGFloat) {
+        let anchorCount = zoomAnchorEnd - zoomAnchorStart
+        guard anchorCount > 0 else { return }
+
+        let center = Double(zoomAnchorStart + zoomAnchorEnd) / 2.0
+        let anchorHalf = Double(anchorCount) / 2.0
+        let newHalf = anchorHalf / Double(scale)
+
+        let newStart = Int(max(0, center - newHalf))
+        let newEnd = Int(min(Double(viewportState.totalCount - 1), center + newHalf))
+
+        // Enforce minimum visible count
+        if newEnd - newStart + 1 >= 10 {
+            viewportState.visibleStart = newStart
+            viewportState.visibleEnd = newEnd
+        }
+    }
+
+    // MARK: - Pan
+
+    private func applyPan(translation: CGFloat, in size: CGSize) {
+        let anchorCount = panAnchorEnd - panAnchorStart
+        guard anchorCount > 0, size.width > 0 else { return }
+
+        // Convert pixel translation to data point delta
+        let pointsPerPixel = CGFloat(anchorCount) / size.width
+        let delta = Int(-translation * pointsPerPixel)
+
+        var newStart = panAnchorStart + delta
+        var newEnd = panAnchorEnd + delta
+
+        // Clamp to bounds
+        if newStart < 0 {
+            newStart = 0
+            newEnd = anchorCount
+        }
+        if newEnd >= viewportState.totalCount {
+            newEnd = viewportState.totalCount - 1
+            newStart = max(0, newEnd - anchorCount)
+        }
+
+        viewportState.visibleStart = newStart
+        viewportState.visibleEnd = newEnd
+    }
+
+    // MARK: - Tooltip Helpers
 
     private func crosshairTooltip(point: StockPricePoint) -> String {
         let dateStr = selectedRange.formatDateForCrosshair(point.date)

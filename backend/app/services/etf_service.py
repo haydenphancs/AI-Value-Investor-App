@@ -191,7 +191,7 @@ class ETFService:
         self.fmp: FMPClient = get_fmp_client()
 
     async def get_etf_detail(
-        self, symbol: str, chart_range: str = "3M"
+        self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> ETFDetailResponse:
         """
         Fetch and assemble complete ETF detail data.
@@ -305,7 +305,12 @@ class ETFService:
         turnover = float(etf_info.get("turnover") or 0)
 
         # ── Step 3: Build chart data ──────────────────────────────
-        chart_data = self._extract_chart_data(historical, chart_range)
+        from app.services.chart_helper import fetch_chart_data, resolve_interval
+        resolved = resolve_interval(chart_range, interval)
+        if resolved != "daily" or chart_range == "ALL":
+            chart_data = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+        else:
+            chart_data = self._extract_chart_data(historical, chart_range)
 
         # ── Step 4: Build key statistics ──────────────────────────
         key_statistics, key_statistics_groups = self._build_key_statistics(

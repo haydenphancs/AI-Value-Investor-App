@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import logging
 import time
+import asyncio
 from typing import Any
 
 from app.config import settings
@@ -35,11 +36,33 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 
+    # Start background news pre-warmer for popular watchlist tickers
+    asyncio.create_task(_run_news_pre_warmer())
+
     yield
 
     # Graceful shutdown: close persistent HTTP clients
     await close_fmp_client()
     logger.info("Shutting down")
+
+
+async def _run_news_pre_warmer():
+    """Background task: pre-warm news cache for popular watchlist tickers."""
+    # Delay initial run to let the app fully start
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            from app.services.news_cache_service import get_news_cache_service
+
+            service = get_news_cache_service()
+            await service.pre_warm_popular_tickers(top_n=20)
+            await service.cleanup_expired_cache()
+        except Exception as e:
+            logger.error(f"News pre-warmer failed: {e}", exc_info=True)
+
+        # Re-run every 2 hours
+        await asyncio.sleep(7200)
 
 
 app = FastAPI(

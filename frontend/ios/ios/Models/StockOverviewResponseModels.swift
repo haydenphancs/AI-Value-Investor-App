@@ -23,7 +23,7 @@ struct StockOverviewResponseDTO: Decodable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: MarketStatusDTO
-    let chartData: [Double]
+    let chartData: [StockOverviewPricePointDTO]
     let keyStatistics: [KeyStatisticItemDTO]
     let keyStatisticsGroups: [StockKeyStatisticsGroupDTO]
     let performancePeriods: [PerformancePeriodDTO]
@@ -50,6 +50,17 @@ struct StockOverviewResponseDTO: Decodable {
         case relatedTickers = "related_tickers"
         case benchmarkSummary = "benchmark_summary"
     }
+}
+
+// MARK: - Price Point DTO (OHLCV)
+
+struct StockOverviewPricePointDTO: Decodable {
+    let date: String?
+    let open: Double?
+    let high: Double?
+    let low: Double?
+    let close: Double
+    let volume: Double?
 }
 
 // MARK: - Key Statistics Group DTO
@@ -210,7 +221,16 @@ extension StockOverviewResponseDTO {
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
             marketStatus: mktStatus,
-            chartData: chartData,
+            chartPricePoints: chartData.map {
+                StockPricePoint(
+                    date: $0.date ?? "",
+                    close: $0.close,
+                    open: $0.open,
+                    high: $0.high,
+                    low: $0.low,
+                    volume: $0.volume
+                )
+            },
             keyStatistics: keyStats,
             keyStatisticsGroups: keyStatsGroups,
             performancePeriods: perfPeriods,

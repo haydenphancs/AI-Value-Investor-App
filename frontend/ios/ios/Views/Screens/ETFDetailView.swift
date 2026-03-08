@@ -80,9 +80,11 @@ struct ETFDetailView: View {
 
                             // Chart
                             TickerChartView(
-                                chartData: etfData.chartData,
+                                pricePoints: etfData.chartPricePoints,
                                 isPositive: etfData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange
+                                selectedRange: $viewModel.selectedChartRange,
+                                chartSettings: viewModel.chartSettings,
+                                assetContext: .etf
                             )
                             .padding(.top, AppSpacing.lg)
                         }

@@ -10,14 +10,14 @@ import Foundation
 
 // MARK: - Top-Level Response
 
-struct CryptoDetailResponse: Codable {
+struct CryptoDetailResponse: Decodable {
     let symbol: String
     let name: String
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: String
-    let chartData: [Double]
+    let chartData: [StockOverviewPricePointDTO]
     let keyStatisticsGroups: [KeyStatisticsGroupDTO]
     let performancePeriods: [PerformancePeriodDTO]
     let snapshots: [CryptoSnapshotDTO]
@@ -278,7 +278,9 @@ extension CryptoDetailResponse {
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
             marketStatus: resolvedMarketStatus,
-            chartData: chartData,
+            chartPricePoints: chartData.map {
+                StockPricePoint(date: $0.date ?? "", close: $0.close, open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
+            },
             keyStatistics: keyStatisticsGroups.flatMap { $0.statistics.map { $0.toModel() } },
             keyStatisticsGroups: keyStatisticsGroups.map { $0.toModel() },
             performancePeriods: performancePeriods.map { $0.toModel() },

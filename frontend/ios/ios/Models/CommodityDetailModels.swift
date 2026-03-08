@@ -109,12 +109,16 @@ struct CommodityDetailData: Identifiable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: CommodityMarketStatus
-    let chartData: [Double]
+    let chartPricePoints: [StockPricePoint]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let commodityProfile: CommodityProfile
     let relatedCommodities: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
+
+    var chartData: [Double] {
+        chartPricePoints.map { $0.close }
+    }
 
     var isPositive: Bool {
         priceChange >= 0
@@ -164,7 +168,9 @@ extension CommodityDetailData {
         priceChange: 18.40,
         priceChangePercent: 0.79,
         marketStatus: .open,
-        chartData: [2280, 2295, 2310, 2305, 2320, 2315, 2330, 2340, 2335, 2350, 2342, 2345],
+        chartPricePoints: [2280, 2295, 2310, 2305, 2320, 2315, 2330, 2340, 2335, 2350, 2342, 2345].enumerated().map { i, c in
+            StockPricePoint(date: "2026-02-\(String(format: "%02d", i+1))", close: c, open: c - 5, high: c + 8, low: c - 8, volume: 200_000)
+        },
         keyStatisticsGroups: CommodityKeyStatisticsGroup.sampleGold,
         performancePeriods: CommodityPerformance.sampleGold,
         commodityProfile: CommodityProfile(
@@ -198,7 +204,9 @@ extension CommodityDetailData {
         priceChange: -1.23,
         priceChangePercent: -1.54,
         marketStatus: .open,
-        chartData: [82, 81, 80, 79, 80, 78, 77, 79, 78, 77, 79, 78],
+        chartPricePoints: [82, 81, 80, 79, 80, 78, 77, 79, 78, 77, 79, 78].enumerated().map { i, c in
+            StockPricePoint(date: "2026-02-\(String(format: "%02d", i+1))", close: Double(c), open: Double(c) + 0.5, high: Double(c) + 1.5, low: Double(c) - 1.5, volume: 500_000)
+        },
         keyStatisticsGroups: CommodityKeyStatisticsGroup.sampleCrudeOil,
         performancePeriods: CommodityPerformance.sampleCrudeOil,
         commodityProfile: CommodityProfile(

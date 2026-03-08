@@ -83,9 +83,11 @@ struct CryptoDetailView: View {
 
                             // Chart
                             TickerChartView(
-                                chartData: cryptoData.chartData,
+                                pricePoints: cryptoData.chartPricePoints,
                                 isPositive: cryptoData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange
+                                selectedRange: $viewModel.selectedChartRange,
+                                chartSettings: viewModel.chartSettings,
+                                assetContext: .crypto
                             )
                             .padding(.top, AppSpacing.lg)
                         }

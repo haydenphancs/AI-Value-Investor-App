@@ -90,9 +90,11 @@ struct TickerDetailView: View {
 
                             // Chart
                             TickerChartView(
-                                chartData: tickerData.chartData,
+                                pricePoints: tickerData.chartPricePoints,
                                 isPositive: tickerData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange
+                                selectedRange: $viewModel.selectedChartRange,
+                                chartSettings: viewModel.chartSettings,
+                                assetContext: .stock
                             )
                             .padding(.top, AppSpacing.lg)
                         }

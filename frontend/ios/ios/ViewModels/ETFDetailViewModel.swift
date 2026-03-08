@@ -23,15 +23,26 @@ class ETFDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var chartSettings = ChartSettings()
 
     // MARK: - Private Properties
 
     let etfSymbol: String
+    private var chartRangeCancellable: AnyCancellable?
 
     // MARK: - Initialization
 
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
+
+        chartRangeCancellable = $selectedChartRange
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .sink { [weak self] newRange in
+                guard let self = self else { return }
+                Task { await self.fetchChartForRange(newRange) }
+            }
     }
 
     // MARK: - Data Loading
@@ -91,33 +102,29 @@ class ETFDetailViewModel: ObservableObject {
 
     /// Reload chart data when user changes the time range.
     func updateChartRange(_ range: ChartTimeRange) {
-        guard range != selectedChartRange else { return }
         selectedChartRange = range
+    }
 
-        Task { [weak self] in
-            guard let self = self else { return }
+    /// Called by the Combine observer when selectedChartRange changes.
+    private func fetchChartForRange(_ range: ChartTimeRange) async {
+        print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
 
-            print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
+        do {
+            let response = try await APIClient.shared.request(
+                endpoint: .getETFDetail(
+                    symbol: self.etfSymbol,
+                    range: range.rawValue
+                ),
+                responseType: ETFDetailResponseDTO.self
+            )
 
-            do {
-                let response = try await APIClient.shared.request(
-                    endpoint: .getETFDetail(
-                        symbol: self.etfSymbol,
-                        range: range.rawValue
-                    ),
-                    responseType: ETFDetailResponseDTO.self
-                )
+            print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
 
-                print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
+            self.etfData = response.toDisplayModel()
+            self.newsArticles = response.toNewsArticles()
 
-                let updated = response.toDisplayModel()
-                self.etfData = updated
-                self.newsArticles = response.toNewsArticles()
-
-            } catch {
-                print("[ETFDetailVM] ⚠️ Chart range update failed, keeping existing data — \(error)")
-                // Keep existing data on failure
-            }
+        } catch {
+            print("[ETFDetailVM] ⚠️ Chart range update failed, keeping existing data — \(error)")
         }
     }
 
@@ -194,6 +201,10 @@ class ETFDetailViewModel: ObservableObject {
 
     var chartData: [Double] {
         etfData?.chartData ?? []
+    }
+
+    var chartPricePoints: [StockPricePoint] {
+        etfData?.chartPricePoints ?? []
     }
 
     var aiSuggestions: [ETFAISuggestion] {

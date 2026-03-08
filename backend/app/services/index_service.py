@@ -416,27 +416,33 @@ class IndexService:
 
     def _extract_chart_data(
         self, historical: List[Dict], chart_range: str
-    ) -> List[float]:
-        """Extract closing prices for chart, filtered by range."""
+    ) -> List[Dict]:
+        """Extract OHLCV data for chart, filtered by range."""
         if not historical:
             return []
 
         today = datetime.now(tz=timezone.utc).date()
         range_days = {
-            "1D": 1, "1W": 7, "3M": 90, "6M": 180,
+            "1D": 2, "1W": 7, "3M": 90, "6M": 180,
             "1Y": 365, "5Y": 365 * 5, "ALL": 99999,
         }
         days = range_days.get(chart_range, 90)
         cutoff = (today - timedelta(days=days)).isoformat()
 
-        closes = []
+        result = []
         for p in historical:
             if p.get("date", "") >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
-                    closes.append(round(close, 2))
-
-        return closes
+                    result.append({
+                        "date": p.get("date"),
+                        "open": p.get("open"),
+                        "high": p.get("high"),
+                        "low": p.get("low"),
+                        "close": round(float(close), 2),
+                        "volume": p.get("volume"),
+                    })
+        return result
 
     # ── Key statistics builder ───────────────────────────────────
 

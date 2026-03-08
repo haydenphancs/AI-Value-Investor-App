@@ -187,11 +187,15 @@ struct ETFDetailData: Identifiable {
     let priceChange: Double
     let priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartData: [Double]
+    let chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let identityRating: ETFIdentityRating
+
+    var chartData: [Double] {
+        chartPricePoints.map { $0.close }
+    }
     let strategy: ETFStrategy
     let netYield: ETFNetYield
     let holdingsRisk: ETFHoldingsRisk
@@ -250,7 +254,9 @@ extension ETFDetailData {
             time: "4:00 PM",
             timezone: "EST"
         ),
-        chartData: [498, 502, 510, 505, 512, 508, 515, 520, 518, 524, 522, 528],
+        chartPricePoints: [498, 502, 510, 505, 512, 508, 515, 520, 518, 524, 522, 528].enumerated().map { i, c in
+            StockPricePoint(date: "2026-02-\(String(format: "%02d", i+1))", close: c, open: c - 2, high: c + 3, low: c - 3, volume: 80_000_000)
+        },
         keyStatistics: ETFKeyStatistic.sampleSPY,
         keyStatisticsGroups: ETFKeyStatisticsGroup.sampleSPY,
         performancePeriods: ETFPerformance.sampleSPY,

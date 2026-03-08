@@ -203,15 +203,27 @@ def _parse_historical(hist_raw) -> List[Dict]:
     return historical
 
 
-def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[float]:
-    """Extract closing prices for the requested chart range."""
+def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
+    """Extract OHLCV data for the requested chart range."""
     range_days = {
-        "1D": 1, "1W": 5, "3M": 63, "6M": 126,
+        "1D": 2, "1W": 5, "3M": 63, "6M": 126,
         "1Y": 252, "5Y": 1260, "ALL": 999999,
     }
     days = range_days.get(chart_range, 63)
     relevant = prices[-days:] if len(prices) > days else prices
-    return [float(p.get("close") or p.get("adjClose") or 0) for p in relevant if p.get("close") or p.get("adjClose")]
+    result = []
+    for p in relevant:
+        close = p.get("close") or p.get("adjClose")
+        if close:
+            result.append({
+                "date": p.get("date"),
+                "open": p.get("open"),
+                "high": p.get("high"),
+                "low": p.get("low"),
+                "close": float(close),
+                "volume": p.get("volume"),
+            })
+    return result
 
 
 # ── Main service ─────────────────────────────────────────────────

@@ -31,3 +31,28 @@ class NewsFeedResponse(BaseModel):
     per_page: int
     total: Optional[int] = None
     has_more: bool = False
+
+
+# ── Ticker-specific AI-enriched news ──────────────────────────────────
+
+class TickerNewsArticleResponse(BaseModel):
+    id: str
+    headline: str
+    summary: Optional[str] = None
+    summary_bullets: List[str] = []
+    sentiment: Optional[str] = None
+    sentiment_confidence: int = 0
+    source_name: Optional[str] = None
+    source_logo_url: Optional[str] = None
+    published_at: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    article_url: Optional[str] = None
+    related_tickers: List[str] = []
+    ai_processed: bool = False
+
+
+class TickerNewsFeedResponse(BaseModel):
+    articles: List[TickerNewsArticleResponse]
+    ticker: str
+    cached: bool = False
+    cache_age_seconds: Optional[int] = None

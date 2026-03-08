@@ -138,11 +138,11 @@ enum CalloutStyle {
 struct ChartData: Identifiable {
     let id = UUID()
     let title: String
-    let type: ChartType
+    let type: MoneyMoveChartType
     let dataPoints: [ChartDataPoint]
 }
 
-enum ChartType {
+enum MoneyMoveChartType {
     case line
     case bar
     case area

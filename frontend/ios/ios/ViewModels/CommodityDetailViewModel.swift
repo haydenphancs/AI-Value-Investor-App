@@ -21,6 +21,7 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var chartSettings = ChartSettings()
 
     // MARK: - Private Properties
 
@@ -116,6 +117,10 @@ class CommodityDetailViewModel: ObservableObject {
 
     var chartData: [Double] {
         commodityData?.chartData ?? []
+    }
+
+    var chartPricePoints: [StockPricePoint] {
+        commodityData?.chartPricePoints ?? []
     }
 
     var aiSuggestions: [CommodityAISuggestion] {

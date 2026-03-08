@@ -22,8 +22,9 @@ struct SubChartCanvas: View {
 
     /// The range of indices (in computePoints) that correspond to the visible slice
     private var visibleRange: Range<Int> {
-        let start = visibleStartIndex
+        let start = max(0, min(visibleStartIndex, computePoints.count))
         let end = min(start + pricePoints.count, computePoints.count)
+        guard start < end else { return 0..<0 }
         return start..<end
     }
 
@@ -124,7 +125,8 @@ struct RSIRenderer: View {
 
     var body: some View {
         let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
-        let visibleValues = Array(rsiData.values[visibleRange])
+        let safeRange = visibleRange.clamped(to: 0..<rsiData.values.count)
+        let visibleValues = Array(rsiData.values[safeRange])
         let count = visibleValues.count
 
         Canvas { context, canvasSize in
@@ -178,9 +180,10 @@ struct MACDRenderer: View {
 
     var body: some View {
         let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
-        let visibleMACD = Array(macdData.macdLine[visibleRange])
-        let visibleSignal = Array(macdData.signalLine[visibleRange])
-        let visibleHistogram = Array(macdData.histogram[visibleRange])
+        let safeRange = visibleRange.clamped(to: 0..<macdData.macdLine.count)
+        let visibleMACD = Array(macdData.macdLine[safeRange])
+        let visibleSignal = Array(macdData.signalLine[safeRange])
+        let visibleHistogram = Array(macdData.histogram[safeRange])
         let count = visibleMACD.count
 
         Canvas { context, canvasSize in
@@ -255,8 +258,9 @@ struct StochasticRenderer: View {
         let highs = allPricePoints.map { $0.high ?? $0.close }
         let lows = allPricePoints.map { $0.low ?? $0.close }
         let stochData = TechnicalIndicatorCalculator.stochastic(highs: highs, lows: lows, closes: closes)
-        let visibleK = Array(stochData.kValues[visibleRange])
-        let visibleD = Array(stochData.dValues[visibleRange])
+        let safeRange = visibleRange.clamped(to: 0..<stochData.kValues.count)
+        let visibleK = Array(stochData.kValues[safeRange])
+        let visibleD = Array(stochData.dValues[safeRange])
         let count = visibleK.count
 
         Canvas { context, canvasSize in

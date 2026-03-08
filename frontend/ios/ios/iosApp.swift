@@ -123,13 +123,10 @@ struct SplashView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 20) {
-                Image(systemName: "chart.line.uptrend.xyaxis.circle.fill")
-                    .font(AppTypography.iconSplash)
-                    .foregroundColor(AppColors.primaryBlue)
-
-                Text("AI Value Investor")
-                    .font(AppTypography.title)
-                    .foregroundColor(AppColors.textPrimary)
+                Image("CaydexLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 160, height: 160)
 
                 ProgressView()
                     .tint(AppColors.primaryBlue)

@@ -103,6 +103,20 @@ CREATE POLICY "watchlist_delete_own"
     ON watchlist_items FOR DELETE
     USING (auth.uid() = user_id);
 
+CREATE POLICY "watchlist_service_all"
+    ON watchlist_items FOR ALL
+    USING (auth.role() = 'service_role');
+
+-- =====================================================
+-- TICKER NEWS CACHE (service role only)
+-- =====================================================
+
+ALTER TABLE ticker_news_cache ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "ticker_news_cache_service_all"
+    ON ticker_news_cache FOR ALL
+    USING (auth.role() = 'service_role');
+
 -- =====================================================
 -- AGENT PERSONAS (public read, service writes)
 -- =====================================================

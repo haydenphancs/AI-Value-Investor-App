@@ -24,6 +24,7 @@ class ETFDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var chartSettings = ChartSettings()
+    @Published var chartDataVersion: Int = 0
 
     // MARK: - Private Properties
 
@@ -93,6 +94,7 @@ class ETFDetailViewModel: ObservableObject {
 
             self.errorMessage = nil
             self.etfData = response.toDisplayModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
             self.isLoading = false
 
@@ -134,6 +136,7 @@ class ETFDetailViewModel: ObservableObject {
             print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
 
             self.etfData = response.toDisplayModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
 
         } catch {

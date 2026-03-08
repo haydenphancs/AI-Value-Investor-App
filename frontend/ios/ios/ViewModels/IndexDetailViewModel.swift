@@ -30,6 +30,7 @@ class IndexDetailViewModel: ObservableObject {
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
+    @Published var chartDataVersion: Int = 0
 
     // MARK: - Private Properties
 
@@ -191,6 +192,7 @@ class IndexDetailViewModel: ObservableObject {
 
             // Map DTOs → display models
             self.indexData = response.toDisplayModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
 
             // Analysis data is not yet served by the backend — use sample
@@ -237,6 +239,7 @@ class IndexDetailViewModel: ObservableObject {
 
             // Update all data — the backend returns a fresh snapshot
             self.indexData = response.toDisplayModel()
+            self.chartDataVersion += 1
             if !response.newsArticles.isEmpty {
                 self.newsArticles = response.toNewsArticles()
             }

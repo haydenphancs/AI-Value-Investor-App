@@ -257,6 +257,7 @@ async def get_stock_chart(
         alias="interval",
         pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
     ),
+    extended_hours: bool = Query(False, alias="extended_hours"),
 ):
     """
     Get historical price data for charting.
@@ -264,12 +265,13 @@ async def get_stock_chart(
     Supported ranges: 1D, 1W, 3M, 6M, 1Y, 5Y, ALL.
     Optional interval: 1min, 5min, 15min, 30min, 1hour, 4hour, daily, weekly, monthly, quarterly.
     Defaults: 1D→5min, 1W→1hour, others→daily.
+    Set extended_hours=true to include pre-market and after-hours data (intraday only).
     """
     from app.services.chart_helper import fetch_chart_data
 
     fmp = get_fmp_client()
     try:
-        prices = await fetch_chart_data(fmp, ticker.upper(), range, interval)
+        prices = await fetch_chart_data(fmp, ticker.upper(), range, interval, extended_hours=extended_hours)
         return {"symbol": ticker.upper(), "prices": prices}
     except HTTPException:
         raise

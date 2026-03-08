@@ -15,6 +15,7 @@ struct TickerChartView: View {
     @Binding var selectedRange: ChartTimeRange
     @ObservedObject var chartSettings: ChartSettings
     let assetContext: ChartAssetContext
+    var chartDataVersion: Int = 0
 
     @State private var showSettingsSheet = false
     @StateObject private var crosshairState = CrosshairState()
@@ -202,8 +203,12 @@ struct TickerChartView: View {
             crosshairState.selectedIndex = nil
             crosshairState.isDragging = false
         }
-        .onChange(of: pricePoints.count) {
+        .onChange(of: chartDataVersion) {
             // Reset viewport when new data is loaded, offsetting past warm-up data
+            viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
+        }
+        .onChange(of: pricePoints.count) {
+            // Fallback: also reset when data count changes (covers views without chartDataVersion)
             viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
         }
         .onAppear {
@@ -242,7 +247,8 @@ struct TickerChartView: View {
                 isPositive: true,
                 selectedRange: $selectedRange,
                 chartSettings: chartSettings,
-                assetContext: .stock
+                assetContext: .stock,
+                chartDataVersion: 0
             )
             .padding(.vertical)
             .background(AppColors.background)

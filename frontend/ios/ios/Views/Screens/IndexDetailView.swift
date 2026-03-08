@@ -97,7 +97,8 @@ struct IndexDetailView: View {
                                 isPositive: indexData.isPositive,
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
-                                assetContext: .index
+                                assetContext: .index,
+                                chartDataVersion: viewModel.chartDataVersion
                             )
                             .padding(.top, AppSpacing.lg)
                         }

@@ -11,23 +11,9 @@ struct LineChartRenderer: View {
     let closes: [Double]
     let coord: ChartCoordinateSystem
     let lineColor: Color
-    let gradientColor: LinearGradient
 
     var body: some View {
         ZStack {
-            // Gradient fill
-            Path { path in
-                path.move(to: CGPoint(x: 0, y: coord.height))
-                for (index, value) in closes.enumerated() {
-                    let x = coord.xPosition(for: index)
-                    let y = coord.yPosition(for: value)
-                    path.addLine(to: CGPoint(x: x, y: y))
-                }
-                path.addLine(to: CGPoint(x: coord.width, y: coord.height))
-                path.closeSubpath()
-            }
-            .fill(gradientColor)
-
             // Line
             Path { path in
                 for (index, value) in closes.enumerated() {

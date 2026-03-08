@@ -1,7 +1,15 @@
 """News schemas matching DB news_articles table."""
 
-from pydantic import BaseModel
+from enum import Enum
+from pydantic import BaseModel, validator
 from typing import Optional, List
+
+
+class SentimentValue(str, Enum):
+    """Strict sentiment values — the only three the frontend accepts."""
+    POSITIVE = "Positive"
+    NEGATIVE = "Negative"
+    NEUTRAL = "Neutral"
 
 
 class NewsArticleResponse(BaseModel):
@@ -40,7 +48,7 @@ class TickerNewsArticleResponse(BaseModel):
     headline: str
     summary: Optional[str] = None
     summary_bullets: List[str] = []
-    sentiment: Optional[str] = None
+    sentiment: Optional[SentimentValue] = None
     sentiment_confidence: int = 0
     source_name: Optional[str] = None
     source_logo_url: Optional[str] = None
@@ -49,6 +57,22 @@ class TickerNewsArticleResponse(BaseModel):
     article_url: Optional[str] = None
     related_tickers: List[str] = []
     ai_processed: bool = False
+
+    @validator("sentiment", pre=True, always=True)
+    def coerce_sentiment(cls, v):
+        """Coerce raw sentiment strings to SentimentValue or None."""
+        if v is None:
+            return None
+        if isinstance(v, SentimentValue):
+            return v
+        s = str(v).strip().lower()
+        if s in ("positive", "bullish"):
+            return SentimentValue.POSITIVE
+        if s in ("negative", "bearish"):
+            return SentimentValue.NEGATIVE
+        if s in ("neutral", "none", "mixed", ""):
+            return SentimentValue.NEUTRAL
+        return SentimentValue.NEUTRAL
 
 
 class TickerNewsFeedResponse(BaseModel):

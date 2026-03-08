@@ -17,14 +17,6 @@ struct MainChartCanvas: View {
         isPositive ? AppColors.bullish : AppColors.bearish
     }
 
-    private var gradientColor: LinearGradient {
-        LinearGradient(
-            colors: [lineColor.opacity(0.3), lineColor.opacity(0.05)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
@@ -44,8 +36,7 @@ struct MainChartCanvas: View {
                         LineChartRenderer(
                             closes: pricePoints.map { $0.close },
                             coord: coord,
-                            lineColor: lineColor,
-                            gradientColor: gradientColor
+                            lineColor: lineColor
                         )
                     case .candle:
                         CandlestickChartRenderer(pricePoints: pricePoints, coord: coord)

@@ -36,6 +36,7 @@ class TickerDetailViewModel: ObservableObject {
 
     // Chart settings
     @Published var chartSettings = ChartSettings()
+    @Published var chartDataVersion: Int = 0
 
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
@@ -87,6 +88,19 @@ class TickerDetailViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Observe extended hours toggle and re-fetch chart data
+        chartSettings.$showExtendedHours
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task { [weak self] in
+                    guard let self = self else { return }
+                    await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -108,6 +122,7 @@ class TickerDetailViewModel: ObservableObject {
                     interval: self.chartSettings.selectedInterval.rawValue
                 )
                 self.tickerData = response.toDisplayModel()
+                self.chartDataVersion += 1
                 print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
             } catch {
                 print("⚠️ TickerDetailVM: Overview failed, falling back to separate calls: \(error)")
@@ -185,16 +200,7 @@ class TickerDetailViewModel: ObservableObject {
                 .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
 
             if !unenrichedIds.isEmpty {
-                do {
-                    let enrichResponse = try await stockRepository.enrichStockNews(
-                        ticker: ticker,
-                        articleIds: unenrichedIds
-                    )
-                    print("✅ TickerDetailVM: Enriched \(enrichResponse.articles.count) articles")
-                    mergeEnrichment(enrichResponse.articles)
-                } catch {
-                    print("⚠️ TickerDetailVM: Enrichment failed: \(error)")
-                }
+                await attemptEnrichment(ticker: ticker, articleIds: unenrichedIds)
             }
 
             // NOW show articles (enriched or raw fallback)
@@ -220,6 +226,39 @@ class TickerDetailViewModel: ObservableObject {
         }
     }
 
+    /// Attempt enrichment with one retry on failure (3s delay between attempts)
+    private func attemptEnrichment(ticker: String, articleIds: [String], maxAttempts: Int = 2) async {
+        for attempt in 1...maxAttempts {
+            do {
+                let enrichResponse = try await stockRepository.enrichStockNews(
+                    ticker: ticker,
+                    articleIds: articleIds
+                )
+                mergeEnrichment(enrichResponse.articles)
+
+                // Check if any articles were actually enriched
+                let enrichedCount = allNewsArticles.prefix(newsDisplayCount)
+                    .filter { $0.aiProcessed }.count
+                if enrichedCount > 0 {
+                    print("✅ TickerDetailVM: Attempt \(attempt) enriched \(enrichedCount) articles")
+                    return
+                } else if attempt < maxAttempts {
+                    print("⚠️ TickerDetailVM: Attempt \(attempt) returned 0 enriched, retrying in 3s...")
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ TickerDetailVM: Enrichment returned 0 enriched after \(maxAttempts) attempts")
+                }
+            } catch {
+                if attempt < maxAttempts {
+                    print("⚠️ TickerDetailVM: Enrichment attempt \(attempt) failed: \(error), retrying...")
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ TickerDetailVM: Enrichment failed after \(maxAttempts) attempts: \(error)")
+                }
+            }
+        }
+    }
+
     private func enrichVisibleArticles() async {
         // Find un-enriched articles in the visible set
         let unenriched = newsArticles.filter { !$0.aiProcessed }
@@ -228,17 +267,8 @@ class TickerDetailViewModel: ObservableObject {
         let ids = unenriched.map { $0.apiId }.filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
         guard !ids.isEmpty else { return }
 
-        do {
-            let response = try await stockRepository.enrichStockNews(
-                ticker: tickerSymbol,
-                articleIds: ids
-            )
-            print("✅ TickerDetailVM: Enriched \(response.articles.count) articles")
-            mergeEnrichment(response.articles)
-            newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
-        } catch {
-            print("⚠️ TickerDetailVM: Enrichment failed: \(error)")
-        }
+        await attemptEnrichment(ticker: tickerSymbol, articleIds: ids)
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
     }
 
     private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
@@ -247,18 +277,28 @@ class TickerDetailViewModel: ObservableObject {
             uniquingKeysWith: { first, _ in first }
         )
 
+        var actuallyEnriched = 0
         for i in allNewsArticles.indices {
             if let enriched = enrichedById[allNewsArticles[i].apiId] {
-                let bullets: [String] = {
-                    if let b = enriched.summaryBullets, !b.isEmpty { return b }
-                    if let s = enriched.summary, !s.isEmpty { return [s] }
-                    return allNewsArticles[i].summaryBullets
-                }()
-                allNewsArticles[i].summaryBullets = bullets
-                allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
-                allNewsArticles[i].aiProcessed = true
+                // Only mark as processed if the backend actually enriched it
+                let wasProcessed = enriched.aiProcessed ?? false
+                let hasBullets = enriched.summaryBullets?.isEmpty == false
+
+                if wasProcessed || hasBullets {
+                    let bullets: [String] = {
+                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                        if let s = enriched.summary, !s.isEmpty { return [s] }
+                        return allNewsArticles[i].summaryBullets
+                    }()
+                    allNewsArticles[i].summaryBullets = bullets
+                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                    allNewsArticles[i].aiProcessed = true
+                    actuallyEnriched += 1
+                }
+                // If not processed, leave aiProcessed = false so we can retry
             }
         }
+        print("📰 TickerDetailVM: Merged \(actuallyEnriched)/\(enrichedArticles.count) truly enriched articles")
     }
 
     private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
@@ -296,11 +336,23 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     private func parseDate(_ dateString: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: dateString) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: dateString)
+        // Try ISO 8601 first (e.g. "2026-03-08T12:06:00+00:00")
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: dateString) { return date }
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateString) { return date }
+
+        // Try "yyyy-MM-dd HH:mm:ss" (FMP raw format)
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let date = dateFormatter.date(from: dateString) { return date }
+
+        // Try "yyyy-MM-dd" only
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        return dateFormatter.date(from: dateString)
     }
 
     func refresh() async {
@@ -373,7 +425,8 @@ class TickerDetailViewModel: ObservableObject {
         print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
         do {
             let intervalString = chartSettings.selectedInterval.rawValue
-            let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString)
+            let useExtendedHours = chartSettings.showExtendedHours && chartSettings.selectedInterval.isIntraday
+            let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString, extendedHours: useExtendedHours)
             let pricePoints = chartResponse.prices
             print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
             if !pricePoints.isEmpty, let currentData = self.tickerData {
@@ -395,6 +448,7 @@ class TickerDetailViewModel: ObservableObject {
                     relatedTickers: currentData.relatedTickers,
                     benchmarkSummary: currentData.benchmarkSummary
                 )
+                self.chartDataVersion += 1
             }
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch chart data for \(ticker): \(error)")

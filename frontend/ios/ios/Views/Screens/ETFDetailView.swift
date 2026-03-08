@@ -84,7 +84,8 @@ struct ETFDetailView: View {
                                 isPositive: etfData.isPositive,
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
-                                assetContext: .etf
+                                assetContext: .etf,
+                                chartDataVersion: viewModel.chartDataVersion
                             )
                             .padding(.top, AppSpacing.lg)
                         }

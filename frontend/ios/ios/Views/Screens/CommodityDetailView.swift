@@ -85,7 +85,8 @@ struct CommodityDetailView: View {
                                 isPositive: commodityData.isPositive,
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
-                                assetContext: .commodity
+                                assetContext: .commodity,
+                                chartDataVersion: viewModel.chartDataVersion
                             )
                             .padding(.top, AppSpacing.lg)
                         }

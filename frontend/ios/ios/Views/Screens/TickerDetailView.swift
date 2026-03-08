@@ -94,7 +94,8 @@ struct TickerDetailView: View {
                                 isPositive: tickerData.isPositive,
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
-                                assetContext: .stock
+                                assetContext: .stock,
+                                chartDataVersion: viewModel.chartDataVersion
                             )
                             .padding(.top, AppSpacing.lg)
                         }
@@ -245,9 +246,9 @@ struct TickerDetailView: View {
                 currentTicker: tickerSymbol,
                 isLoading: viewModel.isNewsLoading,
                 hasMoreNews: viewModel.hasMoreNews,
-                onArticleTap: viewModel.handleNewsArticleTap,
-                onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onArticleTap: { article in viewModel.handleNewsArticleTap(article) },
+                onExternalLinkTap: { article in viewModel.handleNewsExternalLink(article) },
+                onRelatedTickerTap: { ticker in viewModel.handleNewsTickerTap(ticker) },
                 onLoadMore: { viewModel.loadMoreNews() }
             )
         case .analysis:

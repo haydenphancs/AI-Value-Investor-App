@@ -107,8 +107,8 @@ struct ChartSettingsSheet: View {
                         }
                     }
 
-                    // Extended Hours
-                    if assetContext.supportsExtendedHours {
+                    // Extended Hours — only relevant for intraday intervals
+                    if assetContext.supportsExtendedHours && chartSettings.selectedInterval.isIntraday {
                         Divider()
 
                         Toggle(isOn: $chartSettings.showExtendedHours) {

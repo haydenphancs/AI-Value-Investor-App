@@ -138,8 +138,19 @@ class NewsCacheService:
         # 4. Batch enrich with Gemini
         enrichments = await self._batch_enrich_articles(articles_for_gemini)
 
+        if not enrichments:
+            logger.warning(
+                f"Gemini enrichment returned empty for {ticker} "
+                f"({len(needs_enrichment)} articles) — returning unenriched data"
+            )
+            # Return unenriched rows so iOS knows ai_processed=false
+            return enriched_response + [
+                self._format_single_row(r) for r in needs_enrichment
+            ]
+
         # 5. Update cache rows with enrichment data
         newly_enriched = []
+        success_count = 0
         for i, row in enumerate(needs_enrichment):
             enrichment = enrichments.get(i, {})
             if not enrichment:
@@ -158,6 +169,7 @@ class NewsCacheService:
                 self.supabase.table("ticker_news_cache").update(
                     update_data
                 ).eq("id", row["id"]).execute()
+                success_count += 1
             except Exception as e:
                 logger.error(f"Failed to update enrichment for {row['id']}: {e}")
 
@@ -166,9 +178,21 @@ class NewsCacheService:
             newly_enriched.append(self._format_single_row(row))
 
         logger.info(
-            f"Enriched {len(needs_enrichment)} articles for {ticker}"
+            f"Enriched {success_count}/{len(needs_enrichment)} articles for {ticker}"
         )
         return enriched_response + newly_enriched
+
+    # ── Private: Ticker parsing helper ──────────────────────────────────
+
+    @staticmethod
+    def _parse_tickers(raw: dict, fallback_ticker: str, max_tickers: int = 8) -> list:
+        """Split FMP's comma-separated symbol string into a clean list."""
+        symbol = raw.get("symbol")
+        if isinstance(symbol, str):
+            tickers = [t.strip() for t in symbol.split(",") if t.strip()]
+        else:
+            tickers = [fallback_ticker]
+        return tickers[:max_tickers]
 
     # ── Private: Fetch from FMP and cache raw ─────────────────────────
 
@@ -203,11 +227,7 @@ class NewsCacheService:
                 "published_at": raw.get("publishedDate"),
                 "thumbnail_url": raw.get("image"),
                 "article_url": raw.get("url"),
-                "related_tickers": json.dumps(
-                    raw.get("symbol", ticker).split(",")
-                    if isinstance(raw.get("symbol"), str)
-                    else [ticker]
-                ),
+                "related_tickers": self._parse_tickers(raw, ticker),
                 "ai_processed": False,
                 "ai_model": None,
                 "cached_at": now.isoformat(),
@@ -227,11 +247,7 @@ class NewsCacheService:
                 "published_at": row["published_at"],
                 "thumbnail_url": row["thumbnail_url"],
                 "article_url": row["article_url"],
-                "related_tickers": (
-                    raw.get("symbol", ticker).split(",")
-                    if isinstance(raw.get("symbol"), str)
-                    else [ticker]
-                ),
+                "related_tickers": self._parse_tickers(raw, ticker),
                 "ai_processed": False,
             })
 
@@ -257,12 +273,44 @@ class NewsCacheService:
 
     # ── Private: Gemini batch enrichment ──────────────────────────────
 
+    # Gemini response schema for structured output enforcement
+    _ENRICHMENT_SCHEMA = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "index": {"type": "INTEGER"},
+                "bullets": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                },
+                "sentiment": {
+                    "type": "STRING",
+                    "enum": ["Positive", "Negative", "Neutral"],
+                },
+                "confidence": {"type": "INTEGER"},
+            },
+            "required": ["index", "bullets", "sentiment", "confidence"],
+        },
+    }
+
+    @staticmethod
+    def _normalize_sentiment(raw: str) -> str:
+        """Normalize any sentiment string to exactly Positive/Negative/Neutral."""
+        s = (raw or "").strip().lower()
+        if s in ("positive", "bullish"):
+            return "Positive"
+        if s in ("negative", "bearish"):
+            return "Negative"
+        return "Neutral"
+
     async def _batch_enrich_articles(
         self, articles: List[Dict[str, Any]]
     ) -> Dict[int, Dict[str, Any]]:
         """
         Enrich all articles in a single Gemini API call.
         Returns a dict mapping article index → enrichment data.
+        Falls back to Neutral sentiment for each article on any failure.
         """
         if not articles:
             return {}
@@ -283,23 +331,22 @@ For EACH article, provide:
 1. Summary bullet points following these rules:
    - Minimum 2, maximum 5 bullet points
    - Each bullet must be under 25 words — short and punchy
-   - The FINAL bullet must always be a "So What?" — explain why an everyday investor should care, in plain English
+   - The FINAL bullet must always explain why an everyday investor should care, in plain English
+   - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway:". Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix.
    - No introductory phrases like "This article discusses..." or "The key points are..."
-2. Sentiment classification using these exact rules:
-   - "Positive": Strong upward catalyst (e.g., crushing earnings, massive contract win, breakthrough product)
-   - "Negative": Strong downward catalyst (e.g., missed earnings, lawsuit, major regulatory action)
-   - "None": General commentary, educational content, mixed signals, or no clear directional impact on the stock
+2. Sentiment classification — you MUST use one of these three exact values:
+   - "Positive": ONLY use if the article indicates a direct upward catalyst for the stock price (e.g., earnings beat, new product launch, analyst upgrade, winning a lawsuit, major contract win, breakthrough product approval).
+   - "Negative": ONLY use if the article indicates a direct downward catalyst for the stock price (e.g., missed revenue, SEC investigation, product recall, analyst downgrade, lawsuit loss, executive fraud, data breach).
+   - "Neutral": Use for EVERYTHING else — macroeconomic noise, educational articles, history lessons, CEO interviews without financial guidance, mixed signals, industry commentary, or any article where the directional impact on the stock is unclear.
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
 
 Return a JSON array with one object per article in order. Each object must have:
 - "index": the article number (0-based)
-- "bullets": array of 2-5 strings (last one is the "So What?")
-- "sentiment": "Positive" | "Negative" | "None"
+- "bullets": array of 2-5 strings (last one explains why investors should care — vary the opening naturally)
+- "sentiment": exactly one of "Positive" | "Negative" | "Neutral"
 - "confidence": integer 0-100
 
-{chr(10).join(articles_text)}
-
-Return ONLY the JSON array, no markdown fencing or commentary."""
+{chr(10).join(articles_text)}"""
 
         try:
             response = await self.gemini.generate_json(
@@ -308,9 +355,12 @@ Return ONLY the JSON array, no markdown fencing or commentary."""
                     "You are an expert financial translator. Your job is to read dense "
                     "financial news and summarize it for everyday investors. Keep the tone "
                     "friendly, accessible and reliable. Must use correct numbers or data "
-                    "if needed. Do not use introductory phrases."
+                    "if needed. Do not use introductory phrases. "
+                    "For sentiment, you MUST return exactly one of: Positive, Negative, Neutral. "
+                    "No other values are accepted."
                 ),
                 model_name=NEWS_AI_MODEL,
+                response_schema=self._ENRICHMENT_SCHEMA,
             )
 
             text = response.get("text", "")
@@ -320,18 +370,11 @@ Return ONLY the JSON array, no markdown fencing or commentary."""
             if isinstance(parsed, list):
                 for item in parsed:
                     idx = item.get("index", 0)
-                    raw_sentiment = (item.get("sentiment") or "").strip().lower()
-
-                    if raw_sentiment == "positive":
-                        sentiment = "Positive"
-                    elif raw_sentiment == "negative":
-                        sentiment = "Negative"
-                    else:
-                        sentiment = None
-
                     result[idx] = {
                         "bullets": item.get("bullets", [])[:5],
-                        "sentiment": sentiment,
+                        "sentiment": self._normalize_sentiment(
+                            item.get("sentiment", "")
+                        ),
                         "confidence": item.get("confidence", 0),
                     }
 
@@ -342,7 +385,11 @@ Return ONLY the JSON array, no markdown fencing or commentary."""
 
         except Exception as e:
             logger.error(f"Gemini batch enrichment failed: {e}", exc_info=True)
-            return {}
+            # Fallback: return Neutral for every article so the frontend doesn't crash
+            return {
+                i: {"bullets": [], "sentiment": "Neutral", "confidence": 0}
+                for i in range(len(articles))
+            }
 
     # ── Private: Cache lookup ─────────────────────────────────────────
 
@@ -385,11 +432,7 @@ Return ONLY the JSON array, no markdown fencing or commentary."""
                     "published_at": raw.get("publishedDate"),
                     "thumbnail_url": raw.get("image"),
                     "article_url": raw.get("url"),
-                    "related_tickers": (
-                        raw.get("symbol", ticker).split(",")
-                        if isinstance(raw.get("symbol"), str)
-                        else [ticker]
-                    ),
+                    "related_tickers": self._parse_tickers(raw, ticker),
                     "ai_processed": False,
                 })
             return {
@@ -425,8 +468,7 @@ Return ONLY the JSON array, no markdown fencing or commentary."""
             except Exception:
                 related = []
 
-        raw_sentiment = row.get("sentiment")
-        sentiment = raw_sentiment if raw_sentiment not in (None, "None", "none", "neutral") else None
+        sentiment = self._normalize_sentiment(row.get("sentiment", ""))
 
         return {
             "id": row.get("id", ""),

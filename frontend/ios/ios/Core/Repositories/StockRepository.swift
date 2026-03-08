@@ -29,7 +29,7 @@ protocol StockRepositoryProtocol {
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
     func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse
-    func getStockChart(ticker: String, range: String, interval: String?) async throws -> StockChartResponse
+    func getStockChart(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockChartResponse
 }
 
 // MARK: - Stock Repository
@@ -155,8 +155,8 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - Chart
 
-    func getStockChart(ticker: String, range: String, interval: String? = nil) async throws -> StockChartResponse {
-        let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")"
+    func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
+        let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
         // Cache chart data for 5 minutes
         if let cached: StockChartResponse = getCached(cacheKey, maxAge: 300) {
@@ -164,7 +164,7 @@ final class StockRepository: StockRepositoryProtocol {
         }
 
         let chart = try await apiClient.request(
-            endpoint: .getStockChart(ticker: ticker, range: range, interval: interval),
+            endpoint: .getStockChart(ticker: ticker, range: range, interval: interval, extendedHours: extendedHours),
             responseType: StockChartResponse.self
         )
 
@@ -512,7 +512,7 @@ final class MockStockRepository: StockRepositoryProtocol {
         EnrichStockNewsResponse(articles: [], ticker: ticker)
     }
 
-    func getStockChart(ticker: String, range: String, interval: String? = nil) async throws -> StockChartResponse {
+    func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
         StockChartResponse(
             symbol: ticker,
             prices: [

@@ -28,6 +28,7 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
+    @Published var chartDataVersion: Int = 0
 
     // MARK: - Private Properties
 
@@ -90,6 +91,7 @@ class CryptoDetailViewModel: ObservableObject {
 
                 // Map API response → UI models
                 self.cryptoData = response.toModel()
+                self.chartDataVersion += 1
                 self.newsArticles = response.newsArticles.map { $0.toModel() }
 
                 // Analysis tab: use sample data for now (will be added to backend later)
@@ -121,6 +123,7 @@ class CryptoDetailViewModel: ObservableObject {
             )
             print("✅ [CryptoDetail] Refreshed \(response.name)")
             self.cryptoData = response.toModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.newsArticles.map { $0.toModel() }
             self.analysisData = TickerAnalysisData.sampleData
             self.isLoading = false
@@ -152,6 +155,7 @@ class CryptoDetailViewModel: ObservableObject {
             )
 
             self.cryptoData = response.toModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.newsArticles.map { $0.toModel() }
             print("✅ [CryptoDetail] Chart range updated — \(response.chartData.count) data points")
         } catch {

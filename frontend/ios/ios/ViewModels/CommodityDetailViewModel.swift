@@ -23,6 +23,7 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var chartSettings = ChartSettings()
+    @Published var chartDataVersion: Int = 0
 
     // MARK: - Private Properties
 
@@ -82,6 +83,7 @@ class CommodityDetailViewModel: ObservableObject {
                 print("   📰 News articles: \(response.newsArticles.count)")
 
                 self.commodityData = response.toDisplayModel()
+                self.chartDataVersion += 1
                 self.newsArticles = response.toNewsArticles()
                 self.isLoading = false
                 self.errorMessage = nil
@@ -108,6 +110,7 @@ class CommodityDetailViewModel: ObservableObject {
             )
             print("✅ [CommodityDetail] Refreshed \(response.name)")
             self.commodityData = response.toDisplayModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
             self.isLoading = false
         } catch {
@@ -137,6 +140,7 @@ class CommodityDetailViewModel: ObservableObject {
             )
 
             self.commodityData = response.toDisplayModel()
+            self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
             print("✅ [CommodityDetail] Chart range updated — \(response.chartData.count) data points")
         } catch {

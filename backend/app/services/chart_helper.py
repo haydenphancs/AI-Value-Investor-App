@@ -139,12 +139,16 @@ async def fetch_chart_data(
     symbol: str,
     range_code: str,
     interval: Optional[str] = None,
+    extended_hours: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Fetch chart data using the appropriate FMP endpoint.
 
     Returns list of {date, open, high, low, close, volume} dicts,
     sorted chronologically (oldest first).
+
+    When *extended_hours* is False and the interval is intraday, data
+    outside regular market hours (09:30–16:00 ET) is filtered out.
     """
     resolved_interval = resolve_interval(range_code, interval)
     from_date, to_date = compute_date_range(range_code)
@@ -169,7 +173,10 @@ async def fetch_chart_data(
         )
         if isinstance(raw, list):
             raw.sort(key=lambda p: p.get("date", ""))
-            return _normalize_prices(raw)
+            prices = _normalize_prices(raw)
+            if not extended_hours:
+                prices = _filter_regular_hours(prices)
+            return prices
         return []
 
     elif resolved_interval in AGGREGATED_INTERVALS:
@@ -188,6 +195,29 @@ async def fetch_chart_data(
             raw = await fmp.get_historical_prices(symbol, from_date, to_date)
             historical = _parse_historical(raw)
         return _normalize_prices(historical)
+
+
+def _filter_regular_hours(prices: List[Dict]) -> List[Dict]:
+    """Keep only data points within regular US market hours (09:30–16:00 ET)."""
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    filtered = []
+    for p in prices:
+        date_str = p.get("date", "")
+        if len(date_str) <= 10:
+            # Daily data — always include
+            filtered.append(p)
+            continue
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=et)
+        except ValueError:
+            filtered.append(p)
+            continue
+        t = dt.hour * 60 + dt.minute
+        if 9 * 60 + 30 <= t < 16 * 60:
+            filtered.append(p)
+    return filtered
 
 
 def _parse_historical(raw) -> List[Dict]:

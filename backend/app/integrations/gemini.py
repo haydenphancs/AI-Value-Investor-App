@@ -177,10 +177,12 @@ class GeminiClient:
         self,
         prompt: str,
         system_instruction: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        response_schema: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
+        Optionally enforce a response_schema for guaranteed output shape.
         Results are cached.
         """
         key = _cache_key("json", prompt, system_instruction or "", model_name or "")
@@ -194,6 +196,8 @@ class GeminiClient:
                 **self.generation_config,
                 "response_mime_type": "application/json",
             }
+            if response_schema is not None:
+                json_config["response_schema"] = response_schema
 
             model = genai.GenerativeModel(
                 model_name=model_name or self.model_name,

@@ -24,7 +24,7 @@ enum ChartType: String, CaseIterable, Identifiable {
         case .line:   return "chart.xyaxis.line"
         case .candle: return "chart.bar.xaxis"
         case .area:   return "chart.line.uptrend.xyaxis"
-        case .bar:    return "chart.bar.fill"
+        case .bar:    return "chart.bar.xaxis.ascending"
         }
     }
 }

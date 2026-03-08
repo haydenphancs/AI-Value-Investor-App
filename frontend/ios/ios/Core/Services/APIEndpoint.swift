@@ -50,7 +50,7 @@ enum APIEndpoint: Sendable {
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
     case enrichStockNews(ticker: String, articleIds: [String])
-    case getStockChart(ticker: String, range: String, interval: String? = nil)
+    case getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
     case getTickerReport(ticker: String, persona: String)
 
     // MARK: - Indices
@@ -152,7 +152,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/news"
         case .enrichStockNews(let ticker, _):
             return "/api/v1/stocks/\(ticker)/news/enrich"
-        case .getStockChart(let ticker, _, _):
+        case .getStockChart(let ticker, _, _, _):
             return "/api/v1/stocks/\(ticker)/chart"
         case .getTickerReport(let ticker, _):
             return "/api/v1/stocks/\(ticker)/report"
@@ -296,9 +296,10 @@ enum APIEndpoint: Sendable {
             if let interval = interval { params["interval"] = interval }
             return params
 
-        case .getStockChart(_, let range, let interval):
+        case .getStockChart(_, let range, let interval, let extendedHours):
             var params = ["range": range]
             if let interval = interval { params["interval"] = interval }
+            if extendedHours { params["extended_hours"] = "true" }
             return params
 
         case .getTickerReport(_, let persona):

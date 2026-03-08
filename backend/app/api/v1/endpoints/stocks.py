@@ -343,15 +343,14 @@ async def get_stock_financials_full(ticker: str):
 @router.get("/{ticker}/news")
 async def get_stock_news(
     ticker: str,
-    limit: int = Query(10, le=50),
+    limit: int = Query(50, le=50),
 ):
     """
-    Get AI-enriched news for a specific ticker.
+    Get news for a specific ticker (raw + any previously enriched).
 
-    Uses a hybrid caching architecture:
-    - Cache hit: returns instantly from ticker_news_cache table
-    - Cache miss: fetches from FMP, enriches with Gemini AI (summary bullets
-      + sentiment), caches in Supabase, then returns
+    Fetches up to 50 articles from FMP, caches all in Supabase.
+    AI enrichment is NOT automatic — use POST /{ticker}/news/enrich
+    to enrich specific articles on demand.
     """
     from app.services.news_cache_service import get_news_cache_service
 
@@ -361,3 +360,31 @@ async def get_stock_news(
     except Exception as e:
         logger.error(f"Stock news failed for {ticker}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="News service unavailable")
+
+
+@router.post("/{ticker}/news/enrich")
+async def enrich_stock_news(
+    ticker: str,
+    body: Dict[str, Any],
+):
+    """
+    AI-enrich specific news articles on demand.
+
+    Body: { "article_ids": ["uuid1", "uuid2", ...] }
+
+    Only processes articles that haven't been enriched yet.
+    Returns the enriched article data.
+    """
+    from app.services.news_cache_service import get_news_cache_service
+
+    article_ids = body.get("article_ids", [])
+    if not article_ids:
+        raise HTTPException(status_code=400, detail="article_ids is required")
+
+    try:
+        service = get_news_cache_service()
+        enriched = await service.enrich_articles(ticker.upper(), article_ids)
+        return {"articles": enriched, "ticker": ticker.upper()}
+    except Exception as e:
+        logger.error(f"News enrichment failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Enrichment service unavailable")

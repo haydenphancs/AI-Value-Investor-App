@@ -15,17 +15,16 @@ struct TickerNewsCardFooter: View {
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
-            // Show both icons when expanded, on the left side
             if hasExpandableContent && isExpanded {
-                // External link button (first)
+                // External link button
                 Button(action: {
                     onExternalLinkTap?()
                 }) {
                     NewsExternalLinkIcon()
                 }
                 .buttonStyle(PlainButtonStyle())
-                
-                // Collapse button (second)
+
+                // Collapse button
                 Button(action: {
                     onExpandToggle?()
                 }) {
@@ -33,9 +32,8 @@ struct TickerNewsCardFooter: View {
                 }
                 .buttonStyle(PlainButtonStyle())
             }
-            
-            Spacer()
         }
+        .frame(maxWidth: .infinity)
     }
 }
 

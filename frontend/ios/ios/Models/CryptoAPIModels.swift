@@ -251,10 +251,12 @@ struct CryptoNewsArticleDTO: Codable {
             source: newsSource,
             sentiment: newsSentiment,
             publishedAt: date,
-            thumbnailName: thumbnailUrl,
+            thumbnailName: nil,
+            imageURL: thumbnailUrl.flatMap { URL(string: $0) },
             relatedTickers: relatedTickers,
             summaryBullets: summaryBullets,
-            articleURL: articleUrl.flatMap { URL(string: $0) }
+            articleURL: articleUrl.flatMap { URL(string: $0) },
+            aiProcessed: !summaryBullets.isEmpty
         )
     }
 }

@@ -28,6 +28,7 @@ protocol StockRepositoryProtocol {
     func getStockOverview(ticker: String, range: String, interval: String?) async throws -> StockOverviewResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
+    func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse
     func getStockChart(ticker: String, range: String, interval: String?) async throws -> StockChartResponse
 }
 
@@ -127,7 +128,7 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - News
 
-    func getStockNews(ticker: String, limit: Int = 10) async throws -> TickerNewsFeedResponse {
+    func getStockNews(ticker: String, limit: Int = 50) async throws -> TickerNewsFeedResponse {
         let cacheKey = "news_\(ticker)"
 
         // Cache news for 5 minutes
@@ -141,6 +142,14 @@ final class StockRepository: StockRepositoryProtocol {
         )
 
         setCache(cacheKey, value: response)
+        return response
+    }
+
+    func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse {
+        let response = try await apiClient.request(
+            endpoint: .enrichStockNews(ticker: ticker, articleIds: articleIds),
+            responseType: EnrichStockNewsResponse.self
+        )
         return response
     }
 
@@ -381,6 +390,13 @@ struct TickerNewsFeedResponse: Codable {
     }
 }
 
+// MARK: - Enrich Stock News Response (from POST /stocks/{ticker}/news/enrich)
+
+struct EnrichStockNewsResponse: Codable {
+    let articles: [StockNewsArticle]
+    let ticker: String
+}
+
 // MARK: - Stock Chart Response
 
 struct StockChartResponse: Codable {
@@ -490,6 +506,10 @@ final class MockStockRepository: StockRepositoryProtocol {
             cached: true,
             cacheAgeSeconds: 0
         )
+    }
+
+    func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse {
+        EnrichStockNewsResponse(articles: [], ticker: ticker)
     }
 
     func getStockChart(ticker: String, range: String, interval: String? = nil) async throws -> StockChartResponse {

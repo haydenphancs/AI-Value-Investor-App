@@ -129,7 +129,8 @@ class ChartSettings: ObservableObject {
     }
 
     var activeSubCharts: [TechnicalIndicatorType] {
-        enabledIndicators.filter { !$0.isOverlay }.sorted { $0.rawValue < $1.rawValue }
+        let displayOrder: [TechnicalIndicatorType] = [.volume, .rsi14, .macd, .stochastic]
+        return displayOrder.filter { enabledIndicators.contains($0) }
     }
 }
 
@@ -145,10 +146,12 @@ class ChartViewportState: ObservableObject {
     /// Minimum number of visible points (prevent over-zoom)
     private let minVisibleCount = 10
 
-    /// Reset to show all data (called when new data arrives)
-    func reset(totalCount: Int) {
+    /// Reset visible range (called when new data arrives).
+    /// `displayStart` offsets the left edge so warm-up data used by
+    /// technical indicators is available but not rendered.
+    func reset(totalCount: Int, displayStart: Int = 0) {
         self.totalCount = totalCount
-        self.visibleStart = 0
+        self.visibleStart = min(displayStart, max(totalCount - 1, 0))
         self.visibleEnd = max(totalCount - 1, 0)
     }
 

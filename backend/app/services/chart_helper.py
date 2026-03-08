@@ -14,6 +14,23 @@ DAILY_INTERVALS = {"daily"}
 AGGREGATED_INTERVALS = {"weekly", "monthly", "quarterly"}
 ALL_INTERVALS = INTRADAY_INTERVALS | DAILY_INTERVALS | AGGREGATED_INTERVALS
 
+# Extra data points to fetch before the requested range for indicator warm-up.
+# MACD needs ~34, RSI ~14, Stochastic ~14.  50 gives comfortable headroom.
+_WARMUP_DATA_POINTS = 50
+
+
+def _warmup_calendar_days(interval: str) -> int:
+    """Calendar days of extra history to fetch for indicator warm-up."""
+    if interval in INTRADAY_INTERVALS:
+        return 7   # a few extra trading days of intraday bars
+    if interval in DAILY_INTERVALS:
+        return 80  # ~50 trading days
+    if interval == "weekly":
+        return 7 * _WARMUP_DATA_POINTS + 14  # ~50 weeks
+    if interval in ("monthly", "quarterly"):
+        return 30 * _WARMUP_DATA_POINTS + 30  # ~50 months
+    return 80
+
 # Default interval for each range when not explicitly specified
 DEFAULT_INTERVALS = {
     "1D": "5min",
@@ -131,6 +148,17 @@ async def fetch_chart_data(
     """
     resolved_interval = resolve_interval(range_code, interval)
     from_date, to_date = compute_date_range(range_code)
+
+    # Extend from_date to include extra data for indicator warm-up
+    # (MACD, RSI, etc. need preceding data points to produce values).
+    # The frontend trims the warm-up portion from the displayed chart.
+    if from_date and from_date != "1970-01-01":
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+            warmup = _warmup_calendar_days(resolved_interval)
+            from_date = (from_dt - timedelta(days=warmup)).isoformat()
+        except ValueError:
+            pass
 
     if resolved_interval in INTRADAY_INTERVALS:
         raw = await fmp.get_intraday_prices(

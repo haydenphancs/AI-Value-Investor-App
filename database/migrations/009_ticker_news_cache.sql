@@ -41,7 +41,7 @@ RETURNS void AS $$
 BEGIN
     DELETE FROM ticker_news_cache WHERE expires_at < now();
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ── Watchlist popularity RPC ─────────────────────────────────────────
 -- Returns top N most-tracked tickers across all user watchlists
@@ -56,4 +56,4 @@ BEGIN
     ORDER BY watch_count DESC
     LIMIT n;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

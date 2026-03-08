@@ -204,12 +204,21 @@ def _parse_historical(hist_raw) -> List[Dict]:
 
 
 def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
-    """Extract OHLCV data for the requested chart range."""
+    """Extract OHLCV data for the requested chart range.
+
+    Includes extra trading days before the display range so that
+    technical indicators (MACD ≈ 34, RSI ≈ 14) can warm up.
+    """
+    _WARMUP_TRADING_DAYS = 50
     range_days = {
-        "1D": 2, "1W": 5, "3M": 63, "6M": 126,
-        "1Y": 252, "5Y": 1260, "ALL": 999999,
+        "1D": 2, "1W": 5,
+        "3M": 63 + _WARMUP_TRADING_DAYS,
+        "6M": 126 + _WARMUP_TRADING_DAYS,
+        "1Y": 252 + _WARMUP_TRADING_DAYS,
+        "5Y": 1260 + _WARMUP_TRADING_DAYS,
+        "ALL": 999999,
     }
-    days = range_days.get(chart_range, 63)
+    days = range_days.get(chart_range, 63 + _WARMUP_TRADING_DAYS)
     relevant = prices[-days:] if len(prices) > days else prices
     result = []
     for p in relevant:

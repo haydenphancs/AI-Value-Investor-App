@@ -20,12 +20,52 @@ struct TickerChartView: View {
     @StateObject private var crosshairState = CrosshairState()
     @StateObject private var viewportState = ChartViewportState()
 
+    /// Number of leading data points the backend fetched as warm-up
+    /// for technical indicators (MACD, RSI, etc.).  These points are
+    /// not shown on the main chart but are included in `allPricePoints`
+    /// passed to SubChartCanvas so indicator values start from the
+    /// left edge of the visible chart.
+    private var warmupCount: Int {
+        // ALL range already has maximum history — no warm-up trimming.
+        // 1D / 1W intraday data is dense enough that warm-up is tiny;
+        // still trim for correctness.
+        guard !pricePoints.isEmpty else { return 0 }
+        if selectedRange == .all { return 0 }
+
+        let calendar = Calendar.current
+        let now = Date()
+        let displayStart: Date?
+
+        switch selectedRange {
+        case .oneDay:       displayStart = calendar.date(byAdding: .day, value: -3, to: now)
+        case .oneWeek:      displayStart = calendar.date(byAdding: .day, value: -10, to: now)
+        case .threeMonths:  displayStart = calendar.date(byAdding: .month, value: -3, to: now)
+        case .sixMonths:    displayStart = calendar.date(byAdding: .month, value: -6, to: now)
+        case .oneYear:      displayStart = calendar.date(byAdding: .year, value: -1, to: now)
+        case .fiveYears:    displayStart = calendar.date(byAdding: .year, value: -5, to: now)
+        case .all:          displayStart = nil
+        }
+
+        guard let start = displayStart else { return 0 }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let startStr = formatter.string(from: start)
+
+        for (index, point) in pricePoints.enumerated() {
+            let dateStr = String(point.date.prefix(10))
+            if dateStr >= startStr {
+                return index
+            }
+        }
+        return 0
+    }
+
     /// Slice of price points visible in the current viewport
     private var visiblePoints: [StockPricePoint] {
         guard !pricePoints.isEmpty else { return [] }
-        let start = max(0, viewportState.visibleStart)
-        let end = min(pricePoints.count - 1, viewportState.visibleEnd)
-        guard start <= end else { return pricePoints }
+        let start = max(0, min(viewportState.visibleStart, pricePoints.count - 1))
+        let end = max(start, min(pricePoints.count - 1, viewportState.visibleEnd))
         return Array(pricePoints[start...end])
     }
 
@@ -158,16 +198,16 @@ struct TickerChartView: View {
             ChartSettingsSheet(chartSettings: chartSettings, assetContext: assetContext)
                 .transaction { $0.disablesAnimations = true }
         }
-        .onChange(of: selectedRange) { _ in
+        .onChange(of: selectedRange) {
             crosshairState.selectedIndex = nil
             crosshairState.isDragging = false
         }
-        .onChange(of: pricePoints.count) { newCount in
-            // Reset viewport when new data is loaded
-            viewportState.reset(totalCount: newCount)
+        .onChange(of: pricePoints.count) {
+            // Reset viewport when new data is loaded, offsetting past warm-up data
+            viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
         }
         .onAppear {
-            viewportState.reset(totalCount: pricePoints.count)
+            viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
         }
     }
 

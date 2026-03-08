@@ -874,7 +874,7 @@ RULES:
                     "You are an ETF analyst writing for novice investors. "
                     "Output ONLY valid JSON. No markdown, no commentary."
                 ),
-                model_name="gemini-2.0-flash",
+                model_name="gemini-2.5-flash",
             )
 
             text = ai_response.get("text", "").strip()

@@ -699,7 +699,7 @@ Separate each category with "===CATEGORY===" followed by the category name.
                     "Write factually. Each paragraph should be 2-4 sentences. "
                     "Avoid hype. Mention specific names, dates, and data points."
                 ),
-                model_name="gemini-2.0-flash",
+                model_name="gemini-2.5-flash",
             )
 
             text = ai_response.get("text", "")

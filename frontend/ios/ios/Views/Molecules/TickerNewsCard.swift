@@ -31,7 +31,7 @@ struct TickerNewsCard: View {
             }
         }) {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                // Header row: Sentiment + Time
+                // Header row: Sentiment + Time (left) | Source (right)
                 HStack(spacing: AppSpacing.sm) {
                     NewsSentimentBadge(sentiment: article.sentiment)
 
@@ -40,9 +40,13 @@ struct TickerNewsCard: View {
                         .foregroundColor(AppColors.textMuted)
 
                     Spacer()
+
+                    Text(article.source.name)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
                 }
 
-                // Main content: Headline + (Source name above Thumbnail)
+                // Main content: Headline + Thumbnail
                 HStack(alignment: .top, spacing: AppSpacing.xs) {
                     // Headline
                     Text(article.headline)
@@ -54,19 +58,13 @@ struct TickerNewsCard: View {
 
                     Spacer(minLength: 0)
 
-                    // Source name + Thumbnail stacked
-                    VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                        Text(article.source.name)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-
-                        NewsThumbnail(
-                            imageName: article.thumbnailName,
-                            imageURL: article.imageURL,
-                            width: 72,
-                            height: 40
-                        )
-                    }
+                    // Thumbnail
+                    NewsThumbnail(
+                        imageName: article.thumbnailName,
+                        imageURL: article.imageURL,
+                        width: 72,
+                        height: 40
+                    )
                 }
 
                 // Related tickers

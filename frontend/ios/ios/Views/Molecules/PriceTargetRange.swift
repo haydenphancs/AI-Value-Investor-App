@@ -47,44 +47,44 @@ struct PriceTargetRange: View {
                     .frame(height: 8)
                     .cornerRadius(4)
 
-                    // Current price indicator
+                    // Average price indicator (above bar)
+                    let averagePosition = priceTarget.averagePricePosition
+                    let averageX = geometry.size.width * averagePosition
+
+                    VStack(spacing: AppSpacing.xxs) {
+                        // Average price label
+                        Text("Target: \(priceTarget.formattedAverage)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .offset(x: clampedOffset(for: averageX, in: geometry.size.width, labelWidth: 90))
+
+                        // Triangle indicator
+                        Triangle()
+                            .fill(AppColors.textMuted)
+                            .frame(width: 10, height: 6)
+                            .offset(y: -2)
+                    }
+                    .position(x: averageX, y: -12)
+
+                    // Current price indicator (below bar)
                     let position = priceTarget.currentPricePosition
                     let indicatorX = geometry.size.width * position
 
                     VStack(spacing: AppSpacing.xxs) {
+                        // Triangle indicator (pointing down)
+                        Triangle()
+                            .fill(AppColors.textPrimary)
+                            .frame(width: 10, height: 6)
+                            .rotationEffect(.degrees(180))
+                            .offset(y: 2)
+
                         // Current price label
                         Text("Current: \(priceTarget.formattedCurrent)")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textSecondary)
                             .offset(x: clampedOffset(for: indicatorX, in: geometry.size.width, labelWidth: 90))
-
-                        // Triangle indicator
-                        Triangle()
-                            .fill(AppColors.textPrimary)
-                            .frame(width: 10, height: 6)
-                            .offset(y: -2)
                     }
-                    .position(x: indicatorX, y: -12)
-                    
-                    // Average price indicator
-                    let averagePosition = priceTarget.averagePricePosition
-                    let averageX = geometry.size.width * averagePosition
-
-                    VStack(spacing: AppSpacing.xxs) {
-                        // Triangle indicator (pointing down)
-                        Triangle()
-                            .fill(AppColors.textMuted)
-                            .frame(width: 10, height: 6)
-                            .rotationEffect(.degrees(180))
-                            .offset(y: 2)
-                        
-                        // Average price label
-                        Text("Average: \(priceTarget.formattedAverage)")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                            .offset(x: clampedOffset(for: averageX, in: geometry.size.width, labelWidth: 90))
-                    }
-                    .position(x: averageX, y: 20)
+                    .position(x: indicatorX, y: 20)
                 }
             }
             .frame(height: 8)

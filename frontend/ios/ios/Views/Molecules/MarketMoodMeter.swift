@@ -11,12 +11,16 @@ struct MarketMoodMeter: View {
     let sentimentData: SentimentAnalysisData
     @Binding var selectedTimeframe: SentimentTimeframe
 
+    private var currentScore: Int {
+        sentimentData.score(for: selectedTimeframe)
+    }
+
     private var currentMood: MarketMoodLevel {
-        selectedTimeframe == .last24h ? sentimentData.last24hMood : sentimentData.last7dMood
+        sentimentData.mood(for: selectedTimeframe)
     }
 
     private var gaugeValue: Double {
-        Double(sentimentData.moodScore) / 100.0
+        Double(currentScore) / 100.0
     }
 
     var body: some View {
@@ -38,13 +42,14 @@ struct MarketMoodMeter: View {
             // Gauge
             SemiCircleGauge(
                 value: gaugeValue,
-                displayValue: "\(sentimentData.moodScore)",
+                displayValue: "\(currentScore)",
                 label: currentMood.rawValue,
                 labelColor: currentMood.color,
                 gaugeType: .sentiment,
                 showLabels: true,
                 size: 180
             )
+            .animation(.easeInOut(duration: 0.5), value: gaugeValue)
         }
     }
 }

@@ -16,6 +16,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 // MARK: - Stock Repository Protocol
 
@@ -30,6 +31,8 @@ protocol StockRepositoryProtocol {
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
     func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse
     func getStockChart(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockChartResponse
+    func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO
+    func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO
 }
 
 // MARK: - Stock Repository
@@ -170,6 +173,44 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: chart)
         return chart
+    }
+
+    // MARK: - Analyst Analysis
+
+    func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO {
+        let cacheKey = "analyst_\(ticker)"
+
+        if let cached: AnalystAnalysisDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getAnalystAnalysis(ticker: ticker),
+            responseType: AnalystAnalysisDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got analyst analysis for \(ticker) — \(response.totalAnalysts) analysts")
+        return response
+    }
+
+    // MARK: - Sentiment Analysis
+
+    func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO {
+        let cacheKey = "sentiment_\(ticker)"
+
+        if let cached: SentimentAnalysisDTO = getCached(cacheKey, maxAge: 900) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getSentimentAnalysis(ticker: ticker),
+            responseType: SentimentAnalysisDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got sentiment for \(ticker) — mood: \(response.moodScore)")
+        return response
     }
 
     // MARK: - Cache Helpers
@@ -413,6 +454,253 @@ struct StockPricePoint: Codable {
     let volume: Double?
 }
 
+// MARK: - Analyst Analysis DTOs
+
+struct AnalystAnalysisDTO: Codable {
+    let symbol: String
+    let totalAnalysts: Int
+    let updatedDate: String
+    let consensus: String
+    let targetPrice: Double
+    let targetUpside: Double
+    let distributions: [AnalystDistributionDTO]
+    let priceTarget: AnalystPriceTargetDTO
+    let momentumData: [AnalystMomentumDTO]
+    let netPositive: Int
+    let netNegative: Int
+    let actionsSummary: AnalystActionsSummaryDTO
+    let actions: [AnalystActionDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case totalAnalysts = "total_analysts"
+        case updatedDate = "updated_date"
+        case consensus
+        case targetPrice = "target_price"
+        case targetUpside = "target_upside"
+        case distributions
+        case priceTarget = "price_target"
+        case momentumData = "momentum_data"
+        case netPositive = "net_positive"
+        case netNegative = "net_negative"
+        case actionsSummary = "actions_summary"
+        case actions
+    }
+}
+
+struct AnalystDistributionDTO: Codable {
+    let label: String
+    let count: Int
+}
+
+struct AnalystPriceTargetDTO: Codable {
+    let lowPrice: Double
+    let averagePrice: Double
+    let highPrice: Double
+    let currentPrice: Double
+
+    enum CodingKeys: String, CodingKey {
+        case lowPrice = "low_price"
+        case averagePrice = "average_price"
+        case highPrice = "high_price"
+        case currentPrice = "current_price"
+    }
+}
+
+struct AnalystMomentumDTO: Codable {
+    let month: String
+    let positiveCount: Int
+    let negativeCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case month
+        case positiveCount = "positive_count"
+        case negativeCount = "negative_count"
+    }
+}
+
+struct AnalystActionsSummaryDTO: Codable {
+    let upgrades: Int
+    let maintains: Int
+    let downgrades: Int
+}
+
+struct AnalystActionDTO: Codable {
+    let firmName: String
+    let actionType: String
+    let date: String
+    let previousRating: String?
+    let newRating: String
+    let previousPriceTarget: Double?
+    let newPriceTarget: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case firmName = "firm_name"
+        case actionType = "action_type"
+        case date
+        case previousRating = "previous_rating"
+        case newRating = "new_rating"
+        case previousPriceTarget = "previous_price_target"
+        case newPriceTarget = "new_price_target"
+    }
+}
+
+// MARK: - Sentiment Analysis DTO
+
+struct SentimentAnalysisDTO: Codable {
+    let symbol: String
+    // 24h
+    let moodScore: Int
+    let last24hMood: String
+    let socialMentions: Double
+    let socialMentionsChange: Double
+    let newsArticles: Int
+    let newsArticlesChange: Double
+    // 7d
+    let moodScore7d: Int
+    let last7dMood: String
+    let socialMentions7d: Double
+    let socialMentionsChange7d: Double
+    let newsArticles7d: Int
+    let newsArticlesChange7d: Double
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case moodScore = "mood_score"
+        case last24hMood = "last_24h_mood"
+        case socialMentions = "social_mentions"
+        case socialMentionsChange = "social_mentions_change"
+        case newsArticles = "news_articles"
+        case newsArticlesChange = "news_articles_change"
+        case moodScore7d = "mood_score_7d"
+        case last7dMood = "last_7d_mood"
+        case socialMentions7d = "social_mentions_7d"
+        case socialMentionsChange7d = "social_mentions_change_7d"
+        case newsArticles7d = "news_articles_7d"
+        case newsArticlesChange7d = "news_articles_change_7d"
+    }
+
+    func toDisplayModel() -> SentimentAnalysisData {
+        SentimentAnalysisData(
+            moodScore: moodScore,
+            last24hMood: MarketMoodLevel.fromScore(moodScore),
+            socialMentions: socialMentions,
+            socialMentionsChange: socialMentionsChange,
+            newsArticles: newsArticles,
+            newsArticlesChange: newsArticlesChange,
+            moodScore7d: moodScore7d,
+            last7dMood: MarketMoodLevel.fromScore(moodScore7d),
+            socialMentions7d: socialMentions7d,
+            socialMentionsChange7d: socialMentionsChange7d,
+            newsArticles7d: newsArticles7d,
+            newsArticlesChange7d: newsArticlesChange7d
+        )
+    }
+}
+
+// MARK: - DTO → Display Model Mapper
+
+extension AnalystAnalysisDTO {
+    /// Convert backend DTO to the display model used by SwiftUI views.
+    func toDisplayModel() -> AnalystRatingsData {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let parsedDate = dateFormatter.date(from: updatedDate) ?? Date()
+
+        let consensusEnum = AnalystConsensus(rawValue: consensus) ?? .hold
+
+        let distColors: [String: Color] = [
+            "Strong Buy": AppColors.bullish,
+            "Buy": Color(hex: "4ADE80"),
+            "Hold": AppColors.neutral,
+            "Sell": AppColors.bearish,
+            "Strong Sell": Color(hex: "991B1B"),
+        ]
+        let distModels = distributions.map { dto in
+            AnalystRatingDistribution(
+                label: dto.label,
+                count: dto.count,
+                color: distColors[dto.label] ?? AppColors.textSecondary
+            )
+        }
+
+        let pt = AnalystPriceTarget(
+            lowPrice: priceTarget.lowPrice,
+            averagePrice: priceTarget.averagePrice,
+            highPrice: priceTarget.highPrice,
+            currentPrice: priceTarget.currentPrice
+        )
+
+        let momentum = momentumData.map { dto in
+            AnalystMomentumMonth(
+                month: dto.month,
+                positiveCount: dto.positiveCount,
+                negativeCount: dto.negativeCount
+            )
+        }
+
+        let summary = AnalystActionsSummary(
+            upgrades: actionsSummary.upgrades,
+            maintains: actionsSummary.maintains,
+            downgrades: actionsSummary.downgrades
+        )
+
+        let actionModels = actions.map { dto in
+            AnalystAction(
+                firmName: dto.firmName,
+                actionType: AnalystActionType(rawValue: dto.actionType) ?? .maintain,
+                date: dateFormatter.date(from: dto.date) ?? Date(),
+                previousRating: dto.previousRating.flatMap { Self.mapRatingType($0) },
+                newRating: Self.mapRatingType(dto.newRating) ?? .neutral,
+                previousPriceTarget: dto.previousPriceTarget,
+                newPriceTarget: dto.newPriceTarget
+            )
+        }
+
+        return AnalystRatingsData(
+            totalAnalysts: totalAnalysts,
+            updatedDate: parsedDate,
+            consensus: consensusEnum,
+            targetPrice: targetPrice,
+            targetUpside: targetUpside,
+            distributions: distModels,
+            priceTarget: pt,
+            momentumData: momentum,
+            netPositive: netPositive,
+            netNegative: netNegative,
+            actionsSummary: summary,
+            actions: actionModels
+        )
+    }
+
+    /// Map raw FMP grade string → AnalystRatingType enum.
+    private static func mapRatingType(_ raw: String) -> AnalystRatingType? {
+        let lower = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        switch lower {
+        case "strong buy", "long term buy":
+            return .strongBuy
+        case "buy", "positive", "accumulate":
+            return .buy
+        case "outperform", "overweight", "market outperform", "sector outperform":
+            return .overweight
+        case "equal-weight", "equal weight":
+            return .equalWeight
+        case "neutral", "hold", "market perform", "sector perform",
+             "peer perform", "in-line", "in line", "perform", "sector weight":
+            return .neutral
+        case "underperform", "underweight", "negative", "reduce":
+            return .underperform
+        case "sell":
+            return .sell
+        case "strong sell":
+            return .strongSell
+        default:
+            return nil
+        }
+    }
+}
+
 // MARK: - Mock Repository for Previews
 
 #if DEBUG
@@ -521,6 +809,14 @@ final class MockStockRepository: StockRepositoryProtocol {
                 StockPricePoint(date: "2024-01-03", close: 175.0, open: 172.0, high: 176.0, low: 171.0, volume: 52_000_000)
             ]
         )
+    }
+
+    func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO {
+        throw URLError(.badServerResponse)
     }
 }
 #endif

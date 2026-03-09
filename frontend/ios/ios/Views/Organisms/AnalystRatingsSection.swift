@@ -53,6 +53,7 @@ struct AnalystRatingsSection: View {
                 netPositive: ratingsData.netPositive,
                 netNegative: ratingsData.netNegative,
                 actionsSummary: ratingsData.actionsSummary,
+                actions: ratingsData.actions,
                 selectedPeriod: $selectedMomentumPeriod,
                 onActionsTapped: onActionsTapped
             )

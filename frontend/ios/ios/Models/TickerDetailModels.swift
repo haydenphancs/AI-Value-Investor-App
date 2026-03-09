@@ -1107,11 +1107,11 @@ enum MarketMoodLevel: String {
     var color: Color {
         switch self {
         case .bearish:
-            return AppColors.bullish  // 0-30: Green zone
+            return AppColors.bearish  // 0-30: Red (negative sentiment)
         case .neutral:
             return Color(hex: "6B7280")  // 31-70: Grey zone
         case .bullish:
-            return AppColors.bearish  // 71-100: Red zone
+            return AppColors.bullish  // 71-100: Green (positive sentiment)
         }
     }
 
@@ -1130,53 +1130,83 @@ enum MarketMoodLevel: String {
 
 // MARK: - Sentiment Analysis Data
 struct SentimentAnalysisData {
+    // 24h data
     let moodScore: Int // 0-100
     let last24hMood: MarketMoodLevel
-    let last7dMood: MarketMoodLevel
     let socialMentions: Double
     let socialMentionsChange: Double
     let newsArticles: Int
     let newsArticlesChange: Double
+    // 7d data
+    let moodScore7d: Int // 0-100
+    let last7dMood: MarketMoodLevel
+    let socialMentions7d: Double
+    let socialMentionsChange7d: Double
+    let newsArticles7d: Int
+    let newsArticlesChange7d: Double
 
-    var formattedSocialMentions: String {
-        if socialMentions >= 1000 {
-            return String(format: "%.1fK", socialMentions / 1000)
+    // MARK: - Timeframe-aware accessors
+
+    func score(for timeframe: SentimentTimeframe) -> Int {
+        timeframe == .last24h ? moodScore : moodScore7d
+    }
+
+    func mood(for timeframe: SentimentTimeframe) -> MarketMoodLevel {
+        timeframe == .last24h ? last24hMood : last7dMood
+    }
+
+    func formattedSocialMentions(for timeframe: SentimentTimeframe) -> String {
+        let value = timeframe == .last24h ? socialMentions : socialMentions7d
+        if value >= 1000 {
+            return String(format: "%.1fK", value / 1000)
         }
-        return String(format: "%.0f", socialMentions)
+        return String(format: "%.0f", value)
     }
 
-    var formattedSocialChange: String {
-        let sign = socialMentionsChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", socialMentionsChange))% today"
+    func formattedSocialChange(for timeframe: SentimentTimeframe) -> String {
+        let change = timeframe == .last24h ? socialMentionsChange : socialMentionsChange7d
+        let sign = change >= 0 ? "+" : ""
+        let period = timeframe == .last24h ? "today" : "this week"
+        return "\(sign)\(String(format: "%.0f", change))% \(period)"
     }
 
-    var formattedNewsArticles: String {
-        "\(newsArticles)"
+    func formattedNewsArticles(for timeframe: SentimentTimeframe) -> String {
+        let count = timeframe == .last24h ? newsArticles : newsArticles7d
+        return "\(count)"
     }
 
-    var formattedNewsChange: String {
-        let sign = newsArticlesChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", newsArticlesChange))% this week"
+    func formattedNewsChange(for timeframe: SentimentTimeframe) -> String {
+        let change = timeframe == .last24h ? newsArticlesChange : newsArticlesChange7d
+        let sign = change >= 0 ? "+" : ""
+        let period = timeframe == .last24h ? "today" : "this week"
+        return "\(sign)\(String(format: "%.0f", change))% \(period)"
     }
 
-    var socialChangeColor: Color {
-        socialMentionsChange >= 0 ? AppColors.bullish : AppColors.bearish
+    func socialChangeColor(for timeframe: SentimentTimeframe) -> Color {
+        let change = timeframe == .last24h ? socialMentionsChange : socialMentionsChange7d
+        return change >= 0 ? AppColors.bullish : AppColors.bearish
     }
 
-    var newsChangeColor: Color {
-        newsArticlesChange >= 0 ? AppColors.bullish : AppColors.bearish
+    func newsChangeColor(for timeframe: SentimentTimeframe) -> Color {
+        let change = timeframe == .last24h ? newsArticlesChange : newsArticlesChange7d
+        return change >= 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 
 extension SentimentAnalysisData {
     static let sampleData = SentimentAnalysisData(
         moodScore: 24,
-        last24hMood: .bearish,  // 24 is in 0-30 range (Bearish/Red)
-        last7dMood: .neutral,   // Neutral is 31-70 range (Grey)
-        socialMentions: 12400,
+        last24hMood: .bearish,
+        socialMentions: 1200,
         socialMentionsChange: 24,
-        newsArticles: 847,
-        newsArticlesChange: 18
+        newsArticles: 47,
+        newsArticlesChange: 18,
+        moodScore7d: 55,
+        last7dMood: .neutral,
+        socialMentions7d: 12400,
+        socialMentionsChange7d: 15,
+        newsArticles7d: 847,
+        newsArticlesChange7d: 12
     )
 }
 

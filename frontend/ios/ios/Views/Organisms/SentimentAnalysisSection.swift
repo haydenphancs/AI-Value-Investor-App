@@ -31,7 +31,7 @@ struct SentimentAnalysisSection: View {
             }
 
             // Metrics row
-            SentimentMetricsRow(sentimentData: sentimentData)
+            SentimentMetricsRow(sentimentData: sentimentData, selectedTimeframe: selectedTimeframe)
 
             // Disclaimer
             AnalysisDisclaimerText()

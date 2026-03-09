@@ -119,10 +119,26 @@ enum ChartAssetContext {
 // MARK: - Chart Settings
 
 class ChartSettings: ObservableObject {
-    @Published var chartType: ChartType = .line
-    @Published var selectedInterval: ChartInterval = .daily
+    private static let chartTypeKey = "caydex_preferred_chart_type"
+
+    @Published var chartType: ChartType {
+        didSet {
+            UserDefaults.standard.set(chartType.rawValue, forKey: Self.chartTypeKey)
+        }
+    }
+    @Published var selectedInterval: ChartInterval = .fiveMin
     @Published var enabledIndicators: Set<TechnicalIndicatorType> = []
     @Published var showExtendedHours: Bool = false
+
+    init() {
+        // Restore persisted chart type, default to .line
+        if let saved = UserDefaults.standard.string(forKey: Self.chartTypeKey),
+           let type = ChartType(rawValue: saved) {
+            self.chartType = type
+        } else {
+            self.chartType = .line
+        }
+    }
 
     var activeOverlays: [TechnicalIndicatorType] {
         enabledIndicators.filter { $0.isOverlay }.sorted { $0.rawValue < $1.rawValue }

@@ -48,6 +48,56 @@ _STOCK_CHART_TOOL = genai.protos.Tool(
     ]
 )
 
+_ANALYST_ANALYSIS_TOOL = genai.protos.Tool(
+    function_declarations=[
+        genai.protos.FunctionDeclaration(
+            name="get_analyst_analysis",
+            description=(
+                "Fetch Wall Street analyst ratings, consensus, price targets, "
+                "and recent upgrade/downgrade actions for a given ticker symbol. "
+                "Call this tool when the user asks about analyst opinions, "
+                "consensus ratings, price targets, upgrades, downgrades, or "
+                "why a stock is rated as a buy or sell."
+            ),
+            parameters=genai.protos.Schema(
+                type=genai.protos.Type.OBJECT,
+                properties={
+                    "ticker": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    ]
+)
+
+_SENTIMENT_ANALYSIS_TOOL = genai.protos.Tool(
+    function_declarations=[
+        genai.protos.FunctionDeclaration(
+            name="get_sentiment_analysis",
+            description=(
+                "Fetch market sentiment analysis and mood data for a given ticker symbol. "
+                "This includes social media mentions, news sentiment scores, and an overall "
+                "0-100 mood gauge. Call this tool when the user asks about market sentiment, "
+                "mood, why a stock feels bearish or bullish, social media buzz, or "
+                "what people are saying about a stock."
+            ),
+            parameters=genai.protos.Schema(
+                type=genai.protos.Type.OBJECT,
+                properties={
+                    "ticker": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    ]
+)
+
 
 class ChatService:
     def __init__(self):
@@ -104,11 +154,25 @@ class ChatService:
             ticker = args.get("ticker", "").upper()
             return await self._fetch_stock_widget_data(ticker)
 
+        async def _handle_analyst_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Called when Gemini decides it needs analyst data."""
+            ticker = args.get("ticker", "").upper()
+            return await self._fetch_analyst_data(ticker)
+
+        async def _handle_sentiment_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Called when Gemini decides it needs sentiment data."""
+            ticker = args.get("ticker", "").upper()
+            return await self._fetch_sentiment_data(ticker)
+
         try:
             response = await self.gemini.generate_with_tools(
                 prompt=prompt,
-                tools=[_STOCK_CHART_TOOL],
-                tool_handlers={"get_stock_chart_data": _handle_stock_tool},
+                tools=[_STOCK_CHART_TOOL, _ANALYST_ANALYSIS_TOOL, _SENTIMENT_ANALYSIS_TOOL],
+                tool_handlers={
+                    "get_stock_chart_data": _handle_stock_tool,
+                    "get_analyst_analysis": _handle_analyst_tool,
+                    "get_sentiment_analysis": _handle_sentiment_tool,
+                },
                 system_instruction=system_instruction,
             )
 
@@ -194,6 +258,40 @@ class ChatService:
             logger.error(f"FMP stock widget fetch failed for {ticker}: {e}")
             return {"error": str(e)}
 
+    # ── FMP data fetching for the analyst tool ─────────────────────
+
+    async def _fetch_analyst_data(self, ticker: str) -> Dict[str, Any]:
+        """
+        Fetch analyst analysis data for use in chat responses.
+        Returns a dict summary suitable for Gemini to interpret.
+        """
+        try:
+            from app.services.analyst_service import get_analyst_service
+
+            service = get_analyst_service()
+            analysis = await service.get_analysis(ticker)
+            return analysis.model_dump()
+        except Exception as e:
+            logger.error(f"Analyst data fetch failed for {ticker}: {e}")
+            return {"error": str(e)}
+
+    # ── Sentiment data fetching for the sentiment tool ───────────
+
+    async def _fetch_sentiment_data(self, ticker: str) -> Dict[str, Any]:
+        """
+        Fetch sentiment analysis data for use in chat responses.
+        Returns a dict summary suitable for Gemini to interpret.
+        """
+        try:
+            from app.services.sentiment_service import get_sentiment_service
+
+            service = get_sentiment_service()
+            analysis = await service.get_sentiment(ticker)
+            return analysis.model_dump()
+        except Exception as e:
+            logger.error(f"Sentiment data fetch failed for {ticker}: {e}")
+            return {"error": str(e)}
+
     # ── Helpers (unchanged) ─────────────────────────────────────────
 
     def _get_recent_messages(self, session_id: str, limit: int = 10) -> List[Dict]:
@@ -246,7 +344,13 @@ class ChatService:
             "and financial literacy. Always remind users this is educational, not financial advice. "
             "When you have access to real stock data from the get_stock_chart_data tool, "
             "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
-            "analysis. Write your response in clean markdown."
+            "analysis. When you have access to analyst data from the get_analyst_analysis tool, "
+            "incorporate the consensus rating, price targets, analyst counts, and "
+            "recent upgrade/downgrade actions into your analysis. "
+            "When you have access to sentiment data from the get_sentiment_analysis tool, "
+            "incorporate the mood score, social mentions, and news sentiment into your analysis. "
+            "Explain what the sentiment means in plain language. "
+            "Write your response in clean markdown."
         )
         if stock_id:
             base += (

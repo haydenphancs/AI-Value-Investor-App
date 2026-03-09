@@ -51,6 +51,8 @@ enum APIEndpoint: Sendable {
     case getStockNews(ticker: String, limit: Int)
     case enrichStockNews(ticker: String, articleIds: [String])
     case getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
+    case getAnalystAnalysis(ticker: String)
+    case getSentimentAnalysis(ticker: String)
     case getTickerReport(ticker: String, persona: String)
 
     // MARK: - Indices
@@ -154,6 +156,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/news/enrich"
         case .getStockChart(let ticker, _, _, _):
             return "/api/v1/stocks/\(ticker)/chart"
+        case .getAnalystAnalysis(let ticker):
+            return "/api/v1/stocks/\(ticker)/analyst-analysis"
+        case .getSentimentAnalysis(let ticker):
+            return "/api/v1/stocks/\(ticker)/sentiment"
         case .getTickerReport(let ticker, _):
             return "/api/v1/stocks/\(ticker)/report"
 
@@ -408,7 +414,7 @@ enum APIEndpoint: Sendable {
             return false
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
-             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getAnalystAnalysis, .getSentimentAnalysis, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

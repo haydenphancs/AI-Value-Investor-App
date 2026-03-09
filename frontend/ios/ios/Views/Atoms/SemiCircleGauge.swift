@@ -98,6 +98,7 @@ struct SemiCircleGauge: View {
                     Text(displayValue)
                         .font(.system(size: size * 0.2, weight: .bold, design: .rounded))
                         .foregroundColor(labelColor)
+                        .contentTransition(.numericText())
 
                     Text(label)
                         .font(AppTypography.headingSmall)
@@ -149,9 +150,9 @@ struct SentimentGaugeArcs: View {
 
     var body: some View {
         ZStack {
-            // Zone 1: Bearish (0-30) - Green - Left side
+            // Zone 1: Bearish (0-30) - Red - Left side
             SemiCircleArcSegment(startAngle: 180, endAngle: 126)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
             // Zone 2: Neutral (31-70) - Grey - Middle
@@ -159,9 +160,9 @@ struct SentimentGaugeArcs: View {
                 .stroke(Color(hex: "6B7280"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
 
-            // Zone 3: Bullish (71-100) - Red - Right side
+            // Zone 3: Bullish (71-100) - Green - Right side
             SemiCircleArcSegment(startAngle: 54, endAngle: 0)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
+                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
                 .frame(width: size, height: size / 2)
         }
     }
@@ -244,20 +245,15 @@ struct SemiCircleArc: Shape {
 
 // MARK: - Gauge Needle
 struct GaugeNeedle: View {
-    let angle: Double
+    var angle: Double
 
     var body: some View {
         GeometryReader { geometry in
             let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height)
             let needleLength = min(geometry.size.width, geometry.size.height * 2) / 2 - 30
 
-            Path { path in
-                path.move(to: center)
-                let endX = center.x + needleLength * cos(angle * .pi / 180)
-                let endY = center.y + needleLength * sin(angle * .pi / 180)
-                path.addLine(to: CGPoint(x: endX, y: endY))
-            }
-            .stroke(AppColors.textPrimary, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+            NeedleShape(angle: angle, needleLength: needleLength)
+                .stroke(AppColors.textPrimary, style: StrokeStyle(lineWidth: 3, lineCap: .round))
 
             // Center circle
             Circle()
@@ -265,6 +261,27 @@ struct GaugeNeedle: View {
                 .frame(width: 12, height: 12)
                 .position(center)
         }
+    }
+}
+
+// MARK: - Animatable Needle Shape
+struct NeedleShape: Shape {
+    var angle: Double
+    var needleLength: CGFloat
+
+    var animatableData: Double {
+        get { angle }
+        set { angle = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.maxY)
+        path.move(to: center)
+        let endX = center.x + needleLength * cos(angle * .pi / 180)
+        let endY = center.y + needleLength * sin(angle * .pi / 180)
+        path.addLine(to: CGPoint(x: endX, y: endY))
+        return path
     }
 }
 

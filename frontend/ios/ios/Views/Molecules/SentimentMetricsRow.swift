@@ -9,6 +9,7 @@ import SwiftUI
 
 struct SentimentMetricsRow: View {
     let sentimentData: SentimentAnalysisData
+    let selectedTimeframe: SentimentTimeframe
 
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
@@ -16,18 +17,18 @@ struct SentimentMetricsRow: View {
             SentimentMetricCard(
                 iconName: "bubble.left.and.bubble.right.fill",
                 title: "Social Mentions",
-                value: sentimentData.formattedSocialMentions,
-                change: sentimentData.formattedSocialChange,
-                changeColor: sentimentData.socialChangeColor
+                value: sentimentData.formattedSocialMentions(for: selectedTimeframe),
+                change: sentimentData.formattedSocialChange(for: selectedTimeframe),
+                changeColor: sentimentData.socialChangeColor(for: selectedTimeframe)
             )
 
             // News Articles
             SentimentMetricCard(
                 iconName: "newspaper.fill",
                 title: "News Articles",
-                value: sentimentData.formattedNewsArticles,
-                change: sentimentData.formattedNewsChange,
-                changeColor: sentimentData.newsChangeColor
+                value: sentimentData.formattedNewsArticles(for: selectedTimeframe),
+                change: sentimentData.formattedNewsChange(for: selectedTimeframe),
+                changeColor: sentimentData.newsChangeColor(for: selectedTimeframe)
             )
         }
     }
@@ -78,7 +79,7 @@ struct SentimentMetricCard: View {
         AppColors.background
             .ignoresSafeArea()
 
-        SentimentMetricsRow(sentimentData: SentimentAnalysisData.sampleData)
+        SentimentMetricsRow(sentimentData: SentimentAnalysisData.sampleData, selectedTimeframe: .last24h)
             .padding()
     }
 }

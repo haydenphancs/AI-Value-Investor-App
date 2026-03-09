@@ -29,7 +29,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
-    @Published var selectedChartRange: ChartTimeRange = .threeMonths
+    @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
@@ -133,12 +133,14 @@ class TickerDetailViewModel: ObservableObject {
                 }
                 self.tickerData = self.buildTickerDetailData()
                 print("📊 TickerDetailVM: Built fallback TickerDetailData for \(ticker)")
+                // Fetch real chart data for the fallback path
+                await self.fetchChartData(ticker, range: self.selectedChartRange)
             }
 
             // Fetch news in parallel (not included in overview endpoint)
             await self.fetchStockNews(ticker)
 
-            self.analysisData = TickerAnalysisData.sampleData
+            await self.fetchAnalystAnalysis(ticker)
             self.earningsData = EarningsData.sampleData
             self.growthData = GrowthSectionData.sampleData
             self.profitPowerData = ProfitPowerSectionData.sampleData
@@ -209,6 +211,39 @@ class TickerDetailViewModel: ObservableObject {
             print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
         }
         self.isNewsLoading = false
+    }
+
+    private func fetchAnalystAnalysis(_ ticker: String) async {
+        // Fetch analyst + sentiment in parallel
+        var ratingsData = AnalystRatingsData.sampleData
+        var sentimentData = SentimentAnalysisData.sampleData
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [self] in
+                do {
+                    let dto = try await stockRepository.getAnalystAnalysis(ticker: ticker)
+                    await MainActor.run { ratingsData = dto.toDisplayModel() }
+                    print("✅ TickerDetailVM: Got analyst analysis for \(ticker) — \(dto.totalAnalysts) analysts, consensus: \(dto.consensus)")
+                } catch {
+                    print("⚠️ TickerDetailVM: Analyst analysis failed for \(ticker): \(error)")
+                }
+            }
+            group.addTask { [self] in
+                do {
+                    let dto = try await stockRepository.getSentimentAnalysis(ticker: ticker)
+                    await MainActor.run { sentimentData = dto.toDisplayModel() }
+                    print("✅ TickerDetailVM: Got sentiment for \(ticker) — mood: \(dto.moodScore)")
+                } catch {
+                    print("⚠️ TickerDetailVM: Sentiment analysis failed for \(ticker): \(error)")
+                }
+            }
+        }
+
+        self.analysisData = TickerAnalysisData(
+            analystRatings: ratingsData,
+            sentimentAnalysis: sentimentData,
+            technicalAnalysis: TechnicalAnalysisData.sampleData
+        )
     }
 
     func loadMoreNews() {
@@ -497,8 +532,8 @@ class TickerDetailViewModel: ObservableObject {
         // Determine market status based on current time
         let marketStatus = determineMarketStatus()
 
-        // Use sample chart data as placeholder until chart API is wired
-        let sampleChart = TickerDetailData.sampleApple.chartPricePoints
+        // Use existing chart data if available, otherwise empty (will be fetched separately)
+        let existingChart = self.tickerData?.chartPricePoints ?? []
 
         return TickerDetailData(
             symbol: tickerSymbol,
@@ -507,7 +542,7 @@ class TickerDetailViewModel: ObservableObject {
             priceChange: change,
             priceChangePercent: changePercent,
             marketStatus: marketStatus,
-            chartPricePoints: sampleChart,
+            chartPricePoints: existingChart,
             keyStatistics: keyStats,
             keyStatisticsGroups: keyStatsGroups,
             performancePeriods: PerformancePeriod.sampleData,   // No API backing yet

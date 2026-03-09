@@ -206,6 +206,23 @@ class FMPClient:
             params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
+    # ── Analyst grades & price targets ────────────────────────────────
+
+    async def get_grades(
+        self, ticker: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get individual analyst grade actions (upgrades/downgrades/initiations)."""
+        return await self._make_request(
+            "grades", params={"symbol": ticker.upper(), "limit": limit}
+        )
+
+    async def get_price_target_consensus(self, ticker: str) -> Dict[str, Any]:
+        """Get analyst price target consensus (high, low, consensus, median)."""
+        data = await self._make_request(
+            "price-target-consensus", params={"symbol": ticker.upper()}
+        )
+        return data[0] if isinstance(data, list) and data else {}
+
     async def get_earnings_calendar(
         self,
         from_date: Optional[str] = None,
@@ -239,27 +256,65 @@ class FMPClient:
         self,
         ticker: Optional[str] = None,
         limit: int = 10,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        page: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Get stock or general news from FMP (stable API: news/stock).
 
         Args:
             ticker: Optional stock/index symbol. If None, returns general news.
-            limit: Max articles to return.
+            limit: Max articles to return (FMP supports up to 1000).
+            from_date: Start date in YYYY-MM-DD format.
+            to_date: End date in YYYY-MM-DD format.
+            page: Page number for pagination (0-based).
 
         Returns:
             List of news article dicts with keys: symbol, publishedDate,
             publisher, title, image, site, text, url.
         """
-        params: Dict[str, Any] = {"limit": limit}
+        params: Dict[str, Any] = {"limit": limit, "page": page}
         if ticker:
             params["tickers"] = ticker.upper()
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
 
         try:
             return await self._make_request("news/stock", params=params)
         except Exception as e:
             logger.warning(f"Stock news request failed: {e}")
             return []
+
+    async def get_social_sentiment(
+        self, ticker: str, max_pages: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get social sentiment data (StockTwits / Twitter posts, comments, sentiment).
+
+        FMP stable endpoint: social-sentiments/change?symbol=AAPL&page=N
+        Returns hourly data. Paginates through up to ``max_pages`` pages
+        (~100 records per page) to capture a full 14-day window.
+        Returns partial data on error instead of empty list.
+        """
+        all_data: List[Dict[str, Any]] = []
+        try:
+            for page in range(max_pages):
+                data = await self._make_request(
+                    "social-sentiments/change",
+                    params={"symbol": ticker.upper(), "page": page},
+                )
+                if not isinstance(data, list) or not data:
+                    break
+                all_data.extend(data)
+                if len(data) < 100:
+                    break  # Partial page = end of data
+            return all_data
+        except Exception as e:
+            logger.warning(f"Social sentiment request failed for {ticker}: {e}")
+            return all_data
 
     # ── ETF-specific endpoints ───────────────────────────────────────
 

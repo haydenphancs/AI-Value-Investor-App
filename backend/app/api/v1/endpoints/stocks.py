@@ -16,7 +16,11 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse
+from app.schemas.analyst import AnalystAnalysisResponse
+from app.schemas.sentiment import SentimentAnalysisResponse
 from app.services.stock_overview_service import get_stock_overview_service
+from app.services.analyst_service import get_analyst_service
+from app.services.sentiment_service import get_sentiment_service
 
 logger = logging.getLogger(__name__)
 
@@ -390,3 +394,51 @@ async def enrich_stock_news(
     except Exception as e:
         logger.error(f"News enrichment failed for {ticker}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Enrichment service unavailable")
+
+
+# ── Analyst analysis endpoint ─────────────────────────────────────
+
+@router.get("/{ticker}/analyst-analysis", response_model=AnalystAnalysisResponse)
+async def get_analyst_analysis(ticker: str):
+    """
+    Get comprehensive analyst analysis data for a ticker.
+
+    Returns analyst consensus rating, price targets, rating distribution,
+    momentum trends, and individual analyst actions (upgrades/downgrades).
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_analyst_service()
+        return await service.get_analysis(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Analyst analysis failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Analyst analysis service unavailable for {ticker}",
+        )
+
+
+# ── Sentiment analysis endpoint ──────────────────────────────────
+
+@router.get("/{ticker}/sentiment", response_model=SentimentAnalysisResponse)
+async def get_sentiment_analysis(ticker: str):
+    """
+    Get sentiment analysis / market mood data for a ticker.
+
+    Aggregates AI-analyzed news sentiment and social media sentiment
+    to produce a 0-100 mood score with 24H and 7D breakdowns.
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_sentiment_service()
+        return await service.get_sentiment(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sentiment analysis failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Sentiment analysis service unavailable for {ticker}",
+        )

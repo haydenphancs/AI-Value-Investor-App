@@ -10,8 +10,9 @@ import SwiftUI
 struct RatingDistributionList: View {
     let distributions: [AnalystRatingDistribution]
 
-    private var maxCount: Int {
-        distributions.map { $0.count }.max() ?? 1
+    private var totalCount: Int {
+        let total = distributions.map { $0.count }.reduce(0, +)
+        return max(total, 1)
     }
 
     var body: some View {
@@ -21,7 +22,7 @@ struct RatingDistributionList: View {
                     label: distribution.label,
                     count: distribution.count,
                     color: distribution.color,
-                    maxCount: maxCount
+                    maxCount: totalCount
                 )
             }
         }

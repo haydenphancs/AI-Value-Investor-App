@@ -32,29 +32,25 @@ struct ChartSettingsSheet: View {
                                         chartSettings.chartType = type
                                     }
                                 } label: {
-                                    VStack(spacing: 4) {
-                                        Image(systemName: type.iconName)
-                                            .font(.system(size: 18))
-                                        Text(type.rawValue)
-                                            .font(AppTypography.caption)
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, AppSpacing.sm)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                            .fill(chartSettings.chartType == type
-                                                  ? AppColors.primaryBlue.opacity(0.15)
-                                                  : AppColors.cardBackgroundLight.opacity(0.5))
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                            .stroke(chartSettings.chartType == type
-                                                    ? AppColors.primaryBlue
-                                                    : Color.clear, lineWidth: 1)
-                                    )
-                                    .foregroundColor(chartSettings.chartType == type
-                                                     ? AppColors.primaryBlue
-                                                     : AppColors.textMuted)
+                                    Text(type.rawValue)
+                                        .font(AppTypography.bodySmallEmphasis)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, AppSpacing.sm)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                                .fill(chartSettings.chartType == type
+                                                      ? AppColors.primaryBlue.opacity(0.15)
+                                                      : AppColors.cardBackgroundLight.opacity(0.5))
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                                .stroke(chartSettings.chartType == type
+                                                        ? AppColors.primaryBlue
+                                                        : Color.clear, lineWidth: 1)
+                                        )
+                                        .foregroundColor(chartSettings.chartType == type
+                                                         ? AppColors.primaryBlue
+                                                         : AppColors.textMuted)
                                 }
                                 .buttonStyle(PlainButtonStyle())
                             }

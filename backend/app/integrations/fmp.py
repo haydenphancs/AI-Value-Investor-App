@@ -289,7 +289,7 @@ class FMPClient:
             return []
 
     async def get_social_sentiment(
-        self, ticker: str, max_pages: int = 5
+        self, ticker: str, max_pages: int = 10
     ) -> List[Dict[str, Any]]:
         """
         Get social sentiment data (StockTwits / Twitter posts, comments, sentiment).
@@ -315,6 +315,50 @@ class FMPClient:
         except Exception as e:
             logger.warning(f"Social sentiment request failed for {ticker}: {e}")
             return all_data
+
+    async def get_social_sentiment_historical(
+        self, ticker: str, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical daily-aggregated social sentiment data.
+
+        FMP stable endpoint: social-sentiments/historical
+        Returns daily data with stocktwitsSentiment, twitterSentiment,
+        stocktwitsPosts, twitterPosts, etc.
+        Supplements the hourly social-sentiments/change endpoint.
+        """
+        try:
+            data = await self._make_request(
+                "social-sentiments/historical",
+                params={"symbol": ticker.upper(), "limit": limit},
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(
+                f"Historical social sentiment failed for {ticker}: {e}"
+            )
+            return []
+
+    async def get_news_sentiments_rss(
+        self, ticker: str, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """
+        Get news articles with FMP-computed sentiment scores.
+
+        FMP stable endpoint: stock-news-sentiments-rss-feed
+        Returns articles with 'sentimentScore' (float, -1 to 1)
+        and 'sentiment' (Bullish/Bearish/Neutral) fields that
+        the regular news/stock endpoint does NOT reliably include.
+        """
+        try:
+            data = await self._make_request(
+                "stock-news-sentiments-rss-feed",
+                params={"tickers": ticker.upper(), "limit": limit},
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"News sentiments RSS failed for {ticker}: {e}")
+            return []
 
     # ── ETF-specific endpoints ───────────────────────────────────────
 

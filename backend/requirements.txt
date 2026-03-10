@@ -21,6 +21,10 @@ httpx==0.27.2
 # Email validation
 email-validator==2.2.0
 
+# Technical Analysis
+pandas>=2.1.0
+ta>=0.11.0
+
 # Utilities
 python-dotenv==1.0.1
 

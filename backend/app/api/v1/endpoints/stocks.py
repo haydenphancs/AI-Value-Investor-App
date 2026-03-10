@@ -18,9 +18,14 @@ from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse
 from app.schemas.analyst import AnalystAnalysisResponse
 from app.schemas.sentiment import SentimentAnalysisResponse
+from app.schemas.technical_analysis import (
+    TechnicalAnalysisResponse,
+    TechnicalAnalysisDetailResponse,
+)
 from app.services.stock_overview_service import get_stock_overview_service
 from app.services.analyst_service import get_analyst_service
 from app.services.sentiment_service import get_sentiment_service
+from app.services.technical_analysis_service import get_technical_analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -441,4 +446,56 @@ async def get_sentiment_analysis(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Sentiment analysis service unavailable for {ticker}",
+        )
+
+
+# ── Technical analysis endpoints ──────────────────────────────
+
+@router.get("/{ticker}/technical-analysis", response_model=TechnicalAnalysisResponse)
+async def get_technical_analysis(ticker: str):
+    """
+    Get technical analysis gauge data for a ticker.
+
+    Computes 18 technical indicators (10 moving averages + 8 oscillators)
+    on both daily and weekly timeframes, producing a 0-1 gauge value
+    and signal (Strong Sell to Strong Buy).
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_technical_analysis_service()
+        return await service.get_analysis(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Technical analysis failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Technical analysis service unavailable for {ticker}",
+        )
+
+
+@router.get(
+    "/{ticker}/technical-analysis/detail",
+    response_model=TechnicalAnalysisDetailResponse,
+)
+async def get_technical_analysis_detail(ticker: str):
+    """
+    Get detailed technical analysis breakdown for a ticker.
+
+    Returns individual indicator values and signals, pivot points,
+    volume analysis, Fibonacci retracement, and support/resistance levels.
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_technical_analysis_service()
+        return await service.get_analysis_detail(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Technical analysis detail failed for {ticker}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Technical analysis detail service unavailable for {ticker}",
         )

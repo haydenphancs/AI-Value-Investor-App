@@ -10,6 +10,7 @@ import SwiftUI
 struct CandlestickChartRenderer: View {
     let pricePoints: [StockPricePoint]
     let coord: ChartCoordinateSystem
+    var extendedHoursIndices: Set<Int> = []
 
     var body: some View {
         Canvas { context, size in
@@ -23,9 +24,11 @@ struct CandlestickChartRenderer: View {
                 let high = point.high ?? max(open, point.close)
                 let low = point.low ?? min(open, point.close)
                 let isBullish = point.close >= open
+                let isExtended = extendedHoursIndices.contains(index)
 
                 let x = coord.xPosition(for: index)
-                let color = isBullish ? AppColors.bullish : AppColors.bearish
+                let baseColor = isBullish ? AppColors.bullish : AppColors.bearish
+                let color = isExtended ? baseColor.opacity(0.3) : baseColor
 
                 // Wick (high to low)
                 let wickTop = coord.yPosition(for: high)
@@ -33,7 +36,7 @@ struct CandlestickChartRenderer: View {
                 var wickPath = Path()
                 wickPath.move(to: CGPoint(x: x, y: wickTop))
                 wickPath.addLine(to: CGPoint(x: x, y: wickBottom))
-                context.stroke(wickPath, with: .color(color), lineWidth: 1)
+                context.stroke(wickPath, with: .color(color), lineWidth: isExtended ? 0.5 : 1)
 
                 // Body (open to close)
                 let bodyTop = coord.yPosition(for: max(open, point.close))
@@ -46,8 +49,9 @@ struct CandlestickChartRenderer: View {
                     height: bodyHeight
                 )
 
-                if isBullish {
-                    context.fill(Path(bodyRect), with: .color(color))
+                if isExtended {
+                    // Draw outline only for extended hours candles
+                    context.stroke(Path(bodyRect), with: .color(color), lineWidth: 0.5)
                 } else {
                     context.fill(Path(bodyRect), with: .color(color))
                 }

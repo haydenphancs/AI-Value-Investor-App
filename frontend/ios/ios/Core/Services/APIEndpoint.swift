@@ -53,6 +53,8 @@ enum APIEndpoint: Sendable {
     case getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
     case getAnalystAnalysis(ticker: String)
     case getSentimentAnalysis(ticker: String)
+    case getTechnicalAnalysis(ticker: String)
+    case getTechnicalAnalysisDetail(ticker: String)
     case getTickerReport(ticker: String, persona: String)
 
     // MARK: - Indices
@@ -160,6 +162,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/analyst-analysis"
         case .getSentimentAnalysis(let ticker):
             return "/api/v1/stocks/\(ticker)/sentiment"
+        case .getTechnicalAnalysis(let ticker):
+            return "/api/v1/stocks/\(ticker)/technical-analysis"
+        case .getTechnicalAnalysisDetail(let ticker):
+            return "/api/v1/stocks/\(ticker)/technical-analysis/detail"
         case .getTickerReport(let ticker, _):
             return "/api/v1/stocks/\(ticker)/report"
 
@@ -414,7 +420,8 @@ enum APIEndpoint: Sendable {
             return false
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
-             .getAnalystAnalysis, .getSentimentAnalysis, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
+             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
@@ -446,6 +453,8 @@ enum APIEndpoint: Sendable {
             return 120 // 2 minutes for AI generation
         case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
+        case .getTechnicalAnalysis, .getTechnicalAnalysisDetail:
+            return 45 // 45 seconds for technical indicator computation
         case .getStockOverview:
             return 60 // 1 minute for aggregated overview (many FMP calls)
         case .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:

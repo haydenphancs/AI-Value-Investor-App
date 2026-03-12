@@ -11,24 +11,41 @@ struct OverlayRenderer: View {
     let overlays: [TechnicalIndicatorType]
     let pricePoints: [StockPricePoint]
     let coord: ChartCoordinateSystem
+    /// Close prices preceding the visible range, used as warm-up
+    /// so MA lines start from the left edge of the chart.
+    var lookbackCloses: [Double] = []
 
     var body: some View {
-        let closes = pricePoints.map { $0.close }
+        let visibleCloses = pricePoints.map { $0.close }
+        let allCloses = lookbackCloses + visibleCloses
+        let offset = lookbackCloses.count
 
         ForEach(overlays) { indicator in
             switch indicator {
             case .ma20:
-                MALineOverlay(values: TechnicalIndicatorCalculator.sma(closes: closes, period: 20), coord: coord, color: indicator.defaultColor)
+                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 20), offset: offset), coord: coord, color: indicator.defaultColor)
             case .ma50:
-                MALineOverlay(values: TechnicalIndicatorCalculator.sma(closes: closes, period: 50), coord: coord, color: indicator.defaultColor)
+                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 50), offset: offset), coord: coord, color: indicator.defaultColor)
             case .ma200:
-                MALineOverlay(values: TechnicalIndicatorCalculator.sma(closes: closes, period: 200), coord: coord, color: indicator.defaultColor)
+                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 200), offset: offset), coord: coord, color: indicator.defaultColor)
             case .bollingerBands:
-                BollingerBandOverlay(data: TechnicalIndicatorCalculator.bollingerBands(closes: closes), coord: coord)
+                let full = TechnicalIndicatorCalculator.bollingerBands(closes: allCloses)
+                let sliced = BollingerBandData(
+                    upper: sliceAfterOffset(full.upper, offset: offset),
+                    middle: sliceAfterOffset(full.middle, offset: offset),
+                    lower: sliceAfterOffset(full.lower, offset: offset)
+                )
+                BollingerBandOverlay(data: sliced, coord: coord)
             default:
                 EmptyView()
             }
         }
+    }
+
+    /// Strip the lookback portion so the result aligns with the visible coordinate system.
+    private func sliceAfterOffset(_ values: [Double?], offset: Int) -> [Double?] {
+        guard offset > 0, values.count > offset else { return values }
+        return Array(values[offset...])
     }
 }
 

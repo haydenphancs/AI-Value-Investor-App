@@ -1211,7 +1211,7 @@ extension SentimentAnalysisData {
 }
 
 // MARK: - Technical Signal
-enum TechnicalSignal: String, CaseIterable {
+enum TechnicalSignal: String, CaseIterable, Codable {
     case strongSell = "Strong Sell"
     case sell = "Sell"
     case hold = "Hold"
@@ -1245,10 +1245,16 @@ enum TechnicalSignal: String, CaseIterable {
 }
 
 // MARK: - Technical Indicator Result
-struct TechnicalIndicatorResult {
+struct TechnicalIndicatorResult: Codable {
     let signal: TechnicalSignal
     let matchingIndicators: Int
     let totalIndicators: Int
+
+    enum CodingKeys: String, CodingKey {
+        case signal
+        case matchingIndicators = "matching_indicators"
+        case totalIndicators = "total_indicators"
+    }
 
     var formattedCount: String {
         "\(matchingIndicators) of \(totalIndicators) indicators"

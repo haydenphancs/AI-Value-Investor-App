@@ -70,6 +70,14 @@ struct TickerChartView: View {
         return Array(pricePoints[start...end])
     }
 
+    /// Close prices preceding the visible range so MA/Bollinger
+    /// calculations have warm-up data and lines start from the left edge.
+    private var overlayLookbackCloses: [Double] {
+        let start = max(0, min(viewportState.visibleStart, pricePoints.count))
+        guard start > 0 else { return [] }
+        return pricePoints[0..<start].map { $0.close }
+    }
+
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
             // Scrubbing price overlay (shows selected point's price when dragging)
@@ -90,6 +98,18 @@ struct TickerChartView: View {
                             .foregroundColor(change >= 0 ? AppColors.bullish : AppColors.bearish)
                     }
 
+                    if chartSettings.showExtendedHours && point.isExtendedHours {
+                        Text("EXT")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(AppColors.textMuted)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(AppColors.cardBackgroundLight)
+                            )
+                    }
+
                     Spacer()
                 }
                 .padding(.horizontal, AppSpacing.lg)
@@ -102,7 +122,9 @@ struct TickerChartView: View {
                     pricePoints: visiblePoints,
                     isPositive: isPositive,
                     chartType: chartSettings.chartType,
-                    overlays: chartSettings.activeOverlays
+                    overlays: chartSettings.activeOverlays,
+                    showExtendedHours: chartSettings.showExtendedHours,
+                    lookbackCloses: overlayLookbackCloses
                 )
 
                 ChartCrosshairGesture(
@@ -181,6 +203,31 @@ struct TickerChartView: View {
                                 .fill(AppColors.cardBackgroundLight.opacity(0.5))
                         )
                     }
+                }
+
+                // Extended hours toggle — visible for intraday intervals on supported assets
+                if assetContext.supportsExtendedHours && chartSettings.selectedInterval.isIntraday {
+                    Button {
+                        chartSettings.showExtendedHours.toggle()
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: chartSettings.showExtendedHours ? "sun.max.fill" : "sun.max")
+                                .font(.system(size: 10))
+                            Text("EXT")
+                                .font(AppTypography.labelSmall)
+                        }
+                        .fixedSize()
+                        .foregroundColor(chartSettings.showExtendedHours ? AppColors.textPrimary : AppColors.textMuted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                .fill(chartSettings.showExtendedHours
+                                      ? AppColors.cardBackgroundLight
+                                      : AppColors.cardBackgroundLight.opacity(0.5))
+                        )
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
 
                 // Settings icon

@@ -33,6 +33,7 @@ protocol StockRepositoryProtocol {
     func getStockChart(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockChartResponse
     func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO
     func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO
+    func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO
 }
 
 // MARK: - Stock Repository
@@ -210,6 +211,25 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got sentiment for \(ticker) — mood: \(response.moodScore)")
+        return response
+    }
+
+    // MARK: - Technical Analysis
+
+    func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO {
+        let cacheKey = "technical_\(ticker)"
+
+        if let cached: TechnicalAnalysisDTO = getCached(cacheKey, maxAge: 1800) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getTechnicalAnalysis(ticker: ticker),
+            responseType: TechnicalAnalysisDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got technical analysis for \(ticker) — gauge: \(response.gaugeValue)")
         return response
     }
 
@@ -452,6 +472,20 @@ struct StockPricePoint: Codable {
     let high: Double?
     let low: Double?
     let volume: Double?
+
+    /// Whether this data point falls outside regular US market hours (09:30–16:00 ET).
+    var isExtendedHours: Bool {
+        // Only intraday data has time components (length > 10, e.g. "2025-03-10 08:30:00")
+        guard date.count > 10 else { return false }
+        let timeStr = String(date.suffix(from: date.index(date.startIndex, offsetBy: 11)))
+        let parts = timeStr.split(separator: ":")
+        guard parts.count >= 2,
+              let hour = Int(parts[0]),
+              let minute = Int(parts[1]) else { return false }
+        let totalMinutes = hour * 60 + minute
+        // Regular hours: 09:30 (570) to 15:59 (959)
+        return totalMinutes < 570 || totalMinutes >= 960
+    }
 }
 
 // MARK: - Analyst Analysis DTOs
@@ -594,6 +628,33 @@ struct SentimentAnalysisDTO: Codable {
             socialMentionsChange7d: socialMentionsChange7d,
             newsArticles7d: newsArticles7d,
             newsArticlesChange7d: newsArticlesChange7d
+        )
+    }
+}
+
+// MARK: - Technical Analysis DTO
+
+struct TechnicalAnalysisDTO: Codable {
+    let symbol: String
+    let dailySignal: TechnicalIndicatorResult
+    let weeklySignal: TechnicalIndicatorResult
+    let overallSignal: TechnicalSignal
+    let gaugeValue: Double
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case dailySignal = "daily_signal"
+        case weeklySignal = "weekly_signal"
+        case overallSignal = "overall_signal"
+        case gaugeValue = "gauge_value"
+    }
+
+    func toDisplayModel() -> TechnicalAnalysisData {
+        TechnicalAnalysisData(
+            dailySignal: dailySignal,
+            weeklySignal: weeklySignal,
+            overallSignal: overallSignal,
+            gaugeValue: gaugeValue
         )
     }
 }
@@ -816,6 +877,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO {
         throw URLError(.badServerResponse)
     }
 }

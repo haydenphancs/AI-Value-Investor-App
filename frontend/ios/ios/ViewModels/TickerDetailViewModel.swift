@@ -213,36 +213,76 @@ class TickerDetailViewModel: ObservableObject {
         self.isNewsLoading = false
     }
 
-    private func fetchAnalystAnalysis(_ ticker: String) async {
-        // Fetch analyst + sentiment in parallel
-        var ratingsData = AnalystRatingsData.sampleData
-        var sentimentData = SentimentAnalysisData.sampleData
+    private enum AnalysisPayload: Sendable {
+        case ratings(AnalystRatingsData)
+        case sentiment(SentimentAnalysisData)
+        case technical(TechnicalAnalysisData)
+    }
 
-        await withTaskGroup(of: Void.self) { group in
+    private func fetchAnalystAnalysis(_ ticker: String) async {
+        // Fetch analyst + sentiment + technical in parallel — no sample-data fallback
+        var ratingsData: AnalystRatingsData?
+        var sentimentData: SentimentAnalysisData?
+        var techData: TechnicalAnalysisData?
+
+        let results = await withTaskGroup(of: AnalysisPayload?.self) { group -> [AnalysisPayload] in
             group.addTask { [self] in
                 do {
                     let dto = try await stockRepository.getAnalystAnalysis(ticker: ticker)
-                    await MainActor.run { ratingsData = dto.toDisplayModel() }
                     print("✅ TickerDetailVM: Got analyst analysis for \(ticker) — \(dto.totalAnalysts) analysts, consensus: \(dto.consensus)")
+                    return await .ratings(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Analyst analysis failed for \(ticker): \(error)")
+                    return nil
                 }
             }
             group.addTask { [self] in
                 do {
                     let dto = try await stockRepository.getSentimentAnalysis(ticker: ticker)
-                    await MainActor.run { sentimentData = dto.toDisplayModel() }
                     print("✅ TickerDetailVM: Got sentiment for \(ticker) — mood: \(dto.moodScore)")
+                    return await .sentiment(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Sentiment analysis failed for \(ticker): \(error)")
+                    return nil
                 }
+            }
+            group.addTask { [self] in
+                do {
+                    let dto = try await stockRepository.getTechnicalAnalysis(ticker: ticker)
+                    print("✅ TickerDetailVM: Got technical analysis for \(ticker) — gauge: \(dto.gaugeValue), daily: \(dto.dailySignal.matchingIndicators)/\(dto.dailySignal.totalIndicators), weekly: \(dto.weeklySignal.matchingIndicators)/\(dto.weeklySignal.totalIndicators)")
+                    return await .technical(dto.toDisplayModel())
+                } catch {
+                    print("⚠️ TickerDetailVM: Technical analysis failed for \(ticker): \(error)")
+                    return nil
+                }
+            }
+
+            var collected: [AnalysisPayload] = []
+            for await result in group {
+                if let result { collected.append(result) }
+            }
+            return collected
+        }
+
+        // Unpack results — only real API data, no sample fallback
+        for payload in results {
+            switch payload {
+            case .ratings(let data): ratingsData = data
+            case .sentiment(let data): sentimentData = data
+            case .technical(let data): techData = data
             }
         }
 
+        // Only set analysisData if we got at least one real response
+        guard ratingsData != nil || sentimentData != nil || techData != nil else {
+            print("⚠️ TickerDetailVM: All analysis calls failed for \(ticker) — no data to show")
+            return
+        }
+
         self.analysisData = TickerAnalysisData(
-            analystRatings: ratingsData,
-            sentimentAnalysis: sentimentData,
-            technicalAnalysis: TechnicalAnalysisData.sampleData
+            analystRatings: ratingsData ?? AnalystRatingsData.sampleData,
+            sentimentAnalysis: sentimentData ?? SentimentAnalysisData.sampleData,
+            technicalAnalysis: techData ?? TechnicalAnalysisData.sampleData
         )
     }
 

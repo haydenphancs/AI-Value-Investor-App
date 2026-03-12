@@ -22,6 +22,7 @@ struct TechnicalSignalBadge: View {
             Text(indicatorCount)
                 .font(AppTypography.caption)
                 .foregroundColor(isSelected ? AppColors.textSecondary : AppColors.textMuted)
+                .contentTransition(.numericText())
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.md)

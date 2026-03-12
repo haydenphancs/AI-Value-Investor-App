@@ -15,8 +15,9 @@ AGGREGATED_INTERVALS = {"weekly", "monthly", "quarterly"}
 ALL_INTERVALS = INTRADAY_INTERVALS | DAILY_INTERVALS | AGGREGATED_INTERVALS
 
 # Extra data points to fetch before the requested range for indicator warm-up.
-# MACD needs ~34, RSI ~14, Stochastic ~14.  50 gives comfortable headroom.
-_WARMUP_DATA_POINTS = 50
+# MA200 needs 200 bars; other indicators (MACD ~34, RSI ~14) need far less.
+# 210 gives comfortable headroom for MA200 on the main chart overlay.
+_WARMUP_DATA_POINTS = 210
 
 
 def _warmup_calendar_days(interval: str) -> int:
@@ -24,12 +25,12 @@ def _warmup_calendar_days(interval: str) -> int:
     if interval in INTRADAY_INTERVALS:
         return 7   # a few extra trading days of intraday bars
     if interval in DAILY_INTERVALS:
-        return 80  # ~50 trading days
+        return 320  # ~210 trading days for MA200
     if interval == "weekly":
-        return 7 * _WARMUP_DATA_POINTS + 14  # ~50 weeks
+        return 7 * _WARMUP_DATA_POINTS + 14  # ~210 weeks
     if interval in ("monthly", "quarterly"):
-        return 30 * _WARMUP_DATA_POINTS + 30  # ~50 months
-    return 80
+        return 30 * _WARMUP_DATA_POINTS + 30  # ~210 months
+    return 320
 
 # Default interval for each range when not explicitly specified
 DEFAULT_INTERVALS = {

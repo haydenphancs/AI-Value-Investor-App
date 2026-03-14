@@ -19,7 +19,8 @@ struct AnalystRatingsSection: View {
             AnalysisSectionHeader(
                 title: "Analyst Ratings",
                 subtitle: "Total Analysts \(ratingsData.totalAnalysts)\nUpdated On \(ratingsData.formattedUpdatedDate) ET",
-                onAction: { onMoreTapped?() }
+                onAction: { onMoreTapped?() },
+                iconType: .info
             )
 
             // Consensus and Target

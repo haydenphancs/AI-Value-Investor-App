@@ -26,7 +26,7 @@ import SwiftUI
 protocol StockRepositoryProtocol {
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult]
     func getStock(ticker: String) async throws -> StockDetail
-    func getStockOverview(ticker: String, range: String, interval: String?) async throws -> StockOverviewResponseDTO
+    func getStockOverview(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockOverviewResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
     func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse
@@ -34,6 +34,9 @@ protocol StockRepositoryProtocol {
     func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO
     func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO
     func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO
+    func getTechnicalAnalysisDetail(ticker: String) async throws -> TechnicalAnalysisDetailDTO
+    func getChartEvents(ticker: String) async throws -> ChartEventDates
+    func getEarnings(ticker: String) async throws -> EarningsDTO
 }
 
 // MARK: - Stock Repository
@@ -94,20 +97,20 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - Overview (aggregated endpoint)
 
-    func getStockOverview(ticker: String, range: String = "3M", interval: String? = nil) async throws -> StockOverviewResponseDTO {
-        let cacheKey = "overview_\(ticker)_\(range)_\(interval ?? "default")"
+    func getStockOverview(ticker: String, range: String = "3M", interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewResponseDTO {
+        let cacheKey = "overview_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
         if let cached: StockOverviewResponseDTO = getCached(cacheKey, maxAge: 300) {
             return cached
         }
 
         let response = try await apiClient.request(
-            endpoint: .getStockOverview(ticker: ticker, range: range, interval: interval),
+            endpoint: .getStockOverview(ticker: ticker, range: range, interval: interval, extendedHours: extendedHours),
             responseType: StockOverviewResponseDTO.self
         )
 
         setCache(cacheKey, value: response)
-        print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default")")
+        print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default"), extendedHours=\(extendedHours)")
         return response
     }
 
@@ -230,6 +233,61 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got technical analysis for \(ticker) — gauge: \(response.gaugeValue)")
+        return response
+    }
+
+    // MARK: - Technical Analysis Detail
+
+    func getTechnicalAnalysisDetail(ticker: String) async throws -> TechnicalAnalysisDetailDTO {
+        let cacheKey = "tech_detail_\(ticker)"
+
+        if let cached: TechnicalAnalysisDetailDTO = getCached(cacheKey, maxAge: 1800) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getTechnicalAnalysisDetail(ticker: ticker),
+            responseType: TechnicalAnalysisDetailDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got technical analysis detail for \(ticker)")
+        return response
+    }
+
+    func getChartEvents(ticker: String) async throws -> ChartEventDates {
+        let cacheKey = "chart_events_\(ticker)"
+
+        if let cached: ChartEventDates = getCached(cacheKey, maxAge: 3600) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getChartEvents(ticker: ticker),
+            responseType: ChartEventDates.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got chart events for \(ticker)")
+        return response
+    }
+
+    // MARK: - Earnings
+
+    func getEarnings(ticker: String) async throws -> EarningsDTO {
+        let cacheKey = "earnings_\(ticker)"
+
+        if let cached: EarningsDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getEarnings(ticker: ticker),
+            responseType: EarningsDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got earnings for \(ticker) — \(response.epsQuarters.count) EPS quarters")
         return response
     }
 
@@ -659,6 +717,207 @@ struct TechnicalAnalysisDTO: Codable {
     }
 }
 
+// MARK: - Technical Analysis Detail DTO
+
+struct MovingAverageIndicatorDTO: Codable {
+    let name: String
+    let value: Double?
+    let signal: String
+
+    func toDisplayModel() -> MovingAverageIndicator {
+        MovingAverageIndicator(
+            name: name,
+            value: value ?? 0,
+            signal: IndicatorSignal(rawValue: signal) ?? .neutral
+        )
+    }
+}
+
+struct OscillatorIndicatorDTO: Codable {
+    let name: String
+    let value: Double?
+    let signal: String
+
+    func toDisplayModel() -> OscillatorIndicator {
+        OscillatorIndicator(
+            name: name,
+            value: value ?? 0,
+            signal: IndicatorSignal(rawValue: signal) ?? .neutral
+        )
+    }
+}
+
+struct IndicatorSummaryDTO: Codable {
+    let buyCount: Int
+    let neutralCount: Int
+    let sellCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case buyCount = "buy_count"
+        case neutralCount = "neutral_count"
+        case sellCount = "sell_count"
+    }
+
+    func toDisplayModel() -> IndicatorSummary {
+        IndicatorSummary(buyCount: buyCount, neutralCount: neutralCount, sellCount: sellCount)
+    }
+}
+
+struct PivotPointLevelDTO: Codable {
+    let name: String
+    let value: Double
+    let levelType: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, value
+        case levelType = "level_type"
+    }
+
+    func toDisplayModel() -> PivotPointLevel {
+        let type: PivotLevelType
+        switch levelType {
+        case "resistance": type = .resistance
+        case "support": type = .support
+        default: type = .pivot
+        }
+        return PivotPointLevel(name: name, value: value, levelType: type)
+    }
+}
+
+struct PivotPointsDTO: Codable {
+    let method: String
+    let levels: [PivotPointLevelDTO]
+
+    func toDisplayModel() -> PivotPointsData {
+        PivotPointsData(method: method, levels: levels.map { $0.toDisplayModel() })
+    }
+}
+
+struct VolumeAnalysisDTO: Codable {
+    let currentVolume: Double
+    let currentVolumeChange: Double
+    let avgVolume30d: Double
+    let volumeTrend: String
+    let obv: Double
+    let moneyFlowIndex: Double
+
+    enum CodingKeys: String, CodingKey {
+        case currentVolume = "current_volume"
+        case currentVolumeChange = "current_volume_change"
+        case avgVolume30d = "avg_volume_30d"
+        case volumeTrend = "volume_trend"
+        case obv
+        case moneyFlowIndex = "money_flow_index"
+    }
+
+    func toDisplayModel() -> VolumeAnalysisData {
+        VolumeAnalysisData(
+            currentVolume: currentVolume,
+            currentVolumeChange: currentVolumeChange,
+            avgVolume30d: avgVolume30d,
+            volumeTrend: VolumeTrend(rawValue: volumeTrend) ?? .stable,
+            obv: obv,
+            moneyFlowIndex: moneyFlowIndex
+        )
+    }
+}
+
+struct FibonacciLevelDTO: Codable {
+    let percentage: String
+    let value: Double
+    let isKey: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case percentage, value
+        case isKey = "is_key"
+    }
+
+    func toDisplayModel() -> FibonacciLevel {
+        FibonacciLevel(percentage: percentage, value: value, isKey: isKey)
+    }
+}
+
+struct FibonacciRetracementDTO: Codable {
+    let timeframe: String
+    let levels: [FibonacciLevelDTO]
+
+    func toDisplayModel() -> FibonacciRetracementData {
+        FibonacciRetracementData(timeframe: timeframe, levels: levels.map { $0.toDisplayModel() })
+    }
+}
+
+struct SupportResistanceLevelDTO: Codable {
+    let name: String
+    let value: Double
+    let strength: String
+
+    func toDisplayModel() -> SupportResistanceLevel {
+        SupportResistanceLevel(
+            name: name,
+            value: value,
+            strength: LevelStrength(rawValue: strength) ?? .moderate
+        )
+    }
+}
+
+struct SupportResistanceDTO: Codable {
+    let currentPrice: Double
+    let resistanceLevels: [SupportResistanceLevelDTO]
+    let supportLevels: [SupportResistanceLevelDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case currentPrice = "current_price"
+        case resistanceLevels = "resistance_levels"
+        case supportLevels = "support_levels"
+    }
+
+    func toDisplayModel() -> SupportResistanceData {
+        SupportResistanceData(
+            currentPrice: currentPrice,
+            resistanceLevels: resistanceLevels.map { $0.toDisplayModel() },
+            supportLevels: supportLevels.map { $0.toDisplayModel() }
+        )
+    }
+}
+
+struct TechnicalAnalysisDetailDTO: Codable {
+    let symbol: String
+    let movingAverages: [MovingAverageIndicatorDTO]
+    let movingAveragesSummary: IndicatorSummaryDTO
+    let oscillators: [OscillatorIndicatorDTO]
+    let oscillatorsSummary: IndicatorSummaryDTO
+    let pivotPoints: PivotPointsDTO
+    let volumeAnalysis: VolumeAnalysisDTO
+    let fibonacciRetracement: FibonacciRetracementDTO
+    let supportResistance: SupportResistanceDTO
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case movingAverages = "moving_averages"
+        case movingAveragesSummary = "moving_averages_summary"
+        case oscillators
+        case oscillatorsSummary = "oscillators_summary"
+        case pivotPoints = "pivot_points"
+        case volumeAnalysis = "volume_analysis"
+        case fibonacciRetracement = "fibonacci_retracement"
+        case supportResistance = "support_resistance"
+    }
+
+    func toDisplayModel() -> TechnicalAnalysisDetailData {
+        TechnicalAnalysisDetailData(
+            symbol: symbol,
+            movingAverages: movingAverages.map { $0.toDisplayModel() },
+            movingAveragesSummary: movingAveragesSummary.toDisplayModel(),
+            oscillators: oscillators.map { $0.toDisplayModel() },
+            oscillatorsSummary: oscillatorsSummary.toDisplayModel(),
+            pivotPoints: pivotPoints.toDisplayModel(),
+            volumeAnalysis: volumeAnalysis.toDisplayModel(),
+            fibonacciRetracement: fibonacciRetracement.toDisplayModel(),
+            supportResistance: supportResistance.toDisplayModel()
+        )
+    }
+}
+
 // MARK: - DTO → Display Model Mapper
 
 extension AnalystAnalysisDTO {
@@ -762,6 +1021,95 @@ extension AnalystAnalysisDTO {
     }
 }
 
+// MARK: - Earnings DTOs
+
+struct EarningsQuarterDTO: Codable {
+    let quarter: String
+    let actualValue: Double?
+    let estimateValue: Double
+    let surprisePercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case quarter
+        case actualValue = "actual_value"
+        case estimateValue = "estimate_value"
+        case surprisePercent = "surprise_percent"
+    }
+}
+
+struct EarningsPricePointDTO: Codable {
+    let quarter: String
+    let price: Double
+}
+
+struct NextEarningsDateDTO: Codable {
+    let date: String
+    let isConfirmed: Bool
+    let timing: String
+
+    enum CodingKeys: String, CodingKey {
+        case date
+        case isConfirmed = "is_confirmed"
+        case timing
+    }
+}
+
+struct EarningsDTO: Codable {
+    let symbol: String
+    let epsQuarters: [EarningsQuarterDTO]
+    let revenueQuarters: [EarningsQuarterDTO]
+    let priceHistory: [EarningsPricePointDTO]
+    let nextEarningsDate: NextEarningsDateDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case epsQuarters = "eps_quarters"
+        case revenueQuarters = "revenue_quarters"
+        case priceHistory = "price_history"
+        case nextEarningsDate = "next_earnings_date"
+    }
+
+    func toDisplayModel() -> EarningsData {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        let eps = epsQuarters.map { q in
+            EarningsQuarterData(
+                quarter: q.quarter,
+                actualValue: q.actualValue,
+                estimateValue: q.estimateValue,
+                surprisePercent: q.surprisePercent
+            )
+        }
+        let revenue = revenueQuarters.map { q in
+            EarningsQuarterData(
+                quarter: q.quarter,
+                actualValue: q.actualValue,
+                estimateValue: q.estimateValue,
+                surprisePercent: q.surprisePercent
+            )
+        }
+        let prices = priceHistory.map { p in
+            EarningsPricePoint(quarter: p.quarter, price: p.price)
+        }
+        var nextDate: NextEarningsDate? = nil
+        if let nd = nextEarningsDate, let d = dateFormatter.date(from: nd.date) {
+            nextDate = NextEarningsDate(
+                date: d,
+                isConfirmed: nd.isConfirmed,
+                timing: EarningsReportTiming(rawValue: nd.timing) ?? .unknown
+            )
+        }
+        return EarningsData(
+            epsQuarters: eps,
+            revenueQuarters: revenue,
+            priceHistory: prices,
+            nextEarningsDate: nextDate
+        )
+    }
+}
+
 // MARK: - Mock Repository for Previews
 
 #if DEBUG
@@ -775,7 +1123,7 @@ final class MockStockRepository: StockRepositoryProtocol {
         ]
     }
 
-    func getStockOverview(ticker: String, range: String, interval: String? = nil) async throws -> StockOverviewResponseDTO {
+    func getStockOverview(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewResponseDTO {
         // Mock: just throw so ViewModel falls back to sample data
         throw URLError(.badServerResponse)
     }
@@ -881,6 +1229,19 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getTechnicalAnalysisDetail(ticker: String) async throws -> TechnicalAnalysisDetailDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getChartEvents(ticker: String) async throws -> ChartEventDates {
+        ChartEventDates(earningsDates: ["2024-01-25", "2024-04-25", "2024-07-25", "2024-10-31"],
+                        dividendDates: ["2024-02-09", "2024-05-10", "2024-08-12", "2024-11-01"])
+    }
+
+    func getEarnings(ticker: String) async throws -> EarningsDTO {
         throw URLError(.badServerResponse)
     }
 }

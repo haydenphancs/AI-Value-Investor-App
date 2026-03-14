@@ -209,14 +209,7 @@ struct ChartCrosshairGesture: View {
     // MARK: - Tooltip Helpers
 
     private func crosshairTooltip(point: StockPricePoint) -> String {
-        let dateStr = selectedRange.formatDateForCrosshair(point.date)
-        let priceStr: String
-        if point.close >= 1 {
-            priceStr = String(format: "$%.2f", point.close)
-        } else {
-            priceStr = String(format: "$%.6f", point.close)
-        }
-        return "\(dateStr)  \(priceStr)"
+        selectedRange.formatDateForCrosshair(point.date)
     }
 
     private func clampTooltipX(x: CGFloat, width: CGFloat) -> CGFloat {

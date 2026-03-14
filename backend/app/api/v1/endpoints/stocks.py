@@ -24,6 +24,8 @@ from app.schemas.technical_analysis import (
 )
 from app.services.stock_overview_service import get_stock_overview_service
 from app.services.analyst_service import get_analyst_service
+from app.services.earnings_service import get_earnings_service
+from app.schemas.earnings import EarningsResponse
 from app.services.sentiment_service import get_sentiment_service
 from app.services.technical_analysis_service import get_technical_analysis_service
 
@@ -170,6 +172,7 @@ async def get_stock_overview(
         alias="interval",
         pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
     ),
+    extended_hours: bool = Query(False, alias="extended_hours"),
 ):
     """
     Get comprehensive stock overview data for the Overview tab.
@@ -177,11 +180,12 @@ async def get_stock_overview(
     Returns everything the TickerDetailView Overview tab needs in a single call:
     key stats, performance, snapshots, sector info, company profile,
     related tickers, and benchmark summary.
+    Set extended_hours=true to include pre-market and after-hours data (intraday only).
     """
     ticker = ticker.upper()
     try:
         service = get_stock_overview_service()
-        return await service.get_overview(ticker, chart_range=chart_range, interval=interval)
+        return await service.get_overview(ticker, chart_range=chart_range, interval=interval, extended_hours=extended_hours)
     except HTTPException:
         raise
     except Exception as e:
@@ -425,6 +429,28 @@ async def get_analyst_analysis(ticker: str):
         )
 
 
+# ── Earnings endpoint ────────────────────────────────────────────
+
+@router.get("/{ticker}/earnings", response_model=EarningsResponse)
+async def get_earnings(ticker: str):
+    """
+    Get quarterly earnings data (EPS & Revenue actuals vs estimates),
+    price overlay, and next earnings date.
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_earnings_service()
+        return await service.get_earnings(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Earnings failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Earnings service unavailable for {ticker}",
+        )
+
+
 # ── Sentiment analysis endpoint ──────────────────────────────────
 
 @router.get("/{ticker}/sentiment", response_model=SentimentAnalysisResponse)
@@ -471,6 +497,46 @@ async def get_technical_analysis(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Technical analysis service unavailable for {ticker}",
+        )
+
+
+@router.get("/{ticker}/chart-events")
+async def get_chart_events(ticker: str):
+    """
+    Get earnings and ex-dividend dates for chart markers.
+
+    Returns lists of dates (yyyy-MM-dd) so the frontend can render
+    "E" (earnings) and "D" (dividend) markers on the price chart.
+    """
+    ticker = ticker.upper()
+    fmp = get_fmp_client()
+    try:
+        earnings_dates, dividend_data = await asyncio.gather(
+            fmp.get_historical_earnings_dates(ticker),
+            fmp.get_dividend_history(ticker, limit=50),
+        )
+        # Defensive extraction — dividend dates can be under different field names
+        dividend_dates = []
+        for item in dividend_data:
+            if not isinstance(item, dict):
+                continue
+            d = item.get("date") or item.get("recordDate") or ""
+            if d:
+                dividend_dates.append(d)
+
+        logger.info(
+            f"Chart events for {ticker}: "
+            f"{len(earnings_dates)} earnings, {len(dividend_dates)} dividends"
+        )
+        return {
+            "earnings_dates": earnings_dates,
+            "dividend_dates": dividend_dates,
+        }
+    except Exception as e:
+        logger.error(f"Chart events failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Chart events service unavailable for {ticker}",
         )
 
 

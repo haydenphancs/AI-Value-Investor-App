@@ -39,7 +39,7 @@ enum TechnicalIndicatorType: String, CaseIterable, Identifiable, Hashable {
     case volume = "Volume"
     case rsi14 = "RSI(14)"
     case macd = "MACD(9-12-26)"
-    case stochastic = "Stoch"
+    case stochastic = "Stoch(14,3,3)"
 
     var id: String { rawValue }
 
@@ -129,6 +129,7 @@ class ChartSettings: ObservableObject {
     @Published var selectedInterval: ChartInterval = .fiveMin
     @Published var enabledIndicators: Set<TechnicalIndicatorType> = []
     @Published var showExtendedHours: Bool = false
+    @Published var showEarningsDividendDates: Bool = false
 
     init() {
         // Restore persisted chart type, default to .line
@@ -247,4 +248,16 @@ struct MACDData {
 struct StochasticData {
     let kValues: [Double?]
     let dValues: [Double?]
+}
+
+// MARK: - Chart Event Dates (Earnings & Dividends)
+
+struct ChartEventDates: Codable {
+    let earningsDates: [String]   // "yyyy-MM-dd"
+    let dividendDates: [String]   // "yyyy-MM-dd"
+
+    enum CodingKeys: String, CodingKey {
+        case earningsDates = "earnings_dates"
+        case dividendDates = "dividend_dates"
+    }
 }

@@ -19,6 +19,8 @@ class IndexDetailViewModel: ObservableObject {
     @Published var indexData: IndexDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var analysisData: TickerAnalysisData?
+    @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
+    @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: IndexDetailTab = .overview
@@ -139,6 +141,27 @@ class IndexDetailViewModel: ObservableObject {
 
     func handleTechnicalDetail() {
         print("📈 [IndexDetailVM] Technical analysis detail for \(indexSymbol)")
+    }
+
+    func fetchTechnicalAnalysisDetail() {
+        guard technicalAnalysisDetailData == nil, !isTechnicalDetailLoading else { return }
+        isTechnicalDetailLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let dto = try await APIClient.shared.request(
+                    endpoint: .getTechnicalAnalysisDetail(ticker: self.indexSymbol),
+                    responseType: TechnicalAnalysisDetailDTO.self
+                )
+                self.technicalAnalysisDetailData = dto.toDisplayModel()
+                print("✅ [IndexDetailVM] Got technical analysis detail for \(self.indexSymbol)")
+            } catch {
+                print("⚠️ [IndexDetailVM] Technical analysis detail failed: \(error)")
+                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+            }
+            self.isTechnicalDetailLoading = false
+        }
     }
 
     // MARK: - Computed Properties

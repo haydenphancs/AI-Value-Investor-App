@@ -237,6 +237,66 @@ class FMPClient:
 
         return await self._make_request("earnings-calendar", params=params)
 
+    async def get_earning_calendar_full(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """Return full earning calendar records for a ticker.
+
+        Includes date, eps, epsEstimated, revenue, revenueEstimated, time
+        (amc/bmo), fiscalDateEnding, etc.
+        """
+        symbol = ticker.upper()
+        try:
+            data = await self._make_request(
+                "earning_calendar", params={"symbol": symbol}
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"earning_calendar_full failed for {symbol}: {e}")
+            return []
+
+    async def get_historical_earnings_dates(
+        self, ticker: str
+    ) -> List[str]:
+        """Return list of earnings report dates (yyyy-MM-dd) for a specific ticker.
+
+        Tries the per-symbol `earning_calendar` endpoint first (historical),
+        then falls back to `earnings-calendar` with symbol filter.
+        """
+        symbol = ticker.upper()
+        try:
+            # Primary: per-symbol historical earnings endpoint
+            data = await self._make_request(
+                "earning_calendar", params={"symbol": symbol}
+            )
+            if isinstance(data, list) and data:
+                dates = [
+                    item["date"] for item in data
+                    if isinstance(item, dict) and item.get("date")
+                ]
+                if dates:
+                    logger.info(f"earning_calendar returned {len(dates)} dates for {symbol}")
+                    return dates
+        except Exception as e:
+            logger.warning(f"earning_calendar failed for {symbol}: {e}")
+
+        try:
+            # Fallback: general calendar filtered by symbol
+            data = await self._make_request(
+                "earnings-calendar", params={"symbol": symbol}
+            )
+            if isinstance(data, list):
+                dates = [
+                    item["date"] for item in data
+                    if isinstance(item, dict) and item.get("date")
+                ]
+                logger.info(f"earnings-calendar returned {len(dates)} dates for {symbol}")
+                return dates
+        except Exception as e:
+            logger.warning(f"earnings-calendar with symbol failed for {symbol}: {e}")
+
+        return []
+
     # ── Sector & market data ────────────────────────────────────────
 
     async def get_sector_performance(self) -> List[Dict[str, Any]]:

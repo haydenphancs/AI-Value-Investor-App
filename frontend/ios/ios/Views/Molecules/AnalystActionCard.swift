@@ -47,13 +47,13 @@ struct AnalystActionCard: View {
 
                         Text(action.newRating.rawValue)
                             .font(AppTypography.label)
-                            .foregroundColor(action.newRating.color)
+                            .foregroundColor(action.actionType.color)
                     }
                 } else {
                     // For initiated actions, just show new rating
                     Text(action.newRating.rawValue)
                         .font(AppTypography.label)
-                        .foregroundColor(action.newRating.color)
+                        .foregroundColor(action.actionType.color)
                 }
 
                 // Price target change row

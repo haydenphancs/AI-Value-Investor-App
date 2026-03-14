@@ -15,6 +15,8 @@ struct MainChartCanvas: View {
     var showExtendedHours: Bool = false
     /// Close prices preceding the visible range, for MA warm-up.
     var lookbackCloses: [Double] = []
+    /// Earnings and dividend dates to render as "E" and "D" markers
+    var chartEventDates: ChartEventDates? = nil
 
     private var lineColor: Color {
         isPositive ? AppColors.bullish : AppColors.bearish
@@ -51,14 +53,61 @@ struct MainChartCanvas: View {
             let size = geometry.size
 
             if pricePoints.count > 1 {
-                let coord = chartType == .candle || chartType == .bar
+                let baseCoord = chartType == .candle || chartType == .bar
                     ? ChartCoordinateSystem.from(pricePoints: pricePoints, size: size)
                     : ChartCoordinateSystem.from(closes: pricePoints.map { $0.close }, size: size)
 
-                ZStack {
-                    // Grid lines
-                    ChartGridLines()
+                // Expand coordinate range to include overlay values so MA/Bollinger Bands aren't clipped
+                let coord: ChartCoordinateSystem = {
+                    guard !overlays.isEmpty else { return baseCoord }
+                    let visibleCloses = pricePoints.map { $0.close }
+                    let allCloses = lookbackCloses + visibleCloses
+                    let offset = lookbackCloses.count
 
+                    var minVal = baseCoord.minValue
+                    var maxVal = baseCoord.maxValue
+
+                    for overlay in overlays {
+                        switch overlay {
+                        case .ma20:
+                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 20)
+                            let visible = values.count > offset ? Array(values[offset...]) : values
+                            let nums = visible.compactMap { $0 }
+                            if let lo = nums.min() { minVal = min(minVal, lo) }
+                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
+                        case .ma50:
+                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 50)
+                            let visible = values.count > offset ? Array(values[offset...]) : values
+                            let nums = visible.compactMap { $0 }
+                            if let lo = nums.min() { minVal = min(minVal, lo) }
+                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
+                        case .ma200:
+                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 200)
+                            let visible = values.count > offset ? Array(values[offset...]) : values
+                            let nums = visible.compactMap { $0 }
+                            if let lo = nums.min() { minVal = min(minVal, lo) }
+                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
+                        case .bollingerBands:
+                            let bb = TechnicalIndicatorCalculator.bollingerBands(closes: allCloses)
+                            let visUpper = bb.upper.count > offset ? Array(bb.upper[offset...]) : bb.upper
+                            let visLower = bb.lower.count > offset ? Array(bb.lower[offset...]) : bb.lower
+                            if let hi = visUpper.compactMap({ $0 }).max() { maxVal = max(maxVal, hi) }
+                            if let lo = visLower.compactMap({ $0 }).min() { minVal = min(minVal, lo) }
+                        default:
+                            break
+                        }
+                    }
+
+                    return ChartCoordinateSystem(
+                        width: size.width,
+                        height: size.height,
+                        minValue: minVal,
+                        maxValue: maxVal,
+                        dataCount: pricePoints.count
+                    )
+                }()
+
+                ZStack {
                     // Extended hours background shading
                     if showExtendedHours && !extendedHoursIndices.isEmpty {
                         ExtendedHoursBackground(
@@ -81,6 +130,19 @@ struct MainChartCanvas: View {
                                 style: StrokeStyle(lineWidth: 1, dash: [4, 3])
                             )
                         }
+                    }
+
+                    // Current price horizontal dash line
+                    if let lastClose = pricePoints.last?.close {
+                        let currentY = coord.yPosition(for: lastClose)
+                        Path { path in
+                            path.move(to: CGPoint(x: 0, y: currentY))
+                            path.addLine(to: CGPoint(x: size.width, y: currentY))
+                        }
+                        .stroke(
+                            Color.gray.opacity(0.4),
+                            style: StrokeStyle(lineWidth: 0.5, dash: [4, 3])
+                        )
                     }
 
                     // Main chart
@@ -116,6 +178,16 @@ struct MainChartCanvas: View {
                     // Overlays (MA lines, Bollinger Bands)
                     if !overlays.isEmpty {
                         OverlayRenderer(overlays: overlays, pricePoints: pricePoints, coord: coord, lookbackCloses: lookbackCloses)
+                    }
+
+                    // Earnings & Dividend markers
+                    if let events = chartEventDates {
+                        ChartEventMarkers(
+                            pricePoints: pricePoints,
+                            coord: coord,
+                            earningsDates: Set(events.earningsDates),
+                            dividendDates: Set(events.dividendDates)
+                        )
                     }
                 }
                 .drawingGroup()
@@ -168,5 +240,56 @@ private struct ExtendedHoursBackground: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Earnings & Dividend Event Markers
+
+private struct ChartEventMarkers: View {
+    let pricePoints: [StockPricePoint]
+    let coord: ChartCoordinateSystem
+    let earningsDates: Set<String>
+    let dividendDates: Set<String>
+
+    var body: some View {
+        Canvas { context, canvasSize in
+            guard pricePoints.count > 1 else { return }
+
+            for (index, point) in pricePoints.enumerated() {
+                let datePrefix = String(point.date.prefix(10))
+                let isEarnings = earningsDates.contains(datePrefix)
+                let isDividend = dividendDates.contains(datePrefix)
+
+                guard isEarnings || isDividend else { continue }
+
+                let x = coord.xPosition(for: index)
+                let markerY = canvasSize.height - 8
+
+                if isEarnings {
+                    drawMarker(context: context, text: "E", x: x, y: markerY,
+                               bgColor: Color.orange.opacity(0.85), textColor: .white)
+                }
+                if isDividend {
+                    // Offset slightly if both fall on same date
+                    let dY = isEarnings ? markerY - 16 : markerY
+                    drawMarker(context: context, text: "D", x: x, y: dY,
+                               bgColor: AppColors.bullish.opacity(0.85), textColor: .white)
+                }
+            }
+        }
+    }
+
+    private func drawMarker(context: GraphicsContext, text: String, x: CGFloat, y: CGFloat, bgColor: Color, textColor: Color) {
+        let size: CGFloat = 14
+        let rect = CGRect(x: x - size / 2, y: y - size / 2, width: size, height: size)
+        let roundedRect = RoundedRectangle(cornerRadius: 3).path(in: rect)
+        context.fill(roundedRect, with: .color(bgColor))
+
+        let resolvedText = context.resolve(
+            Text(text)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(textColor)
+        )
+        context.draw(resolvedText, at: CGPoint(x: x, y: y))
     }
 }

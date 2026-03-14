@@ -179,9 +179,14 @@ struct IndexDetailView: View {
             }
         }
         .sheet(isPresented: $showTechnicalAnalysisDetail) {
-            TechnicalAnalysisDetailView(
-                detailData: TechnicalAnalysisDetailData.sampleData
-            )
+            if let detailData = viewModel.technicalAnalysisDetailData {
+                TechnicalAnalysisDetailView(detailData: detailData)
+            } else {
+                ProgressView("Loading technical analysis...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.background)
+                    .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
+            }
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()

@@ -17,6 +17,8 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var cryptoData: CryptoDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var analysisData: TickerAnalysisData?
+    @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
+    @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: CryptoDetailTab = .overview
@@ -259,6 +261,27 @@ class CryptoDetailViewModel: ObservableObject {
 
     func handleTechnicalDetail() {
         print("Technical analysis detail for \(cryptoSymbol)")
+    }
+
+    func fetchTechnicalAnalysisDetail() {
+        guard technicalAnalysisDetailData == nil, !isTechnicalDetailLoading else { return }
+        isTechnicalDetailLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let dto = try await self.apiClient.request(
+                    endpoint: .getTechnicalAnalysisDetail(ticker: self.cryptoSymbol),
+                    responseType: TechnicalAnalysisDetailDTO.self
+                )
+                self.technicalAnalysisDetailData = dto.toDisplayModel()
+                print("✅ [CryptoDetail] Got technical analysis detail for \(self.cryptoSymbol)")
+            } catch {
+                print("⚠️ [CryptoDetail] Technical analysis detail failed: \(error)")
+                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+            }
+            self.isTechnicalDetailLoading = false
+        }
     }
 
     // MARK: - Computed Properties

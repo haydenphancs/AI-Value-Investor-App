@@ -95,7 +95,8 @@ struct TickerDetailView: View {
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .stock,
-                                chartDataVersion: viewModel.chartDataVersion
+                                chartDataVersion: viewModel.chartDataVersion,
+                                chartEventDates: viewModel.chartEventDates
                             )
                             .padding(.top, AppSpacing.lg)
                         }
@@ -193,9 +194,14 @@ struct TickerDetailView: View {
             }
         }
         .sheet(isPresented: $showTechnicalAnalysisDetail) {
-            TechnicalAnalysisDetailView(
-                detailData: TechnicalAnalysisDetailData.sampleData
-            )
+            if let detailData = viewModel.technicalAnalysisDetailData {
+                TechnicalAnalysisDetailView(detailData: detailData)
+            } else {
+                ProgressView("Loading technical analysis...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.background)
+                    .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
+            }
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
@@ -270,24 +276,20 @@ struct TickerDetailView: View {
                 placeholderContent(title: "Analysis", description: "Loading analysis data...")
             }
         case .financials:
-            if let earningsData = viewModel.earningsData {
-                TickerFinancialsContent(
-                    earningsData: earningsData,
-                    growthData: viewModel.growthData,
-                    profitPowerData: viewModel.profitPowerData,
-                    signalOfConfidenceData: viewModel.signalOfConfidenceData,
-                    revenueBreakdownData: viewModel.revenueBreakdownData,
-                    healthCheckData: viewModel.healthCheckData,
-                    onEarningsDetailTap: viewModel.handleEarningsDetail,
-                    onGrowthDetailTap: viewModel.handleGrowthDetail,
-                    onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
-                    onSignalOfConfidenceDetailTap: viewModel.handleSignalOfConfidenceDetail,
-                    onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail,
-                    onHealthCheckDetailTap: viewModel.handleHealthCheckDetail
-                )
-            } else {
-                placeholderContent(title: "Financials", description: "Loading financial data...")
-            }
+            TickerFinancialsContent(
+                earningsData: viewModel.earningsData,
+                growthData: viewModel.growthData,
+                profitPowerData: viewModel.profitPowerData,
+                signalOfConfidenceData: viewModel.signalOfConfidenceData,
+                revenueBreakdownData: viewModel.revenueBreakdownData,
+                healthCheckData: viewModel.healthCheckData,
+                onEarningsDetailTap: viewModel.handleEarningsDetail,
+                onGrowthDetailTap: viewModel.handleGrowthDetail,
+                onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
+                onSignalOfConfidenceDetailTap: viewModel.handleSignalOfConfidenceDetail,
+                onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail,
+                onHealthCheckDetailTap: viewModel.handleHealthCheckDetail
+            )
         case .holders:
             if let holdersData = viewModel.holdersData {
                 TickerHoldersContent(

@@ -14,22 +14,10 @@ struct UpgradesDowngradesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
-            HStack {
-                Text("Upgrades & Downgrades")
-                    .font(AppTypography.titleCompact)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Spacer()
-
-                Button(action: {
-                    onInfoTapped?()
-                }) {
-                    Image(systemName: "info.circle")
-                        .font(AppTypography.iconMedium)
-                        .foregroundColor(AppColors.textMuted)
-                }
-            }
-            .padding(.horizontal, AppSpacing.lg)
+            Text("Upgrades & Downgrades")
+                .font(AppTypography.titleCompact)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
 
             // Actions list
             LazyVStack(spacing: AppSpacing.sm) {
@@ -71,13 +59,9 @@ struct UpgradesDowngradesView: View {
 
                     Spacer()
 
-                    Button(action: {
-                        // Info action
-                    }) {
-                        Image(systemName: "info.circle")
-                            .font(AppTypography.iconMedium)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+                    // Spacer to balance the chevron on the left
+                    Color.clear
+                        .frame(width: 24, height: 24)
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.md)

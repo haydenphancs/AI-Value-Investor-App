@@ -28,28 +28,26 @@ struct EarningsSectionCard: View {
     // Get quarters based on selected data type and time range
     private var displayQuarters: [EarningsQuarterData] {
         let allQuarters = earningsData.quarters(for: selectedDataType)
-        
+        let historical = allQuarters.filter { $0.actualValue != nil }
+        let future = allQuarters.filter { $0.actualValue == nil }
+        let futureSlice = Array(future.prefix(2))
+
         switch selectedTimeRange {
         case .oneYear:
-            // Show last 6 quarters (4 historical + 2 future estimates for 1Y view)
-            return Array(allQuarters.suffix(6))
+            // 4 historical quarters + 2 future estimates
+            return Array(historical.suffix(4)) + futureSlice
         case .threeYears:
-            // Show all quarters (up to 14 for 3 years + future)
-            return allQuarters
+            // Last 12 historical quarters (3 years) + 2 future estimates
+            return Array(historical.suffix(12)) + futureSlice
         }
     }
-    
-    // Get price history filtered to match displayed quarters
+
+    // Get price history aligned 1:1 with displayed quarters by label matching
     private var displayPriceHistory: [EarningsPricePoint] {
         let allPriceHistory = earningsData.priceHistory
-        
-        switch selectedTimeRange {
-        case .oneYear:
-            // Show last 6 price points (1 year + future)
-            return Array(allPriceHistory.suffix(6))
-        case .threeYears:
-            // Show all price history
-            return allPriceHistory
+        return displayQuarters.map { quarter in
+            allPriceHistory.first { $0.quarter == quarter.quarter }
+                ?? EarningsPricePoint(quarter: quarter.quarter, price: 0)
         }
     }
 
@@ -65,7 +63,8 @@ struct EarningsSectionCard: View {
             EarningsChartView(
                 quarters: displayQuarters,
                 priceHistory: displayPriceHistory,
-                showPriceLine: showPriceLine
+                showPriceLine: showPriceLine,
+                dataType: selectedDataType
             )
             
             // Surprise bar chart (3Y only)

@@ -16,6 +16,7 @@ struct TickerChartView: View {
     @ObservedObject var chartSettings: ChartSettings
     let assetContext: ChartAssetContext
     var chartDataVersion: Int = 0
+    var chartEventDates: ChartEventDates? = nil
 
     @State private var showSettingsSheet = false
     @StateObject private var crosshairState = CrosshairState()
@@ -98,6 +99,12 @@ struct TickerChartView: View {
                             .foregroundColor(change >= 0 ? AppColors.bullish : AppColors.bearish)
                     }
 
+                    if let vol = point.volume, vol > 0 {
+                        Text("Vol: \(formatVolume(vol))")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
                     if chartSettings.showExtendedHours && point.isExtendedHours {
                         Text("EXT")
                             .font(.system(size: 9, weight: .semibold))
@@ -124,7 +131,8 @@ struct TickerChartView: View {
                     chartType: chartSettings.chartType,
                     overlays: chartSettings.activeOverlays,
                     showExtendedHours: chartSettings.showExtendedHours,
-                    lookbackCloses: overlayLookbackCloses
+                    lookbackCloses: overlayLookbackCloses,
+                    chartEventDates: chartSettings.showEarningsDividendDates ? chartEventDates : nil
                 )
 
                 ChartCrosshairGesture(
@@ -150,7 +158,8 @@ struct TickerChartView: View {
                     indicator: indicator,
                     pricePoints: visiblePoints,
                     allPricePoints: pricePoints,
-                    visibleStartIndex: viewportState.visibleStart
+                    visibleStartIndex: viewportState.visibleStart,
+                    crosshairState: crosshairState
                 )
             }
 
@@ -205,31 +214,6 @@ struct TickerChartView: View {
                     }
                 }
 
-                // Extended hours toggle — visible for intraday intervals on supported assets
-                if assetContext.supportsExtendedHours && chartSettings.selectedInterval.isIntraday {
-                    Button {
-                        chartSettings.showExtendedHours.toggle()
-                    } label: {
-                        HStack(spacing: 2) {
-                            Image(systemName: chartSettings.showExtendedHours ? "sun.max.fill" : "sun.max")
-                                .font(.system(size: 10))
-                            Text("EXT")
-                                .font(AppTypography.labelSmall)
-                        }
-                        .fixedSize()
-                        .foregroundColor(chartSettings.showExtendedHours ? AppColors.textPrimary : AppColors.textMuted)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                .fill(chartSettings.showExtendedHours
-                                      ? AppColors.cardBackgroundLight
-                                      : AppColors.cardBackgroundLight.opacity(0.5))
-                        )
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                }
-
                 // Settings icon
                 Button(action: {
                     showSettingsSheet = true
@@ -268,6 +252,18 @@ struct TickerChartView: View {
             return String(format: "$%.2f", price)
         } else {
             return String(format: "$%.6f", price)
+        }
+    }
+
+    private func formatVolume(_ volume: Double) -> String {
+        if volume >= 1_000_000_000 {
+            return String(format: "%.1fB", volume / 1_000_000_000)
+        } else if volume >= 1_000_000 {
+            return String(format: "%.1fM", volume / 1_000_000)
+        } else if volume >= 1_000 {
+            return String(format: "%.1fK", volume / 1_000)
+        } else {
+            return String(format: "%.0f", volume)
         }
     }
 }

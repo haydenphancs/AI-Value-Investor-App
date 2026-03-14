@@ -12,6 +12,7 @@ struct EarningsChartView: View {
     let quarters: [EarningsQuarterData]
     let priceHistory: [EarningsPricePoint]
     let showPriceLine: Bool
+    var dataType: EarningsDataType = .eps
 
     // Calculate chart bounds based ONLY on EPS/Revenue data (NOT price)
     private var earningsValues: [Double] {
@@ -54,7 +55,7 @@ struct EarningsChartView: View {
     }
 
     private var chartHeight: CGFloat { 200 }
-    private var yAxisWidth: CGFloat { 40 }
+    private var yAxisWidth: CGFloat { dataType == .revenue ? 50 : 40 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -276,14 +277,31 @@ struct EarningsChartView: View {
     }
 
     private func formatYValue(_ value: Double) -> String {
-        if value >= 1000 {
-            return String(format: "%.0f", value)
-        } else if value >= 100 {
+        if dataType == .revenue {
+            return formatLargeNumber(value)
+        }
+        if value >= 100 {
             return String(format: "%.0f", value)
         } else if value >= 10 {
             return String(format: "%.1f", value)
         } else {
             return String(format: "%.2f", value)
+        }
+    }
+
+    private func formatLargeNumber(_ value: Double) -> String {
+        let absValue = abs(value)
+        let sign = value < 0 ? "-" : ""
+        if absValue >= 1_000_000_000_000 {
+            return "\(sign)\(String(format: "%.1f", absValue / 1_000_000_000_000))T"
+        } else if absValue >= 1_000_000_000 {
+            return "\(sign)\(String(format: "%.1f", absValue / 1_000_000_000))B"
+        } else if absValue >= 1_000_000 {
+            return "\(sign)\(String(format: "%.1f", absValue / 1_000_000))M"
+        } else if absValue >= 1_000 {
+            return "\(sign)\(String(format: "%.1f", absValue / 1_000))K"
+        } else {
+            return String(format: "%.0f", value)
         }
     }
 }

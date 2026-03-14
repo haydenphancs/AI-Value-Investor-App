@@ -14,6 +14,7 @@ struct SubChartCanvas: View {
     let pricePoints: [StockPricePoint]          // visible slice (for rendering positions)
     var allPricePoints: [StockPricePoint]? = nil // full dataset (for indicator computation)
     var visibleStartIndex: Int = 0               // where visible slice starts in allPricePoints
+    @ObservedObject var crosshairState: CrosshairState
 
     /// The data used for indicator calculation (full dataset if available)
     private var computePoints: [StockPricePoint] {
@@ -30,44 +31,67 @@ struct SubChartCanvas: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Label
+            // Label + crosshair value
             HStack {
                 Text(indicator.rawValue)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(AppColors.textMuted)
+
+                if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
+                   idx >= 0, idx < pricePoints.count {
+                    Text(crosshairValueText(for: idx))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(AppColors.textPrimary)
+                }
+
                 Spacer()
             }
             .padding(.horizontal, AppSpacing.lg)
 
-            // Chart content
-            GeometryReader { geometry in
-                let size = geometry.size
-                switch indicator {
-                case .volume:
-                    VolumeBarRenderer(
-                        pricePoints: pricePoints,
-                        size: size
-                    )
-                case .rsi14:
-                    RSIRenderer(
-                        allCloses: computePoints.map { $0.close },
-                        visibleRange: visibleRange,
-                        size: size
-                    )
-                case .macd:
-                    MACDRenderer(
-                        allCloses: computePoints.map { $0.close },
-                        visibleRange: visibleRange,
-                        size: size
-                    )
-                case .stochastic:
-                    StochasticRenderer(
-                        allPricePoints: computePoints,
-                        visibleRange: visibleRange,
-                        size: size
-                    )
-                default:
-                    EmptyView()
+            // Chart content with crosshair overlay
+            ZStack {
+                GeometryReader { geometry in
+                    let size = geometry.size
+                    ZStack {
+                        switch indicator {
+                        case .volume:
+                            VolumeBarRenderer(
+                                pricePoints: pricePoints,
+                                size: size
+                            )
+                        case .rsi14:
+                            RSIRenderer(
+                                allCloses: computePoints.map { $0.close },
+                                visibleRange: visibleRange,
+                                size: size
+                            )
+                        case .macd:
+                            MACDRenderer(
+                                allCloses: computePoints.map { $0.close },
+                                visibleRange: visibleRange,
+                                size: size
+                            )
+                        case .stochastic:
+                            StochasticRenderer(
+                                allPricePoints: computePoints,
+                                visibleRange: visibleRange,
+                                size: size
+                            )
+                        default:
+                            EmptyView()
+                        }
+
+                        // Crosshair vertical line on sub-chart
+                        if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
+                           idx >= 0, idx < pricePoints.count {
+                            let x = CGFloat(idx) * size.width / CGFloat(max(1, pricePoints.count - 1))
+                            Path { path in
+                                path.move(to: CGPoint(x: x, y: 0))
+                                path.addLine(to: CGPoint(x: x, y: size.height))
+                            }
+                            .stroke(AppColors.textMuted.opacity(0.6), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
+                        }
+                    }
                 }
             }
             .frame(height: 60)
@@ -75,6 +99,56 @@ struct SubChartCanvas: View {
             .padding(.horizontal, AppSpacing.lg)
         }
         .frame(height: 78)
+    }
+
+    /// Returns a formatted string for the indicator value at the given visible index
+    private func crosshairValueText(for visibleIndex: Int) -> String {
+        switch indicator {
+        case .volume:
+            guard visibleIndex < pricePoints.count,
+                  let vol = pricePoints[visibleIndex].volume else { return "" }
+            return formatVolume(vol)
+        case .rsi14:
+            let allCloses = computePoints.map { $0.close }
+            let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
+            let globalIndex = visibleStartIndex + visibleIndex
+            guard globalIndex >= 0, globalIndex < rsiData.values.count,
+                  let val = rsiData.values[globalIndex] else { return "" }
+            return String(format: "%.1f", val)
+        case .macd:
+            let allCloses = computePoints.map { $0.close }
+            let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
+            let globalIndex = visibleStartIndex + visibleIndex
+            guard globalIndex >= 0, globalIndex < macdData.macdLine.count else { return "" }
+            let m = macdData.macdLine[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
+            let s = macdData.signalLine[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
+            let h = macdData.histogram[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
+            return "M:\(m) S:\(s) H:\(h)"
+        case .stochastic:
+            let closes = computePoints.map { $0.close }
+            let highs = computePoints.map { $0.high ?? $0.close }
+            let lows = computePoints.map { $0.low ?? $0.close }
+            let stochData = TechnicalIndicatorCalculator.stochastic(highs: highs, lows: lows, closes: closes)
+            let globalIndex = visibleStartIndex + visibleIndex
+            guard globalIndex >= 0, globalIndex < stochData.kValues.count else { return "" }
+            let k = stochData.kValues[globalIndex].map { String(format: "%.1f", $0) } ?? "-"
+            let d = stochData.dValues[globalIndex].map { String(format: "%.1f", $0) } ?? "-"
+            return "%K:\(k) %D:\(d)"
+        default:
+            return ""
+        }
+    }
+
+    private func formatVolume(_ volume: Double) -> String {
+        if volume >= 1_000_000_000 {
+            return String(format: "%.1fB", volume / 1_000_000_000)
+        } else if volume >= 1_000_000 {
+            return String(format: "%.1fM", volume / 1_000_000)
+        } else if volume >= 1_000 {
+            return String(format: "%.1fK", volume / 1_000)
+        } else {
+            return String(format: "%.0f", volume)
+        }
     }
 }
 

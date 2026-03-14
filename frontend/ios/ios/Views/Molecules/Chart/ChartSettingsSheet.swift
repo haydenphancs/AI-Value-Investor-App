@@ -119,6 +119,23 @@ struct ChartSettingsSheet: View {
                         }
                         .tint(AppColors.primaryBlue)
                     }
+
+                    // Earnings & Dividend Dates — only for stocks and ETFs
+                    if assetContext == .stock || assetContext == .etf {
+                        Divider()
+
+                        Toggle(isOn: $chartSettings.showEarningsDividendDates) {
+                            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                                Text("Earnings & Dividend Dates")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textPrimary)
+                                Text("Show E and D markers on chart")
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textMuted)
+                            }
+                        }
+                        .tint(AppColors.primaryBlue)
+                    }
                 }
                 .padding(AppSpacing.lg)
             }

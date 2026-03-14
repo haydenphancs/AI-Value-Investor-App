@@ -45,7 +45,7 @@ enum APIEndpoint: Sendable {
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
-    case getStockOverview(ticker: String, range: String, interval: String? = nil)
+    case getStockOverview(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
@@ -55,6 +55,8 @@ enum APIEndpoint: Sendable {
     case getSentimentAnalysis(ticker: String)
     case getTechnicalAnalysis(ticker: String)
     case getTechnicalAnalysisDetail(ticker: String)
+    case getChartEvents(ticker: String)
+    case getEarnings(ticker: String)
     case getTickerReport(ticker: String, persona: String)
 
     // MARK: - Indices
@@ -146,7 +148,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/search"
         case .getStock(let ticker):
             return "/api/v1/stocks/\(ticker)"
-        case .getStockOverview(let ticker, _, _):
+        case .getStockOverview(let ticker, _, _, _):
             return "/api/v1/stocks/\(ticker)/overview"
         case .getStockQuote(let ticker):
             return "/api/v1/stocks/\(ticker)/quote"
@@ -166,6 +168,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/technical-analysis"
         case .getTechnicalAnalysisDetail(let ticker):
             return "/api/v1/stocks/\(ticker)/technical-analysis/detail"
+        case .getChartEvents(let ticker):
+            return "/api/v1/stocks/\(ticker)/chart-events"
+        case .getEarnings(let ticker):
+            return "/api/v1/stocks/\(ticker)/earnings"
         case .getTickerReport(let ticker, _):
             return "/api/v1/stocks/\(ticker)/report"
 
@@ -303,9 +309,10 @@ enum APIEndpoint: Sendable {
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
 
-        case .getStockOverview(_, let range, let interval):
+        case .getStockOverview(_, let range, let interval, let extendedHours):
             var params = ["range": range]
             if let interval = interval { params["interval"] = interval }
+            if extendedHours { params["extended_hours"] = "true" }
             return params
 
         case .getStockChart(_, let range, let interval, let extendedHours):
@@ -421,7 +428,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

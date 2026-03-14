@@ -26,6 +26,8 @@ class TickerDetailViewModel: ObservableObject {
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var healthCheckData: HealthCheckSectionData?
     @Published var holdersData: HoldersData?
+    @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
+    @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -37,6 +39,7 @@ class TickerDetailViewModel: ObservableObject {
     // Chart settings
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
+    @Published var chartEventDates: ChartEventDates?
 
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
@@ -115,11 +118,13 @@ class TickerDetailViewModel: ObservableObject {
             let ticker = self.tickerSymbol
             print("📊 TickerDetailVM: Loading data for \(ticker) from API...")
 
-            // Try the aggregated overview endpoint first (all Overview tab data in one call)
+            // Phase 1: Get price/chart data — show UI as soon as this arrives
             do {
+                let useExtendedHours = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
                 let response = try await self.stockRepository.getStockOverview(
                     ticker: ticker, range: self.selectedChartRange.rawValue,
-                    interval: self.chartSettings.selectedInterval.rawValue
+                    interval: self.chartSettings.selectedInterval.rawValue,
+                    extendedHours: useExtendedHours
                 )
                 self.tickerData = response.toDisplayModel()
                 self.chartDataVersion += 1
@@ -137,11 +142,10 @@ class TickerDetailViewModel: ObservableObject {
                 await self.fetchChartData(ticker, range: self.selectedChartRange)
             }
 
-            // Fetch news in parallel (not included in overview endpoint)
-            await self.fetchStockNews(ticker)
+            // Show UI immediately — price/chart/overview are ready
+            self.isLoading = false
 
-            await self.fetchAnalystAnalysis(ticker)
-            self.earningsData = EarningsData.sampleData
+            // Set sample data for tabs that don't have API data yet
             self.growthData = GrowthSectionData.sampleData
             self.profitPowerData = ProfitPowerSectionData.sampleData
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
@@ -149,12 +153,18 @@ class TickerDetailViewModel: ObservableObject {
             self.healthCheckData = HealthCheckSectionData.sampleData
             self.holdersData = HoldersData.sampleData
 
+            // Phase 2: Fetch supplementary data in parallel (non-blocking)
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.fetchStockNews(ticker) }
+                group.addTask { await self.fetchAnalystAnalysis(ticker) }
+                group.addTask { await self.fetchChartEvents(ticker) }
+                group.addTask { await self.fetchEarnings(ticker) }
+            }
+
             // If we don't have API news, load sample news
             if self.newsArticles.isEmpty {
                 self.newsArticles = TickerNewsArticle.sampleDataForTicker(ticker)
             }
-
-            self.isLoading = false
         }
     }
 
@@ -194,19 +204,21 @@ class TickerDetailViewModel: ObservableObject {
             self.newsDisplayCount = newsPageSize
             self.hasMoreNews = allNewsArticles.count > newsDisplayCount
 
-            // Enrich the first batch BEFORE showing articles
-            let firstBatch = Array(allNewsArticles.prefix(newsDisplayCount))
-            let unenrichedIds = firstBatch
+            // Show articles IMMEDIATELY with raw data
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.isNewsLoading = false
+
+            // Enrich in background, then update displayed articles
+            let unenrichedIds = self.newsArticles
                 .filter { !$0.aiProcessed }
                 .map { $0.apiId }
                 .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
 
             if !unenrichedIds.isEmpty {
                 await attemptEnrichment(ticker: ticker, articleIds: unenrichedIds)
+                // Refresh displayed articles with enriched data
+                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             }
-
-            // NOW show articles (enriched or raw fallback)
-            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
         }
@@ -217,6 +229,27 @@ class TickerDetailViewModel: ObservableObject {
         case ratings(AnalystRatingsData)
         case sentiment(SentimentAnalysisData)
         case technical(TechnicalAnalysisData)
+    }
+
+    private func fetchChartEvents(_ ticker: String) async {
+        do {
+            let events = try await stockRepository.getChartEvents(ticker: ticker)
+            self.chartEventDates = events
+            print("✅ TickerDetailVM: Got chart events for \(ticker) — \(events.earningsDates.count) earnings, \(events.dividendDates.count) dividends")
+        } catch {
+            print("⚠️ TickerDetailVM: Chart events failed for \(ticker): \(error)")
+        }
+    }
+
+    private func fetchEarnings(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getEarnings(ticker: ticker)
+            self.earningsData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got earnings for \(ticker) — \(dto.epsQuarters.count) EPS quarters")
+        } catch {
+            print("⚠️ TickerDetailVM: Earnings failed for \(ticker): \(error)")
+            self.earningsData = EarningsData.sampleData
+        }
     }
 
     private func fetchAnalystAnalysis(_ ticker: String) async {
@@ -284,6 +317,25 @@ class TickerDetailViewModel: ObservableObject {
             sentimentAnalysis: sentimentData ?? SentimentAnalysisData.sampleData,
             technicalAnalysis: techData ?? TechnicalAnalysisData.sampleData
         )
+    }
+
+    func fetchTechnicalAnalysisDetail() {
+        guard technicalAnalysisDetailData == nil, !isTechnicalDetailLoading else { return }
+        isTechnicalDetailLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let dto = try await self.stockRepository.getTechnicalAnalysisDetail(ticker: self.tickerSymbol)
+                self.technicalAnalysisDetailData = dto.toDisplayModel()
+                print("✅ TickerDetailVM: Got technical analysis detail for \(self.tickerSymbol)")
+            } catch {
+                print("⚠️ TickerDetailVM: Technical analysis detail failed for \(self.tickerSymbol): \(error)")
+                // Fall back to sample data so the sheet still shows something
+                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+            }
+            self.isTechnicalDetailLoading = false
+        }
     }
 
     func loadMoreNews() {

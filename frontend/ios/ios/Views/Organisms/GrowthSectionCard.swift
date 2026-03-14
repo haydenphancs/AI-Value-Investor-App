@@ -16,9 +16,19 @@ struct GrowthSectionCard: View {
 
     // MARK: - State
 
-    @State private var selectedMetric: GrowthMetricType = .eps
-    @State private var selectedPeriod: GrowthPeriodType = .annual
-    @State private var showInfoSheet: Bool = false
+    @State private var selectedMetric: GrowthMetricType
+    @State private var selectedPeriod: GrowthPeriodType
+    @State private var showInfoSheet: Bool
+
+    // MARK: - Init
+
+    init(growthData: GrowthSectionData, onDetailTapped: @escaping () -> Void) {
+        self.growthData = growthData
+        self.onDetailTapped = onDetailTapped
+        _selectedMetric = State(initialValue: .eps)
+        _selectedPeriod = State(initialValue: .annual)
+        _showInfoSheet = State(initialValue: false)
+    }
 
     // MARK: - Computed Properties
 

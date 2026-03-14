@@ -17,7 +17,8 @@ struct SentimentAnalysisSection: View {
             // Header
             AnalysisSectionHeader(
                 title: "Sentiment Analysis",
-                onAction: { onMoreTapped?() }
+                onAction: { onMoreTapped?() },
+                iconType: .info
             )
 
             // Market Mood Meter

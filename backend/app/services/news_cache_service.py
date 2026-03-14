@@ -148,9 +148,11 @@ class NewsCacheService:
                 self._format_single_row(r) for r in needs_enrichment
             ]
 
-        # 5. Update cache rows with enrichment data
+        # 5. Update cache rows with enrichment data (concurrent)
         newly_enriched = []
-        success_count = 0
+        update_tasks = []
+        update_indices = []
+
         for i, row in enumerate(needs_enrichment):
             enrichment = enrichments.get(i, {})
             if not enrichment:
@@ -159,28 +161,40 @@ class NewsCacheService:
 
             update_data = {
                 "summary_bullets": json.dumps(enrichment.get("bullets", [])),
-                "sentiment": enrichment.get("sentiment"),
+                "sentiment": self._normalize_sentiment(enrichment.get("sentiment", "")),
                 "sentiment_confidence": enrichment.get("confidence", 0),
                 "ai_processed": True,
                 "ai_model": NEWS_AI_MODEL,
             }
 
-            try:
-                self.supabase.table("ticker_news_cache").update(
-                    update_data
-                ).eq("id", row["id"]).execute()
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Failed to update enrichment for {row['id']}: {e}")
-
             # Merge enrichment into row for response
             row.update(update_data)
             newly_enriched.append(self._format_single_row(row))
+
+            # Queue concurrent DB update
+            update_tasks.append(self._update_enrichment_row(row["id"], update_data))
+            update_indices.append(i)
+
+        # Execute all DB updates concurrently
+        if update_tasks:
+            results = await asyncio.gather(*update_tasks, return_exceptions=True)
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            for j, r in enumerate(results):
+                if isinstance(r, Exception):
+                    logger.error(f"Failed to update enrichment for article {update_indices[j]}: {r}")
+        else:
+            success_count = 0
 
         logger.info(
             f"Enriched {success_count}/{len(needs_enrichment)} articles for {ticker}"
         )
         return enriched_response + newly_enriched
+
+    async def _update_enrichment_row(self, row_id: str, update_data: dict):
+        """Update a single enrichment row in Supabase."""
+        self.supabase.table("ticker_news_cache").update(
+            update_data
+        ).eq("id", row_id).execute()
 
     # ── Private: Ticker parsing helper ──────────────────────────────────
 
@@ -286,7 +300,7 @@ class NewsCacheService:
                 },
                 "sentiment": {
                     "type": "STRING",
-                    "enum": ["Positive", "Negative", "Neutral"],
+                    "enum": ["bullish", "bearish", "neutral"],
                 },
                 "confidence": {"type": "INTEGER"},
             },
@@ -296,13 +310,13 @@ class NewsCacheService:
 
     @staticmethod
     def _normalize_sentiment(raw: str) -> str:
-        """Normalize any sentiment string to exactly Positive/Negative/Neutral."""
+        """Normalize any sentiment string to DB-compatible bullish/bearish/neutral."""
         s = (raw or "").strip().lower()
         if s in ("positive", "bullish"):
-            return "Positive"
+            return "bullish"
         if s in ("negative", "bearish"):
-            return "Negative"
-        return "Neutral"
+            return "bearish"
+        return "neutral"
 
     async def _batch_enrich_articles(
         self, articles: List[Dict[str, Any]]
@@ -335,15 +349,15 @@ For EACH article, provide:
    - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway:". Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix.
    - No introductory phrases like "This article discusses..." or "The key points are..."
 2. Sentiment classification — you MUST use one of these three exact values:
-   - "Positive": ONLY use if the article indicates a direct upward catalyst for the stock price (e.g., earnings beat, new product launch, analyst upgrade, winning a lawsuit, major contract win, breakthrough product approval).
-   - "Negative": ONLY use if the article indicates a direct downward catalyst for the stock price (e.g., missed revenue, SEC investigation, product recall, analyst downgrade, lawsuit loss, executive fraud, data breach).
-   - "Neutral": Use for EVERYTHING else — macroeconomic noise, educational articles, history lessons, CEO interviews without financial guidance, mixed signals, industry commentary, or any article where the directional impact on the stock is unclear.
+   - "bullish": ONLY use if the article indicates a direct upward catalyst for the stock price (e.g., earnings beat, new product launch, analyst upgrade, winning a lawsuit, major contract win, breakthrough product approval).
+   - "bearish": ONLY use if the article indicates a direct downward catalyst for the stock price (e.g., missed revenue, SEC investigation, product recall, analyst downgrade, lawsuit loss, executive fraud, data breach).
+   - "neutral": Use for EVERYTHING else — macroeconomic noise, educational articles, history lessons, CEO interviews without financial guidance, mixed signals, industry commentary, or any article where the directional impact on the stock is unclear.
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
 
 Return a JSON array with one object per article in order. Each object must have:
 - "index": the article number (0-based)
 - "bullets": array of 2-5 strings (last one explains why investors should care — vary the opening naturally)
-- "sentiment": exactly one of "Positive" | "Negative" | "Neutral"
+- "sentiment": exactly one of "bullish" | "bearish" | "neutral"
 - "confidence": integer 0-100
 
 {chr(10).join(articles_text)}"""
@@ -356,7 +370,7 @@ Return a JSON array with one object per article in order. Each object must have:
                     "financial news and summarize it for everyday investors. Keep the tone "
                     "friendly, accessible and reliable. Must use correct numbers or data "
                     "if needed. Do not use introductory phrases. "
-                    "For sentiment, you MUST return exactly one of: Positive, Negative, Neutral. "
+                    "For sentiment, you MUST return exactly one of: bullish, bearish, neutral. "
                     "No other values are accepted."
                 ),
                 model_name=NEWS_AI_MODEL,

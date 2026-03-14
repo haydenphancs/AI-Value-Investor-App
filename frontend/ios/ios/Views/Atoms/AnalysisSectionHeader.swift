@@ -7,25 +7,33 @@
 
 import SwiftUI
 
+enum SectionHeaderIcon {
+    case ellipsis
+    case info
+}
+
 struct AnalysisSectionHeader: View {
     let title: String
     let subtitle: String?
     let actionText: String?
     let onAction: (() -> Void)?
     let showMoreButton: Bool
+    let iconType: SectionHeaderIcon
 
     init(
         title: String,
         subtitle: String? = nil,
         actionText: String? = nil,
         onAction: (() -> Void)? = nil,
-        showMoreButton: Bool = true
+        showMoreButton: Bool = true,
+        iconType: SectionHeaderIcon = .ellipsis
     ) {
         self.title = title
         self.subtitle = subtitle
         self.actionText = actionText
         self.onAction = onAction
         self.showMoreButton = showMoreButton
+        self.iconType = iconType
     }
 
     var body: some View {
@@ -54,7 +62,7 @@ struct AnalysisSectionHeader: View {
                 Button {
                     onAction?()
                 } label: {
-                    Image(systemName: "ellipsis")
+                    Image(systemName: iconType == .info ? "info.circle" : "ellipsis")
                         .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
                         .frame(width: 24, height: 24)

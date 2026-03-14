@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct TickerFinancialsContent: View {
-    let earningsData: EarningsData
+    let earningsData: EarningsData?
     let growthData: GrowthSectionData?
     let profitPowerData: ProfitPowerSectionData?
     let signalOfConfidenceData: SignalOfConfidenceSectionData?
@@ -22,14 +22,16 @@ struct TickerFinancialsContent: View {
     var onHealthCheckDetailTap: (() -> Void)?
 
     var body: some View {
-        LazyVStack(spacing: AppSpacing.lg) {
+        VStack(spacing: AppSpacing.lg) {
             // Earnings Section
-            EarningsSectionCard(
-                earningsData: earningsData,
-                onDetailTap: {
-                    onEarningsDetailTap?()
-                }
-            )
+            if let earningsData = earningsData {
+                EarningsSectionCard(
+                    earningsData: earningsData,
+                    onDetailTap: {
+                        onEarningsDetailTap?()
+                    }
+                )
+            }
 
             // Growth Section
             if let growthData = growthData {

@@ -8,9 +8,18 @@
 import SwiftUI
 import Charts
 
+// Cached formatter to avoid re-creating on every render
+private let _dailyPriceDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    return f
+}()
+
 struct EarningsChartView: View {
     let quarters: [EarningsQuarterData]
     let priceHistory: [EarningsPricePoint]
+    var dailyPriceHistory: [EarningsDailyPricePoint] = []
     let showPriceLine: Bool
     var dataType: EarningsDataType = .eps
 
@@ -34,9 +43,11 @@ struct EarningsChartView: View {
         (earningsValues.max() ?? 1) * 1.1
     }
 
-    // Price bounds for independent normalization
+    // Price bounds for independent normalization (quarterly fallback)
     private var priceValues: [Double] {
-        // Only include prices for quarters that have actual data (not future/pending)
+        if !dailyPriceHistory.isEmpty {
+            return dailyPriceHistory.map { $0.price }
+        }
         var values: [Double] = []
         for (index, quarter) in quarters.enumerated() {
             if quarter.actualValue != nil, index < priceHistory.count, priceHistory[index].price > 0 {
@@ -77,9 +88,12 @@ struct EarningsChartView: View {
                         gridLines(height: height)
 
                         // Price line (optional, rendered first so it's behind)
-                        // Only show for quarters with actual data
                         if showPriceLine && !priceValues.isEmpty {
-                            priceLine(width: width, height: height, stepX: stepX)
+                            if !dailyPriceHistory.isEmpty {
+                                dailyPriceLine(width: width, height: height, stepX: stepX)
+                            } else {
+                                priceLine(width: width, height: height, stepX: stepX)
+                            }
                         }
 
                         // Estimate dots (gray)
@@ -184,7 +198,7 @@ struct EarningsChartView: View {
         }
         .padding(.top, AppSpacing.sm)
     }
-    
+
     private func xAxisLabelsCondensed() -> some View {
         VStack(spacing: 2) {
             // Top row: Q1, Q2, Q3, Q4 labels for each quarter
@@ -196,31 +210,31 @@ struct EarningsChartView: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            
+
             // Bottom row: Year labels positioned under their quarter groups
             GeometryReader { geometry in
                 let totalWidth = geometry.size.width
                 let totalQuarters = quarters.count
                 let stepWidth = totalWidth / CGFloat(totalQuarters)
-                
+
                 // Group quarters by year, maintaining their original indices
                 let groupedByYear = Dictionary(grouping: Array(quarters.enumerated())) { element in
                     let components = element.element.quarter.components(separatedBy: " ")
                     return components.count > 1 ? components[1] : ""
                 }
-                
+
                 // Sort years
                 let sortedYears = groupedByYear.keys.sorted()
-                
+
                 ZStack(alignment: .top) {
                     ForEach(sortedYears, id: \.self) { year in
                         if let yearData = groupedByYear[year]?.sorted(by: { $0.offset < $1.offset }),
                            let firstIndex = yearData.first?.offset,
                            let lastIndex = yearData.last?.offset {
-                            
+
                             let centerIndex = CGFloat(firstIndex + lastIndex) / 2.0
                             let centerX = centerIndex * stepWidth + stepWidth / 2
-                            
+
                             Text(year)
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textMuted)
@@ -233,6 +247,97 @@ struct EarningsChartView: View {
             .frame(height: 12)
         }
     }
+
+    // MARK: - Quarter Label → Approximate Date
+
+    /// Converts "Q1 '24" → approximate fiscal quarter end date.
+    /// Q1→Mar 31, Q2→Jun 30, Q3→Sep 30, Q4→Dec 31.
+    private func estimatedDate(from quarterLabel: String) -> Date? {
+        // Expected format: "Q1 '24"
+        let parts = quarterLabel.components(separatedBy: " '")
+        guard parts.count == 2,
+              let qNum = Int(String(parts[0].dropFirst())),   // "Q1" → 1
+              let yr = Int(parts[1]) else { return nil }      // "24" → 24
+
+        let year = yr < 50 ? 2000 + yr : 1900 + yr
+        let quarterEndMonths = [3, 6, 9, 12]   // Q1→Mar, Q2→Jun, Q3→Sep, Q4→Dec
+        guard qNum >= 1, qNum <= 4 else { return nil }
+        let month = quarterEndMonths[qNum - 1]
+        let day = (month == 6 || month == 9) ? 30 : 31
+
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        return Calendar.current.date(from: components)
+    }
+
+    // MARK: - Continuous Daily Price Line
+
+    private func dailyPriceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {
+        // Find first and last historical quarter indices
+        let historicalIndices = quarters.enumerated()
+            .filter { $0.element.actualValue != nil }
+            .map { $0.offset }
+
+        guard let firstIdx = historicalIndices.first,
+              let lastIdx = historicalIndices.last else {
+            return AnyView(EmptyView())
+        }
+
+        // Anchor x-positions: center of first/last historical quarter columns
+        let xMin = CGFloat(firstIdx) * stepX + stepX / 2
+        let xHistMax = CGFloat(lastIdx) * stepX + stepX / 2
+
+        // Anchor dates: estimated from quarter labels
+        guard let firstHistDate = estimatedDate(from: quarters[firstIdx].quarter),
+              let lastHistDate = estimatedDate(from: quarters[lastIdx].quarter),
+              lastHistDate > firstHistDate else {
+            return AnyView(EmptyView())
+        }
+
+        let anchorInterval = lastHistDate.timeIntervalSince(firstHistDate)
+        let rate = (xHistMax - xMin) / CGFloat(anchorInterval)  // pixels per second
+
+        // Parse dates and pair with prices
+        let datesAndPrices: [(Date, Double)] = dailyPriceHistory.compactMap { dp in
+            guard let d = _dailyPriceDateFormatter.date(from: dp.date) else { return nil }
+            return (d, dp.price)
+        }.sorted { $0.0 < $1.0 }
+
+        guard datesAndPrices.count >= 2 else {
+            return AnyView(EmptyView())
+        }
+
+        let pRange = max(maxPrice - minPrice, 0.01)
+
+        return AnyView(
+            Path { path in
+                var started = false
+                for (_, (date, price)) in datesAndPrices.enumerated() {
+                    // Anchor-based linear mapping — naturally extends past last historical quarter
+                    let x = xMin + rate * CGFloat(date.timeIntervalSince(firstHistDate))
+
+                    let normalizedPrice = (price - minPrice) / pRange
+                    let y = height - (CGFloat(normalizedPrice) * height * 0.85 + height * 0.075)
+
+                    if !started {
+                        path.move(to: CGPoint(x: x, y: y))
+                        started = true
+                    } else {
+                        path.addLine(to: CGPoint(x: x, y: y))
+                    }
+                }
+            }
+            .stroke(
+                AppColors.accentCyan,
+                style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+            )
+            .clipped()
+        )
+    }
+
+    // MARK: - Quarterly Price Line (fallback)
 
     private func priceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {
         let priceRange = max(maxPrice - minPrice, 0.01)
@@ -315,6 +420,7 @@ struct EarningsChartView: View {
             EarningsChartView(
                 quarters: EarningsData.sampleData.epsQuarters,
                 priceHistory: EarningsData.sampleData.priceHistory,
+                dailyPriceHistory: EarningsData.sampleData.dailyPriceHistory,
                 showPriceLine: true
             )
             .padding()

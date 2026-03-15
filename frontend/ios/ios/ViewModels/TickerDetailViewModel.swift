@@ -159,6 +159,7 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchAnalystAnalysis(ticker) }
                 group.addTask { await self.fetchChartEvents(ticker) }
                 group.addTask { await self.fetchEarnings(ticker) }
+                group.addTask { await self.checkWatchlistStatus() }
             }
 
             // If we don't have API news, load sample news
@@ -487,7 +488,48 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     func toggleFavorite() {
-        isFavorite.toggle()
+        print("⭐ TickerDetailVM: toggleFavorite called — isFavorite was \(isFavorite)")
+        let wasInWatchlist = isFavorite
+        isFavorite.toggle() // optimistic UI update
+        print("⭐ TickerDetailVM: isFavorite is now \(isFavorite)")
+
+        Task { @MainActor in
+            do {
+                if wasInWatchlist {
+                    try await APIClient.shared.request(
+                        endpoint: .removeFromWatchlist(stockId: tickerSymbol)
+                    )
+                    print("✅ TickerDetailVM: Removed \(tickerSymbol) from watchlist")
+                } else {
+                    try await APIClient.shared.request(
+                        endpoint: .addToWatchlist(stockId: tickerSymbol)
+                    )
+                    print("✅ TickerDetailVM: Added \(tickerSymbol) to watchlist")
+                }
+            } catch {
+                print("⚠️ TickerDetailVM: Watchlist toggle failed for \(tickerSymbol): \(error)")
+                isFavorite = wasInWatchlist // revert on failure
+            }
+        }
+    }
+
+    private func checkWatchlistStatus() async {
+        do {
+            let watchlist: [WatchlistItemDTO] = try await APIClient.shared.request(
+                endpoint: .getWatchlist,
+                responseType: [WatchlistItemDTO].self
+            )
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == tickerSymbol.uppercased() }
+            print("✅ TickerDetailVM: Watchlist check — \(tickerSymbol) isFavorite=\(isFavorite)")
+        } catch {
+            print("⚠️ TickerDetailVM: Watchlist check failed: \(error)")
+            // Leave isFavorite as default false
+        }
+    }
+
+    /// Lightweight DTO for decoding watchlist items (only need ticker field)
+    private struct WatchlistItemDTO: Codable {
+        let ticker: String
     }
 
     func handleNotificationTap() {

@@ -1731,6 +1731,13 @@ struct EarningsPricePoint: Identifiable {
     let price: Double
 }
 
+// MARK: - Earnings Daily Price Point (continuous price line)
+struct EarningsDailyPricePoint: Identifiable {
+    var id = UUID()
+    let date: String   // "yyyy-MM-dd"
+    let price: Double
+}
+
 // MARK: - Earnings Data (Combined)
 // MARK: - Next Earnings Date
 enum EarningsReportTiming: String {
@@ -1772,17 +1779,20 @@ struct EarningsData {
     let epsQuarters: [EarningsQuarterData]
     let revenueQuarters: [EarningsQuarterData]
     let priceHistory: [EarningsPricePoint]
+    let dailyPriceHistory: [EarningsDailyPricePoint]
     let nextEarningsDate: NextEarningsDate?
 
     init(
         epsQuarters: [EarningsQuarterData],
         revenueQuarters: [EarningsQuarterData],
         priceHistory: [EarningsPricePoint],
+        dailyPriceHistory: [EarningsDailyPricePoint] = [],
         nextEarningsDate: NextEarningsDate? = nil
     ) {
         self.epsQuarters = epsQuarters
         self.revenueQuarters = revenueQuarters
         self.priceHistory = priceHistory
+        self.dailyPriceHistory = dailyPriceHistory
         self.nextEarningsDate = nextEarningsDate
     }
 
@@ -1858,6 +1868,33 @@ extension EarningsData {
             EarningsPricePoint(quarter: "Q1 '25", price: 0.95),
             EarningsPricePoint(quarter: "Q2 '25", price: nil)
         ],
+        dailyPriceHistory: {
+            // Generate sample daily prices spanning Q1 '22 through Q4 '24
+            var points: [EarningsDailyPricePoint] = []
+            let calendar = Calendar.current
+            var date = DateComponents(year: 2022, month: 3, day: 31)
+            let endDate = DateComponents(year: 2024, month: 12, day: 31)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            var current = calendar.date(from: date)!
+            let end = calendar.date(from: endDate)!
+            var price = 145.0
+            while current <= end {
+                let weekday = calendar.component(.weekday, from: current)
+                if weekday != 1 && weekday != 7 { // skip weekends
+                    // Simulate realistic daily price movement
+                    let noise = Double.random(in: -3.0...3.0)
+                    let trend = 0.05 // slight uptrend
+                    price = max(120, min(200, price + trend + noise))
+                    points.append(EarningsDailyPricePoint(
+                        date: formatter.string(from: current),
+                        price: price
+                    ))
+                }
+                current = calendar.date(byAdding: .day, value: 1, to: current)!
+            }
+            return points
+        }(),
         nextEarningsDate: .sample
     )
 

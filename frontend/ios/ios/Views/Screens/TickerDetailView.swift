@@ -18,6 +18,7 @@ struct TickerDetailView: View {
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var selectedSearchTicker: String?
     @StateObject private var chatViewModel = ChatViewModel()
 
     let tickerSymbol: String
@@ -64,7 +65,7 @@ struct TickerDetailView: View {
                     onBackTapped: handleBackTapped,
                     onSearchTapped: handleSearchTapped,
                     onNotificationTapped: viewModel.handleNotificationTap,
-                    onFavoriteTapped: viewModel.toggleFavorite,
+                    onFavoriteTapped: { viewModel.toggleFavorite() },
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
                     tickerSymbol: tickerSymbol,
@@ -203,9 +204,20 @@ struct TickerDetailView: View {
                     .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
             }
         }
-        .fullScreenCover(isPresented: $showSearch) {
-            SearchView()
-                .preferredColorScheme(.dark)
+        .sheet(isPresented: $showSearch) {
+            TickerLiveSearchSheet(
+                onTickerSelected: { ticker in
+                    showSearch = false
+                    selectedSearchTicker = ticker
+                },
+                onDismiss: {
+                    showSearch = false
+                }
+            )
+            .preferredColorScheme(.dark)
+        }
+        .navigationDestination(item: $selectedSearchTicker) { ticker in
+            TickerDetailView(tickerSymbol: ticker)
         }
         .sheet(isPresented: $showAIChat) {
             NavigationStack {

@@ -63,6 +63,7 @@ struct EarningsSectionCard: View {
             EarningsChartView(
                 quarters: displayQuarters,
                 priceHistory: displayPriceHistory,
+                dailyPriceHistory: earningsData.dailyPriceHistory,
                 showPriceLine: showPriceLine,
                 dataType: selectedDataType
             )

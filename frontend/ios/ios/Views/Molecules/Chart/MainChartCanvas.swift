@@ -255,23 +255,29 @@ private struct ChartEventMarkers: View {
         Canvas { context, canvasSize in
             guard pricePoints.count > 1 else { return }
 
-            for (index, point) in pricePoints.enumerated() {
-                let datePrefix = String(point.date.prefix(10))
-                let isEarnings = earningsDates.contains(datePrefix)
-                let isDividend = dividendDates.contains(datePrefix)
+            // Use nearest-date matching so markers work for all intervals
+            // (daily, weekly, monthly, intraday). For each event date, find
+            // the first price point whose date >= the event date. This maps
+            // events to the correct aggregation bar even for weekly/monthly charts.
+            let earningsIndices = eventIndices(for: earningsDates)
+            let dividendIndices = eventIndices(for: dividendDates)
+
+            for index in 0..<pricePoints.count {
+                let isEarnings = earningsIndices.contains(index)
+                let isDividend = dividendIndices.contains(index)
 
                 guard isEarnings || isDividend else { continue }
 
                 let x = coord.xPosition(for: index)
-                let markerY = canvasSize.height - 8
+                let markerY = canvasSize.height - 14
 
                 if isEarnings {
                     drawMarker(context: context, text: "E", x: x, y: markerY,
                                bgColor: Color.orange.opacity(0.85), textColor: .white)
                 }
                 if isDividend {
-                    // Offset slightly if both fall on same date
-                    let dY = isEarnings ? markerY - 16 : markerY
+                    // Offset slightly higher if both fall on same bar
+                    let dY = isEarnings ? markerY - 18 : markerY
                     drawMarker(context: context, text: "D", x: x, y: dY,
                                bgColor: AppColors.bullish.opacity(0.85), textColor: .white)
                 }
@@ -279,15 +285,39 @@ private struct ChartEventMarkers: View {
         }
     }
 
+    /// For each event date, find the first price point whose date prefix >= the event date.
+    /// Works for all chart intervals: daily (exact), weekly/monthly (maps to the bar containing the event).
+    private func eventIndices(for eventDates: Set<String>) -> Set<Int> {
+        guard let firstDate = pricePoints.first.map({ String($0.date.prefix(10)) }),
+              let lastDate = pricePoints.last.map({ String($0.date.prefix(10)) }) else {
+            return []
+        }
+
+        var indices = Set<Int>()
+        for eventDate in eventDates {
+            // Skip events outside the chart's visible date range
+            guard eventDate >= firstDate, eventDate <= lastDate else { continue }
+
+            for (index, point) in pricePoints.enumerated() {
+                let pointDate = String(point.date.prefix(10))
+                if pointDate >= eventDate {
+                    indices.insert(index)
+                    break
+                }
+            }
+        }
+        return indices
+    }
+
     private func drawMarker(context: GraphicsContext, text: String, x: CGFloat, y: CGFloat, bgColor: Color, textColor: Color) {
-        let size: CGFloat = 14
+        let size: CGFloat = 16
         let rect = CGRect(x: x - size / 2, y: y - size / 2, width: size, height: size)
         let roundedRect = RoundedRectangle(cornerRadius: 3).path(in: rect)
         context.fill(roundedRect, with: .color(bgColor))
 
         let resolvedText = context.resolve(
             Text(text)
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundColor(textColor)
         )
         context.draw(resolvedText, at: CGPoint(x: x, y: y))

@@ -21,6 +21,11 @@ class EarningsPricePointSchema(BaseModel):
     price: float
 
 
+class EarningsDailyPriceSchema(BaseModel):
+    date: str    # "yyyy-MM-dd"
+    price: float
+
+
 class NextEarningsDateSchema(BaseModel):
     date: str  # "yyyy-MM-dd"
     is_confirmed: bool
@@ -32,4 +37,5 @@ class EarningsResponse(BaseModel):
     eps_quarters: List[EarningsQuarterSchema]
     revenue_quarters: List[EarningsQuarterSchema]
     price_history: List[EarningsPricePointSchema]
+    daily_price_history: List[EarningsDailyPriceSchema] = []
     next_earnings_date: Optional[NextEarningsDateSchema] = None

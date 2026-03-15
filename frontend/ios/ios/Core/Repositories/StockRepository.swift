@@ -1042,6 +1042,11 @@ struct EarningsPricePointDTO: Codable {
     let price: Double
 }
 
+struct EarningsDailyPricePointDTO: Codable {
+    let date: String
+    let price: Double
+}
+
 struct NextEarningsDateDTO: Codable {
     let date: String
     let isConfirmed: Bool
@@ -1059,6 +1064,7 @@ struct EarningsDTO: Codable {
     let epsQuarters: [EarningsQuarterDTO]
     let revenueQuarters: [EarningsQuarterDTO]
     let priceHistory: [EarningsPricePointDTO]
+    let dailyPriceHistory: [EarningsDailyPricePointDTO]?
     let nextEarningsDate: NextEarningsDateDTO?
 
     enum CodingKeys: String, CodingKey {
@@ -1066,6 +1072,7 @@ struct EarningsDTO: Codable {
         case epsQuarters = "eps_quarters"
         case revenueQuarters = "revenue_quarters"
         case priceHistory = "price_history"
+        case dailyPriceHistory = "daily_price_history"
         case nextEarningsDate = "next_earnings_date"
     }
 
@@ -1093,6 +1100,9 @@ struct EarningsDTO: Codable {
         let prices = priceHistory.map { p in
             EarningsPricePoint(quarter: p.quarter, price: p.price)
         }
+        let dailyPrices = (dailyPriceHistory ?? []).map { dp in
+            EarningsDailyPricePoint(date: dp.date, price: dp.price)
+        }
         var nextDate: NextEarningsDate? = nil
         if let nd = nextEarningsDate, let d = dateFormatter.date(from: nd.date) {
             nextDate = NextEarningsDate(
@@ -1105,6 +1115,7 @@ struct EarningsDTO: Codable {
             epsQuarters: eps,
             revenueQuarters: revenue,
             priceHistory: prices,
+            dailyPriceHistory: dailyPrices,
             nextEarningsDate: nextDate
         )
     }

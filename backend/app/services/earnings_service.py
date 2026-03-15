@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.earnings import (
+    EarningsDailyPriceSchema,
     EarningsQuarterSchema,
     EarningsPricePointSchema,
     EarningsResponse,
@@ -330,6 +331,24 @@ class EarningsService:
         revenue_quarters.sort(key=lambda q: _label_sort_key(q.quarter))
         price_history.sort(key=lambda p: _label_sort_key(p.quarter))
 
+        # ── Daily Price History (continuous line data) ──
+        daily_price_history: List[EarningsDailyPriceSchema] = []
+        if used_income_dates and price_list:
+            sorted_dates = sorted(d[:10] for d in used_income_dates if d)
+            range_start = sorted_dates[0]
+            range_end = today_str
+            for p in price_list:
+                d = (p.get("date") or "")[:10]
+                c = p.get("close")
+                if d and c is not None and range_start <= d <= range_end:
+                    try:
+                        daily_price_history.append(
+                            EarningsDailyPriceSchema(date=d, price=float(c))
+                        )
+                    except (ValueError, TypeError):
+                        pass
+            daily_price_history.sort(key=lambda x: x.date)
+
         # ── Next Earnings Date ──
         next_earnings = self._find_next_earnings_date(estimates_sorted, used_income_dates, today_str)
 
@@ -344,6 +363,7 @@ class EarningsService:
             eps_quarters=eps_quarters,
             revenue_quarters=revenue_quarters,
             price_history=price_history,
+            daily_price_history=daily_price_history,
             next_earnings_date=next_earnings,
         )
 

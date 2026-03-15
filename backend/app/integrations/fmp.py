@@ -78,6 +78,25 @@ class FMPClient:
         try:
             client = await self._get_client()
             response = await client.get(url, params=params)
+
+            # Log rate limit info when headers are present
+            remaining = response.headers.get("X-RateLimit-Remaining")
+            limit = response.headers.get("X-RateLimit-Limit")
+            if remaining is not None:
+                remaining_int = int(remaining)
+                if remaining_int <= 10:
+                    logger.warning(
+                        f"FMP rate limit low: {remaining}/{limit} remaining"
+                    )
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "unknown")
+                logger.error(
+                    f"FMP rate limit HIT on {endpoint}. "
+                    f"Retry-After: {retry_after}s. "
+                    f"Limit: {limit}"
+                )
+
             response.raise_for_status()
             return response.json()
 
@@ -270,10 +289,12 @@ class FMPClient:
                 "earning_calendar", params={"symbol": symbol}
             )
             if isinstance(data, list) and data:
-                dates = [
+                dates = sorted(set(
                     item["date"] for item in data
-                    if isinstance(item, dict) and item.get("date")
-                ]
+                    if isinstance(item, dict)
+                    and item.get("date")
+                    and item.get("symbol", "").upper() == symbol
+                ), reverse=True)
                 if dates:
                     logger.info(f"earning_calendar returned {len(dates)} dates for {symbol}")
                     return dates
@@ -286,10 +307,12 @@ class FMPClient:
                 "earnings-calendar", params={"symbol": symbol}
             )
             if isinstance(data, list):
-                dates = [
+                dates = sorted(set(
                     item["date"] for item in data
-                    if isinstance(item, dict) and item.get("date")
-                ]
+                    if isinstance(item, dict)
+                    and item.get("date")
+                    and item.get("symbol", "").upper() == symbol
+                ), reverse=True)
                 logger.info(f"earnings-calendar returned {len(dates)} dates for {symbol}")
                 return dates
         except Exception as e:
@@ -310,6 +333,15 @@ class FMPClient:
             return await self._make_request("sectors-performance")
         except Exception as e:
             logger.warning(f"Sector performance endpoint failed: {e}")
+            return []
+
+    async def get_sp500_constituents(self) -> List[Dict[str, Any]]:
+        """Get S&P 500 constituent list with symbol, name, sector, subSector."""
+        try:
+            data = await self._make_request("sp500-constituent")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"S&P 500 constituents fetch failed: {e}")
             return []
 
     async def get_stock_news(
@@ -670,11 +702,18 @@ class FMPClient:
         """Get peer stock symbols for a given ticker."""
         try:
             data = await self._make_request(
-                "stock_peers", params={"symbol": ticker.upper()}
+                "stock-peers", params={"symbol": ticker.upper()}
             )
             if isinstance(data, list) and data:
+                # Stable API returns list of {symbol, companyName, ...}
+                if isinstance(data[0], dict) and "symbol" in data[0]:
+                    return [
+                        d["symbol"]
+                        for d in data
+                        if d.get("symbol", "").upper() != ticker.upper()
+                    ]
+                # Legacy format fallback
                 peers = data[0].get("peersList", [])
-                # Filter out the ticker itself
                 return [p for p in peers if p.upper() != ticker.upper()]
             return []
         except Exception as e:

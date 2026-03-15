@@ -310,7 +310,7 @@ struct EarningsChartView: View {
         // Use the earliest and latest historical quarters whose fiscal dates
         // fall within (or close to) the daily price data range
         let priceStart = datesAndPrices.first!.0
-        let priceEnd = datesAndPrices.last!.0
+        _ = datesAndPrices.last!.0
 
         // Find first anchor: earliest historical quarter with fiscal date >= priceStart (or closest)
         let firstAnchor = historicalWithDates.first { $0.date >= priceStart } ?? historicalWithDates.first!

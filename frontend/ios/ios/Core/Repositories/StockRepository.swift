@@ -1028,18 +1028,26 @@ struct EarningsQuarterDTO: Codable {
     let actualValue: Double?
     let estimateValue: Double
     let surprisePercent: Double?
+    let fiscalDate: String?
 
     enum CodingKeys: String, CodingKey {
         case quarter
         case actualValue = "actual_value"
         case estimateValue = "estimate_value"
         case surprisePercent = "surprise_percent"
+        case fiscalDate = "fiscal_date"
     }
 }
 
 struct EarningsPricePointDTO: Codable {
     let quarter: String
     let price: Double
+    let fiscalDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case quarter, price
+        case fiscalDate = "fiscal_date"
+    }
 }
 
 struct EarningsDailyPricePointDTO: Codable {
@@ -1086,7 +1094,8 @@ struct EarningsDTO: Codable {
                 quarter: q.quarter,
                 actualValue: q.actualValue,
                 estimateValue: q.estimateValue,
-                surprisePercent: q.surprisePercent
+                surprisePercent: q.surprisePercent,
+                fiscalDate: q.fiscalDate
             )
         }
         let revenue = revenueQuarters.map { q in
@@ -1094,11 +1103,12 @@ struct EarningsDTO: Codable {
                 quarter: q.quarter,
                 actualValue: q.actualValue,
                 estimateValue: q.estimateValue,
-                surprisePercent: q.surprisePercent
+                surprisePercent: q.surprisePercent,
+                fiscalDate: q.fiscalDate
             )
         }
         let prices = priceHistory.map { p in
-            EarningsPricePoint(quarter: p.quarter, price: p.price)
+            EarningsPricePoint(quarter: p.quarter, price: p.price, fiscalDate: p.fiscalDate)
         }
         let dailyPrices = (dailyPriceHistory ?? []).map { dp in
             EarningsDailyPricePoint(date: dp.date, price: dp.price)

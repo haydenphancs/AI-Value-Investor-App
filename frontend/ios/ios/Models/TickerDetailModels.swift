@@ -1689,6 +1689,7 @@ struct EarningsQuarterData: Identifiable {
     let actualValue: Double?     // nil for future quarters
     let estimateValue: Double
     let surprisePercent: Double? // nil for future quarters
+    var fiscalDate: String? = nil // "yyyy-MM-dd" for price line positioning
 
     var result: EarningsQuarterResult {
         guard let actual = actualValue, let surprise = surprisePercent else {
@@ -1729,6 +1730,7 @@ struct EarningsPricePoint: Identifiable {
     var id = UUID()
     let quarter: String
     let price: Double
+    var fiscalDate: String? = nil
 }
 
 // MARK: - Earnings Daily Price Point (continuous price line)

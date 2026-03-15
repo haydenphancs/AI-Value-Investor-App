@@ -126,6 +126,77 @@ def _match_estimate_to_income(
     return best
 
 
+def _build_fiscal_quarter_map(income_sorted: List[dict]) -> Dict[int, str]:
+    """Analyze historical income records to build month → fiscal period mapping.
+
+    Returns e.g. {1: "Q4", 4: "Q1", 7: "Q2", 10: "Q3"} for Salesforce.
+    """
+    freq: Dict[Tuple[int, str], int] = {}
+    for rec in income_sorted:
+        period = rec.get("period", "")
+        date_str = rec.get("date", "")
+        if not period.startswith("Q") or not date_str:
+            continue
+        try:
+            month = datetime.strptime(date_str[:10], "%Y-%m-%d").month
+            freq[(month, period)] = freq.get((month, period), 0) + 1
+        except Exception:
+            continue
+
+    # For each month that appears, pick the most frequent period label
+    month_to_period: Dict[int, str] = {}
+    for (month, period), count in sorted(freq.items(), key=lambda x: -x[1]):
+        if month not in month_to_period:
+            month_to_period[month] = period
+
+    return month_to_period
+
+
+def _infer_fiscal_label(est_date: str, fiscal_month_map: Dict[int, str]) -> str:
+    """Map an estimate date to the correct fiscal quarter label using the inferred pattern."""
+    try:
+        dt = datetime.strptime(est_date[:10], "%Y-%m-%d")
+    except Exception:
+        return est_date[:10]
+
+    if not fiscal_month_map:
+        q = (dt.month - 1) // 3 + 1
+        yr = dt.strftime("%y")
+        return f"Q{q} '{yr}"
+
+    # Find closest fiscal month
+    best_month = None
+    best_diff = 999
+    for month in fiscal_month_map:
+        # Circular distance between months (1-12)
+        diff = min(abs(dt.month - month), 12 - abs(dt.month - month))
+        if diff < best_diff:
+            best_diff = diff
+            best_month = month
+
+    if best_month is None:
+        q = (dt.month - 1) // 3 + 1
+        yr = dt.strftime("%y")
+        return f"Q{q} '{yr}"
+
+    period = fiscal_month_map[best_month]
+
+    # Determine the year: the fiscal quarter end is in best_month.
+    # If est_date month is close to best_month, use the same year context.
+    # Handle year boundary: e.g., est_date is Dec and fiscal end is Jan → next year
+    if dt.month > best_month and (dt.month - best_month) > 6:
+        # est is in Dec, fiscal end is in Jan → fiscal date is next year
+        year = dt.year + 1
+    elif dt.month < best_month and (best_month - dt.month) > 6:
+        # est is in Jan, fiscal end is in Dec → fiscal date is previous year
+        year = dt.year - 1
+    else:
+        year = dt.year
+
+    yr = str(year % 100).zfill(2)
+    return f"{period} '{yr}"
+
+
 # ── Service ────────────────────────────────────────────────────────
 
 class EarningsService:
@@ -210,6 +281,8 @@ class EarningsService:
         price_history: List[EarningsPricePointSchema] = []
         used_income_dates: set = set()
 
+        fiscal_month_map = _build_fiscal_quarter_map(income_sorted)
+
         for est in estimates_sorted:
             est_date = est.get("date", "")
             est_eps = _safe_float(est, "epsAvg")
@@ -238,6 +311,7 @@ class EarningsService:
                         actual_value=actual_eps,
                         estimate_value=est_eps,
                         surprise_percent=_compute_surprise(actual_eps, est_eps),
+                        fiscal_date=fiscal_date[:10],
                     ))
                 elif actual_eps is not None:
                     eps_quarters.append(EarningsQuarterSchema(
@@ -245,6 +319,7 @@ class EarningsService:
                         actual_value=actual_eps,
                         estimate_value=actual_eps,
                         surprise_percent=0.0,
+                        fiscal_date=fiscal_date[:10],
                     ))
 
                 # Revenue
@@ -254,6 +329,7 @@ class EarningsService:
                         actual_value=actual_rev,
                         estimate_value=est_rev,
                         surprise_percent=_compute_surprise(actual_rev, est_rev),
+                        fiscal_date=fiscal_date[:10],
                     ))
                 elif actual_rev is not None:
                     revenue_quarters.append(EarningsQuarterSchema(
@@ -261,6 +337,7 @@ class EarningsService:
                         actual_value=actual_rev,
                         estimate_value=actual_rev,
                         surprise_percent=0.0,
+                        fiscal_date=fiscal_date[:10],
                     ))
 
                 # Price — always emit an entry to keep 1:1 alignment with quarters
@@ -268,17 +345,12 @@ class EarningsService:
                 price_history.append(EarningsPricePointSchema(
                     quarter=label,
                     price=close_price if close_price is not None else 0,
+                    fiscal_date=fiscal_date[:10],
                 ))
             else:
                 # Future quarter — no actuals
-                # Derive label from estimate date using calendar quarter
-                try:
-                    dt = datetime.strptime(est_date[:10], "%Y-%m-%d")
-                    q = (dt.month - 1) // 3 + 1
-                    yr = dt.strftime("%y")
-                    label = f"Q{q} '{yr}"
-                except Exception:
-                    label = est_date[:10]
+                # Derive label using fiscal quarter pattern inferred from historical data
+                label = _infer_fiscal_label(est_date, fiscal_month_map)
 
                 if est_eps is not None:
                     eps_quarters.append(EarningsQuarterSchema(
@@ -286,6 +358,7 @@ class EarningsService:
                         actual_value=None,
                         estimate_value=est_eps,
                         surprise_percent=None,
+                        fiscal_date=est_date[:10],
                     ))
                 if est_rev is not None:
                     revenue_quarters.append(EarningsQuarterSchema(
@@ -293,6 +366,7 @@ class EarningsService:
                         actual_value=None,
                         estimate_value=est_rev,
                         surprise_percent=None,
+                        fiscal_date=est_date[:10],
                     ))
 
         # Add any income quarters that didn't match estimates (older historical quarters)
@@ -311,6 +385,7 @@ class EarningsService:
                     actual_value=actual_eps,
                     estimate_value=actual_eps,
                     surprise_percent=0.0,
+                    fiscal_date=fiscal_date[:10],
                 ))
             if actual_rev is not None:
                 revenue_quarters.append(EarningsQuarterSchema(
@@ -318,23 +393,26 @@ class EarningsService:
                     actual_value=actual_rev,
                     estimate_value=actual_rev,
                     surprise_percent=0.0,
+                    fiscal_date=fiscal_date[:10],
                 ))
             close_price = _find_close_price(fiscal_date, price_lookup)
             price_history.append(EarningsPricePointSchema(
                 quarter=label,
                 price=close_price if close_price is not None else 0,
+                fiscal_date=fiscal_date[:10],
             ))
 
-        # Sort everything by the fiscal date order
-        # Re-sort by extracting year+quarter from label
-        eps_quarters.sort(key=lambda q: _label_sort_key(q.quarter))
-        revenue_quarters.sort(key=lambda q: _label_sort_key(q.quarter))
-        price_history.sort(key=lambda p: _label_sort_key(p.quarter))
+        # Sort everything by actual fiscal date (correct for all fiscal year types)
+        eps_quarters.sort(key=lambda q: q.fiscal_date or "9999-99-99")
+        revenue_quarters.sort(key=lambda q: q.fiscal_date or "9999-99-99")
+        price_history.sort(key=lambda p: p.fiscal_date or "9999-99-99")
 
         # ── Daily Price History (continuous line data) ──
         daily_price_history: List[EarningsDailyPriceSchema] = []
-        if used_income_dates and price_list:
-            sorted_dates = sorted(d[:10] for d in used_income_dates if d)
+        # Use ALL income dates (matched + unmatched) to determine the price range
+        all_income_dates = {r["date"][:10] for r in income_sorted if r.get("date")}
+        if all_income_dates and price_list:
+            sorted_dates = sorted(all_income_dates)
             range_start = sorted_dates[0]
             range_end = today_str
             for p in price_list:
@@ -391,18 +469,6 @@ class EarningsService:
                         timing="Time Not Specified",
                     )
         return None
-
-
-def _label_sort_key(label: str) -> str:
-    """Convert 'Q1 '24' → '2024-01' for sorting."""
-    try:
-        parts = label.split(" '")
-        q_num = parts[0][1:]
-        yr = int(parts[1])
-        year = yr + 2000 if yr < 50 else yr + 1900
-        return f"{year}-{int(q_num):02d}"
-    except Exception:
-        return label
 
 
 # ── Singleton ──────────────────────────────────────────────────────

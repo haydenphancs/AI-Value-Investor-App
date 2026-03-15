@@ -14,11 +14,13 @@ class EarningsQuarterSchema(BaseModel):
     actual_value: Optional[float] = None  # None for future quarters
     estimate_value: float
     surprise_percent: Optional[float] = None  # None for future quarters
+    fiscal_date: Optional[str] = None  # "yyyy-MM-dd" for sorting & iOS positioning
 
 
 class EarningsPricePointSchema(BaseModel):
     quarter: str  # e.g. "Q1 '24"
     price: float
+    fiscal_date: Optional[str] = None
 
 
 class EarningsDailyPriceSchema(BaseModel):

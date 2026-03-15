@@ -39,6 +39,9 @@ async def lifespan(app: FastAPI):
     # Start background news pre-warmer for popular watchlist tickers
     asyncio.create_task(_run_news_pre_warmer())
 
+    # Start background sector benchmark computation (daily)
+    asyncio.create_task(_run_sector_benchmark_job())
+
     yield
 
     # Graceful shutdown: close persistent HTTP clients
@@ -63,6 +66,23 @@ async def _run_news_pre_warmer():
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
+
+
+async def _run_sector_benchmark_job():
+    """Background task: recompute sector benchmarks every 24 hours."""
+    await asyncio.sleep(60)  # let app fully start
+
+    while True:
+        try:
+            from app.services.sector_benchmark_service import get_sector_benchmark_service
+
+            service = get_sector_benchmark_service()
+            result = await service.compute_all_benchmarks()
+            logger.info(f"Sector benchmark job completed: {result}")
+        except Exception as e:
+            logger.error(f"Sector benchmark job failed: {e}", exc_info=True)
+
+        await asyncio.sleep(86400)  # 24 hours
 
 
 app = FastAPI(

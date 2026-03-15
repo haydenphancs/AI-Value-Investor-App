@@ -5,6 +5,7 @@ API V1 Router — aggregates all endpoint routers.
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    admin,
     auth,
     users,
     stocks,
@@ -39,3 +40,4 @@ api_router.include_router(commodities.router, prefix="/commodities", tags=["Comm
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
 api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])
+api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])

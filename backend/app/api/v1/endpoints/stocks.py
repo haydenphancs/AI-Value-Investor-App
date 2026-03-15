@@ -26,6 +26,8 @@ from app.services.stock_overview_service import get_stock_overview_service
 from app.services.analyst_service import get_analyst_service
 from app.services.earnings_service import get_earnings_service
 from app.schemas.earnings import EarningsResponse
+from app.schemas.growth import GrowthResponse
+from app.services.growth_service import get_growth_service
 from app.services.sentiment_service import get_sentiment_service
 from app.services.technical_analysis_service import get_technical_analysis_service
 
@@ -448,6 +450,25 @@ async def get_earnings(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Earnings service unavailable for {ticker}",
+        )
+
+
+# ── Growth endpoint ──────────────────────────────────────────────
+
+@router.get("/{ticker}/growth", response_model=GrowthResponse)
+async def get_growth(ticker: str):
+    """Get growth data (EPS & Revenue YoY growth with sector comparison)."""
+    ticker = ticker.upper()
+    try:
+        service = get_growth_service()
+        return await service.get_growth(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Growth failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Growth service unavailable for {ticker}",
         )
 
 

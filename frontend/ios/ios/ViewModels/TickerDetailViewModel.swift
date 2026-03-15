@@ -146,7 +146,6 @@ class TickerDetailViewModel: ObservableObject {
             self.isLoading = false
 
             // Set sample data for tabs that don't have API data yet
-            self.growthData = GrowthSectionData.sampleData
             self.profitPowerData = ProfitPowerSectionData.sampleData
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
             self.revenueBreakdownData = RevenueBreakdownData.sampleApple
@@ -159,6 +158,7 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchAnalystAnalysis(ticker) }
                 group.addTask { await self.fetchChartEvents(ticker) }
                 group.addTask { await self.fetchEarnings(ticker) }
+                group.addTask { await self.fetchGrowth(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
 
@@ -250,6 +250,17 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Earnings failed for \(ticker): \(error)")
             self.earningsData = EarningsData.sampleData
+        }
+    }
+
+    private func fetchGrowth(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getGrowth(ticker: ticker)
+            self.growthData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got growth for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Growth failed for \(ticker): \(error)")
+            self.growthData = GrowthSectionData.sampleData
         }
     }
 

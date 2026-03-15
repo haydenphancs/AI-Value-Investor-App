@@ -37,6 +37,7 @@ protocol StockRepositoryProtocol {
     func getTechnicalAnalysisDetail(ticker: String) async throws -> TechnicalAnalysisDetailDTO
     func getChartEvents(ticker: String) async throws -> ChartEventDates
     func getEarnings(ticker: String) async throws -> EarningsDTO
+    func getGrowth(ticker: String) async throws -> GrowthResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -288,6 +289,23 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got earnings for \(ticker) — \(response.epsQuarters.count) EPS quarters")
+        return response
+    }
+
+    func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
+        let cacheKey = "growth_\(ticker)"
+
+        if let cached: GrowthResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getGrowth(ticker: ticker),
+            responseType: GrowthResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got growth for \(ticker)")
         return response
     }
 
@@ -1131,6 +1149,75 @@ struct EarningsDTO: Codable {
     }
 }
 
+// MARK: - Growth DTOs
+
+struct GrowthDataPointDTO: Codable {
+    let period: String
+    let value: Double
+    let yoyChangePercent: Double
+    let sectorAverageYoy: Double
+
+    enum CodingKeys: String, CodingKey {
+        case period
+        case value
+        case yoyChangePercent = "yoy_change_percent"
+        case sectorAverageYoy = "sector_average_yoy"
+    }
+}
+
+struct GrowthResponseDTO: Codable {
+    let symbol: String
+    let epsAnnual: [GrowthDataPointDTO]
+    let epsQuarterly: [GrowthDataPointDTO]
+    let revenueAnnual: [GrowthDataPointDTO]
+    let revenueQuarterly: [GrowthDataPointDTO]
+    let netIncomeAnnual: [GrowthDataPointDTO]
+    let netIncomeQuarterly: [GrowthDataPointDTO]
+    let operatingProfitAnnual: [GrowthDataPointDTO]
+    let operatingProfitQuarterly: [GrowthDataPointDTO]
+    let freeCashFlowAnnual: [GrowthDataPointDTO]
+    let freeCashFlowQuarterly: [GrowthDataPointDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case epsAnnual = "eps_annual"
+        case epsQuarterly = "eps_quarterly"
+        case revenueAnnual = "revenue_annual"
+        case revenueQuarterly = "revenue_quarterly"
+        case netIncomeAnnual = "net_income_annual"
+        case netIncomeQuarterly = "net_income_quarterly"
+        case operatingProfitAnnual = "operating_profit_annual"
+        case operatingProfitQuarterly = "operating_profit_quarterly"
+        case freeCashFlowAnnual = "free_cash_flow_annual"
+        case freeCashFlowQuarterly = "free_cash_flow_quarterly"
+    }
+
+    func toDisplayModel() -> GrowthSectionData {
+        func convert(_ dtos: [GrowthDataPointDTO]) -> [GrowthDataPoint] {
+            dtos.map {
+                GrowthDataPoint(
+                    period: $0.period,
+                    value: $0.value,
+                    yoyChangePercent: $0.yoyChangePercent,
+                    sectorAverageYoY: $0.sectorAverageYoy
+                )
+            }
+        }
+        return GrowthSectionData(
+            epsAnnual: convert(epsAnnual),
+            epsQuarterly: convert(epsQuarterly),
+            revenueAnnual: convert(revenueAnnual),
+            revenueQuarterly: convert(revenueQuarterly),
+            netIncomeAnnual: convert(netIncomeAnnual),
+            netIncomeQuarterly: convert(netIncomeQuarterly),
+            operatingProfitAnnual: convert(operatingProfitAnnual),
+            operatingProfitQuarterly: convert(operatingProfitQuarterly),
+            freeCashFlowAnnual: convert(freeCashFlowAnnual),
+            freeCashFlowQuarterly: convert(freeCashFlowQuarterly)
+        )
+    }
+}
+
 // MARK: - Mock Repository for Previews
 
 #if DEBUG
@@ -1263,6 +1350,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getEarnings(ticker: String) async throws -> EarningsDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
         throw URLError(.badServerResponse)
     }
 }

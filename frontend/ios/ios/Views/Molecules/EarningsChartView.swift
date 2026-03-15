@@ -274,32 +274,29 @@ struct EarningsChartView: View {
 
     // MARK: - Continuous Daily Price Line
 
+    /// Resolves the actual fiscal date for a quarter, using the backend-provided
+    /// fiscal_date when available, falling back to label-based estimation.
+    private func actualFiscalDate(for quarter: EarningsQuarterData) -> Date? {
+        if let fd = quarter.fiscalDate {
+            return _dailyPriceDateFormatter.date(from: fd)
+        }
+        return estimatedDate(from: quarter.quarter)
+    }
+
     private func dailyPriceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {
-        // Find first and last historical quarter indices
-        let historicalIndices = quarters.enumerated()
+        // Find historical quarter indices and their fiscal dates
+        let historicalWithDates: [(index: Int, date: Date)] = quarters.enumerated()
             .filter { $0.element.actualValue != nil }
-            .map { $0.offset }
+            .compactMap { (offset, element) in
+                guard let d = actualFiscalDate(for: element) else { return nil }
+                return (index: offset, date: d)
+            }
 
-        guard let firstIdx = historicalIndices.first,
-              let lastIdx = historicalIndices.last else {
+        guard historicalWithDates.count >= 2 else {
             return AnyView(EmptyView())
         }
 
-        // Anchor x-positions: center of first/last historical quarter columns
-        let xMin = CGFloat(firstIdx) * stepX + stepX / 2
-        let xHistMax = CGFloat(lastIdx) * stepX + stepX / 2
-
-        // Anchor dates: estimated from quarter labels
-        guard let firstHistDate = estimatedDate(from: quarters[firstIdx].quarter),
-              let lastHistDate = estimatedDate(from: quarters[lastIdx].quarter),
-              lastHistDate > firstHistDate else {
-            return AnyView(EmptyView())
-        }
-
-        let anchorInterval = lastHistDate.timeIntervalSince(firstHistDate)
-        let rate = (xHistMax - xMin) / CGFloat(anchorInterval)  // pixels per second
-
-        // Parse dates and pair with prices
+        // Parse daily prices
         let datesAndPrices: [(Date, Double)] = dailyPriceHistory.compactMap { dp in
             guard let d = _dailyPriceDateFormatter.date(from: dp.date) else { return nil }
             return (d, dp.price)
@@ -309,14 +306,36 @@ struct EarningsChartView: View {
             return AnyView(EmptyView())
         }
 
+        // Find the best two anchor quarters that have daily price data coverage
+        // Use the earliest and latest historical quarters whose fiscal dates
+        // fall within (or close to) the daily price data range
+        let priceStart = datesAndPrices.first!.0
+        let priceEnd = datesAndPrices.last!.0
+
+        // Find first anchor: earliest historical quarter with fiscal date >= priceStart (or closest)
+        let firstAnchor = historicalWithDates.first { $0.date >= priceStart } ?? historicalWithDates.first!
+        // Last anchor: always use the last historical quarter
+        let lastAnchor = historicalWithDates.last!
+
+        guard lastAnchor.date > firstAnchor.date else {
+            return AnyView(EmptyView())
+        }
+
+        let xFirst = CGFloat(firstAnchor.index) * stepX + stepX / 2
+        let xLast = CGFloat(lastAnchor.index) * stepX + stepX / 2
+        let anchorInterval = lastAnchor.date.timeIntervalSince(firstAnchor.date)
+        let rate = (xLast - xFirst) / CGFloat(anchorInterval)
+
         let pRange = max(maxPrice - minPrice, 0.01)
 
         return AnyView(
             Path { path in
                 var started = false
-                for (_, (date, price)) in datesAndPrices.enumerated() {
-                    // Anchor-based linear mapping — naturally extends past last historical quarter
-                    let x = xMin + rate * CGFloat(date.timeIntervalSince(firstHistDate))
+                for (date, price) in datesAndPrices {
+                    let x = xFirst + rate * CGFloat(date.timeIntervalSince(firstAnchor.date))
+
+                    // Skip points that fall before the chart area
+                    guard x >= 0 else { continue }
 
                     let normalizedPrice = (price - minPrice) / pRange
                     let y = height - (CGFloat(normalizedPrice) * height * 0.85 + height * 0.075)

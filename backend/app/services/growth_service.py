@@ -58,12 +58,15 @@ def _compute_yoy(current: Optional[float], previous: Optional[float]) -> float:
 
 
 def _extract_year(record: Dict[str, Any]) -> str:
-    """Extract calendar year from the date field (e.g., '2024' from '2024-09-28').
+    """Extract calendar year from the record.
 
-    For quarterly records, uses the fiscal date to determine the calendar year.
-    For Apple-like fiscal years (FY ending Sep), Q1 ending Dec belongs to the
-    calendar year of the date field.
+    Prefers FMP's ``calendarYear`` field which correctly maps fiscal quarters
+    to their reporting calendar year (e.g., Apple's fiscal Q1 ending Dec 2020
+    is reported as calendar year 2021).  Falls back to the date field.
     """
+    cal_year = record.get("calendarYear")
+    if cal_year:
+        return str(cal_year)
     date_str = record.get("date", "")
     if len(date_str) >= 4:
         return date_str[:4]
@@ -183,8 +186,8 @@ class GrowthService:
         # Phase 1: parallel fetch — profile + annual + quarterly income (3 FMP calls)
         profile, annual_income, quarterly_income = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
-            self.fmp.get_income_statement(ticker, period="annual", limit=6),
-            self.fmp.get_income_statement(ticker, period="quarter", limit=24),
+            self.fmp.get_income_statement(ticker, period="annual", limit=16),
+            self.fmp.get_income_statement(ticker, period="quarter", limit=80),
             return_exceptions=True,
         )
 
@@ -211,6 +214,7 @@ class GrowthService:
         # Phase 4: look up pre-computed sector benchmarks (fast DB lookup, cached)
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
+        benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
             benchmarks_annual = lookup.get_sector_benchmarks(
@@ -219,18 +223,27 @@ class GrowthService:
             benchmarks_quarterly = lookup.get_sector_benchmarks(
                 sector, ["eps_yoy", "revenue_yoy"], "quarterly"
             )
+            benchmarks_qoq_quarterly = lookup.get_sector_benchmarks(
+                sector, ["eps_qoq", "revenue_qoq"], "quarterly"
+            )
 
         # Phase 5: assemble response with sector averages matched by period label
         def _to_schemas(
-            points: List[Dict], metric_name: str, benchmarks: Dict[str, Dict[str, float]]
+            points: List[Dict],
+            metric_name: str,
+            benchmarks: Dict[str, Dict[str, float]],
+            qoq_metric_name: str = "",
+            qoq_benchmarks: Optional[Dict[str, Dict[str, float]]] = None,
         ) -> List[GrowthDataPointSchema]:
             metric_benchmarks = benchmarks.get(metric_name, {})
+            qoq_metric_benchmarks = (qoq_benchmarks or {}).get(qoq_metric_name, {})
             return [
                 GrowthDataPointSchema(
                     period=p["period"],
                     value=p["value"],
                     yoy_change_percent=p["yoy_change_percent"],
                     sector_average_yoy=metric_benchmarks.get(p["period"], 0.0),
+                    sector_average_qoq=qoq_metric_benchmarks.get(p["period"], 0.0),
                 )
                 for p in points
             ]
@@ -238,9 +251,15 @@ class GrowthService:
         return GrowthResponse(
             symbol=ticker,
             eps_annual=_to_schemas(eps_annual_points, "eps_yoy", benchmarks_annual),
-            eps_quarterly=_to_schemas(eps_quarterly_points, "eps_yoy", benchmarks_quarterly),
+            eps_quarterly=_to_schemas(
+                eps_quarterly_points, "eps_yoy", benchmarks_quarterly,
+                "eps_qoq", benchmarks_qoq_quarterly,
+            ),
             revenue_annual=_to_schemas(rev_annual_points, "revenue_yoy", benchmarks_annual),
-            revenue_quarterly=_to_schemas(rev_quarterly_points, "revenue_yoy", benchmarks_quarterly),
+            revenue_quarterly=_to_schemas(
+                rev_quarterly_points, "revenue_yoy", benchmarks_quarterly,
+                "revenue_qoq", benchmarks_qoq_quarterly,
+            ),
         )
 
 

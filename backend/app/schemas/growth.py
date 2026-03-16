@@ -11,7 +11,8 @@ class GrowthDataPointSchema(BaseModel):
     period: str               # "2021" or "Q1'21"
     value: float              # absolute value (eps or revenue)
     yoy_change_percent: float  # Year-over-Year growth %
-    sector_average_yoy: float  # sector peers' avg YoY %
+    sector_average_yoy: float  # sector peers' median YoY %
+    sector_average_qoq: float = 0.0  # sector peers' median QoQ % (quarterly only)
 
 
 class GrowthResponse(BaseModel):

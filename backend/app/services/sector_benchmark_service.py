@@ -23,10 +23,16 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10           # concurrent FMP calls per batch of companies
 BATCH_DELAY_SECONDS = 1.0 # delay between batches to avoid rate limits
-FMP_ANNUAL_LIMIT = 6      # 6 annual records → 5 YoY data points
-FMP_QUARTERLY_LIMIT = 24  # ~6 years of quarterly data
 MIN_SAMPLE_SIZE = 3       # minimum companies needed to compute a median
 UPSERT_BATCH_SIZE = 100   # rows per Supabase upsert call
+
+# Backfill limits (one-time deep historical computation)
+FMP_ANNUAL_LIMIT_BACKFILL = 16      # 16 records → 15 YoY data points (15 years)
+FMP_QUARTERLY_LIMIT_BACKFILL = 80   # deep quarterly history (FMP may return fewer)
+
+# Daily limits (only refresh recent/current periods)
+FMP_ANNUAL_LIMIT_DAILY = 3          # 3 records → 2 YoY points (current + prior year)
+FMP_QUARTERLY_LIMIT_DAILY = 12      # ~3 years of quarters (covers recent YoY + QoQ)
 
 # FMP sector names → canonical app sector names
 _FMP_SECTOR_MAP: Dict[str, str] = {
@@ -75,6 +81,9 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "gross_profit_yoy",     "source": "income",   "field": "grossProfit",            "type": "yoy"},
     # YoY growth from cash flow
     {"name": "fcf_yoy",             "source": "cashflow",  "field": "freeCashFlow",           "type": "yoy"},
+    # QoQ growth metrics (sequential quarter comparison, quarterly only)
+    {"name": "eps_qoq",             "source": "income",    "field": "epsDiluted",             "type": "qoq"},
+    {"name": "revenue_qoq",         "source": "income",    "field": "revenue",                "type": "qoq"},
     # Profit Power (direct ratio values)
     {"name": "gross_margin",        "source": "ratios",    "field": "grossProfitMargin",      "type": "direct"},
     {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct"},
@@ -189,6 +198,33 @@ def _compute_yoy_for_records(
     return result
 
 
+def _compute_qoq_for_records(
+    records: List[Dict[str, Any]],
+    field: str,
+) -> Dict[str, float]:
+    """
+    Compute sequential Quarter-over-Quarter growth % for each period.
+    Compares each quarter to the immediately preceding quarter (Q2 vs Q1, Q3 vs Q2, etc.).
+    Returns {period_label: qoq_percent}.
+    """
+    if not records:
+        return {}
+
+    sorted_recs = sorted(records, key=lambda r: r.get("date", ""))
+    result: Dict[str, float] = {}
+
+    for i in range(1, len(sorted_recs)):
+        current_val = _safe_float(sorted_recs[i], field)
+        prev_val = _safe_float(sorted_recs[i - 1], field)
+        if current_val is not None and prev_val is not None and prev_val != 0:
+            qoq = round((current_val - prev_val) / abs(prev_val) * 100, 2)
+            label = _quarterly_period_label(sorted_recs[i])
+            if label:
+                result[label] = qoq
+
+    return result
+
+
 def _normalize_sector(raw_sector: str) -> str:
     """Map FMP sector name to canonical app sector name."""
     return _FMP_SECTOR_MAP.get(raw_sector, raw_sector)
@@ -230,13 +266,49 @@ class SectorBenchmarkService:
             logger.warning(f"Could not check benchmark freshness: {e}")
             return False
 
-    async def compute_all_benchmarks(self, force: bool = False) -> Dict[str, Any]:
-        """Main entry: fetch constituents, group by sector, compute medians, upsert."""
+    def _has_historical_data(self) -> bool:
+        """Check if deep historical backfill has already been performed."""
+        try:
+            response = (
+                self.supabase.table("sector_benchmarks")
+                .select("id")
+                .eq("period_type", "annual")
+                .eq("period_label", "2015")
+                .limit(1)
+                .execute()
+            )
+            return bool(response.data)
+        except Exception:
+            return False
+
+    async def compute_all_benchmarks(self, force: bool = False, backfill: bool = False) -> Dict[str, Any]:
+        """Main entry: fetch constituents, group by sector, compute medians, upsert.
+
+        Args:
+            force: Skip freshness check and recompute.
+            backfill: Use deep historical limits (16 annual, 80 quarterly).
+                      If False, auto-detects: first run does backfill, subsequent
+                      runs use small daily limits (3 annual, 12 quarterly).
+        """
         if not force and self._benchmarks_are_fresh():
             return {"rows_upserted": 0, "skipped": True, "reason": "benchmarks are fresh"}
 
+        # Determine FMP fetch limits
+        if backfill:
+            annual_limit = FMP_ANNUAL_LIMIT_BACKFILL
+            quarterly_limit = FMP_QUARTERLY_LIMIT_BACKFILL
+            mode = "backfill (forced)"
+        elif not self._has_historical_data():
+            annual_limit = FMP_ANNUAL_LIMIT_BACKFILL
+            quarterly_limit = FMP_QUARTERLY_LIMIT_BACKFILL
+            mode = "backfill (initial — no historical data found)"
+        else:
+            annual_limit = FMP_ANNUAL_LIMIT_DAILY
+            quarterly_limit = FMP_QUARTERLY_LIMIT_DAILY
+            mode = "daily (refreshing recent periods only)"
+
         start = time.time()
-        logger.info("Starting sector benchmark computation...")
+        logger.info(f"Starting sector benchmark computation — mode: {mode}")
 
         # Step 1: get S&P 500 constituents grouped by sector
         sector_tickers = await self._get_sector_tickers()
@@ -250,15 +322,15 @@ class SectorBenchmarkService:
         for sector, tickers in sector_tickers.items():
             try:
                 logger.info(f"Computing benchmarks for {sector} sector ({len(tickers)} companies)...")
-                count = await self._compute_sector(sector, tickers)
+                count = await self._compute_sector(sector, tickers, annual_limit, quarterly_limit)
                 total_upserted += count
                 logger.info(f"  {sector}: {count} benchmark rows upserted")
             except Exception as e:
                 logger.error(f"  {sector} sector failed: {e}", exc_info=True)
 
         elapsed = time.time() - start
-        logger.info(f"Sector benchmarks complete: {total_upserted} rows in {elapsed:.1f}s")
-        return {"rows_upserted": total_upserted, "elapsed_seconds": round(elapsed, 1)}
+        logger.info(f"Sector benchmarks complete: {total_upserted} rows in {elapsed:.1f}s (mode: {mode})")
+        return {"rows_upserted": total_upserted, "elapsed_seconds": round(elapsed, 1), "mode": mode}
 
     async def _get_sector_tickers(self) -> Dict[str, List[str]]:
         """Fetch S&P 500 constituents and group by canonical sector name."""
@@ -283,13 +355,13 @@ class SectorBenchmarkService:
 
         return sector_map
 
-    async def _compute_sector(self, sector: str, tickers: List[str]) -> int:
+    async def _compute_sector(self, sector: str, tickers: List[str], annual_limit: int, quarterly_limit: int) -> int:
         """Fetch financial data for all tickers in a sector, compute medians, upsert."""
         all_company_data: List[Dict[str, List]] = []
 
         for batch_start in range(0, len(tickers), BATCH_SIZE):
             batch = tickers[batch_start:batch_start + BATCH_SIZE]
-            tasks = [self._fetch_company_data(ticker) for ticker in batch]
+            tasks = [self._fetch_company_data(ticker, annual_limit, quarterly_limit) for ticker in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for i, result in enumerate(results):
@@ -344,15 +416,15 @@ class SectorBenchmarkService:
 
         return upserted
 
-    async def _fetch_company_data(self, ticker: str) -> Dict[str, List]:
+    async def _fetch_company_data(self, ticker: str, annual_limit: int, quarterly_limit: int) -> Dict[str, List]:
         """Fetch income, cash flow, and ratios for one company (annual + quarterly)."""
         results = await asyncio.gather(
-            self.fmp.get_income_statement(ticker, period="annual", limit=FMP_ANNUAL_LIMIT),
-            self.fmp.get_income_statement(ticker, period="quarter", limit=FMP_QUARTERLY_LIMIT),
-            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=FMP_ANNUAL_LIMIT),
-            self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=FMP_QUARTERLY_LIMIT),
-            self.fmp.get_financial_ratios(ticker, period="annual", limit=FMP_ANNUAL_LIMIT),
-            self.fmp.get_financial_ratios(ticker, period="quarter", limit=FMP_QUARTERLY_LIMIT),
+            self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit),
+            self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit),
+            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=annual_limit),
+            self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=quarterly_limit),
+            self.fmp.get_financial_ratios(ticker, period="annual", limit=annual_limit),
+            self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit),
             return_exceptions=True,
         )
 
@@ -380,10 +452,14 @@ class SectorBenchmarkService:
         """
         source = metric_config["source"]   # "income", "cashflow", "ratios"
         field = metric_config["field"]
-        metric_type = metric_config["type"]  # "yoy" or "direct"
+        metric_type = metric_config["type"]  # "yoy", "qoq", or "direct"
         is_quarterly = period_type == "quarterly"
-        data_key = f"{source}_{period_type}"
 
+        # QoQ metrics only make sense for quarterly data
+        if metric_type == "qoq" and not is_quarterly:
+            return {}
+
+        data_key = f"{source}_{period_type}"
         period_values: Dict[str, List[float]] = {}
 
         for company_data in all_company_data:
@@ -396,6 +472,11 @@ class SectorBenchmarkService:
                 yoy_points = _compute_yoy_for_records(records, field, is_quarterly)
                 for label, yoy_val in yoy_points.items():
                     period_values.setdefault(label, []).append(yoy_val)
+            elif metric_type == "qoq":
+                # Compute per-company QoQ (sequential quarter), then collect
+                qoq_points = _compute_qoq_for_records(records, field)
+                for label, qoq_val in qoq_points.items():
+                    period_values.setdefault(label, []).append(qoq_val)
             else:
                 # Direct value extraction
                 for rec in records:

@@ -56,7 +56,9 @@ struct CostItem: Identifiable {
 
     func percentage(of total: Double) -> Double {
         guard total > 0 else { return 0 }
-        return (abs(value) / total) * 100
+        let pct = (abs(value) / total) * 100
+        // Cap at 999% to prevent display overflow in edge cases
+        return min(pct, 999)
     }
 
     var formattedValue: String {
@@ -64,7 +66,11 @@ struct CostItem: Identifiable {
     }
 
     func formattedPercentage(of total: Double) -> String {
-        String(format: "%.0f%%", percentage(of: total))
+        let pct = percentage(of: total)
+        if pct >= 100 {
+            return String(format: "%.0f%%", pct)
+        }
+        return String(format: "%.0f%%", pct)
     }
 
     private func formatLargeNumber(_ number: Double) -> String {
@@ -85,6 +91,7 @@ struct CostItem: Identifiable {
 // MARK: - Revenue Breakdown Data
 struct RevenueBreakdownData {
     let tickerSymbol: String
+    let fiscalYear: String  // e.g. "2024" — which fiscal year this data represents
     let revenueSources: [RevenueSource]
     let costOfSales: Double
     let operatingExpense: Double
@@ -146,7 +153,8 @@ struct RevenueBreakdownData {
 
     func netProfitPercentage() -> Double {
         guard totalRevenue > 0 else { return 0 }
-        return (abs(netProfit) / totalRevenue) * 100
+        let pct = (abs(netProfit) / totalRevenue) * 100
+        return min(pct, 999) // Cap to prevent display overflow
     }
 
     // MARK: - Chart Calculations
@@ -213,6 +221,7 @@ extension RevenueBreakdownData {
     // Apple - Profitable company
     static let sampleApple = RevenueBreakdownData(
         tickerSymbol: "AAPL",
+        fiscalYear: "2024",
         revenueSources: [
             RevenueSource(name: "iPhone", value: 205_500_000_000, color: RevenueSource.iPhoneColor),
             RevenueSource(name: "Services", value: 73_100_000_000, color: RevenueSource.servicesColor),
@@ -228,6 +237,7 @@ extension RevenueBreakdownData {
     // Example of a company with net loss
     static let sampleLossCompany = RevenueBreakdownData(
         tickerSymbol: "RIVN",
+        fiscalYear: "2024",
         revenueSources: [
             RevenueSource(name: "Vehicles", value: 4_400_000_000, color: RevenueSource.iPhoneColor),
             RevenueSource(name: "Services", value: 300_000_000, color: RevenueSource.servicesColor),
@@ -241,6 +251,7 @@ extension RevenueBreakdownData {
     // Microsoft
     static let sampleMicrosoft = RevenueBreakdownData(
         tickerSymbol: "MSFT",
+        fiscalYear: "2024",
         revenueSources: [
             RevenueSource(name: "Cloud", value: 110_000_000_000, color: RevenueSource.iPhoneColor),
             RevenueSource(name: "Office", value: 48_000_000_000, color: RevenueSource.servicesColor),

@@ -38,6 +38,7 @@ protocol StockRepositoryProtocol {
     func getChartEvents(ticker: String) async throws -> ChartEventDates
     func getEarnings(ticker: String) async throws -> EarningsDTO
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO
+    func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO
 }
 
 // MARK: - Stock Repository
@@ -306,6 +307,25 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got growth for \(ticker)")
+        return response
+    }
+
+    // MARK: - Revenue Breakdown
+
+    func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO {
+        let cacheKey = "revenue_breakdown_\(ticker)"
+
+        if let cached: RevenueBreakdownDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getRevenueBreakdown(ticker: ticker),
+            responseType: RevenueBreakdownDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got revenue breakdown for \(ticker)")
         return response
     }
 
@@ -1218,6 +1238,63 @@ struct GrowthResponseDTO: Codable {
     }
 }
 
+// MARK: - Revenue Breakdown DTOs
+
+struct RevenueSourceDTO: Codable {
+    let name: String
+    let value: Double
+}
+
+struct RevenueBreakdownDTO: Codable {
+    let symbol: String
+    let fiscalYear: String
+    let revenueSources: [RevenueSourceDTO]
+    let costOfSales: Double
+    let operatingExpense: Double
+    let tax: Double
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case fiscalYear = "fiscal_year"
+        case revenueSources = "revenue_sources"
+        case costOfSales = "cost_of_sales"
+        case operatingExpense = "operating_expense"
+        case tax
+    }
+
+    func toDisplayModel() -> RevenueBreakdownData {
+        // Assign colors from a rotating palette — largest segments get the most prominent colors
+        let colorPalette: [Color] = [
+            Color(hex: "3B82F6"),  // Blue
+            Color(hex: "A855F7"),  // Purple
+            Color(hex: "F97316"),  // Orange
+            Color(hex: "06B6D4"),  // Cyan
+            Color(hex: "22C55E"),  // Green
+            Color(hex: "9CA3AF"),  // Gray (always last — used for "Other")
+        ]
+
+        let sources = revenueSources.enumerated().map { index, source in
+            // If segment is "Other", always use gray; otherwise use palette
+            let color: Color
+            if source.name == "Other" {
+                color = Color(hex: "9CA3AF")
+            } else {
+                color = colorPalette[index % colorPalette.count]
+            }
+            return RevenueSource(name: source.name, value: source.value, color: color)
+        }
+
+        return RevenueBreakdownData(
+            tickerSymbol: symbol,
+            fiscalYear: fiscalYear,
+            revenueSources: sources,
+            costOfSales: costOfSales,
+            operatingExpense: operatingExpense,
+            tax: tax
+        )
+    }
+}
+
 // MARK: - Mock Repository for Previews
 
 #if DEBUG
@@ -1354,6 +1431,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO {
         throw URLError(.badServerResponse)
     }
 }

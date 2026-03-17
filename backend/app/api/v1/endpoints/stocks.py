@@ -30,6 +30,8 @@ from app.schemas.growth import GrowthResponse
 from app.services.growth_service import get_growth_service
 from app.services.sentiment_service import get_sentiment_service
 from app.services.technical_analysis_service import get_technical_analysis_service
+from app.schemas.revenue_breakdown import RevenueBreakdownResponse
+from app.services.revenue_breakdown_service import get_revenue_breakdown_service
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +471,31 @@ async def get_growth(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Growth service unavailable for {ticker}",
+        )
+
+
+# ── Revenue breakdown endpoint ───────────────────────────────────
+
+@router.get("/{ticker}/revenue-breakdown", response_model=RevenueBreakdownResponse)
+async def get_revenue_breakdown(ticker: str):
+    """
+    Get revenue breakdown showing how the company makes money.
+
+    Returns product-segment revenue sources plus cost of sales,
+    operating expenses, and tax — the iOS "How [TICKER] Makes Money" section.
+    """
+    try:
+        service = get_revenue_breakdown_service()
+        return await service.get_revenue_breakdown(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Revenue breakdown failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Revenue breakdown service unavailable for {ticker}",
         )
 
 

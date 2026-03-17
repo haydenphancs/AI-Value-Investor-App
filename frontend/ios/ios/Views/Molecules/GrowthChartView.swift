@@ -80,9 +80,9 @@ struct GrowthChartView: View {
             VStack(spacing: 0) {
                 barYAxisLabels
 
-                // Spacer matching x-axis labels + YoY labels rows
+                // Spacer matching x-axis labels + value/YoY/sector label rows
                 Spacer()
-                    .frame(height: 20 + AppSpacing.md + 20 + AppSpacing.sm)
+                    .frame(height: 20 + AppSpacing.md + (20 + AppSpacing.sm) * 3)
             }
             .frame(width: yAxisWidth)
 
@@ -102,7 +102,13 @@ struct GrowthChartView: View {
                         xAxisLabels
                             .padding(.top, AppSpacing.md)
 
+                        valueLabels
+                            .padding(.top, AppSpacing.sm)
+
                         yoyPercentageLabels
+                            .padding(.top, AppSpacing.sm)
+
+                        sectorAverageLabels
                             .padding(.top, AppSpacing.sm)
                     }
                     .frame(width: contentWidth)
@@ -110,7 +116,7 @@ struct GrowthChartView: View {
                 }
                 .defaultScrollAnchor(.trailing)
             }
-            .frame(height: chartHeight + 20 + AppSpacing.md + 20 + AppSpacing.sm + (dataPoints.count > Int(visibleColumnCount) ? AppSpacing.md : 0))
+            .frame(height: chartHeight + 20 + AppSpacing.md + (20 + AppSpacing.sm) * 3 + (dataPoints.count > Int(visibleColumnCount) ? AppSpacing.md : 0))
         }
     }
 
@@ -268,6 +274,54 @@ struct GrowthChartView: View {
         .frame(height: 20)
     }
     
+    // MARK: - Value Labels (blue)
+
+    private var valueLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
+
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                if shouldShowLabel(for: dataPoint) {
+                    Text(formatLargeNumber(dataPoint.value))
+                        .font(.system(size: labelFontSize, weight: .semibold))
+                        .foregroundColor(AppColors.growthBarBlue)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .position(
+                            x: columnWidth * CGFloat(index) + columnWidth / 2,
+                            y: 10
+                        )
+                }
+            }
+        }
+        .frame(height: 20)
+    }
+
+    // MARK: - Sector Average Labels (gray)
+
+    private var sectorAverageLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
+
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                if shouldShowLabel(for: dataPoint) {
+                    Text(String(format: "%.1f%%", dataPoint.sectorAverageYoY))
+                        .font(.system(size: labelFontSize, weight: .regular))
+                        .foregroundColor(AppColors.growthSectorGray)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .position(
+                            x: columnWidth * CGFloat(index) + columnWidth / 2,
+                            y: 10
+                        )
+                }
+            }
+        }
+        .frame(height: 20)
+    }
+
     // MARK: - Helper Functions - Label Display
     
     private func shouldShowLabel(for dataPoint: GrowthDataPoint) -> Bool {

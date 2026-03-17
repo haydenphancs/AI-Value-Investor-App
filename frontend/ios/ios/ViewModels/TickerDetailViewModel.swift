@@ -148,7 +148,6 @@ class TickerDetailViewModel: ObservableObject {
             // Set sample data for tabs that don't have API data yet
             self.profitPowerData = ProfitPowerSectionData.sampleData
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
-            self.revenueBreakdownData = RevenueBreakdownData.sampleApple
             self.healthCheckData = HealthCheckSectionData.sampleData
             self.holdersData = HoldersData.sampleData
 
@@ -159,6 +158,7 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchChartEvents(ticker) }
                 group.addTask { await self.fetchEarnings(ticker) }
                 group.addTask { await self.fetchGrowth(ticker) }
+                group.addTask { await self.fetchRevenueBreakdown(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
 
@@ -261,6 +261,17 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Growth failed for \(ticker): \(error)")
             self.growthData = GrowthSectionData.sampleData
+        }
+    }
+
+    private func fetchRevenueBreakdown(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getRevenueBreakdown(ticker: ticker)
+            self.revenueBreakdownData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got revenue breakdown for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Revenue breakdown failed for \(ticker): \(error)")
+            // No sample fallback — section just won't show if nil
         }
     }
 
@@ -1054,6 +1065,30 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     var aiSuggestions: [TickerAISuggestion] {
-        TickerAISuggestion.defaultSuggestions
+        switch selectedTab {
+        case .financials:
+            return [
+                TickerAISuggestion(text: "Break down the revenue"),
+                TickerAISuggestion(text: "Is margin improving?"),
+                TickerAISuggestion(text: "How healthy is the balance sheet?"),
+                TickerAISuggestion(text: "Is revenue growing?")
+            ]
+        case .analysis:
+            return [
+                TickerAISuggestion(text: "What do analysts say?"),
+                TickerAISuggestion(text: "What's the price target?"),
+                TickerAISuggestion(text: "Any recent upgrades?"),
+                TickerAISuggestion(text: "Technical outlook?")
+            ]
+        case .news:
+            return [
+                TickerAISuggestion(text: "Summarize recent news"),
+                TickerAISuggestion(text: "Any catalysts ahead?"),
+                TickerAISuggestion(text: "What's the sentiment?"),
+                TickerAISuggestion(text: "Key risks?")
+            ]
+        default:
+            return TickerAISuggestion.defaultSuggestions
+        }
     }
 }

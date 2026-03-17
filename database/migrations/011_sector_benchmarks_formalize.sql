@@ -18,6 +18,19 @@ CREATE TABLE IF NOT EXISTS public.sector_benchmarks (
 CREATE INDEX IF NOT EXISTS idx_sector_benchmarks_lookup
     ON public.sector_benchmarks (sector, period_type, metric_name);
 
+-- Row Level Security
+ALTER TABLE public.sector_benchmarks ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read access"
+    ON public.sector_benchmarks FOR SELECT
+    USING (true);
+
+CREATE POLICY "Allow service_role full access"
+    ON public.sector_benchmarks FOR ALL
+    TO service_role
+    USING (true)
+    WITH CHECK (true);
+
 -- Grants (match pattern from 010_ticker_news_cache_grants.sql)
 GRANT ALL ON TABLE public.sector_benchmarks TO service_role;
 GRANT SELECT ON TABLE public.sector_benchmarks TO anon;

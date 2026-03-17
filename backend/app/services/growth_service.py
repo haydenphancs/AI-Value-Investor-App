@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.integrations.fmp import get_fmp_client
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +51,10 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return None
 
 
-def _compute_yoy(current: Optional[float], previous: Optional[float]) -> float:
-    """Compute YoY growth %. Returns 0.0 on division by zero or missing data."""
+def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    """Compute YoY growth %. Returns None on division by zero or missing data."""
     if current is None or previous is None or previous == 0:
-        return 0.0
+        return None
     return round((current - previous) / abs(previous) * 100, 2)
 
 
@@ -142,10 +143,19 @@ def _compute_growth_points(
                 "quarter": period,
             })
     else:
-        # Annual: compare consecutive years
+        # Annual: compare consecutive years (only if exactly 1 year apart)
         for i in range(1, len(sorted_recs)):
             rec = sorted_recs[i]
             prev_rec = sorted_recs[i - 1]
+
+            # Validate year gap is exactly 1 to avoid multi-year growth mislabeled as YoY
+            try:
+                cur_year = int(_extract_year(rec))
+                prev_year = int(_extract_year(prev_rec))
+                if cur_year - prev_year != 1:
+                    continue
+            except (ValueError, TypeError):
+                continue
 
             current_val = _safe_float(rec, metric_key)
             prev_val = _safe_float(prev_rec, metric_key)
@@ -202,8 +212,9 @@ class GrowthService:
             logger.error(f"Quarterly income fetch failed for {ticker}: {quarterly_income}")
             quarterly_income = []
 
-        # Phase 2: get sector from profile
-        sector = profile.get("sector", "") if isinstance(profile, dict) else ""
+        # Phase 2: get sector from profile (normalize to canonical name for benchmark lookup)
+        raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
+        sector = _normalize_sector(raw_sector)
 
         # Phase 3: compute target ticker's YoY growth
         eps_annual_points = _compute_growth_points(annual_income, "epsDiluted", is_quarterly=False)
@@ -242,8 +253,8 @@ class GrowthService:
                     period=p["period"],
                     value=p["value"],
                     yoy_change_percent=p["yoy_change_percent"],
-                    sector_average_yoy=metric_benchmarks.get(p["period"], 0.0),
-                    sector_average_qoq=qoq_metric_benchmarks.get(p["period"], 0.0),
+                    sector_average_yoy=metric_benchmarks.get(p["period"]),
+                    sector_average_qoq=qoq_metric_benchmarks.get(p["period"]),
                 )
                 for p in points
             ]

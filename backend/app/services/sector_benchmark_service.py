@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10           # concurrent FMP calls per batch of companies
 BATCH_DELAY_SECONDS = 1.0 # delay between batches to avoid rate limits
-MIN_SAMPLE_SIZE = 3       # minimum companies needed to compute a median
+MIN_SAMPLE_SIZE = 5       # minimum companies needed to compute a reliable median
 UPSERT_BATCH_SIZE = 100   # rows per Supabase upsert call
+WINSORIZE_FLOOR = -500.0  # cap extreme negative YoY/QoQ values (%)
+WINSORIZE_CEIL = 500.0    # cap extreme positive YoY/QoQ values (%)
 
 # Backfill limits (one-time deep historical computation)
 FMP_ANNUAL_LIMIT_BACKFILL = 16      # 16 records → 15 YoY data points (15 years)
@@ -119,7 +121,15 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _extract_year(record: Dict[str, Any]) -> str:
-    """Extract calendar year from the date field (e.g., '2024' from '2024-09-28')."""
+    """Extract calendar year from the record.
+
+    Prefers FMP's ``calendarYear`` field which correctly maps fiscal quarters
+    to their reporting calendar year (e.g., Apple's fiscal Q1 ending Dec 2020
+    is reported as calendar year 2021).  Falls back to the date field.
+    """
+    cal_year = record.get("calendarYear")
+    if cal_year:
+        return str(cal_year)
     date_str = record.get("date", "")
     if len(date_str) >= 4:
         return date_str[:4]
@@ -183,10 +193,18 @@ def _compute_yoy_for_records(
                 if label:
                     result[label] = yoy
     else:
-        # Annual: compare consecutive sorted records
+        # Annual: compare consecutive sorted records (only if exactly 1 year apart)
         for i in range(1, len(sorted_recs)):
             rec = sorted_recs[i]
             prev_rec = sorted_recs[i - 1]
+            # Validate year gap is exactly 1
+            try:
+                cur_year = int(_extract_year(rec))
+                prv_year = int(_extract_year(prev_rec))
+                if cur_year - prv_year != 1:
+                    continue
+            except (ValueError, TypeError):
+                continue
             current_val = _safe_float(rec, field)
             prev_val = _safe_float(prev_rec, field)
             if current_val is not None and prev_val is not None and prev_val != 0:
@@ -223,6 +241,11 @@ def _compute_qoq_for_records(
                 result[label] = qoq
 
     return result
+
+
+def _winsorize(values: List[float], floor: float = WINSORIZE_FLOOR, ceil: float = WINSORIZE_CEIL) -> List[float]:
+    """Cap extreme values to prevent outliers from distorting the median."""
+    return [max(floor, min(ceil, v)) for v in values]
 
 
 def _normalize_sector(raw_sector: str) -> str:
@@ -388,16 +411,19 @@ class SectorBenchmarkService:
                 period_values = self._collect_metric_values(
                     all_company_data, metric_config, period_type
                 )
+                metric_type = metric_config["type"]
                 for period_label, values in period_values.items():
                     if len(values) < MIN_SAMPLE_SIZE:
                         continue
+                    # Winsorize growth percentages to cap extreme outliers
+                    cleaned = _winsorize(values) if metric_type in ("yoy", "qoq") else values
                     rows_to_upsert.append({
                         "sector": sector,
                         "metric_name": metric_config["name"],
                         "period_type": period_type,
                         "period_label": period_label,
-                        "median_value": round(statistics.median(values), 4),
-                        "sample_size": len(values),
+                        "median_value": round(statistics.median(cleaned), 4),
+                        "sample_size": len(cleaned),
                         "computed_at": now,
                     })
 

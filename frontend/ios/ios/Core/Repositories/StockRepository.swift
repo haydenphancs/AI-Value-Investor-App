@@ -1154,8 +1154,8 @@ struct EarningsDTO: Codable {
 struct GrowthDataPointDTO: Codable {
     let period: String
     let value: Double
-    let yoyChangePercent: Double
-    let sectorAverageYoy: Double
+    let yoyChangePercent: Double?
+    let sectorAverageYoy: Double?
 
     enum CodingKeys: String, CodingKey {
         case period
@@ -1198,8 +1198,8 @@ struct GrowthResponseDTO: Codable {
                 GrowthDataPoint(
                     period: $0.period,
                     value: $0.value,
-                    yoyChangePercent: $0.yoyChangePercent,
-                    sectorAverageYoY: $0.sectorAverageYoy
+                    yoyChangePercent: $0.yoyChangePercent ?? 0.0,
+                    sectorAverageYoY: $0.sectorAverageYoy ?? 0.0
                 )
             }
         }

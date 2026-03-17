@@ -27,6 +27,7 @@ MIN_SAMPLE_SIZE = 5       # minimum companies needed to compute a reliable media
 UPSERT_BATCH_SIZE = 100   # rows per Supabase upsert call
 WINSORIZE_FLOOR = -500.0  # cap extreme negative YoY/QoQ values (%)
 WINSORIZE_CEIL = 500.0    # cap extreme positive YoY/QoQ values (%)
+FMP_SEMAPHORE_LIMIT = 10  # max concurrent FMP API calls across all sectors
 
 # Backfill limits (one-time deep historical computation)
 FMP_ANNUAL_LIMIT_BACKFILL = 16      # 16 records → 15 YoY data points (15 years)
@@ -72,6 +73,9 @@ _FALLBACK_SECTOR_TICKERS: Dict[str, List[str]] = {
     "Utilities": ["NEE", "DUK", "SO", "D", "AEP"],
     "Basic Materials": ["LIN", "APD", "SHW", "ECL", "NEM"],
 }
+
+# The 11 canonical sectors (derived from fallback keys)
+CANONICAL_SECTORS: frozenset = frozenset(_FALLBACK_SECTOR_TICKERS.keys())
 
 # All metrics to compute
 METRIC_CONFIGS: List[Dict[str, str]] = [
@@ -259,6 +263,12 @@ class SectorBenchmarkService:
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
         self.supabase = get_supabase()
+        self._fmp_semaphore = asyncio.Semaphore(FMP_SEMAPHORE_LIMIT)
+
+    async def _fmp_call(self, coro):
+        """Wrap an FMP coroutine with the global semaphore to cap concurrency."""
+        async with self._fmp_semaphore:
+            return await coro
 
     def _benchmarks_are_fresh(self, max_age_hours: float = 23.0) -> bool:
         """Check if benchmarks were computed recently enough to skip recomputation."""
@@ -289,71 +299,91 @@ class SectorBenchmarkService:
             logger.warning(f"Could not check benchmark freshness: {e}")
             return False
 
-    def _has_historical_data(self) -> bool:
-        """Check if deep historical backfill has already been performed."""
+    def _get_existing_periods(self, sector: str) -> set:
+        """Return set of (metric_name, period_type, period_label) already in DB for this sector."""
         try:
             response = (
                 self.supabase.table("sector_benchmarks")
-                .select("id")
-                .eq("period_type", "annual")
-                .eq("period_label", "2015")
-                .limit(1)
+                .select("metric_name,period_type,period_label")
+                .eq("sector", sector)
                 .execute()
             )
-            return bool(response.data)
-        except Exception:
-            return False
+            return {
+                (r["metric_name"], r["period_type"], r["period_label"])
+                for r in (response.data or [])
+            }
+        except Exception as e:
+            logger.warning(f"Could not fetch existing periods for {sector}: {e}")
+            return set()
 
-    async def compute_all_benchmarks(self, force: bool = False, backfill: bool = False) -> Dict[str, Any]:
+    def _sector_has_history(self, existing_periods: set) -> bool:
+        """Check if a sector already has deep historical data (year 2015)."""
+        return any(pt == "annual" and pl == "2015" for (_, pt, pl) in existing_periods)
+
+    async def compute_all_benchmarks(
+        self,
+        force: bool = False,
+        backfill: bool = False,
+        sectors: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Main entry: fetch constituents, group by sector, compute medians, upsert.
 
         Args:
             force: Skip freshness check and recompute.
-            backfill: Use deep historical limits (16 annual, 80 quarterly).
-                      If False, auto-detects: first run does backfill, subsequent
-                      runs use small daily limits (3 annual, 12 quarterly).
+            backfill: Force deep historical limits (16 annual, 80 quarterly) for all sectors.
+                      If False, auto-detects per sector: sectors without 2015 data get
+                      backfill, sectors with history get daily limits.
+            sectors: Optional list of canonical sector names to process (default: all).
         """
         if not force and self._benchmarks_are_fresh():
             return {"rows_upserted": 0, "skipped": True, "reason": "benchmarks are fresh"}
 
-        # Determine FMP fetch limits
-        if backfill:
-            annual_limit = FMP_ANNUAL_LIMIT_BACKFILL
-            quarterly_limit = FMP_QUARTERLY_LIMIT_BACKFILL
-            mode = "backfill (forced)"
-        elif not self._has_historical_data():
-            annual_limit = FMP_ANNUAL_LIMIT_BACKFILL
-            quarterly_limit = FMP_QUARTERLY_LIMIT_BACKFILL
-            mode = "backfill (initial — no historical data found)"
-        else:
-            annual_limit = FMP_ANNUAL_LIMIT_DAILY
-            quarterly_limit = FMP_QUARTERLY_LIMIT_DAILY
-            mode = "daily (refreshing recent periods only)"
-
         start = time.time()
-        logger.info(f"Starting sector benchmark computation — mode: {mode}")
+        logger.info("Starting sector benchmark computation")
 
         # Step 1: get S&P 500 constituents grouped by sector
         sector_tickers = await self._get_sector_tickers()
+
+        # Filter to requested sectors if specified
+        if sectors:
+            sector_tickers = {k: v for k, v in sector_tickers.items() if k in sectors}
+
         logger.info(
             f"Sectors to process: {list(sector_tickers.keys())} "
             f"({sum(len(v) for v in sector_tickers.values())} total companies)"
         )
 
-        # Step 2: compute benchmarks for each sector
+        # Step 2: compute benchmarks for each sector (per-sector mode detection)
         total_upserted = 0
         for sector, tickers in sector_tickers.items():
             try:
-                logger.info(f"Computing benchmarks for {sector} sector ({len(tickers)} companies)...")
-                count = await self._compute_sector(sector, tickers, annual_limit, quarterly_limit)
+                existing = self._get_existing_periods(sector)
+
+                # Determine limits for this sector
+                if backfill:
+                    al, ql = FMP_ANNUAL_LIMIT_BACKFILL, FMP_QUARTERLY_LIMIT_BACKFILL
+                    sector_mode = "backfill (forced)"
+                elif not self._sector_has_history(existing):
+                    al, ql = FMP_ANNUAL_LIMIT_BACKFILL, FMP_QUARTERLY_LIMIT_BACKFILL
+                    sector_mode = "backfill (no historical data)"
+                else:
+                    al, ql = FMP_ANNUAL_LIMIT_DAILY, FMP_QUARTERLY_LIMIT_DAILY
+                    sector_mode = "daily"
+
+                logger.info(
+                    f"Computing {sector} ({len(tickers)} tickers, mode={sector_mode})..."
+                )
+                count = await self._compute_sector(
+                    sector, tickers, al, ql, existing_periods=existing,
+                )
                 total_upserted += count
-                logger.info(f"  {sector}: {count} benchmark rows upserted")
+                logger.info(f"  {sector}: done — {count} new benchmark rows upserted")
             except Exception as e:
                 logger.error(f"  {sector} sector failed: {e}", exc_info=True)
 
         elapsed = time.time() - start
-        logger.info(f"Sector benchmarks complete: {total_upserted} rows in {elapsed:.1f}s (mode: {mode})")
-        return {"rows_upserted": total_upserted, "elapsed_seconds": round(elapsed, 1), "mode": mode}
+        logger.info(f"Sector benchmarks complete: {total_upserted} rows in {elapsed:.1f}s")
+        return {"rows_upserted": total_upserted, "elapsed_seconds": round(elapsed, 1)}
 
     async def _get_sector_tickers(self) -> Dict[str, List[str]]:
         """Fetch S&P 500 constituents and group by canonical sector name."""
@@ -370,6 +400,9 @@ class SectorBenchmarkService:
             if not raw_sector or not symbol:
                 continue
             sector = _normalize_sector(raw_sector)
+            if sector not in CANONICAL_SECTORS:
+                logger.debug(f"Skipping unknown sector '{sector}' (raw: '{raw_sector}') for {symbol}")
+                continue
             sector_map.setdefault(sector, []).append(symbol)
 
         if not sector_map:
@@ -378,7 +411,14 @@ class SectorBenchmarkService:
 
         return sector_map
 
-    async def _compute_sector(self, sector: str, tickers: List[str], annual_limit: int, quarterly_limit: int) -> int:
+    async def _compute_sector(
+        self,
+        sector: str,
+        tickers: List[str],
+        annual_limit: int,
+        quarterly_limit: int,
+        existing_periods: Optional[set] = None,
+    ) -> int:
         """Fetch financial data for all tickers in a sector, compute medians, upsert."""
         all_company_data: List[Dict[str, List]] = []
 
@@ -415,6 +455,11 @@ class SectorBenchmarkService:
                 for period_label, values in period_values.items():
                     if len(values) < MIN_SAMPLE_SIZE:
                         continue
+                    # Skip periods already stored (historical benchmarks never change)
+                    if existing_periods and (
+                        metric_config["name"], period_type, period_label
+                    ) in existing_periods:
+                        continue
                     # Winsorize growth percentages to cap extreme outliers
                     cleaned = _winsorize(values) if metric_type in ("yoy", "qoq") else values
                     rows_to_upsert.append({
@@ -445,12 +490,12 @@ class SectorBenchmarkService:
     async def _fetch_company_data(self, ticker: str, annual_limit: int, quarterly_limit: int) -> Dict[str, List]:
         """Fetch income, cash flow, and ratios for one company (annual + quarterly)."""
         results = await asyncio.gather(
-            self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit),
-            self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit),
-            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=annual_limit),
-            self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=quarterly_limit),
-            self.fmp.get_financial_ratios(ticker, period="annual", limit=annual_limit),
-            self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit),
+            self._fmp_call(self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit)),
+            self._fmp_call(self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit)),
+            self._fmp_call(self.fmp.get_cash_flow_statement(ticker, period="annual", limit=annual_limit)),
+            self._fmp_call(self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=quarterly_limit)),
+            self._fmp_call(self.fmp.get_financial_ratios(ticker, period="annual", limit=annual_limit)),
+            self._fmp_call(self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit)),
             return_exceptions=True,
         )
 

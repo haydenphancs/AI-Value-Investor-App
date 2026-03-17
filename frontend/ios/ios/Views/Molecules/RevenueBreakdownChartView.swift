@@ -15,42 +15,42 @@ struct RevenueBreakdownChartView: View {
     private let leftAxisWidth: CGFloat = 50
     private let rightAxisWidth: CGFloat = 50
 
-    // Calculate chart bounds
+    // Calculate chart bounds — use max(revenue, totalCosts) for proper scaling
     private var chartTopValue: Double {
-        // Top is always total revenue (or slightly above)
-        data.totalRevenue * 1.1
+        let maxVal = max(data.totalRevenue, data.totalCosts)
+        guard maxVal > 0 else { return 1 } // Avoid zero range
+        return maxVal * 1.1
     }
 
     private var chartBottomValue: Double {
         if data.isProfit {
-            // Profitable: bottom is 0
-            0
+            return 0
         } else {
             // Loss: bottom extends to show net loss (negative)
-            data.netProfit * 1.2 // netProfit is negative, so this goes below 0
+            return data.netProfit * 1.2 // netProfit is negative, so this goes below 0
         }
     }
 
     private var chartRange: Double {
-        chartTopValue - chartBottomValue
+        let range = chartTopValue - chartBottomValue
+        return range > 0 ? range : 1 // Prevent division by zero
     }
 
     // Where is the zero line (as fraction from bottom)
     private var zeroLinePosition: CGFloat {
         if data.isProfit {
-            return 0 // Zero is at bottom
+            return 0
         } else {
             return CGFloat(abs(chartBottomValue) / chartRange)
         }
     }
 
-    // Grid values for Y-axis
+    // Grid values for Y-axis — aligned to totalRevenue so 100% matches bar top
     private var gridValues: [Double] {
         if data.isProfit {
-            let maxVal = chartTopValue
-            return [0, maxVal * 0.25, maxVal * 0.5, maxVal * 0.75, maxVal]
+            let rev = data.totalRevenue
+            return [0, rev * 0.25, rev * 0.5, rev * 0.75, rev]
         } else {
-            // Include negative values
             let step = chartRange / 4
             return [
                 chartBottomValue,
@@ -62,20 +62,19 @@ struct RevenueBreakdownChartView: View {
         }
     }
 
-    // Percentage labels
+    // Percentage labels (relative to total revenue)
     private var percentageLabels: [String] {
+        guard data.totalRevenue > 0 else {
+            return ["0%", "25%", "50%", "75%", "100%"]
+        }
+
         if data.isProfit {
             return ["0%", "25%", "50%", "75%", "100%"]
         } else {
-            // Calculate percentage relative to revenue
-            let bottomPercent = Int((chartBottomValue / data.totalRevenue) * 100)
-            return [
-                "\(bottomPercent)%",
-                "\(bottomPercent / 4 * 3)%",
-                "\(bottomPercent / 2)%",
-                "\(bottomPercent / 4)%",
-                "100%"
-            ]
+            return gridValues.map { value in
+                let pct = (value / data.totalRevenue) * 100
+                return "\(Int(pct))%"
+            }
         }
     }
 
@@ -95,37 +94,40 @@ struct RevenueBreakdownChartView: View {
         }
     }
 
+    // Convert a data value to a Y offset (from top of chart)
+    private func yPosition(for value: Double, height: CGFloat) -> CGFloat {
+        CGFloat((chartTopValue - value) / chartRange) * height
+    }
+
     // MARK: - Left Y-Axis
 
     private var leftYAxis: some View {
-        VStack {
-            ForEach(gridValues.reversed(), id: \.self) { value in
+        GeometryReader { geometry in
+            let height = geometry.size.height
+            ForEach(Array(gridValues.enumerated()), id: \.offset) { _, value in
                 Text(formatLargeNumber(value))
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                if value != gridValues.first {
-                    Spacer()
-                }
+                    .position(x: leftAxisWidth / 2, y: yPosition(for: value, height: height))
             }
         }
-        .frame(height: chartHeight)
+        .frame(width: leftAxisWidth, height: chartHeight)
         .padding(.trailing, AppSpacing.xs)
     }
 
     // MARK: - Right Y-Axis
 
     private var rightYAxis: some View {
-        VStack {
-            ForEach(percentageLabels.reversed(), id: \.self) { label in
+        GeometryReader { geometry in
+            let height = geometry.size.height
+            ForEach(Array(percentageLabels.enumerated()), id: \.offset) { index, label in
                 Text(label)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                if label != percentageLabels.first {
-                    Spacer()
-                }
+                    .position(x: rightAxisWidth / 2, y: yPosition(for: gridValues[index], height: height))
             }
         }
-        .frame(height: chartHeight)
+        .frame(width: rightAxisWidth, height: chartHeight)
         .padding(.leading, AppSpacing.xs)
     }
 
@@ -164,14 +166,12 @@ struct RevenueBreakdownChartView: View {
     // MARK: - Grid Lines
 
     private func gridLines(height: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            ForEach(0..<5) { index in
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(gridValues.enumerated()), id: \.offset) { _, value in
                 Rectangle()
                     .fill(AppColors.cardBackgroundLight.opacity(0.5))
                     .frame(height: 0.5)
-                if index < 4 {
-                    Spacer()
-                }
+                    .offset(y: yPosition(for: value, height: height))
             }
         }
         .frame(height: height)

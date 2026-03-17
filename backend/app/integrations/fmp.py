@@ -149,6 +149,21 @@ class FMPClient:
             params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
+    # ── Revenue segmentation ─────────────────────────────────────────
+
+    async def get_revenue_product_segmentation(
+        self, ticker: str, period: str = "annual", structure: str = "flat"
+    ) -> List[Dict[str, Any]]:
+        """Get revenue breakdown by product segment."""
+        return await self._make_request(
+            "revenue-product-segmentation",
+            params={
+                "symbol": ticker.upper(),
+                "period": period,
+                "structure": structure,
+            },
+        )
+
     # ── Metrics & ratios ────────────────────────────────────────────
 
     async def get_key_metrics(

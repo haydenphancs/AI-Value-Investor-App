@@ -54,13 +54,14 @@ struct GrowthSectionCard: View {
             GrowthChartView(dataPoints: currentDataPoints)
                 .id("\(selectedMetric.rawValue)-\(selectedPeriod.rawValue)")
                 .padding(.top, AppSpacing.sm)
+                .padding(.leading, -AppSpacing.md)
                 .animation(.easeInOut(duration: 0.3), value: selectedMetric)
                 .animation(.easeInOut(duration: 0.3), value: selectedPeriod)
 
             // Legend
             GrowthLegendView()
                 .frame(maxWidth: .infinity)
-                .padding(.top, AppSpacing.md)
+                .padding(.top, AppSpacing.xs)
         }
         .padding(AppSpacing.lg)
         .background(

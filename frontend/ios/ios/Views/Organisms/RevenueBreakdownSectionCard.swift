@@ -46,9 +46,17 @@ struct RevenueBreakdownSectionCard: View {
     private var headerSection: some View {
         HStack {
             HStack(spacing: AppSpacing.sm) {
-                Text("How \(data.tickerSymbol) Makes Money")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("How \(data.tickerSymbol) Makes Money")
+                        .font(AppTypography.heading)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    if !data.fiscalYear.isEmpty {
+                        Text("FY \(data.fiscalYear)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                }
 
                 GrowthInfoIcon {
                     showInfoSheet = true

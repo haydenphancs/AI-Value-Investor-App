@@ -191,13 +191,21 @@ class GrowthService:
         return result
 
     async def _build_growth(self, ticker: str) -> GrowthResponse:
-        """Fetch income statements, compute YoY growth, look up sector benchmarks."""
+        """Fetch income + cash flow statements, compute YoY growth, look up sector benchmarks."""
 
-        # Phase 1: parallel fetch — profile + annual + quarterly income (3 FMP calls)
-        profile, annual_income, quarterly_income = await asyncio.gather(
+        # Phase 1: parallel fetch — profile + income + cash flow (5 FMP calls)
+        (
+            profile,
+            annual_income,
+            quarterly_income,
+            annual_cashflow,
+            quarterly_cashflow,
+        ) = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
             self.fmp.get_income_statement(ticker, period="annual", limit=16),
             self.fmp.get_income_statement(ticker, period="quarter", limit=80),
+            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=16),
+            self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=80),
             return_exceptions=True,
         )
 
@@ -211,31 +219,52 @@ class GrowthService:
         if isinstance(quarterly_income, Exception):
             logger.error(f"Quarterly income fetch failed for {ticker}: {quarterly_income}")
             quarterly_income = []
+        if isinstance(annual_cashflow, Exception):
+            logger.error(f"Annual cash flow fetch failed for {ticker}: {annual_cashflow}")
+            annual_cashflow = []
+        if isinstance(quarterly_cashflow, Exception):
+            logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
+            quarterly_cashflow = []
 
         # Phase 2: get sector from profile (normalize to canonical name for benchmark lookup)
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
         sector = _normalize_sector(raw_sector)
 
-        # Phase 3: compute target ticker's YoY growth
+        # Phase 3: compute target ticker's YoY growth for all 5 metrics
+        # EPS & Revenue (from income statement)
         eps_annual_points = _compute_growth_points(annual_income, "epsDiluted", is_quarterly=False)
         eps_quarterly_points = _compute_growth_points(quarterly_income, "epsDiluted", is_quarterly=True)
         rev_annual_points = _compute_growth_points(annual_income, "revenue", is_quarterly=False)
         rev_quarterly_points = _compute_growth_points(quarterly_income, "revenue", is_quarterly=True)
+        # Net Income & Operating Income (from income statement)
+        ni_annual_points = _compute_growth_points(annual_income, "netIncome", is_quarterly=False)
+        ni_quarterly_points = _compute_growth_points(quarterly_income, "netIncome", is_quarterly=True)
+        op_annual_points = _compute_growth_points(annual_income, "operatingIncome", is_quarterly=False)
+        op_quarterly_points = _compute_growth_points(quarterly_income, "operatingIncome", is_quarterly=True)
+        # Free Cash Flow (from cash flow statement)
+        fcf_annual_points = _compute_growth_points(annual_cashflow, "freeCashFlow", is_quarterly=False)
+        fcf_quarterly_points = _compute_growth_points(quarterly_cashflow, "freeCashFlow", is_quarterly=True)
 
         # Phase 4: look up pre-computed sector benchmarks (fast DB lookup, cached)
+        all_yoy_metrics = [
+            "eps_yoy", "revenue_yoy", "net_income_yoy",
+            "operating_income_yoy", "fcf_yoy",
+        ]
+        all_qoq_metrics = ["eps_qoq", "revenue_qoq"]
+
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
             benchmarks_annual = lookup.get_sector_benchmarks(
-                sector, ["eps_yoy", "revenue_yoy"], "annual"
+                sector, all_yoy_metrics, "annual"
             )
             benchmarks_quarterly = lookup.get_sector_benchmarks(
-                sector, ["eps_yoy", "revenue_yoy"], "quarterly"
+                sector, all_yoy_metrics, "quarterly"
             )
             benchmarks_qoq_quarterly = lookup.get_sector_benchmarks(
-                sector, ["eps_qoq", "revenue_qoq"], "quarterly"
+                sector, all_qoq_metrics, "quarterly"
             )
 
         # Phase 5: assemble response with sector averages matched by period label
@@ -270,6 +299,18 @@ class GrowthService:
             revenue_quarterly=_to_schemas(
                 rev_quarterly_points, "revenue_yoy", benchmarks_quarterly,
                 "revenue_qoq", benchmarks_qoq_quarterly,
+            ),
+            net_income_annual=_to_schemas(ni_annual_points, "net_income_yoy", benchmarks_annual),
+            net_income_quarterly=_to_schemas(
+                ni_quarterly_points, "net_income_yoy", benchmarks_quarterly,
+            ),
+            operating_profit_annual=_to_schemas(op_annual_points, "operating_income_yoy", benchmarks_annual),
+            operating_profit_quarterly=_to_schemas(
+                op_quarterly_points, "operating_income_yoy", benchmarks_quarterly,
+            ),
+            free_cash_flow_annual=_to_schemas(fcf_annual_points, "fcf_yoy", benchmarks_annual),
+            free_cash_flow_quarterly=_to_schemas(
+                fcf_quarterly_points, "fcf_yoy", benchmarks_quarterly,
             ),
         )
 

@@ -28,6 +28,8 @@ from app.services.earnings_service import get_earnings_service
 from app.schemas.earnings import EarningsResponse
 from app.schemas.growth import GrowthResponse
 from app.services.growth_service import get_growth_service
+from app.schemas.profit_power import ProfitPowerResponse
+from app.services.profit_power_service import get_profit_power_service
 from app.services.sentiment_service import get_sentiment_service
 from app.services.technical_analysis_service import get_technical_analysis_service
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
@@ -471,6 +473,25 @@ async def get_growth(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Growth service unavailable for {ticker}",
+        )
+
+
+# ── Profit Power endpoint ────────────────────────────────────────
+
+@router.get("/{ticker}/profit-power", response_model=ProfitPowerResponse)
+async def get_profit_power(ticker: str):
+    """Get profit power data (margin metrics with sector average net margin)."""
+    ticker = ticker.upper()
+    try:
+        service = get_profit_power_service()
+        return await service.get_profit_power(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Profit power failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Profit power service unavailable for {ticker}",
         )
 
 

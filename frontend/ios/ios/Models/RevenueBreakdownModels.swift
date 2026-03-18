@@ -213,7 +213,7 @@ extension RevenueSource {
     static let macColor = Color(hex: "F97316")         // Orange
     static let iPadColor = Color(hex: "06B6D4")        // Cyan
     static let otherColor = Color(hex: "9CA3AF")       // Gray
-    static let wearablesColor = Color(hex: "22C55E")   // Green
+    static let wearablesColor = Color(hex: "FBBF24")   // Amber
 }
 
 // MARK: - Sample Data

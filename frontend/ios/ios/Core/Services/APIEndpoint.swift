@@ -58,6 +58,7 @@ enum APIEndpoint: Sendable {
     case getChartEvents(ticker: String)
     case getEarnings(ticker: String)
     case getGrowth(ticker: String)
+    case getProfitPower(ticker: String)
     case getRevenueBreakdown(ticker: String)
     case getTickerReport(ticker: String, persona: String)
 
@@ -176,6 +177,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)/earnings"
         case .getGrowth(let ticker):
             return "/api/v1/stocks/\(ticker)/growth"
+        case .getProfitPower(let ticker):
+            return "/api/v1/stocks/\(ticker)/profit-power"
         case .getRevenueBreakdown(let ticker):
             return "/api/v1/stocks/\(ticker)/revenue-breakdown"
         case .getTickerReport(let ticker, _):
@@ -434,7 +437,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getRevenueBreakdown, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

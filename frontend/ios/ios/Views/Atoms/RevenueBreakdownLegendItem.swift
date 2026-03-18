@@ -25,7 +25,8 @@ struct RevenueBreakdownLegendItem: View {
             Text(name)
                 .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
-                .frame(minWidth: 60, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minWidth: 80, alignment: .leading)
 
             Spacer()
 
@@ -34,9 +35,11 @@ struct RevenueBreakdownLegendItem: View {
                 Text(value)
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textPrimary)
+                    .fixedSize(horizontal: true, vertical: false)
                 Text("(\(percentage))")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }

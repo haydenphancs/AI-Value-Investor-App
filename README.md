@@ -10,5 +10,5 @@ An AI-powered financial assistant designed to democratize financial literacy and
 * **AI Engine:** Google Gemini API
 * **Market Data:** Financial Modeling Prep (FMP)
 
-# Continue developing
+# In development
 # Contact: haydenphancs@gmail.com

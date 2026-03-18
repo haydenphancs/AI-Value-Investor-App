@@ -143,7 +143,13 @@ class ChatService:
             logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
 
         # Step 3: Build prompt (includes RAG context + history)
-        system_instruction = self._build_system_instruction(session_type, stock_id)
+        # Enrich with live margin data for stock sessions
+        profit_summary = None
+        if stock_id:
+            profit_summary = await self._get_profit_summary(stock_id)
+        system_instruction = self._build_system_instruction(
+            session_type, stock_id, profit_summary=profit_summary
+        )
         prompt = self._build_prompt(user_message, history, chunks)
 
         # Step 4: Generate with function-calling tools
@@ -331,7 +337,35 @@ class ChatService:
             logger.warning(f"All chunk search failed: {e}")
             return []
 
-    def _build_system_instruction(self, session_type: str, stock_id: Optional[str]) -> str:
+    async def _get_profit_summary(self, ticker: str) -> Optional[str]:
+        """Fetch cached profit power data and format a compact summary string."""
+        try:
+            from app.services.profit_power_service import get_profit_power_service
+            service = get_profit_power_service()
+            data = await service.get_profit_power(ticker)
+            if not data.annual:
+                return None
+            latest = data.annual[-1]
+            parts = [f"Latest annual margins for {ticker} ({latest.period}):"]
+            if latest.gross_margin is not None:
+                parts.append(f"Gross {latest.gross_margin:.1f}%")
+            if latest.operating_margin is not None:
+                parts.append(f"Operating {latest.operating_margin:.1f}%")
+            if latest.net_margin is not None:
+                parts.append(f"Net {latest.net_margin:.1f}%")
+            if latest.fcf_margin is not None:
+                parts.append(f"FCF {latest.fcf_margin:.1f}%")
+            if latest.sector_average_net_margin is not None:
+                parts.append(f"Sector avg net margin {latest.sector_average_net_margin:.1f}%")
+            return ", ".join(parts[:1]) + " " + ", ".join(parts[1:]) + "."
+        except Exception as e:
+            logger.warning(f"Profit summary fetch failed for {ticker}: {e}")
+            return None
+
+    def _build_system_instruction(
+        self, session_type: str, stock_id: Optional[str],
+        profit_summary: Optional[str] = None,
+    ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
             "CRITICAL IDENTITY RULE: You must NEVER reveal, mention, or hint at the underlying "
@@ -357,6 +391,8 @@ class ChatService:
                 f"\nYou are currently helping analyze {stock_id}. "
                 "Use the provided financial data and filings context."
             )
+            if profit_summary:
+                base += f"\n{profit_summary}"
         return base
 
     def _build_prompt(

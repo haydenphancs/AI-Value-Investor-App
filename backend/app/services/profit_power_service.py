@@ -3,14 +3,21 @@ Profit Power service — fetches income + cash flow statements from FMP,
 computes margin percentages (gross, operating, FCF, net), and looks up
 pre-computed sector median net margin from the sector_benchmarks table.
 
+Uses a two-tier cache-aside pattern:
+  Tier 1 — in-memory dict (5-minute TTL)
+  Tier 2 — Supabase ``profit_power_cache`` table (24-hour TTL + earnings-aware)
+
 Matches the iOS ProfitPowerSectionData struct.
 """
 
 import asyncio
 import logging
+import re
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
@@ -36,6 +43,24 @@ def _cache_get(key: str) -> Optional[Any]:
 
 def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
+
+
+# ── In-flight deduplication ───────────────────────────────────────
+# Prevents thundering herd: if two requests arrive for the same ticker
+# while the cache is cold, only one FMP fetch runs; the other awaits.
+_inflight: Dict[str, asyncio.Future] = {}
+
+
+# ── Ticker validation ────────────────────────────────────────────
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
+
+
+def _validate_ticker(ticker: str) -> str:
+    """Validate and normalize ticker symbol. Raises ValueError if invalid."""
+    ticker = ticker.upper().strip()
+    if not _TICKER_RE.match(ticker):
+        raise ValueError(f"Invalid ticker symbol: {ticker!r}")
+    return ticker
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -140,39 +165,172 @@ def _build_margin_points(
     return results
 
 
+def _find_next_earnings_date_simple(
+    ec_records: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Return the first future earnings date as yyyy-MM-dd, or None."""
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+        ec_date = (ec.get("date") or "")[:10]
+        if not ec_date or ec_date <= today_str:
+            continue
+        # Skip if actual EPS is already reported (past quarter)
+        if ec.get("eps") is not None:
+            continue
+        return ec_date
+    return None
+
+
 # ── Service ───────────────────────────────────────────────────────
 
 class ProfitPowerService:
     def __init__(self):
         self.fmp = get_fmp_client()
+        self.supabase = get_supabase()
 
     async def get_profit_power(self, ticker: str) -> ProfitPowerResponse:
-        """Main entry point — returns cached or freshly built profit power data."""
+        """Public entry point with two-tier caching and in-flight dedup."""
+        ticker = _validate_ticker(ticker)
         cache_key = f"profit_power:{ticker}"
+
+        # ── Tier 1: in-memory cache ──
         cached = _cache_get(cache_key)
         if cached is not None:
+            logger.info(f"Profit power in-memory HIT for {ticker}")
             return cached
 
-        result = await self._build_profit_power(ticker)
-        _cache_set(cache_key, result)
-        return result
+        # ── Tier 2: Supabase cache (run in thread to avoid blocking event loop) ──
+        db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
+        if db_cached is not None:
+            logger.info(f"Profit power Supabase HIT for {ticker}")
+            _cache_set(cache_key, db_cached)
+            return db_cached
 
-    async def _build_profit_power(self, ticker: str) -> ProfitPowerResponse:
-        """Fetch income + cash flow, compute margins, look up sector benchmarks."""
+        # ── In-flight deduplication ──
+        # If another request is already fetching this ticker, wait for it
+        if cache_key in _inflight:
+            logger.info(f"Profit power in-flight JOIN for {ticker}")
+            return await _inflight[cache_key]
 
-        # Phase 1: parallel fetch — profile + income + cash flow (5 FMP calls)
+        # Create a future so other concurrent requests can wait on us
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+
+        try:
+            # ── Cache miss: build from FMP ──
+            logger.info(f"Profit power cache MISS for {ticker} — fetching from FMP")
+            result, next_earnings = await self._build_profit_power(ticker)
+
+            # Persist to Supabase in background thread (truly fire-and-forget)
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                self._upsert_supabase_cache_safe,
+                ticker,
+                result,
+                next_earnings,
+            )
+
+            _cache_set(cache_key, result)
+            future.set_result(result)
+            return result
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(cache_key, None)
+
+    # ── Supabase helpers ──────────────────────────────────────────
+
+    def _check_supabase_cache(self, ticker: str) -> Optional[ProfitPowerResponse]:
+        """Return cached response if fresh (< 24h and before next earnings).
+        This is a synchronous method — call via asyncio.to_thread().
+        """
+        try:
+            row = (
+                self.supabase.table("profit_power_cache")
+                .select("response_json, cached_at, next_earnings_date")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            # Parse cached_at and check 24-hour freshness
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=24):
+                logger.info(f"Supabase cache STALE (age={age}) for {ticker}")
+                return None
+
+            # Check next earnings date — invalidate if we've passed it
+            next_earnings = entry.get("next_earnings_date")
+            if next_earnings:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if today_str >= next_earnings:
+                    logger.info(f"Supabase cache STALE (past earnings {next_earnings}) for {ticker}")
+                    return None
+
+            # Deserialize
+            json_data = entry["response_json"]
+            return ProfitPowerResponse(**json_data)
+
+        except Exception as e:
+            logger.warning(f"Supabase cache check failed for {ticker}: {e}")
+            return None
+
+    def _upsert_supabase_cache_safe(
+        self,
+        ticker: str,
+        result: ProfitPowerResponse,
+        next_earnings: Optional[str],
+    ) -> None:
+        """Upsert to Supabase cache — safe wrapper that logs and swallows errors.
+        This is a synchronous method — call via run_in_executor().
+        """
+        try:
+            self.supabase.table("profit_power_cache").upsert(
+                {
+                    "ticker": ticker,
+                    "response_json": result.model_dump(),
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                    "next_earnings_date": next_earnings,
+                },
+                on_conflict="ticker",
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Supabase upsert failed for {ticker}: {e}")
+
+    # ── Builder ───────────────────────────────────────────────────
+
+    async def _build_profit_power(
+        self, ticker: str
+    ) -> Tuple[ProfitPowerResponse, Optional[str]]:
+        """Fetch income + cash flow, compute margins, look up sector benchmarks.
+        Returns (response, next_earnings_date).
+        """
+
+        # Phase 1: parallel fetch — profile + income + cash flow + earnings calendar (6 FMP calls)
         (
             profile,
             annual_income,
             quarterly_income,
             annual_cashflow,
             quarterly_cashflow,
+            ec_raw,
         ) = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
             self.fmp.get_income_statement(ticker, period="annual", limit=16),
             self.fmp.get_income_statement(ticker, period="quarter", limit=80),
             self.fmp.get_cash_flow_statement(ticker, period="annual", limit=16),
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=80),
+            self.fmp.get_earning_calendar_full(ticker),
             return_exceptions=True,
         )
 
@@ -192,6 +350,9 @@ class ProfitPowerService:
         if isinstance(quarterly_cashflow, Exception):
             logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
             quarterly_cashflow = []
+        if isinstance(ec_raw, Exception):
+            logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
+            ec_raw = []
 
         # Phase 2: get sector from profile
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
@@ -235,11 +396,18 @@ class ProfitPowerService:
                 ))
             return schemas
 
-        return ProfitPowerResponse(
+        response = ProfitPowerResponse(
             symbol=ticker,
             annual=_to_schemas(annual_points, benchmarks_annual),
             quarterly=_to_schemas(quarterly_points, benchmarks_quarterly),
         )
+
+        # Phase 6: extract next earnings date for cache invalidation
+        next_earnings = _find_next_earnings_date_simple(
+            ec_raw if isinstance(ec_raw, list) else []
+        )
+
+        return response, next_earnings
 
 
 # ── Singleton ─────────────────────────────────────────────────────

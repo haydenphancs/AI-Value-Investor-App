@@ -11,7 +11,7 @@ struct RevenueBreakdownLegendView: View {
     let data: RevenueBreakdownData
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.xl) {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
             // Revenue Sources Column
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Text("Revenue Sources")

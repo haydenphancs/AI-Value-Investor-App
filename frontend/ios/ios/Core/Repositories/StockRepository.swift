@@ -38,6 +38,7 @@ protocol StockRepositoryProtocol {
     func getChartEvents(ticker: String) async throws -> ChartEventDates
     func getEarnings(ticker: String) async throws -> EarningsDTO
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO
+    func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO
 }
 
@@ -307,6 +308,25 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got growth for \(ticker)")
+        return response
+    }
+
+    // MARK: - Profit Power
+
+    func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO {
+        let cacheKey = "profit_power_\(ticker)"
+
+        if let cached: ProfitPowerResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getProfitPower(ticker: ticker),
+            responseType: ProfitPowerResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got profit power for \(ticker)")
         return response
     }
 
@@ -1238,6 +1258,51 @@ struct GrowthResponseDTO: Codable {
     }
 }
 
+// MARK: - Profit Power DTOs
+
+struct ProfitPowerDataPointDTO: Codable {
+    let period: String
+    let grossMargin: Double?
+    let operatingMargin: Double?
+    let fcfMargin: Double?
+    let netMargin: Double?
+    let sectorAverageNetMargin: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case period
+        case grossMargin = "gross_margin"
+        case operatingMargin = "operating_margin"
+        case fcfMargin = "fcf_margin"
+        case netMargin = "net_margin"
+        case sectorAverageNetMargin = "sector_average_net_margin"
+    }
+}
+
+struct ProfitPowerResponseDTO: Codable {
+    let symbol: String
+    let annual: [ProfitPowerDataPointDTO]
+    let quarterly: [ProfitPowerDataPointDTO]
+
+    func toDisplayModel() -> ProfitPowerSectionData {
+        func convert(_ dtos: [ProfitPowerDataPointDTO]) -> [ProfitPowerDataPoint] {
+            dtos.map {
+                ProfitPowerDataPoint(
+                    period: $0.period,
+                    grossMargin: $0.grossMargin ?? 0.0,
+                    operatingMargin: $0.operatingMargin ?? 0.0,
+                    fcfMargin: $0.fcfMargin ?? 0.0,
+                    netMargin: $0.netMargin ?? 0.0,
+                    sectorAverageNetMargin: $0.sectorAverageNetMargin ?? 0.0
+                )
+            }
+        }
+        return ProfitPowerSectionData(
+            annualData: convert(annual),
+            quarterlyData: convert(quarterly)
+        )
+    }
+}
+
 // MARK: - Revenue Breakdown DTOs
 
 struct RevenueSourceDTO: Codable {
@@ -1269,7 +1334,7 @@ struct RevenueBreakdownDTO: Codable {
             Color(hex: "A855F7"),  // Purple
             Color(hex: "F97316"),  // Orange
             Color(hex: "06B6D4"),  // Cyan
-            Color(hex: "22C55E"),  // Green
+            Color(hex: "FBBF24"),  // Amber (avoid green — reserved for profit)
             Color(hex: "9CA3AF"),  // Gray (always last — used for "Other")
         ]
 
@@ -1431,6 +1496,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO {
         throw URLError(.badServerResponse)
     }
 

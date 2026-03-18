@@ -146,7 +146,6 @@ class TickerDetailViewModel: ObservableObject {
             self.isLoading = false
 
             // Set sample data for tabs that don't have API data yet
-            self.profitPowerData = ProfitPowerSectionData.sampleData
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
             self.healthCheckData = HealthCheckSectionData.sampleData
             self.holdersData = HoldersData.sampleData
@@ -158,6 +157,7 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchChartEvents(ticker) }
                 group.addTask { await self.fetchEarnings(ticker) }
                 group.addTask { await self.fetchGrowth(ticker) }
+                group.addTask { await self.fetchProfitPower(ticker) }
                 group.addTask { await self.fetchRevenueBreakdown(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
@@ -261,6 +261,17 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Growth failed for \(ticker): \(error)")
             self.growthData = GrowthSectionData.sampleData
+        }
+    }
+
+    private func fetchProfitPower(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getProfitPower(ticker: ticker)
+            self.profitPowerData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got profit power for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Profit power failed for \(ticker): \(error)")
+            self.profitPowerData = ProfitPowerSectionData.sampleData
         }
     }
 

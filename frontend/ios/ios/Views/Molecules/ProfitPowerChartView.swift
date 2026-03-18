@@ -46,14 +46,9 @@ struct ProfitPowerChartView: View {
         return stride(from: minMargin + step, to: maxMargin, by: step).map { $0 }
     }
 
-    // Adaptive sizes for dense data
-    private var symbolSize: CGFloat {
-        dataPoints.count > 20 ? 15 : 40
-    }
-
-    private var lineWidth: CGFloat {
-        dataPoints.count > 20 ? 1.5 : 2.5
-    }
+    // Consistent sizes for both Annual and Quarterly
+    private let symbolSize: CGFloat = 40
+    private let lineWidth: CGFloat = 2.5
 
     private var needsScroll: Bool {
         dataPoints.count > Int(visibleColumnCount)

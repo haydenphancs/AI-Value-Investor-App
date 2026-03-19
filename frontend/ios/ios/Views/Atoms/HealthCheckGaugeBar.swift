@@ -74,11 +74,11 @@ struct HealthCheckGaugeBar: View {
                     )
                     .frame(height: height)
 
-                // Sector average marker (white vertical line at ~60%)
+                // Sector average marker (white vertical line at 50% — matches backend gauge anchor)
                 Rectangle()
                     .fill(Color.white.opacity(0.6))
                     .frame(width: 2, height: height + 4)
-                    .offset(x: geometry.size.width * 0.6 - 1)
+                    .offset(x: geometry.size.width * 0.5 - 1)
 
                 // Position indicator (white circle)
                 Circle()

@@ -147,7 +147,7 @@ class TickerDetailViewModel: ObservableObject {
 
             // Set sample data for tabs that don't have API data yet
             self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
-            self.healthCheckData = HealthCheckSectionData.sampleData
+            // healthCheckData will be fetched in Phase 2
             self.holdersData = HoldersData.sampleData
 
             // Phase 2: Fetch supplementary data in parallel (non-blocking)
@@ -159,6 +159,7 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchGrowth(ticker) }
                 group.addTask { await self.fetchProfitPower(ticker) }
                 group.addTask { await self.fetchRevenueBreakdown(ticker) }
+                group.addTask { await self.fetchHealthCheck(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
 
@@ -272,6 +273,17 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Profit power failed for \(ticker): \(error)")
             self.profitPowerData = ProfitPowerSectionData.sampleData
+        }
+    }
+
+    private func fetchHealthCheck(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getHealthCheck(ticker: ticker)
+            self.healthCheckData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got health check for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Health check failed for \(ticker): \(error)")
+            self.healthCheckData = HealthCheckSectionData.sampleData
         }
     }
 

@@ -162,8 +162,10 @@ struct HealthCheckMetric: Identifiable {
         switch type {
         case .debtToEquity, .currentRatio:
             return "vs \(String(format: "%.2f", comparison))"
-        case .peRatio, .returnOnEquity:
+        case .peRatio:
             return "vs \(String(format: "%.1f", comparison))"
+        case .returnOnEquity:
+            return "vs \(String(format: "%.1f%%", comparison))"
         }
     }
 

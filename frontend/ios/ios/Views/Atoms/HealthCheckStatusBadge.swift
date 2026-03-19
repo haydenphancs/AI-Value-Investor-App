@@ -19,10 +19,16 @@ struct HealthCheckStatusBadge: View {
                 .font(AppTypography.iconSmall).fontWeight(.semibold)
                 .foregroundColor(rating.color)
 
-            // Rating text: [2/4] Mix
-            Text("[\(passedCount)/\(totalCount)] \(rating.rawValue)")
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(rating.color)
+            // Rating text: [2/4] centered above rating label
+            VStack(spacing: 2) {
+                Text("[\(passedCount)/\(totalCount)]")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(rating.color)
+
+                Text(rating.rawValue)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(rating.color)
+            }
         }
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, AppSpacing.xs)

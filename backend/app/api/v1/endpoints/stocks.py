@@ -34,6 +34,8 @@ from app.services.sentiment_service import get_sentiment_service
 from app.services.technical_analysis_service import get_technical_analysis_service
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.services.revenue_breakdown_service import get_revenue_breakdown_service
+from app.schemas.health_check import HealthCheckResponse
+from app.services.health_check_service import get_health_check_service
 
 logger = logging.getLogger(__name__)
 
@@ -492,6 +494,25 @@ async def get_profit_power(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Profit power service unavailable for {ticker}",
+        )
+
+
+# ── Health Check endpoint ────────────────────────────────────────
+
+@router.get("/{ticker}/health-check", response_model=HealthCheckResponse)
+async def get_health_check(ticker: str):
+    """Get health check data (financial ratio analysis vs sector benchmarks)."""
+    ticker = ticker.upper()
+    try:
+        service = get_health_check_service()
+        return await service.get_health_check(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Health check failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Health check service unavailable for {ticker}",
         )
 
 

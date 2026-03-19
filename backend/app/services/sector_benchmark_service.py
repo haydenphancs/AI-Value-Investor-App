@@ -95,15 +95,15 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct"},
     {"name": "net_margin",          "source": "ratios",    "field": "netProfitMargin",        "type": "direct"},
     {"name": "roa",                 "source": "ratios",    "field": "returnOnAssets",         "type": "direct"},
-    {"name": "roe",                 "source": "ratios",    "field": "returnOnEquity",         "type": "direct"},
+    {"name": "roe",                 "source": "key_metrics", "field": "returnOnEquity",       "type": "direct"},
     {"name": "roic",                "source": "ratios",    "field": "returnOnCapitalEmployed","type": "direct"},
     # Health Check (direct ratio values)
     {"name": "current_ratio",       "source": "ratios",    "field": "currentRatio",           "type": "direct"},
-    {"name": "debt_to_equity",      "source": "ratios",    "field": "debtEquityRatio",        "type": "direct"},
+    {"name": "debt_to_equity",      "source": "ratios",    "field": "debtToEquityRatio",      "type": "direct"},
     {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverage",       "type": "direct"},
     {"name": "debt_to_assets",      "source": "ratios",    "field": "debtRatio",              "type": "direct"},
     # Valuation
-    {"name": "pe_ratio",            "source": "ratios",    "field": "priceEarningsRatio",     "type": "direct"},
+    {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},
     {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
@@ -488,7 +488,7 @@ class SectorBenchmarkService:
         return upserted
 
     async def _fetch_company_data(self, ticker: str, annual_limit: int, quarterly_limit: int) -> Dict[str, List]:
-        """Fetch income, cash flow, and ratios for one company (annual + quarterly)."""
+        """Fetch income, cash flow, ratios, and key metrics for one company (annual + quarterly)."""
         results = await asyncio.gather(
             self._fmp_call(self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit)),
             self._fmp_call(self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit)),
@@ -496,6 +496,8 @@ class SectorBenchmarkService:
             self._fmp_call(self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=quarterly_limit)),
             self._fmp_call(self.fmp.get_financial_ratios(ticker, period="annual", limit=annual_limit)),
             self._fmp_call(self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit)),
+            self._fmp_call(self.fmp.get_key_metrics(ticker, period="annual", limit=annual_limit)),
+            self._fmp_call(self.fmp.get_key_metrics(ticker, period="quarter", limit=quarterly_limit)),
             return_exceptions=True,
         )
 
@@ -509,6 +511,8 @@ class SectorBenchmarkService:
             "cashflow_quarterly": _safe_list(results[3]),
             "ratios_annual": _safe_list(results[4]),
             "ratios_quarterly": _safe_list(results[5]),
+            "key_metrics_annual": _safe_list(results[6]),
+            "key_metrics_quarterly": _safe_list(results[7]),
         }
 
     def _collect_metric_values(

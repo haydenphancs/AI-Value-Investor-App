@@ -69,20 +69,33 @@ async def _run_news_pre_warmer():
 
 
 async def _run_sector_benchmark_job():
-    """Background task: recompute sector benchmarks every 24 hours."""
+    """Background task: recompute sector benchmarks weekly on Sunday at 1 AM."""
+    from datetime import datetime, timedelta
+
     await asyncio.sleep(60)  # let app fully start
 
     while True:
+        # Calculate seconds until next Sunday 1:00 AM local time
+        now = datetime.now()
+        days_until_sunday = (6 - now.weekday()) % 7  # 6 = Sunday
+        if days_until_sunday == 0 and now.hour >= 1:
+            days_until_sunday = 7  # already past 1 AM Sunday, wait for next week
+        next_run = now.replace(hour=1, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+        sleep_seconds = (next_run - now).total_seconds()
+        logger.info(
+            f"Sector benchmark job: next run at {next_run.isoformat()} "
+            f"(sleeping {sleep_seconds / 3600:.1f}h)"
+        )
+        await asyncio.sleep(sleep_seconds)
+
         try:
             from app.services.sector_benchmark_service import get_sector_benchmark_service
 
             service = get_sector_benchmark_service()
-            result = await service.compute_all_benchmarks()
+            result = await service.compute_all_benchmarks(force=True)
             logger.info(f"Sector benchmark job completed: {result}")
         except Exception as e:
             logger.error(f"Sector benchmark job failed: {e}", exc_info=True)
-
-        await asyncio.sleep(86400)  # 24 hours
 
 
 app = FastAPI(

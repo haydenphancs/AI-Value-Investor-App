@@ -40,6 +40,7 @@ protocol StockRepositoryProtocol {
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO
     func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO
+    func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -327,6 +328,25 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got profit power for \(ticker)")
+        return response
+    }
+
+    // MARK: - Health Check
+
+    func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO {
+        let cacheKey = "health_check_\(ticker)"
+
+        if let cached: HealthCheckResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getHealthCheck(ticker: ticker),
+            responseType: HealthCheckResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got health check for \(ticker)")
         return response
     }
 
@@ -1303,6 +1323,95 @@ struct ProfitPowerResponseDTO: Codable {
     }
 }
 
+// MARK: - Health Check DTOs
+
+struct HealthCheckMetricDTO: Codable {
+    let type: String
+    let value: Double
+    let comparisonValue: Double?
+    let percentDifference: Double?
+    let gaugePosition: Double
+    let status: String
+    let insightText: String
+    let highlightedValue: String?
+    let highlightedLabel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, value, status
+        case comparisonValue = "comparison_value"
+        case percentDifference = "percent_difference"
+        case gaugePosition = "gauge_position"
+        case insightText = "insight_text"
+        case highlightedValue = "highlighted_value"
+        case highlightedLabel = "highlighted_label"
+    }
+}
+
+struct HealthCheckResponseDTO: Codable {
+    let symbol: String
+    let overallRating: String
+    let passedCount: Int
+    let totalCount: Int
+    let metrics: [HealthCheckMetricDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case overallRating = "overall_rating"
+        case passedCount = "passed_count"
+        case totalCount = "total_count"
+        case metrics
+    }
+
+    func toDisplayModel() -> HealthCheckSectionData {
+        let ratingMap: [String: HealthCheckRating] = [
+            "excellent": .excellent,
+            "good": .good,
+            "mix": .mix,
+            "caution": .caution,
+            "poor": .poor,
+        ]
+
+        let typeMap: [String: HealthCheckMetricType] = [
+            "debt_to_equity": .debtToEquity,
+            "pe_ratio": .peRatio,
+            "roe": .returnOnEquity,
+            "current_ratio": .currentRatio,
+        ]
+
+        let statusMap: [String: HealthCheckMetricStatus] = [
+            "positive": .positive,
+            "neutral": .neutral,
+            "negative": .negative,
+        ]
+
+        let displayMetrics = metrics.compactMap { dto -> HealthCheckMetric? in
+            guard let metricType = typeMap[dto.type],
+                  let metricStatus = statusMap[dto.status] else {
+                return nil
+            }
+
+            return HealthCheckMetric(
+                type: metricType,
+                value: dto.value,
+                comparisonValue: dto.comparisonValue,
+                percentDifference: dto.percentDifference,
+                gaugePosition: dto.gaugePosition,
+                status: metricStatus,
+                insightText: dto.insightText,
+                highlightedValue: dto.highlightedValue,
+                highlightedLabel: dto.highlightedLabel
+            )
+        }
+
+        return HealthCheckSectionData(
+            overallRating: ratingMap[overallRating] ?? .mix,
+            passedCount: passedCount,
+            totalCount: totalCount,
+            metrics: displayMetrics
+        )
+    }
+}
+
 // MARK: - Revenue Breakdown DTOs
 
 struct RevenueSourceDTO: Codable {
@@ -1504,6 +1613,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO {
         throw URLError(.badServerResponse)
     }
 }

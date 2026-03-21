@@ -294,6 +294,7 @@ class SignalOfConfidenceService:
             summary.dividend_yield,
             summary.buyback_yield,
             summary.share_count_change,
+            data_points=data_points,
         )
 
         # Phase 5: extract next earnings date for cache invalidation
@@ -456,6 +457,7 @@ class SignalOfConfidenceService:
         t12m_dividend_yield: float,
         t12m_buyback_yield: float,
         share_count_change: float = 0.0,
+        data_points: Optional[List] = None,
     ) -> Optional[DividendInfoSchema]:
         """Build DividendInfo from dividend history."""
 
@@ -474,25 +476,33 @@ class SignalOfConfidenceService:
         ex_date = (latest.get("date") or "")[:10] or None
         payment_date = (latest.get("paymentDate") or latest.get("payment_date") or "")[:10] or None
 
-        # 5-year average dividend yield (annualized)
-        # FMP's per-dividend `yield` = dividend_amount / stock_price (per-payment, NOT annualized).
-        # We group by calendar year, sum within each year to get an annualized figure,
-        # then average across up to 5 full years so it's comparable to the T12M current yield.
-        yearly_yields: dict[str, float] = defaultdict(float)
-        for d in sorted_divs:
-            y = _safe_float(d, "yield")
-            date_str = (d.get("date") or "")[:4]  # extract year e.g. "2024"
-            if y is not None and y > 0 and date_str:
-                yearly_yields[date_str] += y  # sum quarterly yields → annualized
-
-        # Most recent 5 full calendar years (skip partial current year if < 2 payments)
-        sorted_years = sorted(yearly_yields.keys(), reverse=True)
-        annual_values = [yearly_yields[yr] for yr in sorted_years if yearly_yields[yr] > 0]
-        # Take at most 5 years
-        annual_values = annual_values[:5]
-        five_year_avg_yield = round(
-            sum(annual_values) / len(annual_values), 2
-        ) if annual_values else 0.0
+        # 5-year average total yield (Div + Buyback) from quarterly data points.
+        # Each data point has dividend_yield and buyback_yield (annualized %).
+        # We average across all available quarters to get a comparable figure
+        # to Current Yield which also includes Div + Buyback.
+        five_year_avg_yield = 0.0
+        if data_points and len(data_points) >= 4:
+            # Average the per-quarter total yields (div + buyback)
+            total_yields = [
+                dp.dividend_yield + dp.buyback_yield for dp in data_points
+            ]
+            five_year_avg_yield = round(
+                sum(total_yields) / len(total_yields), 2
+            )
+        else:
+            # Fallback: use dividend history only
+            yearly_yields: dict[str, float] = defaultdict(float)
+            for d in sorted_divs:
+                y = _safe_float(d, "yield")
+                date_str = (d.get("date") or "")[:4]
+                if y is not None and y > 0 and date_str:
+                    yearly_yields[date_str] += y
+            sorted_years = sorted(yearly_yields.keys(), reverse=True)
+            annual_values = [yearly_yields[yr] for yr in sorted_years if yearly_yields[yr] > 0]
+            annual_values = annual_values[:5]
+            five_year_avg_yield = round(
+                sum(annual_values) / len(annual_values), 2
+            ) if annual_values else 0.0
 
         # Dividend yield status: compare current T12M yield to 5-year average
         if five_year_avg_yield > 0:

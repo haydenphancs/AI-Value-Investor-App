@@ -13,35 +13,6 @@ struct SmartMoneyNetFlowBadge: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
-            // Buy / Sell row
-            HStack(spacing: AppSpacing.lg) {
-                // Buy
-                HStack(spacing: AppSpacing.xxs) {
-                    Circle()
-                        .fill(HoldersColors.buyVolume)
-                        .frame(width: 8, height: 8)
-                    Text("Buy:")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text(summary.formattedBuy)
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(HoldersColors.buyVolume)
-                }
-
-                // Sell
-                HStack(spacing: AppSpacing.xxs) {
-                    Circle()
-                        .fill(HoldersColors.sellVolume)
-                        .frame(width: 8, height: 8)
-                    Text("Sell:")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text(summary.formattedSell)
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(HoldersColors.sellVolume)
-                }
-            }
-
             // Net Informative Flow row
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "brain.head.profile")

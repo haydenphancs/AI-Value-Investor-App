@@ -139,18 +139,12 @@ struct ProfitPowerChartView: View {
                 .background(Color.clear)
         }
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    updateSelection(at: value.location, chartWidth: contentWidth)
-                }
-                .onEnded { _ in
-                    // Keep selection visible for a moment, then hide
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                        selectedDataPoint = nil
-                    }
-                }
-        )
+        .onTapGesture { location in
+            updateSelection(at: location, chartWidth: contentWidth)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                selectedDataPoint = nil
+            }
+        }
     }
 
     // MARK: - Line Marks

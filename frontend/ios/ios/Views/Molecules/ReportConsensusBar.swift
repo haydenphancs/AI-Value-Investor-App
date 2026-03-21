@@ -323,6 +323,7 @@ struct ReportConsensusBar: View {
 
                             SmartMoneyFlowChart(
                                 priceData: consensus.hedgeFundPriceData,
+                                dailyPrices: [],
                                 flowData: consensus.hedgeFundFlowData
                             )
 

@@ -1761,15 +1761,26 @@ struct TopInsiderDTO: Codable {
 
 // MARK: - Smart Money DTOs
 
+struct DailyPricePointDTO: Codable {
+    let date: String
+    let price: Double
+
+    func toDisplayModel() -> DailyPricePoint {
+        return DailyPricePoint(date: date, price: price)
+    }
+}
+
 struct SmartMoneyDataDTO: Codable {
     let tab: String
     let priceData: [StockPriceDataPointDTO]
+    let dailyPrices: [DailyPricePointDTO]?
     let flowData: [SmartMoneyFlowDataPointDTO]
     let summary: SmartMoneyFlowSummaryDTO
 
     enum CodingKeys: String, CodingKey {
         case tab
         case priceData = "price_data"
+        case dailyPrices = "daily_prices"
         case flowData = "flow_data"
         case summary
     }
@@ -1786,6 +1797,7 @@ struct SmartMoneyDataDTO: Codable {
         return SmartMoneyData(
             tab: smartTab,
             priceData: priceData.map { $0.toDisplayModel() },
+            dailyPrices: (dailyPrices ?? []).map { $0.toDisplayModel() },
             flowData: flowData.map { $0.toDisplayModel() },
             summary: summary.toDisplayModel()
         )
@@ -1805,29 +1817,36 @@ struct SmartMoneyFlowDataPointDTO: Codable {
     let buyVolume: Double
     let sellVolume: Double
     let month: String
+    let hasActivity: Bool?
 
     enum CodingKeys: String, CodingKey {
         case month
         case buyVolume = "buy_volume"
         case sellVolume = "sell_volume"
+        case hasActivity = "has_activity"
     }
 
     func toDisplayModel() -> SmartMoneyFlowDataPoint {
         return SmartMoneyFlowDataPoint(
             month: month,
             buyVolume: buyVolume,
-            sellVolume: sellVolume
+            sellVolume: sellVolume,
+            hasActivity: hasActivity ?? (buyVolume > 0 || sellVolume > 0)
         )
     }
 }
 
 struct SmartMoneyFlowSummaryDTO: Codable {
     let totalNetFlow: Double
+    let totalBuy: Double?
+    let totalSell: Double?
     let isPositive: Bool
     let periodDescription: String
 
     enum CodingKeys: String, CodingKey {
         case totalNetFlow = "total_net_flow"
+        case totalBuy = "total_buy"
+        case totalSell = "total_sell"
         case isPositive = "is_positive"
         case periodDescription = "period_description"
     }
@@ -1835,6 +1854,8 @@ struct SmartMoneyFlowSummaryDTO: Codable {
     func toDisplayModel() -> SmartMoneyFlowSummary {
         return SmartMoneyFlowSummary(
             totalNetFlow: totalNetFlow,
+            totalBuy: totalBuy ?? 0,
+            totalSell: totalSell ?? 0,
             isPositive: isPositive,
             periodDescription: periodDescription
         )

@@ -12,29 +12,60 @@ struct SmartMoneyNetFlowBadge: View {
     let summary: SmartMoneyFlowSummary
 
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
-            // AI/Smart Money icon
-            Image(systemName: "brain.head.profile")
-                .font(AppTypography.iconDefault)
-                .foregroundColor(AppColors.primaryBlue)
-                .frame(width: 28, height: 28)
-                .background(
+        VStack(spacing: AppSpacing.sm) {
+            // Buy / Sell row
+            HStack(spacing: AppSpacing.lg) {
+                // Buy
+                HStack(spacing: AppSpacing.xxs) {
                     Circle()
-                        .fill(AppColors.primaryBlue.opacity(0.15))
-                )
+                        .fill(HoldersColors.buyVolume)
+                        .frame(width: 8, height: 8)
+                    Text("Buy:")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textSecondary)
+                    Text(summary.formattedBuy)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(HoldersColors.buyVolume)
+                }
 
-            Text("Net Informative Flow:")
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
+                // Sell
+                HStack(spacing: AppSpacing.xxs) {
+                    Circle()
+                        .fill(HoldersColors.sellVolume)
+                        .frame(width: 8, height: 8)
+                    Text("Sell:")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textSecondary)
+                    Text(summary.formattedSell)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(HoldersColors.sellVolume)
+                }
+            }
 
-            HStack(spacing: AppSpacing.xxs) {
-                Image(systemName: summary.flowIcon)
-                    .font(AppTypography.iconXS).fontWeight(.bold)
-                    .foregroundColor(summary.flowColor)
+            // Net Informative Flow row
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "brain.head.profile")
+                    .font(AppTypography.iconDefault)
+                    .foregroundColor(AppColors.primaryBlue)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(AppColors.primaryBlue.opacity(0.15))
+                    )
 
-                Text(summary.formattedNetFlow)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(summary.flowColor)
+                Text("Net Informative Flow:")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+
+                HStack(spacing: AppSpacing.xxs) {
+                    Image(systemName: summary.flowIcon)
+                        .font(AppTypography.iconXS).fontWeight(.bold)
+                        .foregroundColor(summary.flowColor)
+
+                    Text(summary.formattedNetFlow)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(summary.flowColor)
+                }
             }
         }
         .frame(maxWidth: .infinity)
@@ -50,6 +81,8 @@ struct SmartMoneyNetFlowBadge: View {
             SmartMoneyNetFlowBadge(
                 summary: SmartMoneyFlowSummary(
                     totalNetFlow: 8.27,
+                    totalBuy: 42.5,
+                    totalSell: 34.23,
                     isPositive: true,
                     periodDescription: "12-Month"
                 )
@@ -58,6 +91,8 @@ struct SmartMoneyNetFlowBadge: View {
             SmartMoneyNetFlowBadge(
                 summary: SmartMoneyFlowSummary(
                     totalNetFlow: -15.5,
+                    totalBuy: 20.0,
+                    totalSell: 35.5,
                     isPositive: false,
                     periodDescription: "12-Month"
                 )
@@ -66,6 +101,8 @@ struct SmartMoneyNetFlowBadge: View {
             SmartMoneyNetFlowBadge(
                 summary: SmartMoneyFlowSummary(
                     totalNetFlow: 1250,
+                    totalBuy: 3500,
+                    totalSell: 2250,
                     isPositive: true,
                     periodDescription: "12-Month"
                 )

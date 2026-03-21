@@ -302,7 +302,7 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got holders for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Holders failed for \(ticker): \(error)")
-            self.holdersData = HoldersData.sampleData
+            self.holdersData = nil
         }
     }
 
@@ -1155,30 +1155,214 @@ class TickerDetailViewModel: ObservableObject {
         }
     }
 
-    /// Build context string from holders data for AI chat enrichment
+    // MARK: - AI Context Builders
+
+    /// Core stock facts — always included regardless of tab
+    private var baseStockContext: String? {
+        guard let td = tickerData else { return nil }
+        var lines: [String] = []
+        lines.append("Stock: \(td.symbol) (\(td.companyName))")
+        lines.append("Price: \(td.formattedPrice) \(td.formattedChange) \(td.formattedChangePercent)")
+
+        // Key stats (P/E, EPS, Market Cap, etc.)
+        let statsSummary = td.keyStatistics.prefix(8).map { "\($0.label): \($0.value)" }.joined(separator: " | ")
+        if !statsSummary.isEmpty {
+            lines.append(statsSummary)
+        }
+
+        lines.append("Sector: \(td.sectorIndustry.sector) > \(td.sectorIndustry.industry)")
+
+        // Performance periods
+        if !td.performancePeriods.isEmpty {
+            let perfStr = td.performancePeriods.map { p in
+                let sign = p.changePercent >= 0 ? "+" : ""
+                return "\(p.label): \(sign)\(String(format: "%.1f", p.changePercent))%"
+            }.joined(separator: ", ")
+            lines.append("Performance: \(perfStr)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Overview tab context — snapshots and benchmark
+    private var overviewContext: String? {
+        guard let td = tickerData else { return nil }
+        var parts: [String] = []
+
+        // Snapshot ratings
+        for snap in td.snapshots {
+            let metricsStr = snap.metrics.map { "\($0.name): \($0.value)" }.joined(separator: ", ")
+            parts.append("\(snap.category.rawValue): \(snap.rating.displayName) (\(metricsStr))")
+        }
+
+        // Benchmark comparison
+        if let bench = td.benchmarkSummary {
+            let sign = bench.avgAnnualReturn >= 0 ? "+" : ""
+            parts.append("Avg Annual Return: \(sign)\(String(format: "%.1f", bench.avgAnnualReturn))% vs \(bench.benchmarkName): \(String(format: "%.1f", bench.spBenchmark))%")
+        }
+
+        // Signal of confidence if available
+        if let soc = signalOfConfidenceContext {
+            parts.append(soc)
+        }
+
+        return parts.isEmpty ? nil : parts.joined(separator: ". ")
+    }
+
+    /// Analysis tab context — analyst ratings, price targets, technicals
+    private var analysisContext: String? {
+        guard let data = analysisData else { return nil }
+        var parts: [String] = []
+
+        let ar = data.analystRatings
+        parts.append("Analyst Consensus: \(ar.consensus.rawValue) (\(ar.totalAnalysts) analysts)")
+        parts.append("Price Target: Low $\(String(format: "%.0f", ar.priceTarget.lowPrice)), Avg $\(String(format: "%.0f", ar.priceTarget.averagePrice)), High $\(String(format: "%.0f", ar.priceTarget.highPrice))")
+        parts.append("Target Upside: \(ar.formattedUpside)")
+
+        // Rating distribution
+        let distStr = ar.distributions.map { "\($0.label): \($0.count)" }.joined(separator: ", ")
+        parts.append("Ratings: \(distStr)")
+
+        // Recent actions
+        let recentActions = ar.actions.prefix(3)
+        if !recentActions.isEmpty {
+            let actStr = recentActions.map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }.joined(separator: "; ")
+            parts.append("Recent: \(actStr)")
+        }
+
+        // Technical analysis
+        let ta = data.technicalAnalysis
+        parts.append("Technical: Daily \(ta.dailySignal.signal.rawValue), Weekly \(ta.weeklySignal.signal.rawValue), Overall \(ta.overallSignal.rawValue)")
+
+        return parts.joined(separator: ". ")
+    }
+
+    /// Financials tab context — growth, margins, health check, earnings
+    private var financialsContext: String? {
+        var parts: [String] = []
+
+        // Growth data
+        if let gd = growthData {
+            if let latestRevenue = gd.revenueAnnual.last {
+                let sign = latestRevenue.yoyChangePercent >= 0 ? "+" : ""
+                parts.append("Revenue Growth (YoY): \(sign)\(String(format: "%.1f", latestRevenue.yoyChangePercent))%")
+            }
+            if let latestEPS = gd.epsAnnual.last {
+                let sign = latestEPS.yoyChangePercent >= 0 ? "+" : ""
+                parts.append("EPS Growth (YoY): \(sign)\(String(format: "%.1f", latestEPS.yoyChangePercent))%")
+            }
+            if let latestFCF = gd.freeCashFlowAnnual.last {
+                let sign = latestFCF.yoyChangePercent >= 0 ? "+" : ""
+                parts.append("FCF Growth (YoY): \(sign)\(String(format: "%.1f", latestFCF.yoyChangePercent))%")
+            }
+        }
+
+        // Profit margins
+        if let pp = profitPowerData, let latest = pp.annualData.last {
+            parts.append("Margins — Gross: \(String(format: "%.1f", latest.grossMargin))%, Operating: \(String(format: "%.1f", latest.operatingMargin))%, Net: \(String(format: "%.1f", latest.netMargin))%, FCF: \(String(format: "%.1f", latest.fcfMargin))%")
+            parts.append("Sector Avg Net Margin: \(String(format: "%.1f", latest.sectorAverageNetMargin))%")
+        }
+
+        // Health check
+        if let hc = healthCheckData {
+            parts.append("Health Check: \(hc.ratingBadgeText)")
+            let metricsSummary = hc.metrics.map { m in
+                let statusLabel: String
+                switch m.status {
+                case .positive: statusLabel = "Pass"
+                case .neutral: statusLabel = "Mixed"
+                case .negative: statusLabel = "Fail"
+                }
+                return "\(m.type.rawValue): \(statusLabel)"
+            }.joined(separator: ", ")
+            parts.append("Metrics: \(metricsSummary)")
+        }
+
+        // Earnings beat/miss streak
+        if let ed = earningsData {
+            let reported = ed.epsQuarters.filter { $0.actualValue != nil }
+            let beats = reported.filter { $0.result == .beat }.count
+            let misses = reported.filter { $0.result == .missed }.count
+            if !reported.isEmpty {
+                parts.append("Earnings: \(beats) beats, \(misses) misses in last \(reported.count) quarters")
+            }
+            if let next = ed.nextEarningsDate {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                parts.append("Next Earnings: \(formatter.string(from: next.date)) (\(next.statusText))")
+            }
+        }
+
+        return parts.isEmpty ? nil : parts.joined(separator: ". ")
+    }
+
+    /// News tab context — recent headlines
+    private var newsContext: String? {
+        let recent = newsArticles.prefix(3)
+        guard !recent.isEmpty else { return nil }
+        var parts: [String] = []
+        parts.append("Recent Headlines:")
+        for article in recent {
+            let sentiment = article.sentiment.displayName
+            parts.append("- [\(sentiment)] \(article.headline)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// Holders tab context — ownership + smart money flows
     var holdersContext: String? {
         guard let data = holdersData else { return nil }
         var parts: [String] = []
+
+        // Ownership breakdown
         let bd = data.shareholderBreakdown
         parts.append("Ownership: Insiders \(bd.formattedInsiders), Institutions \(bd.formattedInstitutions), Public \(bd.formattedPublicOther)")
         if let topHolder = bd.top10Owners.institutions.first {
             parts.append("Top holder: \(topHolder.name) (\(topHolder.formattedPercent))")
         }
-        let ra = data.recentActivities
-        let summary = ra.insiderActivities.summary
+
+        // Insider activity summary
+        let summary = data.recentActivities.insiderActivities.summary
         if summary.numBuyers > 0 || summary.numSellers > 0 {
             parts.append("Insider activity (\(summary.periodDescription)): \(summary.buyersLabel), \(summary.sellersLabel)")
         }
+
+        // Smart money flow summaries
+        let insiderFlow = data.insiderData.summary
+        parts.append("Insider 12M Net Flow: \(insiderFlow.formattedNetFlow) (\(insiderFlow.isPositive ? "Bullish" : "Bearish"))")
+
+        let hfFlow = data.hedgeFundsData.summary
+        parts.append("Hedge Fund 12M Net Flow: \(hfFlow.formattedNetFlow) (\(hfFlow.isPositive ? "Bullish" : "Bearish"))")
+
+        let congressFlow = data.congressData.summary
+        parts.append("Congress 12M Net Flow: \(congressFlow.formattedNetFlow) (\(congressFlow.isPositive ? "Bullish" : "Bearish"))")
+
         return parts.joined(separator: ". ")
     }
 
     /// Build context string for the current tab to inject into AI chat
     var contextForCurrentTab: String? {
-        switch selectedTab {
-        case .holders:
-            return holdersContext
-        default:
-            return signalOfConfidenceContext
+        var sections: [String] = []
+
+        if let base = baseStockContext {
+            sections.append(base)
         }
+
+        switch selectedTab {
+        case .overview:
+            if let ctx = overviewContext { sections.append(ctx) }
+        case .analysis:
+            if let ctx = analysisContext { sections.append(ctx) }
+        case .financials:
+            if let ctx = financialsContext { sections.append(ctx) }
+        case .news:
+            if let ctx = newsContext { sections.append(ctx) }
+        case .holders:
+            if let ctx = holdersContext { sections.append(ctx) }
+        }
+
+        sections.append("User is viewing the \(selectedTab.rawValue) tab.")
+
+        return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
     }
 }

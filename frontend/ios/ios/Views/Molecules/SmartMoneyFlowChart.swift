@@ -13,35 +13,54 @@ import Charts
 
 struct SmartMoneyFlowChart: View {
     let priceData: [StockPriceDataPoint]
+    let dailyPrices: [DailyPricePoint]
     let flowData: [SmartMoneyFlowDataPoint]
 
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
     private let volumeChartHeight: CGFloat = 120
-    private let barWidth: CGFloat = 12
+
+    /// Wider bars for quarterly (8 bars) vs monthly (12 bars)
+    private var barWidth: CGFloat {
+        isQuarterly ? 20 : 12
+    }
+
+    /// Whether we have enough daily data for a detailed price line
+    private var useDailyPrices: Bool {
+        dailyPrices.count >= 10
+    }
 
     /// All month labels from the data
     private var allMonths: [String] {
         flowData.map { $0.month }
     }
 
-    /// Only show 3 x-axis labels: first, middle, last
+    /// Whether data uses quarterly keys (e.g. "Q1\n'24") vs monthly ("MM/YYYY")
+    private var isQuarterly: Bool {
+        flowData.first?.month.hasPrefix("Q") == true
+    }
+
+    /// Show all labels for quarterly (≤8 bars), sparse for monthly (12 bars)
     private var xAxisLabels: [String] {
+        if isQuarterly { return allMonths }
         guard flowData.count >= 3 else { return allMonths }
         let first = flowData.first?.month ?? ""
         let middle = flowData[flowData.count / 2].month
         let last = flowData.last?.month ?? ""
         return [first, middle, last]
     }
-    
-    /// Format month string from "MM/YYYY" to "MM/YY"
+
+    /// Format label for x-axis display
     private func formatMonthLabel(_ month: String) -> String {
-        // Convert "02/2025" to "02/25"
+        // Quarterly keys like "Q1\n'24" — return as-is
+        if month.hasPrefix("Q") { return month }
+
+        // Monthly keys: "MM/YYYY" → "MM/YY"
         let components = month.split(separator: "/")
         guard components.count == 2,
               let year = components.last,
               year.count == 4 else {
-            return month // Return as-is if format is unexpected
+            return month
         }
         let shortYear = year.suffix(2)
         return "\(components[0])/\(shortYear)"
@@ -50,18 +69,78 @@ struct SmartMoneyFlowChart: View {
     var body: some View {
         VStack(spacing: 0) {
             // Top: Stock Price Line Chart
-            priceChart
+            if useDailyPrices {
+                dailyPriceChart
+            } else {
+                monthlyPriceChart
+            }
 
             // Bottom: Buy/Sell Volume Bar Chart
             volumeChart
         }
     }
 
-    // MARK: - Price Chart (Top)
+    // MARK: - Daily Price Chart (detailed, like Earnings)
 
-    private var priceChart: some View {
+    private var dailyPriceChart: some View {
         Chart {
-            // Area under the line (draw first so line is on top)
+            // Area fill under the daily line
+            ForEach(Array(dailyPrices.enumerated()), id: \.element.id) { index, point in
+                AreaMark(
+                    x: .value("Day", index),
+                    yStart: .value("Base", dailyPriceRange.min),
+                    yEnd: .value("Price", point.price)
+                )
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            HoldersColors.flowLine.opacity(0.4),
+                            HoldersColors.flowLine.opacity(0.05)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .interpolationMethod(.catmullRom)
+            }
+
+            // Daily price line
+            ForEach(Array(dailyPrices.enumerated()), id: \.element.id) { index, point in
+                LineMark(
+                    x: .value("Day", index),
+                    y: .value("Price", point.price)
+                )
+                .foregroundStyle(HoldersColors.flowLine)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
+            }
+        }
+        .chartXAxis(.hidden)
+        .chartXScale(domain: 0...(dailyPrices.count - 1), range: .plotDimension(padding: barWidth / 2))
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine()
+                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                AxisValueLabel {
+                    if let doubleValue = value.as(Double.self) {
+                        Text(formatPriceValue(doubleValue))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textMuted)
+                    }
+                }
+            }
+        }
+        .chartYScale(domain: dailyPriceRange.min...dailyPriceRange.max)
+        .chartPlotStyle { plotArea in
+            plotArea.background(Color.clear)
+        }
+        .frame(height: priceChartHeight)
+    }
+
+    // MARK: - Monthly Price Chart (fallback)
+
+    private var monthlyPriceChart: some View {
+        Chart {
             ForEach(priceData) { point in
                 AreaMark(
                     x: .value("Month", point.month),
@@ -81,7 +160,6 @@ struct SmartMoneyFlowChart: View {
                 .interpolationMethod(.catmullRom)
             }
 
-            // Price line
             ForEach(priceData) { point in
                 LineMark(
                     x: .value("Month", point.month),
@@ -142,7 +220,7 @@ struct SmartMoneyFlowChart: View {
 
             // Zero line
             RuleMark(y: .value("Zero", 0))
-                .foregroundStyle(AppColors.cardBackgroundLight)
+                .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
                 .lineStyle(StrokeStyle(lineWidth: 0.5))
         }
         .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
@@ -183,7 +261,14 @@ struct SmartMoneyFlowChart: View {
         let prices = priceData.map { $0.price }
         let minPrice = (prices.min() ?? 0)
         let maxPrice = (prices.max() ?? 1)
-        // Add padding for visual breathing room
+        let padding = (maxPrice - minPrice) * 0.1
+        return (minPrice - padding, maxPrice + padding)
+    }
+
+    private var dailyPriceRange: (min: Double, max: Double) {
+        let prices = dailyPrices.map { $0.price }
+        let minPrice = (prices.min() ?? 0)
+        let maxPrice = (prices.max() ?? 1)
         let padding = (maxPrice - minPrice) * 0.1
         return (minPrice - padding, maxPrice + padding)
     }
@@ -228,6 +313,7 @@ struct SmartMoneyFlowChart: View {
 
             SmartMoneyFlowChart(
                 priceData: StockPriceDataPoint.sampleData,
+                dailyPrices: [],
                 flowData: SmartMoneyFlowDataPoint.insiderSampleData
             )
         }

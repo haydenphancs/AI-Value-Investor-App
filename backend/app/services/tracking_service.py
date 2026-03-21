@@ -135,33 +135,48 @@ class TrackingService:
             results[2] if not isinstance(results[2], BaseException) else []
         )
 
+        section_names = ["batch_quotes", "sparklines", "earnings_alerts"]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
-                logger.error("Tracking feed section %d failed: %s", idx, res)
+                logger.error("[Tracking] %s failed: %s", section_names[idx], res)
 
         # 3. Merge watchlist + quotes + sparklines into TrackedAssetResponse
         assets: List[TrackedAssetResponse] = []
         for item in watchlist:
-            ticker = item["ticker"]
-            quote = quotes_map.get(ticker, {})
-            sparkline = sparklines_map.get(ticker, [])
+            ticker = item.get("ticker", "")
+            if not ticker:
+                logger.warning("[Tracking] Skipping watchlist item with no ticker: %s", item)
+                continue
+            try:
+                quote = quotes_map.get(ticker, {})
+                sparkline = sparklines_map.get(ticker, [])
 
-            change_pct = quote.get("changesPercentage") or 0
-            price = quote.get("price") or 0
+                change_pct = quote.get("changesPercentage") or 0
+                price = quote.get("price") or 0
+                market_cap_raw = quote.get("marketCap")
 
-            assets.append(
-                TrackedAssetResponse(
-                    ticker=ticker,
-                    company_name=item.get("company_name") or quote.get("name") or ticker,
-                    price=round(float(price), 2),
-                    change_percent=round(float(change_pct), 2),
-                    sparkline_data=sparkline,
-                    logo_url=item.get("logo_url"),
-                    sector=quote.get("sector"),
-                    country=quote.get("country"),
-                    market_cap=float(quote["marketCap"]) if quote.get("marketCap") else None,
+                assets.append(
+                    TrackedAssetResponse(
+                        ticker=ticker,
+                        company_name=item.get("company_name") or quote.get("name") or ticker,
+                        price=round(float(price), 2),
+                        change_percent=round(float(change_pct), 2),
+                        sparkline_data=sparkline,
+                        logo_url=item.get("logo_url"),
+                        sector=quote.get("sector"),
+                        country=quote.get("country"),
+                        market_cap=float(market_cap_raw) if market_cap_raw else None,
+                    )
                 )
-            )
+            except Exception as exc:
+                logger.error("[Tracking] Failed to enrich ticker %s: %s", ticker, exc)
+                # Still include the asset with minimal data so it shows in the list
+                assets.append(
+                    TrackedAssetResponse(
+                        ticker=ticker,
+                        company_name=item.get("company_name") or ticker,
+                    )
+                )
 
         feed = TrackingFeedResponse(assets=assets, alerts=alerts)
         _feed_cache_set(user_id, feed)

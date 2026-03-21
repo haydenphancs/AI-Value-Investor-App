@@ -14,7 +14,7 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user_or_guest
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
     TrackingFeedResponse,
@@ -33,7 +33,7 @@ router = APIRouter()
 
 @router.get("/assets", response_model=TrackingFeedResponse)
 async def get_tracking_assets(
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
 ):
     """Get enriched watchlist with real-time prices, sparklines, and alerts."""
     service = TrackingService()
@@ -45,7 +45,7 @@ async def get_tracking_assets(
 
 @router.get("/holdings")
 async def get_holdings(
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's portfolio holdings for diversification scoring."""
@@ -62,7 +62,7 @@ async def get_holdings(
 @router.post("/holdings")
 async def add_holding(
     request: AddHoldingRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Add or upsert a portfolio holding. Enriches with FMP sector/country data."""
@@ -104,7 +104,7 @@ async def add_holding(
 async def update_holding(
     ticker: str,
     request: UpdateHoldingRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Update an existing portfolio holding's market value or asset type."""
@@ -134,7 +134,7 @@ async def update_holding(
 @router.delete("/holdings/{ticker}")
 async def delete_holding(
     ticker: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """Remove a holding from user's portfolio."""

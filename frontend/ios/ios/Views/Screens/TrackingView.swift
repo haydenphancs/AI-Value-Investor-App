@@ -52,17 +52,14 @@ struct TrackingContentView: View {
                     )
 
                     // Tab Content
-                    TabView(selection: $viewModel.selectedTab) {
-                        // Assets Tab
-                        AssetsTabContent(viewModel: viewModel)
-                            .tag(TrackingTab.assets)
-
-                        // Whales Tab
-                        WhalesTabContent(viewModel: viewModel)
-                            .tag(TrackingTab.whales)
+                    Group {
+                        switch viewModel.selectedTab {
+                        case .assets:
+                            AssetsTabContent(viewModel: viewModel)
+                        case .whales:
+                            WhalesTabContent(viewModel: viewModel)
+                        }
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
                 }
 
                 // Loading overlay
@@ -152,17 +149,14 @@ struct TrackingContentViewWithBinding: View {
                     )
 
                     // Tab Content
-                    TabView(selection: $viewModel.selectedTab) {
-                        // Assets Tab
-                        AssetsTabContent(viewModel: viewModel)
-                            .tag(TrackingTab.assets)
-
-                        // Whales Tab
-                        WhalesTabContent(viewModel: viewModel)
-                            .tag(TrackingTab.whales)
+                    Group {
+                        switch viewModel.selectedTab {
+                        case .assets:
+                            AssetsTabContent(viewModel: viewModel)
+                        case .whales:
+                            WhalesTabContent(viewModel: viewModel)
+                        }
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
                 }
 
                 // Loading overlay
@@ -242,7 +236,8 @@ struct AssetsTabContent: View {
                     assets: viewModel.filteredAssets,
                     onSortTapped: { viewModel.openSortOptions() },
                     onAddTapped: { viewModel.addNewAsset() },
-                    onAssetTapped: { asset in viewModel.viewAssetDetail(asset) }
+                    onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
+                    onRemoveAsset: { asset in viewModel.removeAsset(asset) }
                 )
                 .padding(.top, AppSpacing.sm)
 
@@ -1028,21 +1023,27 @@ struct SortOptionsSheet: View {
                             }
                         }
                     }
+                    .listRowBackground(AppColors.cardBackground)
                 }
             }
             .listStyle(InsetGroupedListStyle())
+            .scrollContentBackground(.hidden)
+            .background(AppColors.background)
             .navigationTitle("Sort By")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         onDismiss?()
                     }
                     .fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryBlue)
                 }
             }
         }
         .presentationDetents([.medium])
+        .preferredColorScheme(.dark)
     }
 }
 

@@ -51,7 +51,8 @@ struct SignalOfConfidenceSectionCard: View {
                     .padding(.top, AppSpacing.md)
             }
         }
-        .padding(AppSpacing.lg)
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                 .fill(AppColors.cardBackground)

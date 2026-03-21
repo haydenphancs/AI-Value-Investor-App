@@ -11,22 +11,21 @@ struct TickerDetailTabBar: View {
     @Binding var selectedTab: TickerDetailTab
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(TickerDetailTab.allCases, id: \.rawValue) { tab in
-                    TickerDetailTabButton(
-                        tab: tab,
-                        isSelected: selectedTab == tab,
-                        onTap: {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                selectedTab = tab
-                            }
+        HStack(spacing: 0) {
+            ForEach(TickerDetailTab.allCases, id: \.rawValue) { tab in
+                TickerDetailTabButton(
+                    tab: tab,
+                    isSelected: selectedTab == tab,
+                    onTap: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedTab = tab
                         }
-                    )
-                }
+                    }
+                )
+                .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, AppSpacing.lg)
         }
+        .padding(.horizontal, AppSpacing.sm)
     }
 }
 
@@ -43,7 +42,8 @@ struct TickerDetailTabButton: View {
                 Text(tab.rawValue)
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(isSelected ? AppColors.primaryBlue : AppColors.textMuted)
-                    .padding(.horizontal, AppSpacing.md)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
 
                 // Selection indicator
                 Rectangle()

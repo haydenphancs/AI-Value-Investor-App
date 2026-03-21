@@ -14,16 +14,10 @@ struct AddAssetButton: View {
         Button {
             onTap?()
         } label: {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "plus")
-                    .font(AppTypography.iconSmall).fontWeight(.semibold)
-
-                Text("Add New")
-                    .font(AppTypography.bodyEmphasis)
-            }
-            .foregroundColor(AppColors.textPrimary)
-            .padding(.horizontal, AppSpacing.xl)
-            .padding(.vertical, AppSpacing.md)
+            Image(systemName: "plus")
+                .font(AppTypography.iconSmall).fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(AppSpacing.md)
             .background(AppColors.cardBackground)
             .cornerRadius(AppCornerRadius.pill)
             .overlay(

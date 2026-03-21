@@ -16,8 +16,8 @@ struct SignalOfConfidenceChartView: View {
 
     // Chart configuration
     private let chartHeight: CGFloat = 280
-    private let yAxisWidth: CGFloat = 40
-    private let rightYAxisWidth: CGFloat = 45
+    private let yAxisWidth: CGFloat = 30
+    private let rightYAxisWidth: CGFloat = 38
     private let visibleColumnCount: CGFloat = 6
     private let labelRowHeight: CGFloat = 20
     private let labelRowCount: CGFloat = 3 // dividends, buybacks, shares outstanding
@@ -293,7 +293,7 @@ struct SignalOfConfidenceChartView: View {
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 Text(viewType == .yield
-                     ? String(format: "%.1f%%", dataPoint.dividendYield)
+                     ? String(format: "%.2f%%", dataPoint.dividendYield)
                      : formatLargeNumber(dataPoint.dividendAmount))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(AppColors.confidenceDividends)
@@ -315,7 +315,7 @@ struct SignalOfConfidenceChartView: View {
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 Text(viewType == .yield
-                     ? String(format: "%.1f%%", dataPoint.buybackYield)
+                     ? String(format: "%.2f%%", dataPoint.buybackYield)
                      : formatLargeNumber(dataPoint.buybackAmount))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(AppColors.confidenceBuybacks)

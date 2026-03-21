@@ -20,10 +20,9 @@ struct SendButton: View {
                     .fill(isEnabled ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
                     .frame(width: 44, height: 44)
 
-                Image(systemName: "paperplane.fill")
-                    .font(AppTypography.iconMedium).fontWeight(.semibold)
+                Image(systemName: "arrow.up")
+                    .font(AppTypography.iconMedium).fontWeight(.bold)
                     .foregroundColor(isEnabled ? .white : AppColors.textMuted)
-                    .rotationEffect(.degrees(45))
             }
         }
         .buttonStyle(PlainButtonStyle())

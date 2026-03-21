@@ -61,7 +61,7 @@ struct InstitutionalHolder: Identifiable {
     }
 
     var formattedPercent: String {
-        String(format: "%.2f%%", percentOwnership)
+        formatOwnershipPercent(percentOwnership)
     }
 
     var formattedChange: String? {
@@ -408,7 +408,7 @@ struct TopInstitution: Identifiable {
     }
 
     var formattedPercent: String {
-        String(format: "%.1f%%", percentOwnership)
+        formatOwnershipPercent(percentOwnership)
     }
 }
 
@@ -432,8 +432,22 @@ struct TopInsider: Identifiable {
     }
 
     var formattedPercent: String {
-        String(format: "%.2f%%", percentOwnership)
+        formatOwnershipPercent(percentOwnership)
     }
+}
+
+/// Adaptive decimal formatting — shows enough precision so small values never display as 0.00%
+private func formatOwnershipPercent(_ value: Double) -> String {
+    if value >= 1 {
+        return String(format: "%.1f%%", value)
+    } else if value >= 0.01 {
+        return String(format: "%.2f%%", value)
+    } else if value >= 0.001 {
+        return String(format: "%.3f%%", value)
+    } else if value > 0 {
+        return String(format: "%.4f%%", value)
+    }
+    return "0.00%"
 }
 
 // MARK: - Top 10 Owners Data

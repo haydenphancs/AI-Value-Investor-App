@@ -384,8 +384,9 @@ class HoldersService:
 
         # Build top 10 owners
         top_10_institutions = self._build_top_institutions(inst_holders[:10])
+        outstanding_shares = _safe_float(profile, "outstandingShares", 0.0)
         top_10_insiders = self._build_top_insiders(
-            insider_roster, current_price
+            insider_roster, current_price, outstanding_shares
         )
 
         return ShareholderBreakdownSchema(
@@ -453,6 +454,7 @@ class HoldersService:
         self,
         roster: List[Dict[str, Any]],
         current_price: float,
+        outstanding_shares: float = 0.0,
     ) -> List[TopInsiderSchema]:
         if not roster:
             return []
@@ -462,9 +464,13 @@ class HoldersService:
         for r in roster:
             shares = _safe_float(r, "numberOfShares", 0.0)
             value_millions = (shares * current_price) / 1_000_000 if current_price > 0 else 0.0
-            ownership_pct = _safe_float(r, "ownershipPercent", 0.0)
-            if 0 < ownership_pct < 1.0:
-                ownership_pct *= 100.0
+            # Compute ownership % from shares / outstanding shares
+            if outstanding_shares > 0 and shares > 0:
+                ownership_pct = (shares / outstanding_shares) * 100.0
+            else:
+                ownership_pct = _safe_float(r, "ownershipPercent", 0.0)
+                if 0 < ownership_pct < 1.0:
+                    ownership_pct *= 100.0
 
             insiders.append({
                 "name": r.get("owner", "Unknown"),
@@ -483,7 +489,7 @@ class HoldersService:
                 name=ins["name"],
                 title=ins["title"],
                 value_in_millions=round(ins["valueInMillions"], 1),
-                percent_ownership=round(ins["percentOwnership"], 2),
+                percent_ownership=round(ins["percentOwnership"], 4),
             ))
         return result
 

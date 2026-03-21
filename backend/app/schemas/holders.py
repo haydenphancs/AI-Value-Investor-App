@@ -55,6 +55,12 @@ class ShareholderBreakdownSchema(BaseModel):
 
 # ── Smart Money Flow (placeholder for now) ───────────────────────
 
+class DailyPricePointSchema(BaseModel):
+    """Daily stock price for detailed smart money price chart."""
+    date: str
+    price: float = 0.0
+
+
 class StockPriceDataPointSchema(BaseModel):
     """Monthly stock price for smart money chart."""
     month: str
@@ -62,15 +68,18 @@ class StockPriceDataPointSchema(BaseModel):
 
 
 class SmartMoneyFlowDataPointSchema(BaseModel):
-    """Monthly smart money buy/sell volume."""
-    month: str
+    """Buy/sell volume per period (monthly for insider/congress, quarterly for hedge funds)."""
+    month: str  # "MM/YYYY" for monthly, "Q1\n'24" for quarterly
     buy_volume: float = Field(0.0)
     sell_volume: float = Field(0.0)
+    has_activity: bool = True
 
 
 class SmartMoneyFlowSummarySchema(BaseModel):
     """Summary of smart money activity."""
     total_net_flow: float = Field(0.0)
+    total_buy: float = Field(0.0)
+    total_sell: float = Field(0.0)
     is_positive: bool = True
     period_description: str = "12-Month"
 
@@ -79,6 +88,7 @@ class SmartMoneyDataSchema(BaseModel):
     """Complete smart money data for one tab (Insider/Hedge Funds/Congress)."""
     tab: str
     price_data: List[StockPriceDataPointSchema] = []
+    daily_prices: List[DailyPricePointSchema] = []
     flow_data: List[SmartMoneyFlowDataPointSchema] = []
     summary: SmartMoneyFlowSummarySchema = SmartMoneyFlowSummarySchema()
 

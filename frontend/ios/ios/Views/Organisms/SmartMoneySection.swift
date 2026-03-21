@@ -41,20 +41,36 @@ struct SmartMoneySection: View {
                 .padding(.top, AppSpacing.xs)
 
             // Flow chart (price on top, buy/sell volume below)
-            SmartMoneyFlowChart(
-                priceData: currentData.priceData,
-                flowData: currentData.flowData
-            )
-            .id(selectedTab.rawValue)
-            .animation(.easeInOut(duration: 0.3), value: selectedTab)
+            if currentData.flowData.allSatisfy({ !$0.hasActivity }) {
+                // Empty state when no data for this tab
+                VStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.system(size: 28))
+                        .foregroundColor(AppColors.textMuted)
+                    Text("No \(selectedTab.rawValue.lowercased()) activity data available")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textMuted)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 200)
+            } else {
+                SmartMoneyFlowChart(
+                    priceData: currentData.priceData,
+                    dailyPrices: currentData.dailyPrices,
+                    flowData: currentData.flowData
+                )
+                .id(selectedTab.rawValue)
+                .animation(.easeInOut(duration: 0.3), value: selectedTab)
 
-            // Legend
-            SmartMoneyFlowLegend()
-                .padding(.top, AppSpacing.sm)
+                // Legend
+                SmartMoneyFlowLegend()
+                    .padding(.top, AppSpacing.sm)
 
-            // Net flow badge
-            SmartMoneyNetFlowBadge(summary: currentData.summary)
-                .padding(.top, AppSpacing.sm)
+                // Net flow badge
+                SmartMoneyNetFlowBadge(summary: currentData.summary)
+                    .padding(.top, AppSpacing.sm)
+            }
         }
         .padding(AppSpacing.lg)
         .background(

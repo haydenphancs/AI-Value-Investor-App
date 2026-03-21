@@ -7,7 +7,9 @@ NOTE: FMP deprecated all /api/v3 ("legacy") endpoints after August 31 2025.
       This client uses the /stable/ base URL with query-param-based routing.
 """
 
+import asyncio
 import httpx
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import logging
 
@@ -689,15 +691,165 @@ class FMPClient:
             logger.warning(f"Shares float request failed for {ticker}: {e}")
             return {}
 
-    # ── Per-ticker institutional holders ─────────────────────────────
+    # ── Institutional ownership summary ─────────────────────────────
+
+    async def get_institutional_ownership_summary(
+        self, ticker: str
+    ) -> Dict[str, Any]:
+        """Get total institutional ownership summary for a stock.
+
+        Returns ownershipPercent (total), investorsHolding count,
+        totalInvested, and position change data.
+        """
+        now = datetime.now(timezone.utc)
+        month = now.month
+        if month <= 3:
+            year, quarter = now.year - 1, 4
+        elif month <= 6:
+            year, quarter = now.year, 1
+        elif month <= 9:
+            year, quarter = now.year, 2
+        else:
+            year, quarter = now.year, 3
+
+        try:
+            data = await self._make_request(
+                "institutional-ownership/symbol-positions-summary",
+                params={
+                    "symbol": ticker.upper(),
+                    "year": year,
+                    "quarter": quarter,
+                },
+            )
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"Institutional ownership summary unavailable for {ticker}"
+                )
+                return {}
+            raise
+        except Exception as e:
+            logger.warning(f"Institutional ownership summary failed for {ticker}: {e}")
+            return {}
+
+    async def get_institutional_ownership_history(
+        self, ticker: str, quarters: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Get institutional ownership summary for the last N quarters.
+
+        Fetches symbol-positions-summary for each quarter in parallel and
+        returns a chronologically sorted list (oldest first).
+        """
+        now = datetime.now(timezone.utc)
+        month = now.month
+        if month <= 3:
+            cur_year, cur_q = now.year - 1, 4
+        elif month <= 6:
+            cur_year, cur_q = now.year, 1
+        elif month <= 9:
+            cur_year, cur_q = now.year, 2
+        else:
+            cur_year, cur_q = now.year, 3
+
+        # Build list of (year, quarter) going backwards
+        yq_pairs = []
+        y, q = cur_year, cur_q
+        for _ in range(quarters):
+            yq_pairs.append((y, q))
+            q -= 1
+            if q == 0:
+                q = 4
+                y -= 1
+
+        async def _fetch_quarter(year: int, quarter: int) -> Optional[Dict[str, Any]]:
+            try:
+                data = await self._make_request(
+                    "institutional-ownership/symbol-positions-summary",
+                    params={
+                        "symbol": ticker.upper(),
+                        "year": year,
+                        "quarter": quarter,
+                    },
+                )
+                if isinstance(data, list) and data:
+                    return data[0]
+                return data if isinstance(data, dict) else None
+            except Exception as e:
+                logger.warning(
+                    f"Institutional ownership history failed for "
+                    f"{ticker} {year}Q{quarter}: {e}"
+                )
+                return None
+
+        results = await asyncio.gather(
+            *[_fetch_quarter(y, q) for y, q in yq_pairs]
+        )
+        # Filter out failures and sort chronologically (oldest first)
+        valid = [r for r in results if r and r.get("date")]
+        valid.sort(key=lambda r: r["date"])
+        return valid
+
+    async def get_institutional_ownership_for_quarter(
+        self, ticker: str, year: int, quarter: int
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a single quarter's institutional ownership summary."""
+        try:
+            data = await self._make_request(
+                "institutional-ownership/symbol-positions-summary",
+                params={
+                    "symbol": ticker.upper(),
+                    "year": year,
+                    "quarter": quarter,
+                },
+            )
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.warning(
+                f"Institutional ownership fetch failed for "
+                f"{ticker} {year}Q{quarter}: {e}"
+            )
+            return None
+
+    # ── Per-ticker institutional holders (stable API) ───────────────
 
     async def get_institutional_holder(
         self, ticker: str, limit: int = 20
     ) -> List[Dict[str, Any]]:
-        """Get top institutional holders for a stock ticker."""
+        """Get top institutional holders for a stock via 13F analytics.
+
+        Uses the stable API endpoint:
+        institutional-ownership/extract-analytics/holder?symbol={ticker}
+
+        Returns holders sorted by market value with ownership %, change data, etc.
+        """
+        # Determine most recent quarter
+        now = datetime.now(timezone.utc)
+        # Use previous quarter (current quarter filings aren't available yet)
+        month = now.month
+        if month <= 3:
+            year, quarter = now.year - 1, 4
+        elif month <= 6:
+            year, quarter = now.year, 1
+        elif month <= 9:
+            year, quarter = now.year, 2
+        else:
+            year, quarter = now.year, 3
+
         try:
             data = await self._make_request(
-                f"institutional-holder/{ticker.upper()}",
+                "institutional-ownership/extract-analytics/holder",
+                params={
+                    "symbol": ticker.upper(),
+                    "year": year,
+                    "quarter": quarter,
+                    "page": 0,
+                    "limit": limit,
+                },
             )
             if isinstance(data, list):
                 return data[:limit]
@@ -705,8 +857,8 @@ class FMPClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
                 logger.warning(
-                    f"Institutional holder endpoint unavailable for {ticker} "
-                    "(may require higher plan)"
+                    f"Institutional holder analytics unavailable for {ticker} "
+                    f"(tried {year}Q{quarter})"
                 )
                 return []
             raise

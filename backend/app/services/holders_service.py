@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.holders import (
+    DailyPricePointSchema,
     HoldersResponse,
     InstitutionalActivitySchema,
     InstitutionalHolderSchema,
@@ -159,11 +160,8 @@ class HoldersService:
             future.set_result(result)
 
             # Upsert to Supabase in background (non-blocking)
-            loop.run_in_executor(
-                None,
-                self._upsert_supabase_cache_safe,
-                ticker,
-                result,
+            asyncio.ensure_future(
+                asyncio.to_thread(self._upsert_supabase_cache_safe, ticker, result)
             )
 
             return result
@@ -203,11 +201,42 @@ class HoldersService:
 
             response_json = entry.get("response_json")
             if response_json:
-                return HoldersResponse(**response_json)
+                result = HoldersResponse(**response_json)
+                # Validate hedge fund flow data — reject one-sided cached data
+                if self._has_one_sided_hedge_fund_data(result):
+                    logger.info(
+                        f"Holders Supabase cache STALE for {ticker} "
+                        f"(one-sided hedge fund flow data detected)"
+                    )
+                    return None
+                return result
             return None
         except Exception as e:
             logger.warning(f"Holders Supabase cache check failed for {ticker}: {e}")
             return None
+
+    @staticmethod
+    def _has_one_sided_hedge_fund_data(result: HoldersResponse) -> bool:
+        """Detect stale cache where hedge fund quarters have only buy OR sell.
+
+        When both buyers and sellers exist (which is nearly always the case),
+        we expect both buy_volume > 0 and sell_volume > 0.  One-sided data
+        indicates the row was computed before the _estimate_buy_sell logic
+        was added.
+        """
+        try:
+            hf = result.hedge_funds_data
+            if not hf or not hf.flow_data:
+                return False
+            for pt in hf.flow_data:
+                if not pt.has_activity:
+                    continue
+                # If there's activity but only one side has volume → stale
+                if (pt.buy_volume > 0) != (pt.sell_volume > 0):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def _upsert_supabase_cache_safe(self, ticker: str, result: HoldersResponse):
         try:
@@ -230,12 +259,13 @@ class HoldersService:
 
         # Phase 1: Core data (all in parallel)
         now = datetime.now(timezone.utc)
-        from_date = (now - timedelta(days=400)).strftime("%Y-%m-%d")
+        from_date = (now - timedelta(days=760)).strftime("%Y-%m-%d")  # ~2 years for hedge fund chart
 
         (
             shares_float,
             quote_data,
             institutional_holders,
+            inst_ownership_summary,
             insider_trading,
             insider_roster,
             historical_prices,
@@ -245,11 +275,12 @@ class HoldersService:
             self.fmp.get_shares_float(ticker),
             self.fmp.get_stock_price_quote(ticker),
             self.fmp.get_institutional_holder(ticker, limit=20),
+            self.fmp.get_institutional_ownership_summary(ticker),
             self.fmp.get_insider_trading(ticker, limit=100),
             self.fmp.get_insider_roster(ticker),
             self.fmp.get_historical_prices(ticker, from_date=from_date),
-            self.fmp.get_senate_latest(limit=100),
-            self.fmp.get_house_latest(limit=100),
+            self.fmp.get_senate_latest(limit=500),
+            self.fmp.get_house_latest(limit=500),
             return_exceptions=True,
         )
 
@@ -263,6 +294,7 @@ class HoldersService:
         shares_float = _unwrap(shares_float, "Shares float", {})
         quote_data = _unwrap(quote_data, "Quote", {})
         institutional_holders = _unwrap(institutional_holders, "Institutional holders", [])
+        inst_ownership_summary = _unwrap(inst_ownership_summary, "Inst ownership summary", {})
         insider_trading = _unwrap(insider_trading, "Insider trading", [])
         insider_roster = _unwrap(insider_roster, "Insider roster", [])
         historical_prices = _unwrap(historical_prices, "Historical prices", [])
@@ -274,27 +306,26 @@ class HoldersService:
 
         # Extract monthly price data from historical prices
         monthly_prices = self._extract_monthly_prices(historical_prices)
+        daily_prices = self._extract_daily_prices(historical_prices)
 
         # Filter congressional trades for this ticker
         senate_for_ticker = [s for s in senate_latest if s.get("symbol", "").upper() == ticker]
         house_for_ticker = [h for h in house_latest if h.get("symbol", "").upper() == ticker]
 
-        # Whale data from Supabase (for hedge funds tab)
-        whale_trades = await asyncio.to_thread(self._get_whale_trades, ticker)
-
         # Build each section
         breakdown = self._build_shareholder_breakdown(
-            company_profile, institutional_holders, insider_roster, current_price
+            company_profile, institutional_holders, insider_roster, current_price,
+            inst_ownership_summary,
         )
         recent = self._build_recent_activities(
             institutional_holders, insider_trading, insider_roster, current_price
         )
 
         # Build live smart money data
-        insider_sm = self._build_insider_smart_money(insider_trading, monthly_prices)
-        hedge_sm = self._build_hedge_fund_smart_money(whale_trades, monthly_prices)
+        insider_sm = self._build_insider_smart_money(insider_trading, monthly_prices, daily_prices)
+        hedge_sm = await self._build_hedge_fund_smart_money(ticker, daily_prices)
         congress_sm = self._build_congress_smart_money(
-            senate_for_ticker, house_for_ticker, monthly_prices
+            senate_for_ticker, house_for_ticker, monthly_prices, daily_prices
         )
 
         return HoldersResponse(
@@ -314,44 +345,34 @@ class HoldersService:
         inst_holders: List[Dict[str, Any]],
         insider_roster: List[Dict[str, Any]],
         current_price: float,
+        inst_summary: Optional[Dict[str, Any]] = None,
     ) -> ShareholderBreakdownSchema:
         # ── Derive ownership percentages ──────────────────────────
-        # Primary source: shares-float endpoint (freeFloat %)
+        # Insiders: from shares-float endpoint (freeFloat %)
         free_float = _safe_float(profile, "freeFloat", 0.0)
 
-        # If freeFloat is available, insiders = 100 - freeFloat
         if free_float > 0:
             insiders_pct = max(0.0, 100.0 - free_float)
         else:
-            # Fallback to insidersPercentage if profile has it
             insiders_pct = _safe_float(profile, "insidersPercentage", 0.0)
             if 0 < insiders_pct < 1.0:
                 insiders_pct *= 100.0
 
-        # Institutional % — from holder data if premium endpoints available
-        if inst_holders:
-            inst_pct_from_holders = sum(
-                _safe_float(h, "percentOfSharesHeld", 0.0)
+        # Institutional %: use real total from positions-summary endpoint
+        inst_summary = inst_summary or {}
+        real_inst_pct = _safe_float(inst_summary, "ownershipPercent", 0.0)
+
+        if real_inst_pct > 0:
+            institutions_pct = real_inst_pct
+        elif inst_holders:
+            # Fallback: sum top holders (partial — less accurate)
+            institutions_pct = sum(
+                _safe_float(h, "ownership",
+                    _safe_float(h, "percentOfSharesHeld", 0.0))
                 for h in inst_holders
             )
-            # FMP may return as decimal (0.08) or whole number (8.0)
-            if inst_pct_from_holders < 1.0 and inst_pct_from_holders > 0:
-                inst_pct_from_holders *= 100.0
-            institutions_pct = inst_pct_from_holders
         else:
-            # Fallback: use profile data or estimate from float
-            profile_inst_pct = _safe_float(profile, "institutionsPercentage", 0.0)
-            if 0 < profile_inst_pct < 1.0:
-                profile_inst_pct *= 100.0
-
-            if profile_inst_pct > 0:
-                institutions_pct = profile_inst_pct
-            elif free_float > 50:
-                # For large-cap stocks, ~60-80% of float is typically institutional
-                # Conservative estimate: use 60% of float as institutional
-                institutions_pct = round(free_float * 0.6, 1)
-            else:
-                institutions_pct = 0.0
+            institutions_pct = 0.0
 
         # Clamp and compute public/other
         insiders_pct = max(0.0, min(100.0, insiders_pct))
@@ -381,12 +402,14 @@ class HoldersService:
     def _build_top_holders(
         self, holders: List[Dict[str, Any]]
     ) -> List[InstitutionalHolderSchema]:
+        """Build legacy top holders list from analytics data."""
         result = []
         for h in holders:
-            pct = _safe_float(h, "percentOfSharesHeld", 0.0)
-            if 0 < pct < 1.0:
-                pct *= 100.0
-            change = _safe_float(h, "changeInSharesPercentage", 0.0)
+            # Analytics endpoint uses "ownership" field (already 0-100 scale)
+            pct = _safe_float(h, "ownership",
+                    _safe_float(h, "percentOfSharesHeld", 0.0))
+            change = _safe_float(h, "changeInSharesNumberPercentage",
+                        _safe_float(h, "changeInSharesPercentage", 0.0))
 
             result.append(InstitutionalHolderSchema(
                 name=h.get("investorName", h.get("holder", "Unknown")),
@@ -399,19 +422,21 @@ class HoldersService:
     def _build_top_institutions(
         self, holders: List[Dict[str, Any]]
     ) -> List[TopInstitutionSchema]:
-        # Sort by value descending
+        """Build top 10 institutions from analytics data."""
+        # Sort by marketValue descending
         sorted_holders = sorted(
             holders,
-            key=lambda h: _safe_float(h, "value", 0.0),
+            key=lambda h: _safe_float(h, "marketValue",
+                            _safe_float(h, "value", 0.0)),
             reverse=True,
         )[:10]
 
         result = []
         for rank, h in enumerate(sorted_holders, 1):
-            value = _safe_float(h, "value", 0.0)
-            pct = _safe_float(h, "percentOfSharesHeld", 0.0)
-            if 0 < pct < 1.0:
-                pct *= 100.0
+            value = _safe_float(h, "marketValue",
+                        _safe_float(h, "value", 0.0))
+            pct = _safe_float(h, "ownership",
+                    _safe_float(h, "percentOfSharesHeld", 0.0))
 
             result.append(TopInstitutionSchema(
                 rank=rank,
@@ -509,20 +534,20 @@ class HoldersService:
     def _build_institutional_activities(
         self, holders: List[Dict[str, Any]]
     ) -> List[InstitutionalActivitySchema]:
-        """Convert institutional holder data into recent activity entries."""
+        """Convert institutional holder analytics into recent activity entries."""
         result = []
-        for h in holders[:15]:  # Top 15 for activities
-            change_shares = _safe_float(h, "changeInShares", 0.0)
-            change_pct = _safe_float(h, "changeInSharesPercentage", 0.0)
-            total_value = _safe_float(h, "value", 0.0)
-            shares = _safe_float(h, "sharesNumber", 0.0)
+        for h in holders[:15]:
+            # Analytics endpoint fields
+            change_in_value = _safe_float(h, "changeInMarketValue", 0.0)
+            change_pct = _safe_float(h, "changeInSharesNumberPercentage",
+                            _safe_float(h, "changeInSharesPercentage", 0.0))
+            total_value = _safe_float(h, "marketValue",
+                            _safe_float(h, "value", 0.0))
 
-            if change_shares == 0.0:
+            if change_in_value == 0.0:
                 continue
 
-            # Calculate change in millions (approximate using value/shares ratio)
-            price_per_share = total_value / shares if shares > 0 else 0.0
-            change_value_millions = (change_shares * price_per_share) / 1_000_000
+            change_value_millions = change_in_value / 1_000_000
 
             # Filing date
             date_str = h.get("filingDate", h.get("dateReported", ""))
@@ -655,12 +680,20 @@ class HoldersService:
 
     @staticmethod
     def _generate_month_keys(count: int = 12) -> List[str]:
-        """Generate last N month keys like '03/2026'."""
+        """Generate last N month keys like '03/2026'.
+
+        Uses proper calendar arithmetic instead of timedelta(days=30)
+        to avoid drift that can duplicate or skip months.
+        """
         now = datetime.now(timezone.utc)
         months = []
         for i in range(count - 1, -1, -1):
-            dt = now - timedelta(days=30 * i)
-            months.append(dt.strftime("%m/%Y"))
+            year = now.year
+            month = now.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            months.append(f"{month:02d}/{year}")
         return months
 
     @staticmethod
@@ -689,16 +722,47 @@ class HoldersService:
 
         return monthly
 
+    @staticmethod
+    def _extract_daily_prices(
+        historical: Any,
+    ) -> List[DailyPricePointSchema]:
+        """Extract daily closing prices from historical EOD data, sorted oldest-first."""
+        if isinstance(historical, dict):
+            historical = historical.get("historical", [])
+        if not isinstance(historical, list):
+            return []
+
+        points = []
+        for rec in historical:
+            date_str = rec.get("date", "")[:10]
+            price = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
+            if date_str and price > 0:
+                points.append(DailyPricePointSchema(date=date_str, price=round(price, 2)))
+
+        # FMP returns newest-first; reverse to oldest-first for chart rendering
+        points.sort(key=lambda p: p.date)
+        return points
+
     def _build_price_data(
         self, monthly_prices: Dict[str, float], month_keys: List[str]
     ) -> List[StockPriceDataPointSchema]:
-        """Build StockPriceDataPoint list from monthly price map."""
-        return [
-            StockPriceDataPointSchema(
-                month=m, price=round(monthly_prices.get(m, 0.0), 2)
-            )
-            for m in month_keys
-        ]
+        """Build StockPriceDataPoint list from monthly price map.
+
+        Forward-fills missing months with the last known price instead
+        of defaulting to 0.0 (which would create a misleading chart dip).
+        """
+        result = []
+        last_known_price = 0.0
+        for m in month_keys:
+            price = monthly_prices.get(m, 0.0)
+            if price > 0:
+                last_known_price = price
+            else:
+                price = last_known_price
+            result.append(StockPriceDataPointSchema(
+                month=m, price=round(price, 2)
+            ))
+        return result
 
     @staticmethod
     def _build_summary(
@@ -710,6 +774,8 @@ class HoldersService:
         net = total_buy - total_sell
         return SmartMoneyFlowSummarySchema(
             total_net_flow=round(net, 2),
+            total_buy=round(total_buy, 2),
+            total_sell=round(total_sell, 2),
             is_positive=net >= 0,
             period_description="12-Month",
         )
@@ -720,6 +786,7 @@ class HoldersService:
         self,
         insider_trades: List[Dict[str, Any]],
         monthly_prices: Dict[str, float],
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
     ) -> SmartMoneyDataSchema:
         """Build insider smart money from individual trade data.
 
@@ -731,7 +798,19 @@ class HoldersService:
             m: {"buy": 0.0, "sell": 0.0} for m in month_keys
         }
 
+        informative_count = 0
+        skipped_count = 0
+
         for tx in insider_trades:
+            # Only count informative trades (open-market buys/sells).
+            # Skip option grants, 10b5-1 plan sales, gifts, tax withholding,
+            # and Form 3 initial ownership filings (empty transactionType).
+            tx_type = tx.get("transactionType", "")
+            classified = _classify_insider_transaction(tx_type)
+            if "Uninformative" in classified:
+                skipped_count += 1
+                continue
+
             # Use transactionDate or filingDate
             date_str = (tx.get("transactionDate") or tx.get("filingDate") or "")[:10]
             if not date_str:
@@ -758,14 +837,22 @@ class HoldersService:
             acq_disp = (tx.get("acquisitionOrDisposition") or "").upper()
             if acq_disp == "A":
                 monthly_flows[m_key]["buy"] += value_millions
+                informative_count += 1
             elif acq_disp == "D":
                 monthly_flows[m_key]["sell"] += value_millions
+                informative_count += 1
+
+        logger.info(
+            f"Insider smart money: {informative_count} informative trades, "
+            f"{skipped_count} uninformative skipped"
+        )
 
         flow_data = [
             SmartMoneyFlowDataPointSchema(
                 month=m,
                 buy_volume=round(monthly_flows[m]["buy"], 2),
                 sell_volume=round(monthly_flows[m]["sell"], 2),
+                has_activity=(monthly_flows[m]["buy"] > 0 or monthly_flows[m]["sell"] > 0),
             )
             for m in month_keys
         ]
@@ -773,75 +860,337 @@ class HoldersService:
         return SmartMoneyDataSchema(
             tab="Insider",
             price_data=self._build_price_data(monthly_prices, month_keys),
+            daily_prices=daily_prices or [],
             flow_data=flow_data,
             summary=self._build_summary(flow_data),
         )
 
-    # ── Hedge Fund Smart Money Tab ────────────────────────────────
+    # ── Hedge Fund Smart Money Tab (quarterly, incremental DB) ────
 
-    def _get_whale_trades(self, ticker: str) -> List[Dict[str, Any]]:
-        """Fetch whale trades for a ticker from Supabase."""
+    @staticmethod
+    def _generate_quarter_keys(count: int = 8) -> List[Tuple[int, int]]:
+        """Return the last *count* (year, quarter) pairs, oldest-first.
+
+        Starts from the most recently *completed* quarter and works
+        backwards.  E.g. in March 2026 the latest completed quarter is
+        Q4 2025, so 8 quarters → Q1'24 … Q4'25.
+        """
+        now = datetime.now(timezone.utc)
+        month = now.month
+        if month <= 3:
+            cur_year, cur_q = now.year - 1, 4
+        elif month <= 6:
+            cur_year, cur_q = now.year, 1
+        elif month <= 9:
+            cur_year, cur_q = now.year, 2
+        else:
+            cur_year, cur_q = now.year, 3
+
+        pairs: List[Tuple[int, int]] = []
+        y, q = cur_year, cur_q
+        for _ in range(count):
+            pairs.append((y, q))
+            q -= 1
+            if q == 0:
+                q = 4
+                y -= 1
+        pairs.reverse()  # oldest-first
+        return pairs
+
+    @staticmethod
+    def _quarter_label(year: int, quarter: int) -> str:
+        """Format a quarter as a chart label, e.g. ``Q3\\n'25``."""
+        return f"Q{quarter}\n'{year % 100:02d}"
+
+    @staticmethod
+    def _estimate_buy_sell(
+        net_millions: float, buyers: int, sellers: int
+    ) -> Tuple[float, float]:
+        """Estimate gross buy/sell volumes from net change + buyer/seller counts.
+
+        13F filings only provide the NET dollar change across all
+        institutional filers.  We use the ratio of buyers to sellers
+        to estimate the gross buy and sell volumes so that each quarter
+        shows both a green (buy) and red (sell) bar.
+
+        The constraint ``buy - sell = net_millions`` always holds.
+        A safety cap prevents extreme inflation when the
+        buyer/seller ratio is close to 50/50.
+        """
+        total = buyers + sellers
+        if total == 0 or net_millions == 0:
+            if net_millions >= 0:
+                return round(net_millions, 2), 0.0
+            return 0.0, round(abs(net_millions), 2)
+
+        buyer_ratio = buyers / total
+        ratio_diff = buyer_ratio - (1.0 - buyer_ratio)  # buyer_ratio - seller_ratio
+        abs_net = abs(net_millions)
+
+        MAX_GROSS_MULTIPLIER = 5.0
+
+        if abs(ratio_diff) < 1e-6:
+            gross = abs_net * MAX_GROSS_MULTIPLIER
+        else:
+            gross = abs_net / abs(ratio_diff)
+            gross = min(gross, abs_net * MAX_GROSS_MULTIPLIER)
+
+        # Derive buy/sell from gross while preserving net constraint:
+        # buy - sell = net_millions, buy + sell = gross
+        buy_vol = (gross + net_millions) / 2.0
+        sell_vol = (gross - net_millions) / 2.0
+
+        # Clamp to non-negative (shouldn't happen with valid cap)
+        if buy_vol < 0:
+            buy_vol = 0.0
+            sell_vol = abs_net
+        if sell_vol < 0:
+            sell_vol = 0.0
+            buy_vol = abs_net
+
+        return round(buy_vol, 2), round(sell_vol, 2)
+
+    # ── DB helpers for hedge_fund_quarters ──────────────────────
+
+    def _load_existing_quarters(
+        self, ticker: str, pairs: List[Tuple[int, int]]
+    ) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """Read already-computed quarters from Supabase."""
         try:
-            result = (
-                self.supabase.table("whale_trades")
-                .select("action, amount, date, whale_id")
+            years = list({y for y, _ in pairs})
+            rows = (
+                self.supabase.table("hedge_fund_quarters")
+                .select("*")
                 .eq("ticker", ticker)
-                .order("date", desc=True)
-                .limit(50)
+                .in_("year", years)
                 .execute()
             )
-            return result.data or []
+            target_set = {tuple(p) for p in pairs}
+            result: Dict[Tuple[int, int], Dict[str, Any]] = {}
+            for r in rows.data or []:
+                key = (r["year"], r["quarter"])
+                if key not in target_set:
+                    continue
+                # Skip rows that need re-computation:
+                # 1) All values zeroed out
+                # 2) Old logic: one side is zero while both buyers & sellers exist
+                bv = r.get("buy_volume", 0) or 0
+                sv = r.get("sell_volume", 0) or 0
+                nf = r.get("net_flow", 0) or 0
+                bc = r.get("buyers_count", 0) or 0
+                sc = r.get("sellers_count", 0) or 0
+                if bv == 0 and sv == 0 and nf == 0:
+                    continue
+                if nf != 0 and bc > 0 and sc > 0 and (bv == 0 or sv == 0):
+                    continue
+                result[key] = r
+            return result
         except Exception as e:
-            logger.warning(f"Whale trades fetch failed for {ticker}: {e}")
-            return []
+            logger.warning(f"hedge_fund_quarters read failed for {ticker}: {e}")
+            return {}
 
-    def _build_hedge_fund_smart_money(
-        self,
-        whale_trades: List[Dict[str, Any]],
-        monthly_prices: Dict[str, float],
-    ) -> SmartMoneyDataSchema:
-        """Build hedge fund smart money from whale trades (Supabase)."""
-        month_keys = self._generate_month_keys(12)
-        monthly_flows: Dict[str, Dict[str, float]] = {
-            m: {"buy": 0.0, "sell": 0.0} for m in month_keys
-        }
+    def _save_quarters(
+        self, ticker: str, rows: List[Dict[str, Any]]
+    ) -> None:
+        """Upsert computed quarter rows into Supabase."""
+        if not rows:
+            return
+        try:
+            self.supabase.table("hedge_fund_quarters").upsert(
+                rows, on_conflict="ticker,year,quarter"
+            ).execute()
+            logger.info(
+                f"hedge_fund_quarters: upserted {len(rows)} rows for {ticker}"
+            )
+        except Exception as e:
+            logger.warning(f"hedge_fund_quarters upsert failed for {ticker}: {e}")
 
-        for trade in whale_trades:
-            date_str = (trade.get("date") or "")[:10]
-            amount = abs(_safe_float(trade, "amount", 0.0)) / 1_000_000
-            action = (trade.get("action") or "").upper()
+    # ── Main builder ───────────────────────────────────────────
 
-            if not date_str or amount <= 0:
-                continue
-
+    @staticmethod
+    def _quarter_end_prices(
+        daily_prices: Optional[List[DailyPricePointSchema]],
+    ) -> Dict[Tuple[int, int], float]:
+        """Extract the last closing price per quarter from daily price data."""
+        qtr_prices: Dict[Tuple[int, int], float] = {}
+        if not daily_prices:
+            return qtr_prices
+        for dp in daily_prices:
             try:
-                m_key = f"{date_str[5:7]}/{date_str[:4]}"
+                m = int(dp.date[5:7])
+                y = int(dp.date[:4])
             except (IndexError, ValueError):
                 continue
+            q = (m - 1) // 3 + 1
+            qtr_prices[(y, q)] = dp.price  # last wins (sorted oldest-first)
+        return qtr_prices
 
-            if m_key not in monthly_flows:
-                continue
+    async def _build_hedge_fund_smart_money(
+        self,
+        ticker: str,
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
+    ) -> SmartMoneyDataSchema:
+        """Build hedge fund smart money with incremental quarterly DB store.
 
-            if "BOUGHT" in action or "ADDED" in action or "INCREASED" in action:
-                monthly_flows[m_key]["buy"] += amount
-            elif "SOLD" in action or "REDUCED" in action or "DECREASED" in action:
-                monthly_flows[m_key]["sell"] += amount
+        Uses ``numberOf13FsharesChange * quarter-end price`` to compute
+        the actual dollar value of net institutional buying/selling,
+        stripping out the stock-price-appreciation component that
+        contaminates ``totalInvestedChange``.
 
-        flow_data = [
-            SmartMoneyFlowDataPointSchema(
-                month=m,
-                buy_volume=round(monthly_flows[m]["buy"], 2),
-                sell_volume=round(monthly_flows[m]["sell"], 2),
+        1. Determine the 8 target quarters (last 2 years).
+        2. Load already-computed rows from ``hedge_fund_quarters``.
+        3. Fetch only missing quarters from FMP (parallel).
+        4. Compute buy/sell volumes and persist new rows.
+        5. Return 8 quarterly flow-data points.
+        """
+        target_pairs = self._generate_quarter_keys(8)
+        qtr_prices = self._quarter_end_prices(daily_prices)
+
+        # 1. Load existing rows from DB
+        existing = await asyncio.to_thread(
+            self._load_existing_quarters, ticker, target_pairs
+        )
+        logger.info(
+            f"Hedge fund quarters for {ticker}: "
+            f"{len(existing)}/{len(target_pairs)} in DB"
+        )
+
+        # 2. Identify missing quarters
+        missing = [p for p in target_pairs if p not in existing]
+
+        # 3. Fetch missing from FMP in parallel
+        new_rows: List[Dict[str, Any]] = []
+        if missing:
+            fmp_results = await asyncio.gather(
+                *[
+                    self.fmp.get_institutional_ownership_for_quarter(
+                        ticker, y, q
+                    )
+                    for y, q in missing
+                ]
             )
-            for m in month_keys
-        ]
+            for (y, q), data in zip(missing, fmp_results):
+                if data is None:
+                    continue
+
+                buyers = (
+                    int(data.get("newPositions") or 0)
+                    + int(data.get("increasedPositions") or 0)
+                )
+                sellers = (
+                    int(data.get("closedPositions") or 0)
+                    + int(data.get("reducedPositions") or 0)
+                )
+
+                # ── Compute REAL net buy/sell ────────────────────────
+                # numberOf13FsharesChange = net shares added/removed
+                # Multiply by quarter-end price → dollar value of
+                # actual institutional trading, free of price drift.
+                shares_change = float(data.get("numberOf13FsharesChange") or 0)
+                price = qtr_prices.get((y, q), 0.0)
+                if price <= 0:
+                    # Fallback: use totalInvested / shares for avg price
+                    total_inv = float(data.get("totalInvested") or 0)
+                    total_shares = float(data.get("numberOf13Fshares") or 1)
+                    price = total_inv / total_shares if total_shares > 0 else 0
+
+                net_millions = (shares_change * price) / 1_000_000
+                buy_vol, sell_vol = self._estimate_buy_sell(
+                    net_millions, buyers, sellers
+                )
+                row = {
+                    "ticker": ticker,
+                    "year": y,
+                    "quarter": q,
+                    "quarter_date": (data.get("date") or "")[:10],
+                    "buy_volume": buy_vol,
+                    "sell_volume": sell_vol,
+                    "net_flow": round(net_millions, 2),
+                    "buyers_count": buyers,
+                    "sellers_count": sellers,
+                }
+                new_rows.append(row)
+                existing[(y, q)] = row
+
+        # 4. Persist new rows in background
+        if new_rows:
+            asyncio.ensure_future(
+                asyncio.to_thread(self._save_quarters, ticker, new_rows)
+            )
+
+        # 5. Build flow_data from all quarters (oldest-first)
+        flow_data: List[SmartMoneyFlowDataPointSchema] = []
+        total_buy = 0.0
+        total_sell = 0.0
+
+        for y, q in target_pairs:
+            label = self._quarter_label(y, q)
+            row = existing.get((y, q))
+            if row:
+                bv = float(row.get("buy_volume", 0))
+                sv = float(row.get("sell_volume", 0))
+            else:
+                bv, sv = 0.0, 0.0
+            total_buy += bv
+            total_sell += sv
+            flow_data.append(SmartMoneyFlowDataPointSchema(
+                month=label,
+                buy_volume=round(bv, 2),
+                sell_volume=round(sv, 2),
+                has_activity=(bv > 0 or sv > 0),
+            ))
+
+        net = round(total_buy - total_sell, 2)
+        summary = SmartMoneyFlowSummarySchema(
+            total_net_flow=net,
+            total_buy=round(total_buy, 2),
+            total_sell=round(total_sell, 2),
+            is_positive=net >= 0,
+            period_description="2-Year",
+        )
+
+        # 6. Build quarterly price data from daily prices
+        price_data = self._build_quarterly_price_data(daily_prices, target_pairs)
 
         return SmartMoneyDataSchema(
             tab="Hedge Funds",
-            price_data=self._build_price_data(monthly_prices, month_keys),
+            price_data=price_data,
+            daily_prices=daily_prices or [],
             flow_data=flow_data,
-            summary=self._build_summary(flow_data),
+            summary=summary,
         )
+
+    @staticmethod
+    def _build_quarterly_price_data(
+        daily_prices: Optional[List[DailyPricePointSchema]],
+        quarter_pairs: List[Tuple[int, int]],
+    ) -> List[StockPriceDataPointSchema]:
+        """Pick the last closing price of each quarter for the price overlay."""
+        if not daily_prices:
+            return []
+
+        # Index daily prices by (year, quarter)
+        qtr_prices: Dict[Tuple[int, int], float] = {}
+        for dp in daily_prices:
+            try:
+                m = int(dp.date[5:7])
+                y = int(dp.date[:4])
+            except (IndexError, ValueError):
+                continue
+            q = (m - 1) // 3 + 1
+            qtr_prices[(y, q)] = dp.price  # last wins (sorted oldest-first)
+
+        result: List[StockPriceDataPointSchema] = []
+        last_known = 0.0
+        for y, q in quarter_pairs:
+            label = f"Q{q}\n'{y % 100:02d}"
+            price = qtr_prices.get((y, q), 0.0)
+            if price > 0:
+                last_known = price
+            else:
+                price = last_known
+            result.append(StockPriceDataPointSchema(month=label, price=round(price, 2)))
+        return result
 
     # ── Congress Smart Money Tab ──────────────────────────────────
 
@@ -878,6 +1227,7 @@ class HoldersService:
         senate_trades: List[Dict[str, Any]],
         house_trades: List[Dict[str, Any]],
         monthly_prices: Dict[str, float],
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
     ) -> SmartMoneyDataSchema:
         """Build congress smart money from senate + house latest trades."""
         month_keys = self._generate_month_keys(12)
@@ -913,6 +1263,7 @@ class HoldersService:
                 month=m,
                 buy_volume=round(monthly_flows[m]["buy"], 2),
                 sell_volume=round(monthly_flows[m]["sell"], 2),
+                has_activity=(monthly_flows[m]["buy"] > 0 or monthly_flows[m]["sell"] > 0),
             )
             for m in month_keys
         ]
@@ -920,6 +1271,7 @@ class HoldersService:
         return SmartMoneyDataSchema(
             tab="Congress",
             price_data=self._build_price_data(monthly_prices, month_keys),
+            daily_prices=daily_prices or [],
             flow_data=flow_data,
             summary=self._build_summary(flow_data),
         )

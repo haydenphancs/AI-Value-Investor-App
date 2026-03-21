@@ -29,17 +29,17 @@ struct ShareholderBreakdown: Identifiable {
         insidersPercent + institutionsPercent + publicOtherPercent
     }
 
-    // Formatted strings
+    // Formatted strings — always show 1 decimal
     var formattedInsiders: String {
-        String(format: "%.0f%%", insidersPercent)
+        String(format: "%.1f%%", insidersPercent)
     }
 
     var formattedInstitutions: String {
-        String(format: "%.0f%%", institutionsPercent)
+        String(format: "%.1f%%", institutionsPercent)
     }
 
     var formattedPublicOther: String {
-        String(format: "%.0f%%", publicOtherPercent)
+        String(format: "%.1f%%", publicOtherPercent)
     }
 }
 
@@ -97,6 +97,15 @@ struct StockPriceDataPoint: Identifiable {
     }
 }
 
+// MARK: - Daily Price Data Point
+
+/// Daily stock price for detailed smart money price chart
+struct DailyPricePoint: Identifiable {
+    let id = UUID()
+    let date: String   // "YYYY-MM-DD"
+    let price: Double
+}
+
 // MARK: - Smart Money Flow Data
 
 /// Monthly smart money flow data point
@@ -105,6 +114,14 @@ struct SmartMoneyFlowDataPoint: Identifiable {
     let month: String
     let buyVolume: Double   // In millions
     let sellVolume: Double  // In millions
+    let hasActivity: Bool   // False when both buy and sell are 0
+
+    init(month: String, buyVolume: Double, sellVolume: Double, hasActivity: Bool = true) {
+        self.month = month
+        self.buyVolume = buyVolume
+        self.sellVolume = sellVolume
+        self.hasActivity = hasActivity
+    }
 
     var netFlow: Double {
         buyVolume - sellVolume
@@ -126,6 +143,8 @@ struct SmartMoneyFlowDataPoint: Identifiable {
 /// Summary of smart money activity
 struct SmartMoneyFlowSummary {
     let totalNetFlow: Double  // Total net in millions
+    let totalBuy: Double      // Total buy volume in millions
+    let totalSell: Double     // Total sell volume in millions
     let isPositive: Bool
     let periodDescription: String  // e.g., "12-Month"
 
@@ -135,6 +154,20 @@ struct SmartMoneyFlowSummary {
             return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow) / 1000))B"
         }
         return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow)))M"
+    }
+
+    var formattedBuy: String {
+        if totalBuy >= 1000 {
+            return "$\(String(format: "%.2f", totalBuy / 1000))B"
+        }
+        return "$\(String(format: "%.2f", totalBuy))M"
+    }
+
+    var formattedSell: String {
+        if totalSell >= 1000 {
+            return "$\(String(format: "%.2f", totalSell / 1000))B"
+        }
+        return "$\(String(format: "%.2f", totalSell))M"
     }
 
     var flowColor: Color {
@@ -151,6 +184,7 @@ struct SmartMoneyData: Identifiable {
     let id = UUID()
     let tab: SmartMoneyTab
     let priceData: [StockPriceDataPoint]  // Stock price for comparison
+    let dailyPrices: [DailyPricePoint]    // Daily prices for detailed chart
     let flowData: [SmartMoneyFlowDataPoint]
     let summary: SmartMoneyFlowSummary
 }
@@ -221,6 +255,20 @@ extension StockPriceDataPoint {
     ]
 }
 
+extension StockPriceDataPoint {
+    /// Quarterly price data for hedge fund chart (8 quarters, 2 years)
+    static let hedgeFundQuarterlySampleData: [StockPriceDataPoint] = [
+        StockPriceDataPoint(month: "Q2\n'24", price: 192.50),
+        StockPriceDataPoint(month: "Q3\n'24", price: 228.80),
+        StockPriceDataPoint(month: "Q4\n'24", price: 248.20),
+        StockPriceDataPoint(month: "Q1\n'25", price: 232.10),
+        StockPriceDataPoint(month: "Q2\n'25", price: 214.30),
+        StockPriceDataPoint(month: "Q3\n'25", price: 228.50),
+        StockPriceDataPoint(month: "Q4\n'25", price: 255.40),
+        StockPriceDataPoint(month: "Q1\n'26", price: 242.80)
+    ]
+}
+
 extension SmartMoneyFlowDataPoint {
     static let insiderSampleData: [SmartMoneyFlowDataPoint] = [
         SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 10.2, sellVolume: 6.5),
@@ -238,18 +286,14 @@ extension SmartMoneyFlowDataPoint {
     ]
 
     static let hedgeFundsSampleData: [SmartMoneyFlowDataPoint] = [
-        SmartMoneyFlowDataPoint(month: "02/2025", buyVolume: 42.1, sellVolume: 35.2),
-        SmartMoneyFlowDataPoint(month: "03/2025", buyVolume: 38.5, sellVolume: 42.1),
-        SmartMoneyFlowDataPoint(month: "04/2025", buyVolume: 35.2, sellVolume: 48.3),
-        SmartMoneyFlowDataPoint(month: "05/2025", buyVolume: 48.9, sellVolume: 32.5),
-        SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 45.2, sellVolume: 38.5),
-        SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 39.8, sellVolume: 45.2),
-        SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 52.1, sellVolume: 41.3),
-        SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 44.5, sellVolume: 38.9),
-        SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 38.9, sellVolume: 55.2),
-        SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 51.2, sellVolume: 36.8),
-        SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 48.5, sellVolume: 33.2),
-        SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 55.8, sellVolume: 31.2)
+        SmartMoneyFlowDataPoint(month: "Q2\n'24", buyVolume: 4200, sellVolume: 3520),
+        SmartMoneyFlowDataPoint(month: "Q3\n'24", buyVolume: 3850, sellVolume: 4210),
+        SmartMoneyFlowDataPoint(month: "Q4\n'24", buyVolume: 5210, sellVolume: 4130),
+        SmartMoneyFlowDataPoint(month: "Q1\n'25", buyVolume: 4890, sellVolume: 3250),
+        SmartMoneyFlowDataPoint(month: "Q2\n'25", buyVolume: 4520, sellVolume: 3850),
+        SmartMoneyFlowDataPoint(month: "Q3\n'25", buyVolume: 3980, sellVolume: 4520),
+        SmartMoneyFlowDataPoint(month: "Q4\n'25", buyVolume: 5120, sellVolume: 3680),
+        SmartMoneyFlowDataPoint(month: "Q1\n'26", buyVolume: 5580, sellVolume: 3120)
     ]
 
     static let congressSampleData: [SmartMoneyFlowDataPoint] = [
@@ -272,9 +316,12 @@ extension SmartMoneyData {
     static let insiderSampleData = SmartMoneyData(
         tab: .insider,
         priceData: StockPriceDataPoint.sampleData,
+        dailyPrices: [],
         flowData: SmartMoneyFlowDataPoint.insiderSampleData,
         summary: SmartMoneyFlowSummary(
             totalNetFlow: 8.27,
+            totalBuy: 129.8,
+            totalSell: 121.53,
             isPositive: true,
             periodDescription: "12-Month"
         )
@@ -282,21 +329,27 @@ extension SmartMoneyData {
 
     static let hedgeFundsSampleData = SmartMoneyData(
         tab: .hedgeFunds,
-        priceData: StockPriceDataPoint.sampleData,
+        priceData: StockPriceDataPoint.hedgeFundQuarterlySampleData,
+        dailyPrices: [],
         flowData: SmartMoneyFlowDataPoint.hedgeFundsSampleData,
         summary: SmartMoneyFlowSummary(
-            totalNetFlow: 57.7,
+            totalNetFlow: 4990,
+            totalBuy: 37350,
+            totalSell: 32360,
             isPositive: true,
-            periodDescription: "12-Month"
+            periodDescription: "2-Year"
         )
     )
 
     static let congressSampleData = SmartMoneyData(
         tab: .congress,
         priceData: StockPriceDataPoint.sampleData,
+        dailyPrices: [],
         flowData: SmartMoneyFlowDataPoint.congressSampleData,
         summary: SmartMoneyFlowSummary(
             totalNetFlow: 7.4,
+            totalBuy: 31.3,
+            totalSell: 23.9,
             isPositive: true,
             periodDescription: "12-Month"
         )

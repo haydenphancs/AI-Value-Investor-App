@@ -36,6 +36,10 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.services.revenue_breakdown_service import get_revenue_breakdown_service
 from app.schemas.health_check import HealthCheckResponse
 from app.services.health_check_service import get_health_check_service
+from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
+from app.services.signal_of_confidence_service import get_signal_of_confidence_service
+from app.schemas.holders import HoldersResponse
+from app.services.holders_service import get_holders_service
 
 logger = logging.getLogger(__name__)
 
@@ -538,6 +542,57 @@ async def get_revenue_breakdown(ticker: str):
         raise HTTPException(
             status_code=502,
             detail=f"Revenue breakdown service unavailable for {ticker}",
+        )
+
+
+# ── Signal of Confidence endpoint ────────────────────────────────
+
+@router.get("/{ticker}/signal-of-confidence", response_model=SignalOfConfidenceResponse)
+async def get_signal_of_confidence(ticker: str):
+    """
+    Get signal of confidence data (dividends, buybacks, shares outstanding).
+
+    Returns per-quarter shareholder yield data plus a trailing-12-month summary
+    and optional dividend info — the iOS "Signal of Confidence" section.
+    """
+    try:
+        service = get_signal_of_confidence_service()
+        return await service.get_signal_of_confidence(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Signal of confidence failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Signal of confidence service unavailable for {ticker}",
+        )
+
+
+# ── Holders endpoint ─────────────────────────────────────────────
+
+@router.get("/{ticker}/holders", response_model=HoldersResponse)
+async def get_holders(ticker: str):
+    """
+    Get shareholder breakdown, smart money flow, and recent activities.
+
+    Returns ownership distribution (insiders/institutions/public),
+    top 10 owners, recent institutional and insider trading activity —
+    the iOS "Holders" tab.
+    """
+    try:
+        service = get_holders_service()
+        return await service.get_holders(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Holders failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Holders service unavailable for {ticker}",
         )
 
 

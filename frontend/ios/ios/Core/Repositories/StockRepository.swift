@@ -41,6 +41,8 @@ protocol StockRepositoryProtocol {
     func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO
     func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO
+    func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO
+    func getHolders(ticker: String) async throws -> HoldersResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -347,6 +349,44 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got health check for \(ticker)")
+        return response
+    }
+
+    // MARK: - Signal of Confidence
+
+    func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO {
+        let cacheKey = "signal_of_confidence_\(ticker)"
+
+        if let cached: SignalOfConfidenceResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getSignalOfConfidence(ticker: ticker),
+            responseType: SignalOfConfidenceResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got signal of confidence for \(ticker)")
+        return response
+    }
+
+    // MARK: - Holders
+
+    func getHolders(ticker: String) async throws -> HoldersResponseDTO {
+        let cacheKey = "holders_\(ticker)"
+
+        if let cached: HoldersResponseDTO = getCached(cacheKey, maxAge: 300) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getHoldersData(ticker: ticker),
+            responseType: HoldersResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got holders for \(ticker)")
         return response
     }
 
@@ -1469,6 +1509,495 @@ struct RevenueBreakdownDTO: Codable {
     }
 }
 
+// MARK: - Signal of Confidence DTOs
+
+struct SignalOfConfidenceDataPointDTO: Codable {
+    let period: String
+    let dividendYield: Double
+    let buybackYield: Double
+    let dividendAmount: Double
+    let buybackAmount: Double
+    let sharesOutstanding: Double
+
+    enum CodingKeys: String, CodingKey {
+        case period
+        case dividendYield = "dividend_yield"
+        case buybackYield = "buyback_yield"
+        case dividendAmount = "dividend_amount"
+        case buybackAmount = "buyback_amount"
+        case sharesOutstanding = "shares_outstanding"
+    }
+}
+
+struct SignalOfConfidenceSummaryDTO: Codable {
+    let totalYield: Double
+    let dividendYield: Double
+    let buybackYield: Double
+    let shareCountChange: Double
+
+    enum CodingKeys: String, CodingKey {
+        case totalYield = "total_yield"
+        case dividendYield = "dividend_yield"
+        case buybackYield = "buyback_yield"
+        case shareCountChange = "share_count_change"
+    }
+}
+
+struct DividendInfoDTO: Codable {
+    let exDividendDate: String?
+    let paymentDate: String?
+    let fiveYearAvgYield: Double
+    let status: String
+    let buybackStatus: String
+
+    enum CodingKeys: String, CodingKey {
+        case exDividendDate = "ex_dividend_date"
+        case paymentDate = "payment_date"
+        case fiveYearAvgYield = "five_year_avg_yield"
+        case status
+        case buybackStatus = "buyback_status"
+    }
+}
+
+struct SignalOfConfidenceResponseDTO: Codable {
+    let symbol: String
+    let dataPoints: [SignalOfConfidenceDataPointDTO]
+    let summary: SignalOfConfidenceSummaryDTO
+    let dividendInfo: DividendInfoDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case dataPoints = "data_points"
+        case summary
+        case dividendInfo = "dividend_info"
+    }
+
+    func toDisplayModel() -> SignalOfConfidenceSectionData {
+        let points = dataPoints.map {
+            SignalOfConfidenceDataPoint(
+                period: $0.period,
+                dividendYield: $0.dividendYield,
+                buybackYield: $0.buybackYield,
+                dividendAmount: $0.dividendAmount,
+                buybackAmount: $0.buybackAmount,
+                sharesOutstanding: $0.sharesOutstanding
+            )
+        }
+
+        let summaryModel = SignalOfConfidenceSummary(
+            totalYield: summary.totalYield,
+            dividendYield: summary.dividendYield,
+            buybackYield: summary.buybackYield,
+            shareCountChange: summary.shareCountChange
+        )
+
+        var divInfo: DividendInfo? = nil
+        if let dto = dividendInfo {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd"
+            dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+            let exDate = dto.exDividendDate.flatMap { dateFormatter.date(from: $0) }
+            let payDate = dto.paymentDate.flatMap { dateFormatter.date(from: $0) }
+
+            let yieldStatus = DividendYieldStatus(rawValue: dto.status) ?? .fair
+            let bbStatus = BuybackStatus(rawValue: dto.buybackStatus) ?? .low
+
+            divInfo = DividendInfo(
+                exDividendDate: exDate,
+                paymentDate: payDate,
+                fiveYearAvgYield: dto.fiveYearAvgYield,
+                status: yieldStatus,
+                buybackStatus: bbStatus
+            )
+        }
+
+        return SignalOfConfidenceSectionData(
+            dataPoints: points,
+            summary: summaryModel,
+            dividendInfo: divInfo
+        )
+    }
+}
+
+// MARK: - Holders DTOs
+
+struct HoldersResponseDTO: Codable {
+    let symbol: String
+    let shareholderBreakdown: ShareholderBreakdownDTO
+    let insiderData: SmartMoneyDataDTO
+    let hedgeFundsData: SmartMoneyDataDTO
+    let congressData: SmartMoneyDataDTO
+    let recentActivities: RecentActivitiesDTO
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case shareholderBreakdown = "shareholder_breakdown"
+        case insiderData = "insider_data"
+        case hedgeFundsData = "hedge_funds_data"
+        case congressData = "congress_data"
+        case recentActivities = "recent_activities"
+    }
+
+    func toDisplayModel() -> HoldersData {
+        return HoldersData(
+            shareholderBreakdown: shareholderBreakdown.toDisplayModel(),
+            insiderData: insiderData.toDisplayModel(),
+            hedgeFundsData: hedgeFundsData.toDisplayModel(),
+            congressData: congressData.toDisplayModel(),
+            recentActivities: recentActivities.toDisplayModel()
+        )
+    }
+}
+
+struct ShareholderBreakdownDTO: Codable {
+    let insidersPercent: Double
+    let institutionsPercent: Double
+    let publicOtherPercent: Double
+    let topHolders: [InstitutionalHolderDTO]
+    let top10Owners: Top10OwnersDTO
+
+    enum CodingKeys: String, CodingKey {
+        case insidersPercent = "insiders_percent"
+        case institutionsPercent = "institutions_percent"
+        case publicOtherPercent = "public_other_percent"
+        case topHolders = "top_holders"
+        case top10Owners = "top_10_owners"
+    }
+
+    func toDisplayModel() -> ShareholderBreakdown {
+        return ShareholderBreakdown(
+            insidersPercent: insidersPercent,
+            institutionsPercent: institutionsPercent,
+            publicOtherPercent: publicOtherPercent,
+            topHolders: topHolders.map { $0.toDisplayModel() },
+            top10Owners: top10Owners.toDisplayModel()
+        )
+    }
+}
+
+struct InstitutionalHolderDTO: Codable {
+    let name: String
+    let sharesHeld: Double
+    let percentOwnership: Double
+    let changePercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case sharesHeld = "shares_held"
+        case percentOwnership = "percent_ownership"
+        case changePercent = "change_percent"
+    }
+
+    func toDisplayModel() -> InstitutionalHolder {
+        return InstitutionalHolder(
+            name: name,
+            sharesHeld: sharesHeld,
+            percentOwnership: percentOwnership,
+            changePercent: changePercent
+        )
+    }
+}
+
+struct Top10OwnersDTO: Codable {
+    let institutions: [TopInstitutionDTO]
+    let insiders: [TopInsiderDTO]
+
+    func toDisplayModel() -> Top10OwnersData {
+        return Top10OwnersData(
+            institutions: institutions.map { $0.toDisplayModel() },
+            insiders: insiders.map { $0.toDisplayModel() }
+        )
+    }
+}
+
+struct TopInstitutionDTO: Codable {
+    let rank: Int
+    let name: String
+    let category: String
+    let valueInBillions: Double
+    let percentOwnership: Double
+
+    enum CodingKeys: String, CodingKey {
+        case rank, name, category
+        case valueInBillions = "value_in_billions"
+        case percentOwnership = "percent_ownership"
+    }
+
+    func toDisplayModel() -> TopInstitution {
+        return TopInstitution(
+            rank: rank,
+            name: name,
+            category: category,
+            valueInBillions: valueInBillions,
+            percentOwnership: percentOwnership
+        )
+    }
+}
+
+struct TopInsiderDTO: Codable {
+    let rank: Int
+    let name: String
+    let title: String
+    let valueInMillions: Double
+    let percentOwnership: Double
+
+    enum CodingKeys: String, CodingKey {
+        case rank, name, title
+        case valueInMillions = "value_in_millions"
+        case percentOwnership = "percent_ownership"
+    }
+
+    func toDisplayModel() -> TopInsider {
+        return TopInsider(
+            rank: rank,
+            name: name,
+            title: title,
+            valueInMillions: valueInMillions,
+            percentOwnership: percentOwnership
+        )
+    }
+}
+
+// MARK: - Smart Money DTOs
+
+struct SmartMoneyDataDTO: Codable {
+    let tab: String
+    let priceData: [StockPriceDataPointDTO]
+    let flowData: [SmartMoneyFlowDataPointDTO]
+    let summary: SmartMoneyFlowSummaryDTO
+
+    enum CodingKeys: String, CodingKey {
+        case tab
+        case priceData = "price_data"
+        case flowData = "flow_data"
+        case summary
+    }
+
+    func toDisplayModel() -> SmartMoneyData {
+        let smartTab: SmartMoneyTab
+        switch tab {
+        case "Insider": smartTab = .insider
+        case "Hedge Funds": smartTab = .hedgeFunds
+        case "Congress": smartTab = .congress
+        default: smartTab = .insider
+        }
+
+        return SmartMoneyData(
+            tab: smartTab,
+            priceData: priceData.map { $0.toDisplayModel() },
+            flowData: flowData.map { $0.toDisplayModel() },
+            summary: summary.toDisplayModel()
+        )
+    }
+}
+
+struct StockPriceDataPointDTO: Codable {
+    let month: String
+    let price: Double
+
+    func toDisplayModel() -> StockPriceDataPoint {
+        return StockPriceDataPoint(month: month, price: price)
+    }
+}
+
+struct SmartMoneyFlowDataPointDTO: Codable {
+    let buyVolume: Double
+    let sellVolume: Double
+    let month: String
+
+    enum CodingKeys: String, CodingKey {
+        case month
+        case buyVolume = "buy_volume"
+        case sellVolume = "sell_volume"
+    }
+
+    func toDisplayModel() -> SmartMoneyFlowDataPoint {
+        return SmartMoneyFlowDataPoint(
+            month: month,
+            buyVolume: buyVolume,
+            sellVolume: sellVolume
+        )
+    }
+}
+
+struct SmartMoneyFlowSummaryDTO: Codable {
+    let totalNetFlow: Double
+    let isPositive: Bool
+    let periodDescription: String
+
+    enum CodingKeys: String, CodingKey {
+        case totalNetFlow = "total_net_flow"
+        case isPositive = "is_positive"
+        case periodDescription = "period_description"
+    }
+
+    func toDisplayModel() -> SmartMoneyFlowSummary {
+        return SmartMoneyFlowSummary(
+            totalNetFlow: totalNetFlow,
+            isPositive: isPositive,
+            periodDescription: periodDescription
+        )
+    }
+}
+
+// MARK: - Recent Activities DTOs
+
+struct RecentActivitiesDTO: Codable {
+    let institutionalFlowSummary: RecentActivitiesFlowSummaryDTO
+    let institutionalActivities: [InstitutionalActivityDTO]
+    let insiderActivities: InsiderActivitiesDataDTO
+
+    enum CodingKeys: String, CodingKey {
+        case institutionalFlowSummary = "institutional_flow_summary"
+        case institutionalActivities = "institutional_activities"
+        case insiderActivities = "insider_activities"
+    }
+
+    func toDisplayModel() -> RecentActivitiesData {
+        return RecentActivitiesData(
+            institutionalFlowSummary: institutionalFlowSummary.toDisplayModel(),
+            institutionalActivities: institutionalActivities.map { $0.toDisplayModel() },
+            insiderActivities: insiderActivities.toDisplayModel()
+        )
+    }
+}
+
+struct RecentActivitiesFlowSummaryDTO: Codable {
+    let periodDescription: String
+    let quarterDescription: String
+    let inFlowInBillions: Double
+    let outFlowInBillions: Double
+
+    enum CodingKeys: String, CodingKey {
+        case periodDescription = "period_description"
+        case quarterDescription = "quarter_description"
+        case inFlowInBillions = "in_flow_in_billions"
+        case outFlowInBillions = "out_flow_in_billions"
+    }
+
+    func toDisplayModel() -> RecentActivitiesFlowSummary {
+        return RecentActivitiesFlowSummary(
+            periodDescription: periodDescription,
+            quarterDescription: quarterDescription,
+            inFlowInBillions: inFlowInBillions,
+            outFlowInBillions: outFlowInBillions
+        )
+    }
+}
+
+struct InstitutionalActivityDTO: Codable {
+    let institutionName: String
+    let category: String
+    let date: String
+    let changeInMillions: Double
+    let changePercent: Double
+    let totalHeldInBillions: Double
+
+    enum CodingKeys: String, CodingKey {
+        case category, date
+        case institutionName = "institution_name"
+        case changeInMillions = "change_in_millions"
+        case changePercent = "change_percent"
+        case totalHeldInBillions = "total_held_in_billions"
+    }
+
+    func toDisplayModel() -> InstitutionalActivity {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let parsedDate = dateFormatter.date(from: date) ?? Date()
+
+        return InstitutionalActivity(
+            institutionName: institutionName,
+            category: category,
+            date: parsedDate,
+            changeInMillions: changeInMillions,
+            changePercent: changePercent,
+            totalHeldInBillions: totalHeldInBillions
+        )
+    }
+}
+
+struct InsiderActivitiesDataDTO: Codable {
+    let summary: InsiderActivitySummaryDTO
+    let activities: [InsiderActivityDTO]
+
+    func toDisplayModel() -> InsiderActivitiesData {
+        return InsiderActivitiesData(
+            summary: summary.toDisplayModel(),
+            activities: activities.map { $0.toDisplayModel() }
+        )
+    }
+}
+
+struct InsiderActivitySummaryDTO: Codable {
+    let periodDescription: String
+    let informativeBuysInMillions: Double
+    let informativeSellsInMillions: Double
+    let numBuyers: Int
+    let numSellers: Int
+
+    enum CodingKeys: String, CodingKey {
+        case periodDescription = "period_description"
+        case informativeBuysInMillions = "informative_buys_in_millions"
+        case informativeSellsInMillions = "informative_sells_in_millions"
+        case numBuyers = "num_buyers"
+        case numSellers = "num_sellers"
+    }
+
+    func toDisplayModel() -> InsiderActivitySummary {
+        return InsiderActivitySummary(
+            periodDescription: periodDescription,
+            informativeBuysInMillions: informativeBuysInMillions,
+            informativeSellsInMillions: informativeSellsInMillions,
+            numBuyers: numBuyers,
+            numSellers: numSellers
+        )
+    }
+}
+
+struct InsiderActivityDTO: Codable {
+    let name: String
+    let title: String
+    let date: String
+    let changeInMillions: Double
+    let transactionType: String
+    let priceAtTransaction: Double
+
+    enum CodingKeys: String, CodingKey {
+        case name, title, date
+        case changeInMillions = "change_in_millions"
+        case transactionType = "transaction_type"
+        case priceAtTransaction = "price_at_transaction"
+    }
+
+    func toDisplayModel() -> InsiderActivity {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let parsedDate = dateFormatter.date(from: date) ?? Date()
+
+        let txType: InsiderTransactionType
+        switch transactionType {
+        case "Informative Buy": txType = .informativeBuy
+        case "Informative Sell": txType = .informativeSell
+        case "Uninformative Buy": txType = .uninformativeBuy
+        case "Uninformative Sell": txType = .uninformativeSell
+        default: txType = .uninformativeSell
+        }
+
+        return InsiderActivity(
+            name: name,
+            title: title,
+            date: parsedDate,
+            changeInMillions: changeInMillions,
+            transactionType: txType,
+            priceAtTransaction: priceAtTransaction
+        )
+    }
+}
+
 // MARK: - Mock Repository for Previews
 
 #if DEBUG
@@ -1617,6 +2146,14 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO {
+        throw URLError(.badServerResponse)
+    }
+
+    func getHolders(ticker: String) async throws -> HoldersResponseDTO {
         throw URLError(.badServerResponse)
     }
 }

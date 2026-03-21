@@ -9,6 +9,11 @@ import SwiftUI
 
 struct DividendInfoCard: View {
     let dividendInfo: DividendInfo
+    var currentYield: Double = 0.0
+
+    private var formattedCurrentYield: String {
+        String(format: "%.1f%%", currentYield)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +29,14 @@ struct DividendInfoCard: View {
             DividendInfoRow(
                 label: "Payment Date",
                 value: dividendInfo.formattedPaymentDate
+            )
+
+            divider
+
+            // Current Yield row (Dividends + Buyback)
+            DividendInfoRow(
+                label: "Current Yield (Div + Buyback)",
+                value: formattedCurrentYield
             )
 
             divider
@@ -80,13 +93,13 @@ private struct DividendInfoRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(AppTypography.body)
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 
             Spacer()
 
             Text(value)
-                .font(AppTypography.bodyEmphasis)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(valueColor)
         }
     }
@@ -98,7 +111,7 @@ private struct DividendInfoRow: View {
             .ignoresSafeArea()
 
         VStack(spacing: AppSpacing.lg) {
-            DividendInfoCard(dividendInfo: .sample)
+            DividendInfoCard(dividendInfo: .sample, currentYield: 2.9)
 
             // High yield example
             DividendInfoCard(
@@ -108,7 +121,8 @@ private struct DividendInfoRow: View {
                     fiveYearAvgYield: 3.45,
                     status: .high,
                     buybackStatus: .high
-                )
+                ),
+                currentYield: 5.8
             )
         }
         .padding()

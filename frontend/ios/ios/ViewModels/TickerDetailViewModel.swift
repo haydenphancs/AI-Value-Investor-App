@@ -145,11 +145,6 @@ class TickerDetailViewModel: ObservableObject {
             // Show UI immediately — price/chart/overview are ready
             self.isLoading = false
 
-            // Set sample data for tabs that don't have API data yet
-            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
-            // healthCheckData will be fetched in Phase 2
-            self.holdersData = HoldersData.sampleData
-
             // Phase 2: Fetch supplementary data in parallel (non-blocking)
             await withTaskGroup(of: Void.self) { group in
                 group.addTask { await self.fetchStockNews(ticker) }
@@ -160,6 +155,8 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchProfitPower(ticker) }
                 group.addTask { await self.fetchRevenueBreakdown(ticker) }
                 group.addTask { await self.fetchHealthCheck(ticker) }
+                group.addTask { await self.fetchSignalOfConfidence(ticker) }
+                group.addTask { await self.fetchHolders(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
 
@@ -284,6 +281,28 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Health check failed for \(ticker): \(error)")
             self.healthCheckData = HealthCheckSectionData.sampleData
+        }
+    }
+
+    private func fetchSignalOfConfidence(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getSignalOfConfidence(ticker: ticker)
+            self.signalOfConfidenceData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got signal of confidence for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Signal of confidence failed for \(ticker): \(error)")
+            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
+        }
+    }
+
+    private func fetchHolders(_ ticker: String) async {
+        do {
+            let dto = try await stockRepository.getHolders(ticker: ticker)
+            self.holdersData = dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got holders for \(ticker)")
+        } catch {
+            print("⚠️ TickerDetailVM: Holders failed for \(ticker): \(error)")
+            self.holdersData = HoldersData.sampleData
         }
     }
 
@@ -625,6 +644,20 @@ class TickerDetailViewModel: ObservableObject {
         aiInputText = ""
         print("🤖 AI Query for \(tickerSymbol): \(query)")
         pendingAIQuery = query
+    }
+
+    /// Build context string from signal of confidence data for AI chat enrichment
+    var signalOfConfidenceContext: String? {
+        guard let data = signalOfConfidenceData else { return nil }
+        var parts: [String] = []
+        parts.append(data.summary.formattedSummary)
+        parts.append(data.summary.shareCountDescription)
+        if let info = data.dividendInfo {
+            parts.append("Dividend Status: \(info.status.rawValue)")
+            parts.append("Buyback Status: \(info.buybackStatus.rawValue)")
+            parts.append("5Y Avg Yield: \(info.formattedYield)")
+        }
+        return parts.joined(separator: " ")
     }
 
     func updateChartRange(_ range: ChartTimeRange) {
@@ -1110,8 +1143,42 @@ class TickerDetailViewModel: ObservableObject {
                 TickerAISuggestion(text: "What's the sentiment?"),
                 TickerAISuggestion(text: "Key risks?")
             ]
+        case .holders:
+            return [
+                TickerAISuggestion(text: "Who are the top holders?"),
+                TickerAISuggestion(text: "Any insider buying recently?"),
+                TickerAISuggestion(text: "Is institutional ownership increasing?"),
+                TickerAISuggestion(text: "Smart money sentiment?")
+            ]
         default:
             return TickerAISuggestion.defaultSuggestions
+        }
+    }
+
+    /// Build context string from holders data for AI chat enrichment
+    var holdersContext: String? {
+        guard let data = holdersData else { return nil }
+        var parts: [String] = []
+        let bd = data.shareholderBreakdown
+        parts.append("Ownership: Insiders \(bd.formattedInsiders), Institutions \(bd.formattedInstitutions), Public \(bd.formattedPublicOther)")
+        if let topHolder = bd.top10Owners.institutions.first {
+            parts.append("Top holder: \(topHolder.name) (\(topHolder.formattedPercent))")
+        }
+        let ra = data.recentActivities
+        let summary = ra.insiderActivities.summary
+        if summary.numBuyers > 0 || summary.numSellers > 0 {
+            parts.append("Insider activity (\(summary.periodDescription)): \(summary.buyersLabel), \(summary.sellersLabel)")
+        }
+        return parts.joined(separator: ". ")
+    }
+
+    /// Build context string for the current tab to inject into AI chat
+    var contextForCurrentTab: String? {
+        switch selectedTab {
+        case .holders:
+            return holdersContext
+        default:
+            return signalOfConfidenceContext
         }
     }
 }

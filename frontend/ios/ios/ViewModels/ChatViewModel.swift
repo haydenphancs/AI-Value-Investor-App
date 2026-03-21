@@ -61,7 +61,8 @@ class ChatViewModel: ObservableObject {
     /// Create a new chat session and optionally send the first message.
     func startNewConversation(
         firstMessage: String,
-        stockId: String? = nil
+        stockId: String? = nil,
+        context: String? = nil
     ) {
         errorMessage = nil
         currentStockId = stockId
@@ -76,6 +77,14 @@ class ChatViewModel: ObservableObject {
         messages = [userMessage]
         isAITyping = true
 
+        // Enrich message with context if available
+        let enrichedMessage: String
+        if let context = context, !context.isEmpty {
+            enrichedMessage = "[Context: \(context)]\n\(firstMessage)"
+        } else {
+            enrichedMessage = firstMessage
+        }
+
         Task {
             do {
                 // Step 1: Create session
@@ -87,8 +96,8 @@ class ChatViewModel: ObservableObject {
                 currentSessionId = session.id
                 print("✅ [ChatVM] Session created: \(session.id)")
 
-                // Step 2: Send first message
-                await sendMessageToSession(sessionId: session.id, message: firstMessage)
+                // Step 2: Send first message with context
+                await sendMessageToSession(sessionId: session.id, message: enrichedMessage)
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")

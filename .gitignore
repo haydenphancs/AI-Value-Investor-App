@@ -218,3 +218,5 @@ DerivedData/
 *.xcworkspace
 !default.xcworkspace.temp/
 .temp/
+
+.vscode/settings.json

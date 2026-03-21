@@ -42,13 +42,12 @@ struct SignalOfConfidenceSectionCard: View {
                 .frame(maxWidth: .infinity)
                 .padding(.top, AppSpacing.sm)
 
-            // Summary text
-            SignalOfConfidenceSummaryView(summary: signalData.summary)
-                .padding(.top, AppSpacing.sm)
-
             // Dividend Info
             if let dividendInfo = signalData.dividendInfo {
-                DividendInfoCard(dividendInfo: dividendInfo)
+                DividendInfoCard(
+                    dividendInfo: dividendInfo,
+                    currentYield: signalData.summary.totalYield
+                )
                     .padding(.top, AppSpacing.md)
             }
         }

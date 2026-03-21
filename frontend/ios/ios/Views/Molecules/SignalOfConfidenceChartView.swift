@@ -4,6 +4,7 @@
 //
 //  Molecule: Combined bar and line chart for Signal of Confidence using Swift Charts
 //  Displays dividends (bars), buybacks (bars), and shares outstanding (line)
+//  Supports horizontal scrolling when data points exceed visible column count
 //
 
 import SwiftUI
@@ -17,19 +18,20 @@ struct SignalOfConfidenceChartView: View {
     private let chartHeight: CGFloat = 280
     private let yAxisWidth: CGFloat = 40
     private let rightYAxisWidth: CGFloat = 45
+    private let visibleColumnCount: CGFloat = 6
+    private let labelRowHeight: CGFloat = 20
+    private let labelRowCount: CGFloat = 3 // dividends, buybacks, shares outstanding
 
     // MARK: - Computed Properties
 
     private var maxBarValue: Double {
         switch viewType {
         case .yield:
-            let maxDividend = dataPoints.map { $0.dividendYield }.max() ?? 1
-            let maxBuyback = dataPoints.map { $0.buybackYield }.max() ?? 1
-            return max(maxDividend, maxBuyback) * 1.15
+            let maxTotal = dataPoints.map { $0.dividendYield + $0.buybackYield }.max() ?? 1
+            return maxTotal * 1.15
         case .capital:
-            let maxDividend = dataPoints.map { $0.dividendAmount }.max() ?? 1
-            let maxBuyback = dataPoints.map { $0.buybackAmount }.max() ?? 1
-            return max(maxDividend, maxBuyback) * 1.15
+            let maxTotal = dataPoints.map { $0.dividendAmount + $0.buybackAmount }.max() ?? 1
+            return maxTotal * 1.15
         }
     }
 
@@ -46,25 +48,66 @@ struct SignalOfConfidenceChartView: View {
         return [step, step * 2, step * 3]
     }
 
+    /// Total height of x-axis + data label rows below the chart
+    private var belowChartHeight: CGFloat {
+        // x-axis row + padding + (label row + padding) * 3
+        labelRowHeight + AppSpacing.sm + (labelRowHeight + AppSpacing.sm) * labelRowCount
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Chart with dual Y-axes
-            HStack(alignment: .top, spacing: 0) {
-                // Left Y-axis labels (yield % or capital $)
+        HStack(alignment: .top, spacing: 0) {
+            // Left Y-axis labels (fixed, never scrolls)
+            VStack(spacing: 0) {
                 leftYAxisLabels
-                    .frame(width: yAxisWidth)
 
-                // Main chart area
-                chartContent
-                    .frame(height: chartHeight)
-
-                // Right Y-axis labels (shares outstanding)
-                rightYAxisLabels
-                    .frame(width: rightYAxisWidth)
+                // Spacer matching below-chart rows
+                Spacer()
+                    .frame(height: belowChartHeight)
             }
+            .frame(width: yAxisWidth)
 
-            // X-axis labels (periods)
-            xAxisLabels
+            // Scrollable chart + x-axis + data labels area
+            GeometryReader { geometry in
+                let visibleWidth = geometry.size.width
+                let needsScroll = dataPoints.count > Int(visibleColumnCount)
+                let contentWidth = needsScroll
+                    ? CGFloat(dataPoints.count) * (visibleWidth / visibleColumnCount)
+                    : visibleWidth
+
+                ScrollView(.horizontal, showsIndicators: needsScroll) {
+                    VStack(spacing: 0) {
+                        chartContent
+                            .frame(height: chartHeight)
+                            .id(viewType)
+
+                        scrollableXAxisLabels
+                            .padding(.top, AppSpacing.sm)
+
+                        dividendLabels
+                            .padding(.top, AppSpacing.sm)
+
+                        buybackLabels
+                            .padding(.top, AppSpacing.sm)
+
+                        sharesOutstandingLabels
+                            .padding(.top, AppSpacing.sm)
+                    }
+                    .frame(width: contentWidth)
+                    .padding(.bottom, needsScroll ? AppSpacing.md : 0)
+                }
+                .defaultScrollAnchor(.trailing)
+            }
+            .frame(height: chartHeight + belowChartHeight + (dataPoints.count > Int(visibleColumnCount) ? AppSpacing.md : 0))
+
+            // Right Y-axis labels (fixed, never scrolls)
+            VStack(spacing: 0) {
+                rightYAxisLabels
+
+                // Spacer matching below-chart rows
+                Spacer()
+                    .frame(height: belowChartHeight)
+            }
+            .frame(width: rightYAxisWidth)
         }
     }
 
@@ -84,7 +127,7 @@ struct SignalOfConfidenceChartView: View {
                 BarMark(
                     x: .value("Period", dataPoint.period),
                     y: .value("Dividends", viewType == .yield ? dataPoint.dividendYield : dataPoint.dividendAmount),
-                    width: .fixed(18)
+                    width: dataPoints.count > 6 ? .fixed(18) : .fixed(18)
                 )
                 .foregroundStyle(AppColors.confidenceDividends)
                 .cornerRadius(3)
@@ -96,7 +139,7 @@ struct SignalOfConfidenceChartView: View {
                 BarMark(
                     x: .value("Period", dataPoint.period),
                     y: .value("Buybacks", viewType == .yield ? dataPoint.buybackYield : dataPoint.buybackAmount),
-                    width: .fixed(18)
+                    width: dataPoints.count > 6 ? .fixed(18) : .fixed(18)
                 )
                 .foregroundStyle(AppColors.confidenceBuybacks)
                 .cornerRadius(3)
@@ -122,6 +165,13 @@ struct SignalOfConfidenceChartView: View {
                 )
                 .foregroundStyle(AppColors.confidenceSharesOutstanding)
                 .symbolSize(50)
+            }
+
+            // Dashed connector line from newest shares outstanding to right Y-axis
+            if let lastShares = dataPoints.last?.sharesOutstanding {
+                RuleMark(y: .value("SharesConnector", normalizeShares(lastShares)))
+                    .foregroundStyle(AppColors.confidenceSharesOutstanding.opacity(0.5))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
         }
         .chartXAxis(.hidden)
@@ -163,48 +213,141 @@ struct SignalOfConfidenceChartView: View {
         .padding(.trailing, AppSpacing.xs)
     }
 
+    /// Newest shares outstanding value for right Y-axis highlight
+    private var newestShares: Double {
+        dataPoints.last?.sharesOutstanding ?? 0
+    }
+
+    /// Vertical position (0 = top, 1 = bottom) of the newest shares on the right Y-axis
+    private var newestSharesYPosition: CGFloat {
+        let range = sharesRange.max - sharesRange.min
+        guard range > 0 else { return 0.5 }
+        // Invert because VStack top = max, bottom = min
+        return CGFloat(1.0 - (newestShares - sharesRange.min) / range)
+    }
+
     private var rightYAxisLabels: some View {
-        VStack {
-            Text(formatSharesValue(sharesRange.max))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+        ZStack(alignment: .leading) {
+            // Static axis labels
+            VStack {
+                Text(formatSharesValue(sharesRange.max))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
 
-            Spacer()
+                Spacer()
 
-            let midValue = (sharesRange.max + sharesRange.min) / 2
-            Text(formatSharesValue(midValue))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+                let midValue = (sharesRange.max + sharesRange.min) / 2
+                Text(formatSharesValue(midValue))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
 
-            Spacer()
+                Spacer()
 
-            Text(formatSharesValue(sharesRange.min))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+                Text(formatSharesValue(sharesRange.min))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+
+            // Highlighted newest shares value positioned at the dashed line
+            GeometryReader { geometry in
+                let yPos = newestSharesYPosition * geometry.size.height
+                Text(formatSharesValue(newestShares))
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(AppColors.confidenceSharesOutstanding)
+                    .fixedSize()
+                    .position(x: geometry.size.width / 2, y: yPos)
+            }
         }
         .frame(height: chartHeight)
         .padding(.leading, AppSpacing.xs)
     }
 
-    // MARK: - X-Axis Labels
+    // MARK: - X-Axis Labels (scrollable, positioned via GeometryReader)
 
-    private var xAxisLabels: some View {
-        HStack(spacing: 0) {
-            Spacer()
-                .frame(width: yAxisWidth)
+    private var scrollableXAxisLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
 
-            ForEach(dataPoints) { dataPoint in
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 Text(dataPoint.period)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity)
                     .lineLimit(1)
+                    .fixedSize()
+                    .position(
+                        x: columnWidth * CGFloat(index) + columnWidth / 2,
+                        y: 10
+                    )
             }
-
-            Spacer()
-                .frame(width: rightYAxisWidth)
         }
-        .padding(.top, AppSpacing.sm)
+        .frame(height: 20)
+    }
+
+    // MARK: - Data Label Rows
+
+    private var dividendLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
+
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                Text(viewType == .yield
+                     ? String(format: "%.1f%%", dataPoint.dividendYield)
+                     : formatLargeNumber(dataPoint.dividendAmount))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(AppColors.confidenceDividends)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .position(
+                        x: columnWidth * CGFloat(index) + columnWidth / 2,
+                        y: 10
+                    )
+            }
+        }
+        .frame(height: labelRowHeight)
+    }
+
+    private var buybackLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
+
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                Text(viewType == .yield
+                     ? String(format: "%.1f%%", dataPoint.buybackYield)
+                     : formatLargeNumber(dataPoint.buybackAmount))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(AppColors.confidenceBuybacks)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .position(
+                        x: columnWidth * CGFloat(index) + columnWidth / 2,
+                        y: 10
+                    )
+            }
+        }
+        .frame(height: labelRowHeight)
+    }
+
+    private var sharesOutstandingLabels: some View {
+        GeometryReader { geometry in
+            let chartWidth = geometry.size.width
+            let columnWidth = chartWidth / CGFloat(dataPoints.count)
+
+            ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
+                Text(formatSharesValue(dataPoint.sharesOutstanding))
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundColor(AppColors.confidenceSharesOutstanding)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .position(
+                        x: columnWidth * CGFloat(index) + columnWidth / 2,
+                        y: 10
+                    )
+            }
+        }
+        .frame(height: labelRowHeight)
     }
 
     // MARK: - Helper Functions
@@ -231,9 +374,13 @@ struct SignalOfConfidenceChartView: View {
 
     private func formatSharesValue(_ value: Double) -> String {
         if value >= 1000 {
-            return String(format: "%.0fB", value / 1000)
-        } else {
+            return String(format: "%.2fB", value / 1000)
+        } else if value >= 100 {
             return String(format: "%.0fM", value)
+        } else if value >= 10 {
+            return String(format: "%.1fM", value)
+        } else {
+            return String(format: "%.2fM", value)
         }
     }
 

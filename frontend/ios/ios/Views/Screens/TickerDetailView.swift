@@ -235,7 +235,7 @@ struct TickerDetailView: View {
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 print("🤖 TickerDetailView: Opening AI chat for \(tickerSymbol) with query: \(query)")
-                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol)
+                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab)
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
             }

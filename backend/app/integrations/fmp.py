@@ -521,10 +521,14 @@ class FMPClient:
     async def get_dividend_history(
         self, ticker: str, limit: int = 20
     ) -> List[Dict[str, Any]]:
-        """Get dividend payment history for a stock/ETF."""
+        """Get dividend payment history for a stock/ETF.
+
+        Uses the stable ``dividends`` endpoint (the legacy ``stock-dividend``
+        path was removed after August 2025).
+        """
         try:
             data = await self._make_request(
-                "stock-dividend", params={"symbol": ticker.upper()}
+                "dividends", params={"symbol": ticker.upper()}
             )
             if isinstance(data, dict):
                 historical = data.get("historical", [])
@@ -667,7 +671,161 @@ class FMPClient:
             logger.warning(f"Performance summary failed for CIK {cik}: {e}")
             return {}
 
+    # ── Shares float ────────────────────────────────────────────────
+
+    async def get_shares_float(
+        self, ticker: str
+    ) -> Dict[str, Any]:
+        """Get shares float data (freeFloat %, float shares, outstanding)."""
+        try:
+            data = await self._make_request(
+                "shares-float",
+                params={"symbol": ticker.upper()},
+            )
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"Shares float request failed for {ticker}: {e}")
+            return {}
+
+    # ── Per-ticker institutional holders ─────────────────────────────
+
+    async def get_institutional_holder(
+        self, ticker: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Get top institutional holders for a stock ticker."""
+        try:
+            data = await self._make_request(
+                f"institutional-holder/{ticker.upper()}",
+            )
+            if isinstance(data, list):
+                return data[:limit]
+            return []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"Institutional holder endpoint unavailable for {ticker} "
+                    "(may require higher plan)"
+                )
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"Institutional holder request failed for {ticker}: {e}")
+            return []
+
+    # ── Per-ticker insider trading (stable API) ────────────────────
+
+    async def get_insider_trading(
+        self, ticker: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get insider trading history for a stock ticker (stable API path)."""
+        try:
+            data = await self._make_request(
+                "insider-trading/search",
+                params={"symbol": ticker.upper(), "limit": limit, "page": 0},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"Insider trading search unavailable for {ticker}"
+                )
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"Insider trading search failed for {ticker}: {e}")
+            return []
+
+    async def get_insider_trading_statistics(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """Get quarterly insider trading statistics for a stock ticker."""
+        try:
+            data = await self._make_request(
+                "insider-trading/statistics",
+                params={"symbol": ticker.upper()},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"Insider trading statistics unavailable for {ticker}"
+                )
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"Insider trading statistics failed for {ticker}: {e}")
+            return []
+
+    # ── Per-ticker insider roster (derive from trade data) ────────
+
+    async def get_insider_roster(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get insider roster for a stock ticker.
+
+        Derives from insider-trading/search data since the dedicated
+        insider-roster endpoint is not available on the stable API.
+        """
+        try:
+            trades = await self.get_insider_trading(ticker, limit=100)
+            # Deduplicate insiders by name
+            seen = {}
+            for tx in trades:
+                name = tx.get("reportingName", "").strip()
+                if not name or name in seen:
+                    continue
+                seen[name] = {
+                    "owner": name,
+                    "title": tx.get("typeOfOwner", "Officer"),
+                    "numberOfShares": tx.get("securitiesOwned", 0),
+                }
+            return list(seen.values())
+        except Exception as e:
+            logger.warning(f"Insider roster derivation failed for {ticker}: {e}")
+            return []
+
     # ── Congressional trading ────────────────────────────────────────
+
+    async def get_senate_latest(
+        self, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get latest senate trades (all symbols, filter client-side)."""
+        try:
+            data = await self._make_request(
+                "senate-latest",
+                params={"limit": limit},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning("Senate latest endpoint unavailable")
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"Senate latest request failed: {e}")
+            return []
+
+    async def get_house_latest(
+        self, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get latest house trades (all symbols, filter client-side)."""
+        try:
+            data = await self._make_request(
+                "house-latest",
+                params={"limit": limit},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning("House latest endpoint unavailable")
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"House latest request failed: {e}")
+            return []
 
     async def get_senate_trades_by_name(
         self, name: str

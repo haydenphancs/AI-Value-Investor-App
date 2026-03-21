@@ -125,6 +125,8 @@ enum DividendYieldStatus: String {
 // MARK: - Buyback Status
 
 enum BuybackStatus: String {
+    case diluting = "Diluting"
+    case dilutingMild = "Diluting (Mild)"
     case low = "Low"
     case moderate = "Moderate"
     case high = "High"
@@ -132,6 +134,8 @@ enum BuybackStatus: String {
 
     var color: Color {
         switch self {
+        case .diluting: return AppColors.bearish
+        case .dilutingMild: return AppColors.bearish
         case .low: return AppColors.bearish
         case .moderate: return AppColors.neutral
         case .high: return AppColors.bullish
@@ -143,22 +147,24 @@ enum BuybackStatus: String {
 // MARK: - Dividend Info
 
 struct DividendInfo {
-    let exDividendDate: Date
-    let paymentDate: Date
+    let exDividendDate: Date?
+    let paymentDate: Date?
     let fiveYearAvgYield: Double
     let status: DividendYieldStatus
     let buybackStatus: BuybackStatus
 
     var formattedExDividendDate: String {
+        guard let date = exDividendDate else { return "N/A" }
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: exDividendDate)
+        return formatter.string(from: date)
     }
 
     var formattedPaymentDate: String {
+        guard let date = paymentDate else { return "N/A" }
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: paymentDate)
+        return formatter.string(from: date)
     }
 
     var formattedYield: String {
@@ -207,18 +213,16 @@ struct SignalOfConfidenceSectionData {
         self.dividendInfo = dividendInfo
     }
 
-    /// Get max yield for chart scaling
+    /// Get max yield for chart scaling (stacked: dividend + buyback per quarter)
     var maxYield: Double {
-        let maxDividend = dataPoints.map { $0.dividendYield }.max() ?? 0
-        let maxBuyback = dataPoints.map { $0.buybackYield }.max() ?? 0
-        return max(maxDividend, maxBuyback) * 1.15
+        let maxTotal = dataPoints.map { $0.totalYield }.max() ?? 0
+        return maxTotal * 1.15
     }
 
-    /// Get max capital for chart scaling (in millions)
+    /// Get max capital for chart scaling in millions (stacked: dividend + buyback per quarter)
     var maxCapital: Double {
-        let maxDividend = dataPoints.map { $0.dividendAmount }.max() ?? 0
-        let maxBuyback = dataPoints.map { $0.buybackAmount }.max() ?? 0
-        return max(maxDividend, maxBuyback) * 1.15
+        let maxTotal = dataPoints.map { $0.totalCapitalReturned }.max() ?? 0
+        return maxTotal * 1.15
     }
 
     /// Get shares outstanding range for normalization

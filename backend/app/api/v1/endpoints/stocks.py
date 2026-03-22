@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.yahoo_finance import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse
@@ -161,13 +162,75 @@ async def search_stocks(
 
 @router.get("/{ticker}")
 async def get_stock_details(ticker: str):
-    """Get detailed company profile from FMP."""
+    """Get detailed company profile from FMP, enriched with ownership & valuation data."""
     fmp = get_fmp_client()
     try:
-        profile = await fmp.get_company_profile(ticker)
+        # Fetch profile, shares float, analyst estimates, institutional ownership, and short interest in parallel
+        results = await asyncio.gather(
+            fmp.get_company_profile(ticker),
+            fmp.get_shares_float(ticker),
+            fmp.get_analyst_estimates(ticker, period="annual", limit=5),
+            fmp.get_institutional_ownership_summary(ticker),
+            get_short_interest(ticker),
+            return_exceptions=True,
+        )
+
+        profile = results[0] if not isinstance(results[0], Exception) else {}
+        shares_float = results[1] if not isinstance(results[1], Exception) else {}
+        analyst_est = results[2] if not isinstance(results[2], Exception) else []
+        inst_summary = results[3] if not isinstance(results[3], Exception) else []
+        short_data = results[4] if not isinstance(results[4], Exception) else {}
+
         if not profile:
             raise HTTPException(status_code=404, detail=f"Stock {ticker} not found")
-        return normalize_fmp_response(profile)
+
+        response = normalize_fmp_response(profile)
+
+        # Ensure iOS-expected field names exist (stable API changed names)
+        if "last_dividend" in response and "last_div" not in response:
+            response["last_div"] = response["last_dividend"]
+        if "average_volume" in response and "vol_avg" not in response:
+            response["vol_avg"] = response["average_volume"]
+
+        # Float & insider % from shares-float endpoint
+        if isinstance(shares_float, dict) and shares_float:
+            float_shares = shares_float.get("floatShares")
+            free_float = shares_float.get("freeFloat")
+            if float_shares is not None:
+                response["float_shares"] = float(float_shares)
+            if free_float is not None:
+                response["percent_insiders"] = round(100 - float(free_float), 4)
+
+        # Institutional ownership % from ownership summary
+        if isinstance(inst_summary, list) and inst_summary:
+            inst = inst_summary[0] if isinstance(inst_summary[0], dict) else {}
+            own_pct = inst.get("ownershipPercent")
+            if own_pct is not None:
+                response["percent_institutional"] = float(own_pct)
+        elif isinstance(inst_summary, dict) and inst_summary:
+            own_pct = inst_summary.get("ownershipPercent")
+            if own_pct is not None:
+                response["percent_institutional"] = float(own_pct)
+
+        # Short % of Float from Yahoo Finance
+        if isinstance(short_data, dict) and short_data.get("short_percent_of_float") is not None:
+            response["short_percent_float"] = short_data["short_percent_of_float"]
+
+        # Forward P/E from analyst estimates (nearest future fiscal year)
+        price = profile.get("price")
+        if analyst_est and isinstance(analyst_est, list) and price and float(price) > 0:
+            today_str = datetime.now().date().isoformat()
+            future_ests = [
+                e for e in analyst_est
+                if isinstance(e, dict) and e.get("date", "") >= today_str
+            ]
+            if future_ests:
+                future_ests.sort(key=lambda x: x.get("date", ""))
+                fwd_eps = future_ests[0].get("epsAvg") or future_ests[0].get("estimatedEpsAvg")
+                if fwd_eps and float(fwd_eps) > 0:
+                    response["pe_forward"] = round(float(price) / float(fwd_eps), 2)
+
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -210,13 +273,52 @@ async def get_stock_overview(
 
 @router.get("/{ticker}/quote")
 async def get_stock_quote(ticker: str):
-    """Get real-time stock quote from FMP."""
+    """Get real-time stock quote from FMP, enriched with PE/EPS/shares data."""
     fmp = get_fmp_client()
     try:
-        quote = await fmp.get_stock_price_quote(ticker)
+        results = await asyncio.gather(
+            fmp.get_stock_price_quote(ticker),
+            fmp.get_income_statement(ticker, period="quarter", limit=4),
+            fmp.get_shares_float(ticker),
+            fmp.get_company_profile(ticker),
+            return_exceptions=True,
+        )
+        quote = results[0] if not isinstance(results[0], Exception) else {}
+        income_q = results[1] if not isinstance(results[1], Exception) else []
+        shares_float = results[2] if not isinstance(results[2], Exception) else {}
+        profile = results[3] if not isinstance(results[3], Exception) else {}
+
         if not quote:
             raise HTTPException(status_code=404, detail=f"Quote for {ticker} not found")
-        return normalize_fmp_response(quote)
+
+        response = normalize_fmp_response(quote)
+
+        # EPS (TTM): sum diluted EPS from last 4 quarterly income statements
+        price = quote.get("price")
+        if isinstance(income_q, list) and len(income_q) >= 4:
+            try:
+                ttm_eps = sum(
+                    float(q.get("epsDiluted") or q.get("eps") or 0)
+                    for q in income_q[:4]
+                )
+                if ttm_eps > 0:
+                    response["eps"] = round(ttm_eps, 2)
+                    if price and float(price) > 0:
+                        response["pe"] = round(float(price) / ttm_eps, 2)
+            except (ValueError, TypeError):
+                pass
+
+        if response.get("shares_outstanding") is None and isinstance(shares_float, dict):
+            out = shares_float.get("outstandingShares")
+            if out is not None:
+                response["shares_outstanding"] = float(out)
+
+        if response.get("avg_volume") is None and isinstance(profile, dict):
+            avg_vol = profile.get("averageVolume") or profile.get("volAvg")
+            if avg_vol is not None:
+                response["avg_volume"] = float(avg_vol)
+
+        return response
     except HTTPException:
         raise
     except Exception as e:

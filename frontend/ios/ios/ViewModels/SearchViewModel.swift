@@ -34,7 +34,7 @@ class SearchViewModel: ObservableObject {
 
     // MARK: - Initialization
     init(stockRepository: StockRepository? = nil, apiClient: APIClient? = nil) {
-        self.stockRepository = stockRepository ?? StockRepository()
+        self.stockRepository = stockRepository ?? .shared
         self.apiClient = apiClient ?? .shared
 
         // Load static data immediately (suggestions, books stay local for MVP)

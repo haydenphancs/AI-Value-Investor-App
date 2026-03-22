@@ -569,7 +569,7 @@ extension KeyStatistic {
         KeyStatistic(label: "BVPS", value: "4.991"),
         KeyStatistic(label: "Float", value: "15.61B"),
         KeyStatistic(label: "Avg. Volume (3M)", value: "45.23M"),
-        KeyStatistic(label: "Dividend & Yield", value: "1.04 (0.39%)"),
+        KeyStatistic(label: "Dividends", value: "1.04 (0.39%)"),
         KeyStatistic(label: "Beta", value: "1.09"),
         KeyStatistic(label: "% Held by Insiders", value: "1.69%"),
         KeyStatistic(label: "Market Cap", value: "3.89T"),
@@ -594,7 +594,7 @@ extension KeyStatisticsGroup {
             KeyStatistic(label: "P/E (TTM)", value: "35.15"),
             KeyStatistic(label: "P/E (FWD)", value: "31.84"),
             KeyStatistic(label: "EPS (TTM)", value: "7.47"),
-            KeyStatistic(label: "Dividend & Yield", value: "1.04 (0.39%)"),
+            KeyStatistic(label: "Dividends", value: "1.04 (0.39%)"),
             KeyStatistic(label: "Ex-Dividend Date", value: "11/10/2025")
         ]),
         // Column 3: Per Share Data

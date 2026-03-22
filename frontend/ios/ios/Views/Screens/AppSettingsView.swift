@@ -280,11 +280,16 @@ struct AppSettingsView: View {
     }
 
     private func clearCache() {
+        // Clear filesystem cache (images, URLCache temp files)
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         guard let cacheURL else { return }
 
         try? FileManager.default.removeItem(at: cacheURL)
         try? FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+
+        // Clear in-memory API response cache
+        StockRepository.shared.clearCache()
+
         calculateCacheSize()
     }
 

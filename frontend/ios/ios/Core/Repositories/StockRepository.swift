@@ -51,10 +51,27 @@ protocol StockRepositoryProtocol {
 @MainActor
 final class StockRepository: StockRepositoryProtocol {
 
+    // MARK: - Singleton
+
+    static let shared = StockRepository()
+
+    // MARK: - Cache TTL Constants (aligned with backend split cache)
+
+    private enum CacheTTL {
+        static let volatile: TimeInterval = 120        // 2 min — quote, overview, chart
+        static let news: TimeInterval = 60             // 1 min — news updates frequently
+        static let fundamental: TimeInterval = 86400   // 24 hours — matches backend Supabase cache
+        static let analysis: TimeInterval = 1800       // 30 min — analyst, sentiment, technical
+        static let events: TimeInterval = 86400        // 24 hours — chart events rarely change
+    }
+
+    // MARK: - Properties
+
     private let apiClient: APIClient
     private var cache: [String: CacheEntry] = [:]
+    private let maxCacheEntries = 200
 
-    init(apiClient: APIClient = .shared) {
+    private init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
     }
 
@@ -73,9 +90,9 @@ final class StockRepository: StockRepositoryProtocol {
         let cacheKey = "stock_\(ticker)"
 
         // Check cache
-        if let cached: StockDetail = getCached(cacheKey, maxAge: 300) {
-            // Trigger background refresh if stale
-            if isCacheStale(cacheKey, maxAge: 60) {
+        if let cached: StockDetail = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+            // Trigger background refresh if stale (after 5 min)
+            if isCacheStale(cacheKey, maxAge: 300) {
                 Task {
                     try? await refreshStock(ticker)
                 }
@@ -106,7 +123,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockOverview(ticker: String, range: String = "3M", interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewResponseDTO {
         let cacheKey = "overview_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
-        if let cached: StockOverviewResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: StockOverviewResponseDTO = getCached(cacheKey, maxAge: CacheTTL.volatile) {
             return cached
         }
 
@@ -125,8 +142,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockQuote(ticker: String) async throws -> StockQuote {
         let cacheKey = "quote_\(ticker)"
 
-        // Short cache for quotes (1 minute)
-        if let cached: StockQuote = getCached(cacheKey, maxAge: 60) {
+        if let cached: StockQuote = getCached(cacheKey, maxAge: CacheTTL.volatile) {
             return cached
         }
 
@@ -144,8 +160,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockNews(ticker: String, limit: Int = 50) async throws -> TickerNewsFeedResponse {
         let cacheKey = "news_\(ticker)"
 
-        // Cache news for 5 minutes
-        if let cached: TickerNewsFeedResponse = getCached(cacheKey, maxAge: 300) {
+        if let cached: TickerNewsFeedResponse = getCached(cacheKey, maxAge: CacheTTL.news) {
             return cached
         }
 
@@ -171,8 +186,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
         let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
-        // Cache chart data for 5 minutes
-        if let cached: StockChartResponse = getCached(cacheKey, maxAge: 300) {
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: CacheTTL.volatile) {
             return cached
         }
 
@@ -190,7 +204,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getAnalystAnalysis(ticker: String) async throws -> AnalystAnalysisDTO {
         let cacheKey = "analyst_\(ticker)"
 
-        if let cached: AnalystAnalysisDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: AnalystAnalysisDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
             return cached
         }
 
@@ -209,7 +223,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getSentimentAnalysis(ticker: String) async throws -> SentimentAnalysisDTO {
         let cacheKey = "sentiment_\(ticker)"
 
-        if let cached: SentimentAnalysisDTO = getCached(cacheKey, maxAge: 900) {
+        if let cached: SentimentAnalysisDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
             return cached
         }
 
@@ -228,7 +242,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getTechnicalAnalysis(ticker: String) async throws -> TechnicalAnalysisDTO {
         let cacheKey = "technical_\(ticker)"
 
-        if let cached: TechnicalAnalysisDTO = getCached(cacheKey, maxAge: 1800) {
+        if let cached: TechnicalAnalysisDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
             return cached
         }
 
@@ -247,7 +261,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getTechnicalAnalysisDetail(ticker: String) async throws -> TechnicalAnalysisDetailDTO {
         let cacheKey = "tech_detail_\(ticker)"
 
-        if let cached: TechnicalAnalysisDetailDTO = getCached(cacheKey, maxAge: 1800) {
+        if let cached: TechnicalAnalysisDetailDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
             return cached
         }
 
@@ -264,7 +278,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getChartEvents(ticker: String) async throws -> ChartEventDates {
         let cacheKey = "chart_events_\(ticker)"
 
-        if let cached: ChartEventDates = getCached(cacheKey, maxAge: 3600) {
+        if let cached: ChartEventDates = getCached(cacheKey, maxAge: CacheTTL.events) {
             return cached
         }
 
@@ -283,7 +297,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getEarnings(ticker: String) async throws -> EarningsDTO {
         let cacheKey = "earnings_\(ticker)"
 
-        if let cached: EarningsDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: EarningsDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -300,7 +314,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
         let cacheKey = "growth_\(ticker)"
 
-        if let cached: GrowthResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: GrowthResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -319,7 +333,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO {
         let cacheKey = "profit_power_\(ticker)"
 
-        if let cached: ProfitPowerResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: ProfitPowerResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -338,7 +352,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO {
         let cacheKey = "health_check_\(ticker)"
 
-        if let cached: HealthCheckResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: HealthCheckResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -357,7 +371,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO {
         let cacheKey = "signal_of_confidence_\(ticker)"
 
-        if let cached: SignalOfConfidenceResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: SignalOfConfidenceResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -376,7 +390,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getHolders(ticker: String) async throws -> HoldersResponseDTO {
         let cacheKey = "holders_\(ticker)"
 
-        if let cached: HoldersResponseDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: HoldersResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -395,7 +409,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO {
         let cacheKey = "revenue_breakdown_\(ticker)"
 
-        if let cached: RevenueBreakdownDTO = getCached(cacheKey, maxAge: 300) {
+        if let cached: RevenueBreakdownDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 
@@ -431,6 +445,13 @@ final class StockRepository: StockRepositoryProtocol {
     }
 
     private func setCache(_ key: String, value: Any) {
+        // LRU eviction: remove oldest entries when at capacity
+        if cache.count >= maxCacheEntries {
+            let sortedByAge = cache.sorted { $0.value.timestamp < $1.value.timestamp }
+            for entry in sortedByAge.prefix(20) {
+                cache.removeValue(forKey: entry.key)
+            }
+        }
         cache[key] = CacheEntry(data: value, timestamp: Date())
     }
 
@@ -488,9 +509,13 @@ struct StockDetail: Codable, Identifiable {
     let state: String?
     let ipoDate: String?
     let dcf: Double?
+    // Enriched fields from key-metrics / analyst estimates
+    var peForward: Double? = nil
+    var shortPercentFloat: Double? = nil
+    var floatShares: Double? = nil
+    var percentInsiders: Double? = nil
+    var percentInstitutional: Double? = nil
 
-    // Backend (FMP profile) returns: symbol, company_name, image, changes, vol_avg, market_cap,
-    // beta, last_div, ceo, full_time_employees, country, city, state, ipo_date, dcf
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case companyName = "company_name"
@@ -511,6 +536,11 @@ struct StockDetail: Codable, Identifiable {
         case country, city, state
         case ipoDate = "ipo_date"
         case dcf
+        case peForward = "pe_forward"
+        case shortPercentFloat = "short_percent_float"
+        case floatShares = "float_shares"
+        case percentInsiders = "percent_insiders"
+        case percentInstitutional = "percent_institutional"
     }
 
     var isPositive: Bool {
@@ -563,9 +593,12 @@ struct StockQuote: Codable {
     let pe: Double?
     let sharesOutstanding: Double?
     let avgVolume: Double?
+    let marketCap: Double?
+    let yearHigh: Double?
+    let yearLow: Double?
 
     // Backend (FMP quote) returns: symbol, changes_percentage, day_high, day_low, timestamp (unix int),
-    // eps, pe, shares_outstanding, avg_volume
+    // eps, pe, shares_outstanding, avg_volume, market_cap, year_high, year_low
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case price, change
@@ -578,6 +611,9 @@ struct StockQuote: Codable {
         case eps, pe
         case sharesOutstanding = "shares_outstanding"
         case avgVolume = "avg_volume"
+        case marketCap = "market_cap"
+        case yearHigh = "year_high"
+        case yearLow = "year_low"
     }
 }
 
@@ -2165,7 +2201,10 @@ final class MockStockRepository: StockRepositoryProtocol {
             eps: 6.75,
             pe: 26.0,
             sharesOutstanding: 15_638_000_000,
-            avgVolume: 55_000_000
+            avgVolume: 55_000_000,
+            marketCap: 2_740_000_000_000,
+            yearHigh: 199.62,
+            yearLow: 164.08
         )
     }
 

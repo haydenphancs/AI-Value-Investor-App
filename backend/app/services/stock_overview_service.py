@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.yahoo_finance import get_short_interest
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
     KeyStatisticItem,
@@ -34,8 +35,11 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache ──────────────────────────────────────────────
 
 _cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL = 300          # 5 min for market data
-_SP_HIST_CACHE_TTL = 3600  # 1 hour for S&P historical
+_VOLATILE_TTL = 120            # 2 min for intraday data (quote, chart)
+_FUNDAMENTALS_MEM_TTL = 3600   # 1 hour in-memory for fundamentals
+_FUNDAMENTALS_DB_TTL_HOURS = 24  # 24 hours in Supabase for fundamentals
+_SP_HIST_CACHE_TTL = 3600      # 1 hour for S&P historical
+_CACHE_TTL = _VOLATILE_TTL     # default TTL for general cache
 
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
@@ -243,135 +247,292 @@ class StockOverviewService:
 
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
+        from app.database import get_supabase
+        self.supabase = get_supabase()
 
     async def get_overview(
         self, ticker: str, chart_range: str = "3M", interval: str = None,
         extended_hours: bool = False,
     ) -> StockOverviewResponse:
+        """
+        Split-cache architecture:
+          - Volatile data (quote, chart): 120s in-memory only
+          - Fundamental data (P/E, EPS, ownership, etc.): 24h Supabase + 1h in-memory
+          - Combined into one clean JSON response for the frontend
+        """
         ticker = ticker.upper()
 
-        # Check full overview cache
-        cache_key = f"stock_overview:{ticker}:{chart_range}:{interval or 'default'}:{extended_hours}"
-        cached = _cache_get(cache_key)
+        # Check full response cache (120s — volatile freshness window)
+        overview_key = f"stock_overview:{ticker}:{chart_range}:{interval or 'default'}:{extended_hours}"
+        cached_full = _cache_get(overview_key, ttl=_VOLATILE_TTL)
+        if cached_full is not None:
+            return cached_full
+
+        # ── Fetch fundamentals (cached 24h) and volatile (live) in parallel ──
+        fund_task = self._get_fundamentals(ticker)
+        vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
+        fundamentals, volatile = await asyncio.gather(fund_task, vol_task)
+
+        # ── Build response from both data sources ─────────────────
+        response = self._build_full_response(
+            ticker, fundamentals, volatile, chart_range, interval, extended_hours,
+        )
+
+        # Related tickers (async call, uses its own caching)
+        response.related_tickers = await self._build_related_tickers(ticker)
+
+        # Cache full response for 120s (volatile freshness)
+        _cache_set(overview_key, response)
+        return response
+
+    # ── Fundamentals: 24h Supabase + 1h in-memory ─────────────────
+
+    async def _get_fundamentals(self, ticker: str) -> Dict[str, Any]:
+        """
+        Fetch slow-moving data with two-tier cache:
+          Tier 1: in-memory (1h TTL)
+          Tier 2: Supabase stock_fundamentals_cache (24h TTL)
+          Miss:   parallel FMP calls → cache in both tiers
+        """
+        mem_key = f"fundamentals:{ticker}"
+
+        # Tier 1: in-memory
+        cached = _cache_get(mem_key, ttl=_FUNDAMENTALS_MEM_TTL)
         if cached is not None:
+            logger.debug(f"Fundamentals in-memory HIT for {ticker}")
             return cached
 
-        # ── Step 1: Parallel FMP fetches ─────────────────────────
+        # Tier 2: Supabase
+        db_data = self._check_fundamentals_db(ticker)
+        if db_data is not None:
+            _cache_set(mem_key, db_data)
+            return db_data
+
+        # Miss: fetch from FMP + Yahoo
+        logger.info(f"Fundamentals MISS for {ticker} — fetching from APIs")
+        data = await self._fetch_fundamentals(ticker)
+
+        # Cache in both tiers
+        _cache_set(mem_key, data)
+        self._upsert_fundamentals_db(ticker, data)
+
+        return data
+
+    async def _fetch_fundamentals(self, ticker: str) -> Dict[str, Any]:
+        """Parallel FMP calls for all fundamental/slow-moving data."""
         today = datetime.now(tz=timezone.utc).date()
         from_date_10y = (today - timedelta(days=365 * 10 + 30)).isoformat()
         to_date = today.isoformat()
 
-        # Check if we have cached SPY historical
+        # SPY historical (separate 1h cache)
         sp_cache_key = f"spy_hist:{from_date_10y}:{to_date}"
         cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
 
         tasks = [
-            self.fmp.get_company_profile(ticker),          # 0
-            self.fmp.get_stock_price_quote(ticker),        # 1
-            self.fmp.get_key_metrics(ticker, period="annual", limit=5),   # 2
-            self.fmp.get_financial_ratios(ticker, period="annual", limit=5),  # 3
-            self.fmp.get_income_statement(ticker, period="annual", limit=3),  # 4
-            self.fmp.get_balance_sheet(ticker, period="annual", limit=2),     # 5
-            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=2),  # 6
-            self.fmp.get_analyst_estimates(ticker, period="annual", limit=1),    # 7
-            self.fmp.get_sector_performance(),              # 8
-            self.fmp.get_historical_prices(ticker, from_date_10y, to_date),  # 9
+            self.fmp.get_company_profile(ticker),                                # 0
+            self.fmp.get_key_metrics(ticker, period="annual", limit=5),          # 1
+            self.fmp.get_financial_ratios(ticker, period="annual", limit=5),     # 2
+            self.fmp.get_income_statement(ticker, period="annual", limit=3),     # 3
+            self.fmp.get_balance_sheet(ticker, period="annual", limit=2),        # 4
+            self.fmp.get_cash_flow_statement(ticker, period="annual", limit=2),  # 5
+            self.fmp.get_analyst_estimates(ticker, period="annual", limit=5),    # 6
+            self.fmp.get_shares_float(ticker),                                   # 7
+            self.fmp.get_institutional_ownership_summary(ticker),                # 8
+            self.fmp.get_income_statement(ticker, period="quarter", limit=4),    # 9
+            get_short_interest(ticker),                                          # 10
+            self.fmp.get_sector_performance(),                                   # 11
+            self.fmp.get_historical_prices(ticker, from_date_10y, to_date),     # 12
         ]
 
-        # Only fetch SPY if not cached
+        spy_task_idx = None
         if cached_spy is None:
-            tasks.append(
-                self.fmp.get_historical_prices("SPY", from_date_10y, to_date)  # 10
-            )
+            spy_task_idx = len(tasks)
+            tasks.append(self.fmp.get_historical_prices("SPY", from_date_10y, to_date))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        profile = results[0] if not isinstance(results[0], Exception) else {}
-        quote = results[1] if not isinstance(results[1], Exception) else {}
-        key_metrics_raw = results[2] if not isinstance(results[2], Exception) else []
-        fin_ratios_raw = results[3] if not isinstance(results[3], Exception) else []
-        income_annual = results[4] if not isinstance(results[4], Exception) else []
-        balance_annual = results[5] if not isinstance(results[5], Exception) else []
-        cashflow_annual = results[6] if not isinstance(results[6], Exception) else []
-        analyst_est = results[7] if not isinstance(results[7], Exception) else []
-        sector_perf = results[8] if not isinstance(results[8], Exception) else []
-        stock_hist_raw = results[9] if not isinstance(results[9], Exception) else {}
+        def _safe(i, default=None):
+            if default is None:
+                default = {}
+            return results[i] if not isinstance(results[i], Exception) else default
 
-        if cached_spy is not None:
-            spy_historical = cached_spy
-        else:
-            spy_hist_raw = results[10] if not isinstance(results[10], Exception) else {}
-            spy_historical = _parse_historical(spy_hist_raw)
-            if spy_historical:
-                _cache_set(sp_cache_key, spy_historical)
-
-        # Log any failures
+        # Log failures
         for i, r in enumerate(results):
             if isinstance(r, Exception):
-                logger.warning(f"FMP call {i} failed for {ticker}: {r}")
+                logger.warning(f"Fundamentals FMP call {i} failed for {ticker}: {r}")
+
+        # Parse SPY historical
+        if cached_spy is not None:
+            spy_hist = cached_spy
+        else:
+            spy_raw = _safe(spy_task_idx) if spy_task_idx is not None else {}
+            spy_hist = _parse_historical(spy_raw)
+            if spy_hist:
+                _cache_set(sp_cache_key, spy_hist)
 
         # Parse lists safely
-        key_metrics = key_metrics_raw if isinstance(key_metrics_raw, list) else []
-        fin_ratios = fin_ratios_raw if isinstance(fin_ratios_raw, list) else []
-        income_annual = income_annual if isinstance(income_annual, list) else []
-        balance_annual = balance_annual if isinstance(balance_annual, list) else []
-        cashflow_annual = cashflow_annual if isinstance(cashflow_annual, list) else []
-        analyst_est = analyst_est if isinstance(analyst_est, list) else []
-        sector_perf = sector_perf if isinstance(sector_perf, list) else []
+        def _list(i): return _safe(i, []) if isinstance(_safe(i, []), list) else []
 
-        # Parse historical prices
-        stock_historical = _parse_historical(stock_hist_raw)
+        stock_hist = _parse_historical(_safe(12))
 
-        # ── Step 2: Extract quote/profile data ────────────────────
+        return {
+            "profile": _safe(0),
+            "key_metrics": _list(1),
+            "fin_ratios": _list(2),
+            "income_annual": _list(3),
+            "balance_annual": _list(4),
+            "cashflow_annual": _list(5),
+            "analyst_est": _list(6),
+            "shares_float": _safe(7),
+            "inst_ownership": _safe(8, []),
+            "income_quarterly": _list(9),
+            "short_interest": _safe(10),
+            "sector_perf": _list(11),
+            "stock_historical": stock_hist,
+            "spy_historical": spy_hist,
+        }
+
+    def _check_fundamentals_db(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Check Supabase stock_fundamentals_cache (24h TTL)."""
+        try:
+            row = (
+                self.supabase.table("stock_fundamentals_cache")
+                .select("response_json, cached_at")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=_FUNDAMENTALS_DB_TTL_HOURS):
+                logger.info(f"Fundamentals Supabase STALE (age={age}) for {ticker}")
+                return None
+
+            data = entry.get("response_json")
+            if data and isinstance(data, dict):
+                logger.info(f"Fundamentals Supabase HIT for {ticker} (age={age})")
+                return data
+            return None
+        except Exception as e:
+            logger.warning(f"Fundamentals Supabase check failed for {ticker}: {e}")
+            return None
+
+    def _upsert_fundamentals_db(self, ticker: str, data: Dict[str, Any]) -> None:
+        """Upsert fundamentals into Supabase cache."""
+        try:
+            self.supabase.table("stock_fundamentals_cache").upsert(
+                {
+                    "ticker": ticker,
+                    "response_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="ticker",
+            ).execute()
+            logger.info(f"Fundamentals cached in Supabase for {ticker}")
+        except Exception as e:
+            logger.warning(f"Fundamentals Supabase upsert failed for {ticker}: {e}")
+
+    # ── Volatile: live intraday data (120s response-level cache) ──
+
+    async def _get_volatile(
+        self, ticker: str, chart_range: str, interval: str, extended_hours: bool,
+    ) -> Dict[str, Any]:
+        """Fetch live quote + chart data (no persistent caching)."""
+        quote_task = self.fmp.get_stock_price_quote(ticker)
+
+        from app.services.chart_helper import fetch_chart_data, resolve_interval
+        resolved = resolve_interval(chart_range, interval)
+
+        results = await asyncio.gather(quote_task, return_exceptions=True)
+        quote = results[0] if not isinstance(results[0], Exception) else {}
+
+        # Chart data
+        if resolved != "daily" or chart_range == "ALL":
+            chart_data = await fetch_chart_data(
+                self.fmp, ticker, chart_range, interval, extended_hours=extended_hours,
+            )
+        else:
+            chart_data = None  # Will be sliced from fundamental stock_historical
+
+        return {"quote": quote, "chart_data": chart_data}
+
+    # ── Build full response from both data sources ────────────────
+
+    def _build_full_response(
+        self, ticker: str, fund: Dict, vol: Dict,
+        chart_range: str, interval: str, extended_hours: bool,
+    ) -> StockOverviewResponse:
+        """Combine fundamentals + volatile into one response."""
+        profile = fund.get("profile", {})
+        quote = vol.get("quote", {})
+        key_metrics = fund.get("key_metrics", [])
+        fin_ratios = fund.get("fin_ratios", [])
+        income_annual = fund.get("income_annual", [])
+        balance_annual = fund.get("balance_annual", [])
+        cashflow_annual = fund.get("cashflow_annual", [])
+        analyst_est = fund.get("analyst_est", [])
+        shares_float = fund.get("shares_float", {})
+        inst_ownership = fund.get("inst_ownership", [])
+        income_quarterly = fund.get("income_quarterly", [])
+        short_interest = fund.get("short_interest", {})
+        sector_perf = fund.get("sector_perf", [])
+        stock_historical = fund.get("stock_historical", [])
+        spy_historical = fund.get("spy_historical", [])
+
+        # Price from volatile quote, fallback to profile
         price = _safe_float(quote, "price") or _safe_float(profile, "price")
         change = _safe_float(quote, "change") or _safe_float(profile, "changes")
         change_pct = _safe_float(quote, "changesPercentage") or _safe_float(profile, "changesPercentage")
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
-        # ── Step 3: Chart data ────────────────────────────────────
-        from app.services.chart_helper import fetch_chart_data, resolve_interval
-        resolved = resolve_interval(chart_range, interval)
-        if resolved != "daily" or chart_range == "ALL":
-            # Intraday/aggregated intervals or ALL range: use chart_helper
-            chart_data = await fetch_chart_data(self.fmp, ticker, chart_range, interval, extended_hours=extended_hours)
-        else:
-            # Daily with bounded range: slice from already-fetched 10yr history
+        # Chart data: use volatile if available, else slice from historical
+        chart_data = vol.get("chart_data")
+        if chart_data is None:
             chart_data = _extract_chart_data(stock_historical, chart_range)
 
-        # ── Step 4: Key statistics ────────────────────────────────
+        # Key statistics
         key_statistics, key_statistics_groups = self._build_key_statistics(
-            quote, profile, key_metrics, analyst_est, price
+            quote, profile, key_metrics, analyst_est, price,
+            shares_float_data=shares_float,
+            inst_ownership_data=inst_ownership,
+            income_quarterly=income_quarterly,
+            short_interest=short_interest,
         )
 
-        # ── Step 5: Performance periods ───────────────────────────
+        # Performance periods
         performance_periods = self._build_performance_periods(
-            stock_historical, spy_historical
+            stock_historical, spy_historical,
         )
 
-        # ── Step 6: Snapshots ────────────────────────────────────
+        # Snapshots
         sector_name = profile.get("sector") or "N/A"
         snapshots = self._build_snapshots(
             key_metrics, fin_ratios, income_annual, balance_annual,
-            cashflow_annual, price, _safe_float(profile, "mktCap") or _safe_float(quote, "marketCap"),
-            sector_name
+            cashflow_annual, price,
+            _safe_float(profile, "mktCap") or _safe_float(quote, "marketCap"),
+            sector_name,
         )
 
-        # ── Step 7: Sector & Industry ─────────────────────────────
+        # Sector & Industry
         sector_industry = self._build_sector_industry(profile, sector_perf)
 
-        # ── Step 8: Company profile ───────────────────────────────
+        # Company profile
         company_profile = self._build_company_profile(profile)
 
-        # ── Step 9: Related tickers ───────────────────────────────
-        related_tickers = await self._build_related_tickers(ticker)
-
-        # ── Step 10: Benchmark summary ────────────────────────────
+        # Benchmark summary
         benchmark_summary = self._build_benchmark_summary(
-            stock_historical, spy_historical
+            stock_historical, spy_historical,
         )
 
-        # ── Assemble response ────────────────────────────────────
-        response = StockOverviewResponse(
+        return StockOverviewResponse(
             symbol=ticker,
             company_name=company_name,
             current_price=price,
@@ -385,26 +546,28 @@ class StockOverviewService:
             snapshots=snapshots,
             sector_industry=sector_industry,
             company_profile=company_profile,
-            related_tickers=related_tickers,
+            related_tickers=[],  # Populated below
             benchmark_summary=benchmark_summary,
         )
-
-        _cache_set(cache_key, response)
-        return response
 
     # ── Key Statistics ────────────────────────────────────────────
 
     def _build_key_statistics(
         self, quote: Dict, profile: Dict, key_metrics: List[Dict],
         analyst_est: List[Dict], price: float,
+        shares_float_data: Dict = None, inst_ownership_data=None,
+        income_quarterly: List[Dict] = None,
+        short_interest: Dict = None,
     ) -> Tuple[List[KeyStatisticItem], List[KeyStatisticsGroupResponse]]:
         open_val = _safe_float(quote, "open")
         prev_close = _safe_float(quote, "previousClose")
         day_high = _safe_float(quote, "dayHigh")
         day_low = _safe_float(quote, "dayLow")
-        volume = _safe_float(quote, "volume")
-        avg_volume = _safe_float(quote, "avgVolume") or _safe_float(profile, "volAvg")
-        market_cap = _safe_float(quote, "marketCap") or _safe_float(profile, "mktCap")
+        volume = _safe_float(quote, "volume") or _safe_float(profile, "volume")
+        avg_volume = (_safe_float(quote, "avgVolume") or _safe_float(profile, "volAvg")
+                      or _safe_float(profile, "averageVolume"))
+        market_cap = (_safe_float(quote, "marketCap") or _safe_float(profile, "mktCap")
+                      or _safe_float(profile, "marketCap"))
         year_high = _safe_float(quote, "yearHigh")
         year_low = _safe_float(quote, "yearLow")
         # Fallback: parse profile.range string "124.17-199.62"
@@ -421,23 +584,78 @@ class StockOverviewService:
                             year_high = high_val
                     except ValueError:
                         pass
-        pe = _safe_float(quote, "pe")
-        eps = _safe_float(quote, "eps")
         beta = _safe_float(profile, "beta") or _safe_float(quote, "beta")
-        last_div = _safe_float(profile, "lastDiv")
-        shares_out = _safe_float(quote, "sharesOutstanding")
+        last_div = _safe_float(profile, "lastDiv") or _safe_float(profile, "lastDividend")
+        shares_out = (_safe_float(quote, "sharesOutstanding")
+                      or _safe_float(shares_float_data or {}, "outstandingShares"))
 
-        # Forward P/E from analyst estimates
+        # ── EPS (TTM): sum diluted EPS from last 4 quarterly income statements ──
+        eps = None
+        pe = None
+        if income_quarterly and len(income_quarterly) >= 4:
+            try:
+                ttm_eps = sum(
+                    float(q.get("epsDiluted") or q.get("eps") or 0)
+                    for q in income_quarterly[:4]
+                )
+                if ttm_eps > 0:
+                    eps = round(ttm_eps, 2)
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback: try quote fields, then key_metrics earningsYield
+        if not eps:
+            eps = _safe_float(quote, "eps")
+        if not eps and price and price > 0:
+            km_latest = key_metrics[0] if key_metrics else {}
+            earnings_yield = _safe_float(km_latest, "earningsYield")
+            if earnings_yield and earnings_yield > 0:
+                eps = round(earnings_yield * price, 2)
+
+        # ── P/E (TTM): price / EPS ──
+        if eps and eps > 0 and price and price > 0:
+            pe = round(price / eps, 2)
+
+        # ── Forward P/E: use nearest future fiscal year estimate ──
         pe_fwd = None
-        if analyst_est and isinstance(analyst_est[0], dict):
-            fwd_eps = _safe_float(analyst_est[0], "estimatedEpsAvg")
-            if fwd_eps > 0 and price > 0:
-                pe_fwd = round(price / fwd_eps, 2)
+        if analyst_est and price and price > 0:
+            today_str = datetime.now(tz=timezone.utc).date().isoformat()
+            # Sort by date ascending to find nearest future year
+            future_ests = []
+            for est in analyst_est:
+                if isinstance(est, dict):
+                    est_date = est.get("date", "")
+                    if est_date >= today_str:
+                        future_ests.append(est)
+            # Pick the nearest future estimate
+            if future_ests:
+                future_ests.sort(key=lambda x: x.get("date", ""))
+                nearest = future_ests[0]
+                fwd_eps = _safe_float(nearest, "epsAvg") or _safe_float(nearest, "estimatedEpsAvg")
+                if fwd_eps and fwd_eps > 0:
+                    pe_fwd = round(price / fwd_eps, 2)
 
-        # Ownership from key_metrics (most recent)
-        km = key_metrics[0] if key_metrics else {}
-        insider_pct = km.get("insidersPercentage")
-        inst_pct = km.get("institutionPercentage") or km.get("institutionalOwnership")
+        # Ownership from shares-float and institutional ownership endpoints
+        shares_float_data = shares_float_data or {}
+        float_shares_val = _safe_float(shares_float_data, "floatShares")
+        free_float = _safe_float(shares_float_data, "freeFloat")
+        insider_pct = round(100 - free_float, 4) if free_float else None
+
+        # Institutional ownership
+        inst_pct = None
+        if isinstance(inst_ownership_data, list) and inst_ownership_data:
+            inst_dict = inst_ownership_data[0] if isinstance(inst_ownership_data[0], dict) else {}
+            inst_pct = _safe_float(inst_dict, "ownershipPercent")
+        elif isinstance(inst_ownership_data, dict):
+            inst_pct = _safe_float(inst_ownership_data, "ownershipPercent")
+
+        # Fallback: try key_metrics for ownership if endpoints returned nothing
+        if insider_pct is None or inst_pct is None:
+            km = key_metrics[0] if key_metrics else {}
+            if insider_pct is None:
+                insider_pct = _safe_float(km, "insidersPercentage")
+            if inst_pct is None:
+                inst_pct = _safe_float(km, "institutionPercentage") or _safe_float(km, "institutionalOwnership")
 
         # Dividend yield
         div_str = "—"
@@ -460,7 +678,7 @@ class StockOverviewService:
             KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
             KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd else "—"),
             KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
-            KeyStatisticItem(label="Dividend & Yield", value=div_str),
+            KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ]
 
@@ -473,49 +691,58 @@ class StockOverviewService:
             KeyStatisticItem(label="Market Cap", value=_fmt(market_cap) if market_cap else "—"),
         ])
 
+        # 52-Week % Range = ((High - Low) / Low) * 100
+        week52_pct_range = None
+        if year_high and year_low and year_low > 0:
+            week52_pct_range = round(((year_high - year_low) / year_low) * 100, 2)
+
         group2 = KeyStatisticsGroupResponse(statistics=[
             KeyStatisticItem(label="Day High", value=f"{day_high:.2f}" if day_high else "—"),
             KeyStatisticItem(label="Day Low", value=f"{day_low:.2f}" if day_low else "—"),
             KeyStatisticItem(label="52-Week High", value=f"{year_high:.2f}" if year_high else "—"),
             KeyStatisticItem(label="52-Week Low", value=f"{year_low:.2f}" if year_low else "—"),
+            KeyStatisticItem(label="52-Week % Range", value=f"{week52_pct_range:.2f}%" if week52_pct_range is not None else "—"),
         ])
 
         group3 = KeyStatisticsGroupResponse(statistics=[
             KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
             KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd else "—"),
             KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
-            KeyStatisticItem(label="Dividend & Yield", value=div_str),
+            KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ])
 
         # Ownership group
-        # Short % of Float: try key_metrics fields (availability varies by FMP plan)
-        short_pct = km.get("shortPercentOutstanding") or km.get("shortPercentFloat")
-        if short_pct is not None:
-            try:
-                sp = float(short_pct)
-                if sp < 1:
-                    sp *= 100
-                short_pct_str = f"{sp:.2f}%"
-            except (ValueError, TypeError):
-                short_pct_str = "N/A"
-        else:
-            short_pct_str = "N/A"
+        # Short % of Float: from Yahoo Finance (cached in Supabase, 24h TTL)
+        short_interest = short_interest or {}
+        short_pct_val = short_interest.get("short_percent_of_float")
 
-        # Float = shares outstanding * (1 - insider %)
-        float_shares = None
-        if shares_out and insider_pct is not None:
+        if short_pct_val is None:
+            # Fallback: try FMP key_metrics (rarely available on stable API)
+            km = key_metrics[0] if key_metrics else {}
+            raw = km.get("shortPercentOutstanding") or km.get("shortPercentFloat")
+            if raw is not None:
+                try:
+                    sp = float(raw)
+                    short_pct_val = sp * 100 if sp < 1 else sp
+                except (ValueError, TypeError):
+                    pass
+
+        short_pct_str = f"{short_pct_val:.2f}%" if short_pct_val is not None else "N/A"
+
+        # Float shares from shares-float endpoint (or fallback calculation)
+        if not float_shares_val and shares_out and insider_pct is not None:
             try:
                 ins = float(insider_pct)
                 if ins < 1:
-                    ins *= 100  # normalize to percentage
-                float_shares = shares_out * (1 - ins / 100)
+                    ins *= 100
+                float_shares_val = shares_out * (1 - ins / 100)
             except (ValueError, TypeError):
                 pass
-        float_str = _fmt_large(float_shares) if float_shares else "—"
+        float_str = _fmt_large(float_shares_val) if float_shares_val else "—"
 
-        insider_str = _pct(insider_pct * 100 if insider_pct and insider_pct < 1 else insider_pct) if insider_pct else "—"
-        inst_str = _pct(inst_pct * 100 if inst_pct and inst_pct < 1 else inst_pct) if inst_pct else "—"
+        insider_str = _pct(insider_pct) if insider_pct is not None else "—"
+        inst_str = _pct(inst_pct) if inst_pct is not None else "—"
 
         group4 = KeyStatisticsGroupResponse(statistics=[
             KeyStatisticItem(label="Short % of Float", value=short_pct_str, is_highlighted=True),

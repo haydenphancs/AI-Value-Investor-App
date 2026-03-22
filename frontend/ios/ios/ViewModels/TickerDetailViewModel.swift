@@ -62,7 +62,7 @@ class TickerDetailViewModel: ObservableObject {
 
     init(tickerSymbol: String, stockRepository: StockRepository? = nil) {
         self.tickerSymbol = tickerSymbol
-        self.stockRepository = stockRepository ?? StockRepository()
+        self.stockRepository = stockRepository ?? .shared
 
         // Observe chart range changes: auto-set default interval and fetch new chart data
         $selectedChartRange
@@ -138,6 +138,13 @@ class TickerDetailViewModel: ObservableObject {
                 }
                 self.tickerData = self.buildTickerDetailData()
                 print("📊 TickerDetailVM: Built fallback TickerDetailData for \(ticker)")
+                print("📊 Fallback data sources: stockDetail=\(self.stockDetail != nil), stockQuote=\(self.stockQuote != nil)")
+                if let d = self.stockDetail {
+                    print("  profile: price=\(d.price as Any), beta=\(d.beta as Any), marketCap=\(d.marketCap as Any), lastDiv=\(d.lastDiv as Any), 52wkH=\(d.high52Week as Any)")
+                }
+                if let q = self.stockQuote {
+                    print("  quote: price=\(q.price as Any), pe=\(q.pe as Any), eps=\(q.eps as Any), open=\(q.open as Any), vol=\(q.volume as Any)")
+                }
                 // Fetch real chart data for the fallback path
                 await self.fetchChartData(ticker, range: self.selectedChartRange)
             }
@@ -857,10 +864,11 @@ class TickerDetailViewModel: ObservableObject {
 
         // Dividend from profile
         if let lastDiv = stockDetail?.lastDiv, lastDiv > 0, let price = stockQuote?.price ?? stockDetail?.price, price > 0 {
-            let yield = (lastDiv * 4 / price) * 100  // Annualized yield estimate
-            stats.append(KeyStatistic(label: "Dividend & Yield", value: String(format: "%.2f (%.2f%%)", lastDiv, yield)))
+            // FMP lastDiv is already annualized
+            let divYield = (lastDiv / price) * 100
+            stats.append(KeyStatistic(label: "Dividends", value: String(format: "%.2f (%.2f%%)", lastDiv, divYield)))
         } else {
-            stats.append(KeyStatistic(label: "Dividend & Yield", value: "--"))
+            stats.append(KeyStatistic(label: "Dividends", value: "--"))
         }
 
         return stats
@@ -869,7 +877,7 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Build Key Statistics Groups
 
     private func buildKeyStatisticsGroups() -> [KeyStatisticsGroup] {
-        // Column 1: Price & Volume
+        // Column 1: Price & Volume (quote primary, profile fallback)
         let priceVolumeStats: [KeyStatistic] = [
             KeyStatistic(
                 label: "Open",
@@ -890,11 +898,21 @@ class TickerDetailViewModel: ObservableObject {
             ),
             KeyStatistic(
                 label: "Avg. Volume (3M)",
-                value: stockDetail?.avgVolume != nil ? formatLargeNumber(stockDetail!.avgVolume!) : "--"
+                value: {
+                    if let avgVol = stockQuote?.avgVolume ?? stockDetail?.avgVolume {
+                        return formatLargeNumber(avgVol)
+                    }
+                    return "--"
+                }()
             ),
             KeyStatistic(
                 label: "Market Cap",
-                value: stockDetail?.marketCap != nil ? formatMarketCap(stockDetail!.marketCap!) : "--"
+                value: {
+                    if let cap = stockDetail?.marketCap ?? stockQuote?.marketCap {
+                        return formatMarketCap(cap)
+                    }
+                    return "--"
+                }()
             )
         ]
 
@@ -910,15 +928,37 @@ class TickerDetailViewModel: ObservableObject {
             ),
             KeyStatistic(
                 label: "52-Week High",
-                value: stockDetail?.high52Week != nil ? String(format: "%.2f", stockDetail!.high52Week!) : "--"
+                value: {
+                    if let h = stockDetail?.high52Week ?? stockQuote?.yearHigh {
+                        return String(format: "%.2f", h)
+                    }
+                    return "--"
+                }()
             ),
             KeyStatistic(
                 label: "52-Week Low",
-                value: stockDetail?.low52Week != nil ? String(format: "%.2f", stockDetail!.low52Week!) : "--"
+                value: {
+                    if let l = stockDetail?.low52Week ?? stockQuote?.yearLow {
+                        return String(format: "%.2f", l)
+                    }
+                    return "--"
+                }()
+            ),
+            KeyStatistic(
+                label: "52-Week % Range",
+                value: {
+                    let h = stockDetail?.high52Week ?? stockQuote?.yearHigh
+                    let l = stockDetail?.low52Week ?? stockQuote?.yearLow
+                    if let high = h, let low = l, low > 0 {
+                        let pctRange = ((high - low) / low) * 100
+                        return String(format: "%.2f%%", pctRange)
+                    }
+                    return "--"
+                }()
             )
         ]
 
-        // Column 3: Valuation (from quote + profile)
+        // Column 3: Valuation (quote + profile)
         let peValue: String = {
             if let pe = stockQuote?.pe, pe > 0 { return String(format: "%.2f", pe) }
             return "--"
@@ -934,30 +974,60 @@ class TickerDetailViewModel: ObservableObject {
         let divValue: String = {
             if let lastDiv = stockDetail?.lastDiv, lastDiv > 0,
                let price = stockQuote?.price ?? stockDetail?.price, price > 0 {
-                let yield = (lastDiv * 4 / price) * 100
-                return String(format: "%.2f (%.2f%%)", lastDiv, yield)
+                // FMP lastDiv is already annualized
+                let divYield = (lastDiv / price) * 100
+                return String(format: "%.2f (%.2f%%)", lastDiv, divYield)
             }
+            return "--"
+        }()
+        let peFwdValue: String = {
+            if let peFwd = stockDetail?.peForward, peFwd > 0 { return String(format: "%.2f", peFwd) }
             return "--"
         }()
         let valuationStats: [KeyStatistic] = [
             KeyStatistic(label: "P/E (TTM)", value: peValue),
-            KeyStatistic(label: "P/E (FWD)", value: "--"),
+            KeyStatistic(label: "P/E (FWD)", value: peFwdValue),
             KeyStatistic(label: "EPS (TTM)", value: epsValue),
-            KeyStatistic(label: "Dividend & Yield", value: divValue),
+            KeyStatistic(label: "Dividends", value: divValue),
             KeyStatistic(label: "Beta", value: betaValue)
         ]
 
-        // Column 4: Shares & Ownership (from quote)
+        // Column 4: Shares & Ownership
         let sharesValue: String = {
             if let shares = stockQuote?.sharesOutstanding { return formatLargeNumber(shares) }
             return "--"
         }()
+        let shortFloatValue: String = {
+            if let sp = stockDetail?.shortPercentFloat {
+                let pct = sp < 1 ? sp * 100 : sp
+                return String(format: "%.2f%%", pct)
+            }
+            return "N/A"
+        }()
+        let floatValue: String = {
+            if let f = stockDetail?.floatShares { return formatLargeNumber(f) }
+            return "--"
+        }()
+        let insiderValue: String = {
+            if let ins = stockDetail?.percentInsiders {
+                let pct = ins < 1 ? ins * 100 : ins
+                return String(format: "%.2f%%", pct)
+            }
+            return "--"
+        }()
+        let instValue: String = {
+            if let inst = stockDetail?.percentInstitutional {
+                let pct = inst < 1 ? inst * 100 : inst
+                return String(format: "%.2f%%", pct)
+            }
+            return "--"
+        }()
         let ownershipStats: [KeyStatistic] = [
-            KeyStatistic(label: "Short % of Float", value: "--"),
+            KeyStatistic(label: "Short % of Float", value: shortFloatValue),
             KeyStatistic(label: "Shares Outstanding", value: sharesValue),
-            KeyStatistic(label: "Float", value: "--"),
-            KeyStatistic(label: "% Held by Insiders", value: "--"),
-            KeyStatistic(label: "% Held Inst.", value: "--")
+            KeyStatistic(label: "Float", value: floatValue),
+            KeyStatistic(label: "% Held by Insiders", value: insiderValue),
+            KeyStatistic(label: "% Held Inst.", value: instValue)
         ]
 
         return [

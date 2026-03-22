@@ -3,7 +3,7 @@
 //  ios
 //
 //  Organism: Complete Recent Activities section card
-//  Displays recent institutional or insider trading activities with flow bar and activity list
+//  Displays recent institutional, insider, or congressional trading activities
 //
 
 import SwiftUI
@@ -13,12 +13,21 @@ struct RecentActivitiesSection: View {
 
     let data: RecentActivitiesData
 
+    // MARK: - Constants
+
+    private let initialDisplayCount = 10
+    private let expandedListHeight: CGFloat = 500
+
     // MARK: - State
 
-    @State private var selectedTab: RecentActivitiesTab = .institutions
+    @State private var selectedTab: RecentActivitiesTab = .insiders
     @State private var selectedSort: RecentActivitiesSortOption = .byValue
     @State private var selectedFilter: InsiderActivityFilterOption = .all
+    @State private var congressSort: RecentActivitiesSortOption = .byValue
     @State private var showInfoSheet: Bool = false
+    @State private var institutionsExpanded: Bool = false
+    @State private var insidersExpanded: Bool = false
+    @State private var congressExpanded: Bool = false
 
     // MARK: - Computed Properties
 
@@ -27,8 +36,11 @@ struct RecentActivitiesSection: View {
     }
 
     private var sortedInsiderActivities: [InsiderActivity] {
-        // Always sort by date (most recent first) for both All and Informative tabs
         return data.insiderActivities.sortedActivities(by: .byDate, filter: selectedFilter)
+    }
+
+    private var sortedCongressActivities: [CongressActivity] {
+        data.congressActivities.sortedActivities(by: congressSort)
     }
 
     // MARK: - Body
@@ -38,18 +50,26 @@ struct RecentActivitiesSection: View {
             // Header with title and info icon
             headerSection
 
-            // Tab selector (Institutions / Insiders)
+            // Tab selector (Insiders / Institutions / Congress)
             RecentActivitiesTabSelector(
                 selectedTab: $selectedTab,
-                disabledTabs: []  // Both tabs enabled
+                disabledTabs: []
             )
 
             // Content based on selected tab
-            if selectedTab == .institutions {
-                institutionsContent
-            } else {
-                insidersContent
+            // .id(selectedTab) prevents SwiftUI from animating row-by-row
+            // removal when switching tabs (which freezes with 73+ rows)
+            Group {
+                switch selectedTab {
+                case .insiders:
+                    insidersContent
+                case .institutions:
+                    institutionsContent
+                case .congress:
+                    congressContent
+                }
             }
+            .id(selectedTab)
         }
         .padding(AppSpacing.lg)
         .background(
@@ -82,7 +102,13 @@ struct RecentActivitiesSection: View {
     // MARK: - Institutions Content
 
     private var institutionsContent: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        let allActivities = sortedInstitutionalActivities
+        let displayedActivities = institutionsExpanded
+            ? allActivities
+            : Array(allActivities.prefix(initialDisplayCount))
+        let hasMore = allActivities.count > initialDisplayCount
+
+        return VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Period label
             Text("Latest Filings (\(data.institutionalFlowSummary.periodDescription))")
                 .font(AppTypography.labelSmall)
@@ -106,19 +132,46 @@ struct RecentActivitiesSection: View {
             RecentActivitiesSortSelector(selectedSort: $selectedSort)
 
             // Activity list
-            LazyVStack(spacing: AppSpacing.sm) {
-                ForEach(sortedInstitutionalActivities) { activity in
-                    InstitutionalActivityRow(activity: activity)
+            if institutionsExpanded {
+                ScrollView {
+                    LazyVStack(spacing: AppSpacing.sm) {
+                        ForEach(displayedActivities) { activity in
+                            InstitutionalActivityRow(activity: activity)
+                        }
+                    }
+                }
+                .scrollIndicators(.visible)
+                .frame(maxHeight: expandedListHeight)
+            } else {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(displayedActivities) { activity in
+                        InstitutionalActivityRow(activity: activity)
+                    }
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: selectedSort)
+
+            // Show more / Show less button
+            if hasMore {
+                showMoreButton(
+                    isExpanded: institutionsExpanded,
+                    totalCount: allActivities.count
+                ) {
+                    institutionsExpanded.toggle()
+                }
+            }
         }
     }
 
     // MARK: - Insiders Content
 
     private var insidersContent: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        let allActivities = sortedInsiderActivities
+        let displayedActivities = insidersExpanded
+            ? allActivities
+            : Array(allActivities.prefix(initialDisplayCount))
+        let hasMore = allActivities.count > initialDisplayCount
+
+        return VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Period label
             Text(data.insiderActivities.summary.periodDescription)
                 .font(AppTypography.labelSmall)
@@ -135,14 +188,113 @@ struct RecentActivitiesSection: View {
             InsiderFilterSelector(selectedFilter: $selectedFilter)
 
             // Activity list
-            LazyVStack(spacing: AppSpacing.sm) {
-                ForEach(sortedInsiderActivities) { activity in
-                    InsiderActivityRow(activity: activity)
+            if insidersExpanded {
+                ScrollView {
+                    LazyVStack(spacing: AppSpacing.sm) {
+                        ForEach(displayedActivities) { activity in
+                            InsiderActivityRow(activity: activity)
+                        }
+                    }
+                }
+                .scrollIndicators(.visible)
+                .frame(maxHeight: expandedListHeight)
+            } else {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(displayedActivities) { activity in
+                        InsiderActivityRow(activity: activity)
+                    }
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: selectedFilter)
-            .animation(.easeInOut(duration: 0.2), value: selectedSort)
+
+            // Show more / Show less button
+            if hasMore {
+                showMoreButton(
+                    isExpanded: insidersExpanded,
+                    totalCount: allActivities.count
+                ) {
+                    insidersExpanded.toggle()
+                }
+            }
         }
+    }
+
+    // MARK: - Congress Content
+
+    private var congressContent: some View {
+        let allActivities = sortedCongressActivities
+        let displayedActivities = congressExpanded
+            ? allActivities
+            : Array(allActivities.prefix(initialDisplayCount))
+        let hasMore = allActivities.count > initialDisplayCount
+
+        return VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Period label
+            Text(data.congressActivities.summary.periodDescription)
+                .font(AppTypography.labelSmall)
+                .foregroundColor(AppColors.textMuted)
+                .padding(.top, AppSpacing.xs)
+
+            // Total Buys vs Sells summary card
+            CongressFlowSummaryCard(summary: data.congressActivities.summary)
+
+            // Net flow
+            CongressNetFlowBadge(summary: data.congressActivities.summary)
+
+            // Sort selector (By Value / By Date)
+            RecentActivitiesSortSelector(selectedSort: $congressSort)
+
+            // Activity list
+            if congressExpanded {
+                ScrollView {
+                    LazyVStack(spacing: AppSpacing.sm) {
+                        ForEach(displayedActivities) { activity in
+                            CongressActivityRow(activity: activity)
+                        }
+                    }
+                }
+                .scrollIndicators(.visible)
+                .frame(maxHeight: expandedListHeight)
+            } else {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(displayedActivities) { activity in
+                        CongressActivityRow(activity: activity)
+                    }
+                }
+            }
+
+            // Show more / Show less button
+            if hasMore {
+                showMoreButton(
+                    isExpanded: congressExpanded,
+                    totalCount: allActivities.count
+                ) {
+                    congressExpanded.toggle()
+                }
+            }
+        }
+    }
+
+    // MARK: - Show More Button
+
+    private func showMoreButton(
+        isExpanded: Bool,
+        totalCount: Int,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: AppSpacing.xs) {
+                Text(isExpanded ? "Show Less" : "Show All (\(totalCount))")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, AppSpacing.sm)
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -112,9 +112,9 @@ struct SmartMoneyInfoSheet: View {
 
                 smartMoneyTypeCard(
                     icon: "building.columns.fill",
-                    title: "Hedge Funds",
-                    description: "Professional money managers who actively research stocks. Disclosed quarterly in 13F filings.",
-                    signal: "Large position increases by respected funds often precede gains. Watch for coordinated buying.",
+                    title: "Institutions",
+                    description: "Mutual funds, pension funds, hedge funds, and other large investors. Disclosed quarterly in 13F filings.",
+                    signal: "Large position increases by major institutions often precede gains. Watch for coordinated buying.",
                     signalType: .neutral
                 )
 
@@ -165,17 +165,11 @@ struct SmartMoneyInfoSheet: View {
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(alignment: .top, spacing: AppSpacing.sm) {
-                Image(systemName: "lightbulb.fill")
-                    .font(AppTypography.iconXS)
-                    .foregroundColor(signalType.color)
-
-                Text(signal)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, AppSpacing.xs)
+            Text(signal)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, AppSpacing.xs)
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)

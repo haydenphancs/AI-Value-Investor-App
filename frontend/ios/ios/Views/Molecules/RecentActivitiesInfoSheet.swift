@@ -39,6 +39,10 @@ struct RecentActivitiesInfoSheet: View {
                     // Key Insights
                     keyInsightsSection
 
+                    // Congress Section
+                    congressSectionHeader
+                    congressDisclaimerSection
+
                     // Important Considerations
                     considerationsSection
                 }
@@ -140,7 +144,7 @@ struct RecentActivitiesInfoSheet: View {
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
-            VStack(spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
                 flowBarExplanation(
                     color: AppColors.bullish,
                     title: "In Flow (Green)",
@@ -168,11 +172,11 @@ struct RecentActivitiesInfoSheet: View {
     }
 
     private func flowBarExplanation(color: Color, title: String, description: String) -> some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
+        HStack(alignment: .top, spacing: AppSpacing.sm) {
             Circle()
                 .fill(color)
                 .frame(width: 12, height: 12)
-                .padding(.top, 4)
+                .padding(.top, 5)
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(title)
@@ -220,33 +224,29 @@ struct RecentActivitiesInfoSheet: View {
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            VStack(spacing: AppSpacing.md) {
-                tradeTypeCard(
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                flowBarExplanation(
                     color: AppColors.bullish,
                     title: "Informative Buy",
-                    description: "An insider voluntarily purchases shares on the open market with their own money. This is one of the strongest bullish signals—they believe the stock will rise.",
-                    example: "CEO uses personal funds to buy $500K in shares"
+                    description: "An insider voluntarily purchases shares on the open market with their own money. This is one of the strongest bullish signals."
                 )
 
-                tradeTypeCard(
+                flowBarExplanation(
                     color: AppColors.bearish,
                     title: "Informative Sell",
-                    description: "An insider voluntarily sells shares not related to scheduled plans. May indicate concerns about the stock, though could also be diversification.",
-                    example: "CFO sells shares outside of a 10b5-1 plan"
+                    description: "An insider voluntarily sells shares not related to scheduled plans. May indicate concerns about the stock or diversification."
                 )
 
-                tradeTypeCard(
+                flowBarExplanation(
                     color: AppColors.textSecondary,
                     title: "Uninformative Buy",
-                    description: "Shares acquired through compensation, stock options, or grants. Not a signal of conviction since they didn't use their own money.",
-                    example: "Director receives annual stock grant"
+                    description: "Shares acquired through compensation, stock options, or grants. Not a signal of conviction since they didn't use their own money."
                 )
 
-                tradeTypeCard(
+                flowBarExplanation(
                     color: AppColors.textSecondary,
                     title: "Uninformative Sell",
-                    description: "Scheduled sales (10b5-1 plans), tax-related sales, or option exercises. These are routine and don't indicate sentiment.",
-                    example: "Automatic quarterly sale per preset plan"
+                    description: "Scheduled sales (10b5-1 plans), tax-related sales, or option exercises. These are routine and don't indicate sentiment."
                 )
             }
             .padding(AppSpacing.lg)
@@ -257,102 +257,71 @@ struct RecentActivitiesInfoSheet: View {
         }
     }
 
-    private func tradeTypeCard(color: Color, title: String, description: String, example: String) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack(spacing: AppSpacing.sm) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 10, height: 10)
-
-                Text(title)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(color == AppColors.textSecondary ? AppColors.textPrimary : color)
-            }
-
-            Text(description)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: AppSpacing.xs) {
-                Text("Example:")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .italic()
-
-                Text(example)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .italic()
-            }
-        }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                .fill(AppColors.background)
-        )
-    }
-
     // MARK: - Key Insights Section
 
     private var keyInsightsSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Text("Key Insights")
-                .font(AppTypography.headingSmall)
-                .foregroundColor(AppColors.textPrimary)
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "lightbulb.fill")
+                    .font(AppTypography.iconMedium)
+                    .foregroundColor(AppColors.neutral)
 
-            VStack(spacing: AppSpacing.md) {
-                insightCard(
-                    number: "1",
-                    title: "Informative Buying is the Strongest Signal",
-                    description: "When insiders spend their own money to buy shares, they're putting skin in the game. Multiple insiders buying is especially bullish."
-                )
+                Text("Key Insights")
+                    .font(AppTypography.headingSmall)
+                    .foregroundColor(AppColors.textPrimary)
+            }
 
-                insightCard(
-                    number: "2",
-                    title: "Focus on the Net Flow",
-                    description: "Positive net informative flow (more buying than selling) suggests insiders are confident. Persistent negative flow may be a warning sign."
-                )
-
-                insightCard(
-                    number: "3",
-                    title: "Filter to \"Informative\" for Clarity",
-                    description: "Use the filter to see only meaningful trades. Uninformative trades add noise but don't indicate sentiment."
-                )
-
-                insightCard(
-                    number: "4",
-                    title: "Consider the Role",
-                    description: "CEO and CFO trades often carry more weight than directors, as they have the deepest knowledge of the company's prospects."
-                )
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                considerationRow("Informative buying is the strongest signal—insiders putting skin in the game.")
+                considerationRow("Positive net informative flow suggests insider confidence; persistent negative flow is a warning.")
+                considerationRow("Filter to \"Informative\" to see only meaningful trades and cut through noise.")
+                considerationRow("CEO and CFO trades carry more weight than directors—they have the deepest knowledge.")
             }
         }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                        .stroke(AppColors.neutral.opacity(0.3), lineWidth: 1)
+                )
+        )
     }
 
-    private func insightCard(number: String, title: String, description: String) -> some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            Text(number)
-                .font(AppTypography.headingSmall)
+    // MARK: - Congress Section
+
+    private var congressSectionHeader: some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "building.columns.fill")
+                .font(AppTypography.iconMedium)
                 .foregroundColor(AppColors.primaryBlue)
-                .frame(width: 24, height: 24)
-                .background(
-                    Circle()
-                        .fill(AppColors.primaryBlue.opacity(0.15))
-                )
 
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(title)
-                    .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
+            Text("Congress")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
+        }
+        .padding(.top, AppSpacing.md)
+    }
 
-                Text(description)
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private var congressDisclaimerSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("About Congressional Trade Data")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Congress members report trades in broad ranges (e.g., \"$1,001 - $15,000\" or \"$1,000,001 - $5,000,000\") rather than exact amounts. Aggregate totals shown as \"Est.\" are estimated using the midpoint of these reported ranges.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Trades are sorted by the maximum potential value of the reported range when using \"By Value\" sorting.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackground)

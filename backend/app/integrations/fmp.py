@@ -941,16 +941,42 @@ class FMPClient:
 
     # ── Congressional trading ────────────────────────────────────────
 
+    async def _fetch_congress_pages(
+        self, endpoint: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch multiple pages of congress trading data in parallel.
+
+        FMP caps results at 250 per page.  Paginating captures older
+        trades that would otherwise be lost (e.g. Pelosi's large AAPL
+        sales on later pages).
+        """
+        PAGE_SIZE = 250
+        max_pages = min((limit + PAGE_SIZE - 1) // PAGE_SIZE, 5)
+
+        results = await asyncio.gather(
+            *[
+                self._make_request(
+                    endpoint, params={"limit": PAGE_SIZE, "page": p}
+                )
+                for p in range(max_pages)
+            ],
+            return_exceptions=True,
+        )
+
+        all_trades: List[Dict[str, Any]] = []
+        for r in results:
+            if isinstance(r, list):
+                all_trades.extend(r)
+            elif isinstance(r, Exception):
+                logger.warning(f"{endpoint} page fetch error: {r}")
+        return all_trades
+
     async def get_senate_latest(
-        self, limit: int = 100
+        self, limit: int = 1000
     ) -> List[Dict[str, Any]]:
         """Get latest senate trades (all symbols, filter client-side)."""
         try:
-            data = await self._make_request(
-                "senate-latest",
-                params={"limit": limit},
-            )
-            return data if isinstance(data, list) else []
+            return await self._fetch_congress_pages("senate-latest", limit)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
                 logger.warning("Senate latest endpoint unavailable")
@@ -961,15 +987,11 @@ class FMPClient:
             return []
 
     async def get_house_latest(
-        self, limit: int = 100
+        self, limit: int = 1000
     ) -> List[Dict[str, Any]]:
         """Get latest house trades (all symbols, filter client-side)."""
         try:
-            data = await self._make_request(
-                "house-latest",
-                params={"limit": limit},
-            )
-            return data if isinstance(data, list) else []
+            return await self._fetch_congress_pages("house-latest", limit)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
                 logger.warning("House latest endpoint unavailable")

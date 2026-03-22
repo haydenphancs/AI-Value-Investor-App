@@ -113,6 +113,7 @@ class ChatService:
         user_message: str,
         session_type: str = "NORMAL",
         stock_id: Optional[str] = None,
+        context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
@@ -148,7 +149,8 @@ class ChatService:
         if stock_id:
             profit_summary = await self._get_profit_summary(stock_id)
         system_instruction = self._build_system_instruction(
-            session_type, stock_id, profit_summary=profit_summary
+            session_type, stock_id, profit_summary=profit_summary,
+            client_context=context,
         )
         prompt = self._build_prompt(user_message, history, chunks)
 
@@ -365,6 +367,7 @@ class ChatService:
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
         profit_summary: Optional[str] = None,
+        client_context: Optional[str] = None,
     ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
@@ -393,6 +396,12 @@ class ChatService:
             )
             if profit_summary:
                 base += f"\n{profit_summary}"
+        if client_context:
+            base += (
+                f"\n\nCLIENT CONTEXT (current data visible to the user):\n"
+                f"{client_context}\n"
+                "Use this data to give precise, numbers-backed answers."
+            )
         return base
 
     def _build_prompt(

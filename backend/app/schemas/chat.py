@@ -12,6 +12,7 @@ class CreateChatSessionRequest(BaseModel):
 
 class SendChatMessageRequest(BaseModel):
     message: str
+    context: Optional[str] = None  # rich context from the client (key stats, tab data)
 
 
 class UpdateChatSessionRequest(BaseModel):

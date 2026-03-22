@@ -829,7 +829,7 @@ struct AddAssetSheet: View {
     var onAssetAdded: ((String) -> Void)?
     var onDismiss: (() -> Void)?
 
-    private let stockRepository = StockRepository()
+    private let stockRepository = StockRepository.shared
 
     var body: some View {
         NavigationView {

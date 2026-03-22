@@ -50,7 +50,7 @@ struct KeyStatisticsCard: View {
                 KeyStatistic(label: "P/E (TTM)", value: "35.15"),
                 KeyStatistic(label: "P/E (FWD)", value: "31.84"),
                 KeyStatistic(label: "EPS (TTM)", value: "7.47"),
-                KeyStatistic(label: "Dividend & Yield", value: "1.04 (0.39%)"),
+                KeyStatistic(label: "Dividends", value: "1.04 (0.39%)"),
                 KeyStatistic(label: "Ex-Dividend Date", value: "11/10/2025")
             ])
         }

@@ -46,24 +46,24 @@ struct AssetsListSection: View {
                     }
                 }
 
-                Section {
-                    Button(action: { onAddTapped?() }) {
-                        HStack {
-                            Spacer()
-                            Image(systemName: "plus")
-                                .font(AppTypography.iconMedium).fontWeight(.semibold)
-                                .foregroundColor(AppColors.textMuted)
-                            Spacer()
-                        }
-                    }
-                    .listRowBackground(AppColors.cardBackground)
-                }
             }
             .listStyle(InsetGroupedListStyle())
             .listSectionSpacing(AppSpacing.sm)
             .scrollContentBackground(.hidden)
             .scrollDisabled(true)
-            .frame(height: CGFloat(assets.count) * 72 + 80)
+            .frame(height: CGFloat(assets.count) * 72 + 20)
+
+            // Add button
+            Button(action: { onAddTapped?() }) {
+                Image(systemName: "plus")
+                    .font(AppTypography.iconSmall).fontWeight(.semibold)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(AppSpacing.md)
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.pill)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, AppSpacing.md)
         }
     }
 }

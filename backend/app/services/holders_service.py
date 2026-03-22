@@ -92,22 +92,38 @@ def _classify_insider_transaction(tx_type: str) -> str:
     """
     Classify FMP transactionType into informative/uninformative categories.
 
-    Simple heuristic:
-      - P-Purchase → Informative Buy
-      - S-Sale     → Informative Sell
-      - A-*/M-*/G-*→ Uninformative Buy (awards, exercises, gifts)
-      - F-*/D-*    → Uninformative Sell (tax withholding, disposition)
+    Only open-market purchases (P) and pure sales (S) are informative.
+    Composite sale types (S-Sale+OE, S-Sale+DIS) indicate option exercises
+    or RSU dispositions paired with sales — these are uninformative because
+    they reflect compensation mechanics, not insider sentiment.
+
+      - P-Purchase           → Informative Buy
+      - S-Sale (pure)        → Informative Sell
+      - S-Sale+OE / +DIS     → Uninformative Sell (option exercise / disposition combo)
+      - A-*/M-*/G-*          → Uninformative Buy (awards, exercises, gifts)
+      - F-*/D-*              → Uninformative Sell (tax withholding, disposition)
     """
     tx = (tx_type or "").strip().upper()
+
+    # Open-market purchases are always informative
     if tx.startswith("P"):
         return "Informative Buy"
-    elif tx.startswith("S"):
+
+    # Sales: only pure open-market sales are informative.
+    # Composite types like "S - SALE+OE" are option-exercise sales → uninformative.
+    if tx.startswith("S"):
+        if "+OE" in tx or "+DIS" in tx or "EXEMPT" in tx:
+            return "Uninformative Sell"
         return "Informative Sell"
-    elif tx.startswith(("A", "M", "G")):
+
+    # Awards, option exercises, gifts → uninformative acquisitions
+    if tx.startswith(("A", "M", "G")):
         return "Uninformative Buy"
-    elif tx.startswith(("F", "D")):
+
+    # Tax withholding, dispositions
+    if tx.startswith(("F", "D")):
         return "Uninformative Sell"
-    # Default: if positive value treat as buy, else sell
+
     return "Uninformative Sell"
 
 
@@ -271,6 +287,8 @@ class HoldersService:
             historical_prices,
             senate_latest,
             house_latest,
+            senate_disclosure,
+            house_disclosure,
         ) = await asyncio.gather(
             self.fmp.get_shares_float(ticker),
             self.fmp.get_stock_price_quote(ticker),
@@ -279,8 +297,10 @@ class HoldersService:
             self.fmp.get_insider_trading(ticker, limit=100),
             self.fmp.get_insider_roster(ticker),
             self.fmp.get_historical_prices(ticker, from_date=from_date),
-            self.fmp.get_senate_latest(limit=500),
-            self.fmp.get_house_latest(limit=500),
+            self.fmp.get_senate_latest(limit=1000),
+            self.fmp.get_house_latest(limit=1000),
+            self.fmp.get_senate_disclosure(ticker),
+            self.fmp.get_house_disclosure(ticker),
             return_exceptions=True,
         )
 
@@ -300,6 +320,8 @@ class HoldersService:
         historical_prices = _unwrap(historical_prices, "Historical prices", [])
         senate_latest = _unwrap(senate_latest, "Senate latest", [])
         house_latest = _unwrap(house_latest, "House latest", [])
+        senate_disclosure = _unwrap(senate_disclosure, "Senate disclosure", [])
+        house_disclosure = _unwrap(house_disclosure, "House disclosure", [])
 
         current_price = _safe_float(quote_data, "price", 0.0)
         company_profile = shares_float
@@ -308,9 +330,11 @@ class HoldersService:
         monthly_prices = self._extract_monthly_prices(historical_prices)
         daily_prices = self._extract_daily_prices(historical_prices)
 
-        # Filter congressional trades for this ticker
-        senate_for_ticker = [s for s in senate_latest if s.get("symbol", "").upper() == ticker]
-        house_for_ticker = [h for h in house_latest if h.get("symbol", "").upper() == ticker]
+        # Merge congressional trades: symbol-filtered disclosure + latest, deduplicated
+        senate_from_latest = [s for s in senate_latest if s.get("symbol", "").upper() == ticker]
+        house_from_latest = [h for h in house_latest if h.get("symbol", "").upper() == ticker]
+        senate_for_ticker = self._dedup_congress_trades(senate_disclosure, senate_from_latest)
+        house_for_ticker = self._dedup_congress_trades(house_disclosure, house_from_latest)
 
         # Build each section
         breakdown = self._build_shareholder_breakdown(
@@ -518,9 +542,14 @@ class HoldersService:
         insider_roster: List[Dict[str, Any]],
         current_price: float,
     ) -> RecentActivitiesSchema:
-        # Build institutional activities
-        inst_activities = self._build_institutional_activities(inst_holders)
-        flow_summary = self._build_institutional_flow_summary(inst_activities)
+        # Build institutional activities (all, before truncation)
+        all_inst_activities = self._build_institutional_activities(inst_holders)
+        # Flow summary from ALL activities to avoid sampling bias
+        flow_summary = self._build_institutional_flow_summary(all_inst_activities)
+        # Truncate to top 10 by absolute value for the display list
+        inst_activities = sorted(
+            all_inst_activities, key=lambda a: abs(a.change_in_millions), reverse=True
+        )[:10]
 
         # Build insider activities
         insider_acts = self._build_insider_activities(
@@ -571,9 +600,9 @@ class HoldersService:
                 total_held_in_billions=round(total_value / 1_000_000_000, 1) if total_value > 0 else 0.0,
             ))
 
-        # Sort by absolute change value descending
+        # Sort by absolute change value descending (caller truncates to top 10)
         result.sort(key=lambda a: abs(a.change_in_millions), reverse=True)
-        return result[:10]
+        return result
 
     def _build_institutional_flow_summary(
         self, activities: List[InstitutionalActivitySchema]
@@ -589,20 +618,31 @@ class HoldersService:
             else:
                 outflow += abs(val)
 
-        # Determine period description from activity dates
+        # Use PREVIOUS quarter to match FMP fetch logic in get_institutional_holder.
+        # Current-quarter 13F filings aren't available yet, so FMP returns
+        # the prior quarter's data. The label must reflect that.
         now = datetime.now(timezone.utc)
-        quarter = (now.month - 1) // 3 + 1
-        quarter_start_month = (quarter - 1) * 3 + 1
+        month = now.month
+        if month <= 3:
+            data_year, data_quarter = now.year - 1, 4
+        elif month <= 6:
+            data_year, data_quarter = now.year, 1
+        elif month <= 9:
+            data_year, data_quarter = now.year, 2
+        else:
+            data_year, data_quarter = now.year, 3
+
+        quarter_start_month = (data_quarter - 1) * 3 + 1
         month_names = [
             "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
         ]
         period_start = month_names[quarter_start_month]
-        period_end = month_names[min(quarter_start_month + 2, 12)]
+        period_end = month_names[quarter_start_month + 2]
 
         return RecentActivitiesFlowSummarySchema(
-            period_description=f"{period_start} - {period_end} {now.year}",
-            quarter_description=f"Q{quarter}",
+            period_description=f"{period_start} - {period_end} {data_year}",
+            quarter_description=f"Q{data_quarter}",
             in_flow_in_billions=round(inflow / 1000, 1),
             out_flow_in_billions=round(outflow / 1000, 1),
         )
@@ -623,6 +663,11 @@ class HoldersService:
 
         result = []
         for tx in trades[:30]:  # Process up to 30 trades
+            # Only show equity trades (common stock), not RSUs/options/warrants
+            security_name = (tx.get("securityName") or "").lower()
+            if security_name and "common stock" not in security_name:
+                continue
+
             reporting_name = tx.get("reportingName", tx.get("reportingCik", "Unknown"))
             tx_type_raw = tx.get("transactionType", "")
             classified = _classify_insider_transaction(tx_type_raw)
@@ -817,6 +862,13 @@ class HoldersService:
                 skipped_count += 1
                 continue
 
+            # Only count equity trades (common stock).
+            # Skip RSU vestings, stock options, warrants, phantom stock, etc.
+            security_name = (tx.get("securityName") or "").lower()
+            if security_name and "common stock" not in security_name:
+                skipped_count += 1
+                continue
+
             # Use transactionDate or filingDate
             date_str = (tx.get("transactionDate") or tx.get("filingDate") or "")[:10]
             if not date_str:
@@ -837,7 +889,11 @@ class HoldersService:
             if price <= 0:
                 price = monthly_prices.get(m_key, 0.0)
 
-            value_millions = (shares * price) / 1_000_000 if price > 0 else 0.0
+            # Skip if we still have no price — can't compute meaningful value
+            if price <= 0:
+                continue
+
+            value_millions = (shares * price) / 1_000_000
 
             # Determine buy vs sell from acquisitionOrDisposition field
             acq_disp = (tx.get("acquisitionOrDisposition") or "").upper()
@@ -1201,6 +1257,27 @@ class HoldersService:
     # ── Congress Smart Money Tab ──────────────────────────────────
 
     @staticmethod
+    def _dedup_congress_trades(
+        primary: List[Dict[str, Any]],
+        secondary: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Merge two trade lists, deduplicating by key fields."""
+        seen: set = set()
+        result: List[Dict[str, Any]] = []
+        for trade in primary + secondary:
+            key = (
+                trade.get("transactionDate", ""),
+                (trade.get("firstName") or trade.get("first_name", "")).lower(),
+                (trade.get("lastName") or trade.get("last_name", "")).lower(),
+                (trade.get("type") or "").lower(),
+                trade.get("amount", ""),
+            )
+            if key not in seen:
+                seen.add(key)
+                result.append(trade)
+        return result
+
+    @staticmethod
     def _parse_congress_amount(amount_str: str) -> float:
         """Parse FMP congressional amount range to midpoint in millions.
 
@@ -1220,6 +1297,14 @@ class HoldersService:
                 high = float(parts[1].strip())
                 return (low + high) / 2 / 1_000_000  # Convert to millions
             except (ValueError, IndexError):
+                pass
+
+        # Handle "Over X" format (e.g., "Over 50000000" after cleaning)
+        if clean.lower().startswith("over "):
+            try:
+                base = float(clean[5:].strip())
+                return (base * 1.5) / 1_000_000  # 1.5x as estimated midpoint
+            except ValueError:
                 pass
 
         # Try as single number
@@ -1259,7 +1344,7 @@ class HoldersService:
             if m_key not in monthly_flows:
                 continue
 
-            if "purchase" in tx_type or "buy" in tx_type:
+            if "purchase" in tx_type or "buy" in tx_type or "exchange" in tx_type:
                 monthly_flows[m_key]["buy"] += amount_millions
             elif "sale" in tx_type or "sell" in tx_type:
                 monthly_flows[m_key]["sell"] += amount_millions

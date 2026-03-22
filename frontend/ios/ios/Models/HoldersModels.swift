@@ -149,7 +149,7 @@ struct SmartMoneyFlowSummary {
     let periodDescription: String  // e.g., "12-Month"
 
     var formattedNetFlow: String {
-        let sign = totalNetFlow >= 0 ? "+" : ""
+        let sign = totalNetFlow >= 0 ? "+" : "-"
         if abs(totalNetFlow) >= 1000 {
             return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow) / 1000))B"
         }

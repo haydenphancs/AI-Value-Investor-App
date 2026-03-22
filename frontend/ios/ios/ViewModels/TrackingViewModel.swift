@@ -114,6 +114,9 @@ class TrackingViewModel: ObservableObject {
         case .marketCap:
             // For now, sort by price as proxy for market cap
             assets.sort { sortAscending ? $0.price < $1.price : $0.price > $1.price }
+        case .dateAdded:
+            // Keep original order from backend (added_at desc)
+            if !sortAscending { assets.reverse() }
         }
 
         return assets

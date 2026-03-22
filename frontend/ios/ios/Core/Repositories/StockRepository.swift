@@ -71,7 +71,12 @@ final class StockRepository: StockRepositoryProtocol {
     private var cache: [String: CacheEntry] = [:]
     private let maxCacheEntries = 200
 
-    private init(apiClient: APIClient = .shared) {
+    private init() {
+        self.apiClient = .shared
+    }
+
+    /// For dependency injection (e.g. ResearchViewModel with custom APIClient)
+    init(apiClient: APIClient) {
         self.apiClient = apiClient
     }
 

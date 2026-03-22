@@ -22,10 +22,11 @@ struct TickerDetailTabBar: View {
                         }
                     }
                 )
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: tab == .news ? 50 : .infinity)
             }
         }
-        .padding(.horizontal, AppSpacing.sm)
+        .padding(.leading, AppSpacing.md)
+        .padding(.trailing, AppSpacing.sm)
     }
 }
 
@@ -40,10 +41,9 @@ struct TickerDetailTabButton: View {
         }) {
             VStack(spacing: AppSpacing.sm) {
                 Text(tab.rawValue)
-                    .font(AppTypography.bodySmallEmphasis)
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundColor(isSelected ? AppColors.primaryBlue : AppColors.textMuted)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
 
                 // Selection indicator
                 Rectangle()

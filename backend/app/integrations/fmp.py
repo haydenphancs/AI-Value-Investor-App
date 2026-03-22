@@ -979,6 +979,44 @@ class FMPClient:
             logger.warning(f"House latest request failed: {e}")
             return []
 
+    async def get_senate_disclosure(
+        self, symbol: str
+    ) -> List[Dict[str, Any]]:
+        """Get senate disclosure trades filtered by symbol."""
+        try:
+            data = await self._make_request(
+                "senate-disclosure",
+                params={"symbol": symbol},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning("Senate disclosure endpoint unavailable")
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"Senate disclosure request failed for {symbol}: {e}")
+            return []
+
+    async def get_house_disclosure(
+        self, symbol: str
+    ) -> List[Dict[str, Any]]:
+        """Get house disclosure trades filtered by symbol."""
+        try:
+            data = await self._make_request(
+                "house-disclosure",
+                params={"symbol": symbol},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning("House disclosure endpoint unavailable")
+                return []
+            raise
+        except Exception as e:
+            logger.warning(f"House disclosure request failed for {symbol}: {e}")
+            return []
+
     async def get_senate_trades_by_name(
         self, name: str
     ) -> List[Dict[str, Any]]:

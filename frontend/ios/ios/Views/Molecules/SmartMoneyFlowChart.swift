@@ -293,9 +293,11 @@ struct SmartMoneyFlowChart: View {
         if absValue >= 1000 {
             return String(format: "%.0fB", value / 1000)
         } else if absValue >= 1 {
-            return String(format: "%.0f", value)
+            return String(format: "%.0fM", value)
+        } else if absValue >= 0.01 {
+            return String(format: "$%.0fK", value * 1000)
         } else if absValue > 0 {
-            return String(format: "%.1f", value)
+            return String(format: "$%.1fK", value * 1000)
         }
         return "0"
     }

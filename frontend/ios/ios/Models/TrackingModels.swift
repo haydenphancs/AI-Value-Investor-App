@@ -25,6 +25,7 @@ enum AssetSortOption: String, CaseIterable {
     case price = "Price"
     case change = "Change"
     case marketCap = "Market Cap"
+    case dateAdded = "Date Added"
 
     var displayName: String { rawValue }
 }

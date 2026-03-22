@@ -55,6 +55,7 @@ class ChatViewModel: ObservableObject {
 
     private var currentSessionType: String = "NORMAL"
     private var currentStockId: String?
+    private var pendingContext: String?
 
     // MARK: - Session Management
 
@@ -67,6 +68,7 @@ class ChatViewModel: ObservableObject {
         errorMessage = nil
         currentStockId = stockId
         currentSessionType = stockId != nil ? "STOCK" : "NORMAL"
+        pendingContext = context
 
         // Add user message immediately for instant feedback
         let userMessage = RichChatMessage(
@@ -76,14 +78,6 @@ class ChatViewModel: ObservableObject {
         )
         messages = [userMessage]
         isAITyping = true
-
-        // Enrich message with context if available
-        let enrichedMessage: String
-        if let context = context, !context.isEmpty {
-            enrichedMessage = "[Context: \(context)]\n\(firstMessage)"
-        } else {
-            enrichedMessage = firstMessage
-        }
 
         Task {
             do {
@@ -96,8 +90,9 @@ class ChatViewModel: ObservableObject {
                 currentSessionId = session.id
                 print("✅ [ChatVM] Session created: \(session.id)")
 
-                // Step 2: Send first message with context
-                await sendMessageToSession(sessionId: session.id, message: enrichedMessage)
+                // Step 2: Send first message with context as separate field
+                await sendMessageToSession(sessionId: session.id, message: firstMessage, context: pendingContext)
+                pendingContext = nil
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")
@@ -227,13 +222,13 @@ class ChatViewModel: ObservableObject {
     // MARK: - Private Helpers
 
     /// Send a message to an existing session and handle the AI response.
-    private func sendMessageToSession(sessionId: String, message: String) async {
+    private func sendMessageToSession(sessionId: String, message: String, context: String? = nil) async {
         let startTime = CFAbsoluteTimeGetCurrent()
         print("📡 [ChatVM] Sending message to session \(sessionId): \"\(message.prefix(50))...\"")
 
         do {
             let response = try await APIClient.shared.request(
-                endpoint: .sendChatMessage(sessionId: sessionId, message: message),
+                endpoint: .sendChatMessage(sessionId: sessionId, message: message, context: context),
                 responseType: ChatMessageDTO.self
             )
 

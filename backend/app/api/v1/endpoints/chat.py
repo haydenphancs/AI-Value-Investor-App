@@ -153,6 +153,7 @@ async def send_chat_message(
             user_message=request.message,
             session_type=session.data.get("session_type", "NORMAL"),
             stock_id=session.data.get("stock_id"),
+            context=request.context,
         )
 
         # Build the widget payload (if Gemini triggered the stock tool)

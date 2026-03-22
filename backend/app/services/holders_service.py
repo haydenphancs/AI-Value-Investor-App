@@ -20,6 +20,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.holders import (
+    CongressActivitiesDataSchema,
+    CongressActivitySchema,
+    CongressActivitySummarySchema,
     DailyPricePointSchema,
     HoldersResponse,
     InstitutionalActivitySchema,
@@ -277,11 +280,23 @@ class HoldersService:
         now = datetime.now(timezone.utc)
         from_date = (now - timedelta(days=760)).strftime("%Y-%m-%d")  # ~2 years for hedge fund chart
 
+        # Determine data quarter for aggregate institutional fetch
+        month = now.month
+        if month <= 3:
+            data_year, data_quarter = now.year - 1, 4
+        elif month <= 6:
+            data_year, data_quarter = now.year, 1
+        elif month <= 9:
+            data_year, data_quarter = now.year, 2
+        else:
+            data_year, data_quarter = now.year, 3
+
         (
             shares_float,
             quote_data,
             institutional_holders,
             inst_ownership_summary,
+            inst_quarter_aggregate,
             insider_trading,
             insider_roster,
             historical_prices,
@@ -294,7 +309,8 @@ class HoldersService:
             self.fmp.get_stock_price_quote(ticker),
             self.fmp.get_institutional_holder(ticker, limit=20),
             self.fmp.get_institutional_ownership_summary(ticker),
-            self.fmp.get_insider_trading(ticker, limit=100),
+            self.fmp.get_institutional_ownership_for_quarter(ticker, data_year, data_quarter),
+            self.fmp.get_insider_trading(ticker, limit=200),
             self.fmp.get_insider_roster(ticker),
             self.fmp.get_historical_prices(ticker, from_date=from_date),
             self.fmp.get_senate_latest(limit=1000),
@@ -315,6 +331,7 @@ class HoldersService:
         quote_data = _unwrap(quote_data, "Quote", {})
         institutional_holders = _unwrap(institutional_holders, "Institutional holders", [])
         inst_ownership_summary = _unwrap(inst_ownership_summary, "Inst ownership summary", {})
+        inst_quarter_aggregate = _unwrap(inst_quarter_aggregate, "Inst quarter aggregate", None)
         insider_trading = _unwrap(insider_trading, "Insider trading", [])
         insider_roster = _unwrap(insider_roster, "Insider roster", [])
         historical_prices = _unwrap(historical_prices, "Historical prices", [])
@@ -342,7 +359,11 @@ class HoldersService:
             inst_ownership_summary,
         )
         recent = self._build_recent_activities(
-            institutional_holders, insider_trading, insider_roster, current_price
+            institutional_holders, insider_trading, insider_roster, current_price,
+            inst_quarter_aggregate=inst_quarter_aggregate,
+            daily_prices=daily_prices,
+            senate_trades=senate_for_ticker,
+            house_trades=house_for_ticker,
         )
 
         # Build live smart money data
@@ -541,28 +562,56 @@ class HoldersService:
         insider_trades: List[Dict[str, Any]],
         insider_roster: List[Dict[str, Any]],
         current_price: float,
+        inst_quarter_aggregate: Optional[Dict[str, Any]] = None,
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
+        senate_trades: Optional[List[Dict[str, Any]]] = None,
+        house_trades: Optional[List[Dict[str, Any]]] = None,
     ) -> RecentActivitiesSchema:
         # Build institutional activities (all, before truncation)
         all_inst_activities = self._build_institutional_activities(inst_holders)
-        # Flow summary from ALL activities to avoid sampling bias
-        flow_summary = self._build_institutional_flow_summary(all_inst_activities)
-        # Truncate to top 10 by absolute value for the display list
+        # Flow summary: prefer aggregate data from ALL institutions (not just top 15)
+        flow_summary = self._build_institutional_flow_summary(
+            all_inst_activities,
+            aggregate_data=inst_quarter_aggregate,
+            daily_prices=daily_prices,
+        )
+        # Sort by absolute value for the display list (return ALL for frontend pagination)
         inst_activities = sorted(
             all_inst_activities, key=lambda a: abs(a.change_in_millions), reverse=True
-        )[:10]
+        )
 
-        # Build insider activities
-        insider_acts = self._build_insider_activities(
+        # Build insider activities — summary from 12-month window, return all for frontend
+        all_insider_acts = self._build_insider_activities(
             insider_trades, insider_roster
         )
-        insider_summary = self._build_insider_activity_summary(insider_acts)
+        # Filter to last 12 months for summary (matches Smart Money window)
+        month_keys_set = set(self._generate_month_keys(12))
+        acts_in_window = [
+            a for a in all_insider_acts
+            if f"{a.date[5:7]}/{a.date[:4]}" in month_keys_set
+        ]
+        insider_summary = self._build_insider_activity_summary(acts_in_window)
+
+        # Build congress activities — return all for frontend
+        all_congress_acts = self._build_congress_activities(
+            senate_trades or [], house_trades or [], daily_prices
+        )
+        congress_in_window = [
+            a for a in all_congress_acts
+            if f"{a.date[5:7]}/{a.date[:4]}" in month_keys_set
+        ]
+        congress_summary = self._build_congress_activity_summary(congress_in_window)
 
         return RecentActivitiesSchema(
             institutional_flow_summary=flow_summary,
             institutional_activities=inst_activities,
             insider_activities=InsiderActivitiesDataSchema(
                 summary=insider_summary,
-                activities=insider_acts,
+                activities=all_insider_acts,
+            ),
+            congress_activities=CongressActivitiesDataSchema(
+                summary=congress_summary,
+                activities=all_congress_acts,
             ),
         )
 
@@ -573,11 +622,17 @@ class HoldersService:
         result = []
         for h in holders[:15]:
             # Analytics endpoint fields
-            change_in_value = _safe_float(h, "changeInMarketValue", 0.0)
-            change_pct = _safe_float(h, "changeInSharesNumberPercentage",
-                            _safe_float(h, "changeInSharesPercentage", 0.0))
+            # Use share count change × implied price to strip out
+            # stock-price-appreciation that contaminates changeInMarketValue.
+            shares_change = _safe_float(h, "changeInSharesNumber", 0.0)
+            total_shares = max(_safe_float(h, "sharesNumber", 1.0), 1.0)
             total_value = _safe_float(h, "marketValue",
                             _safe_float(h, "value", 0.0))
+            implied_price = total_value / total_shares
+            change_in_value = shares_change * implied_price
+
+            change_pct = _safe_float(h, "changeInSharesNumberPercentage",
+                            _safe_float(h, "changeInSharesPercentage", 0.0))
 
             if change_in_value == 0.0:
                 continue
@@ -605,22 +660,20 @@ class HoldersService:
         return result
 
     def _build_institutional_flow_summary(
-        self, activities: List[InstitutionalActivitySchema]
+        self,
+        activities: List[InstitutionalActivitySchema],
+        aggregate_data: Optional[Dict[str, Any]] = None,
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
     ) -> RecentActivitiesFlowSummarySchema:
-        """Aggregate institutional activities into a flow summary."""
-        inflow = 0.0
-        outflow = 0.0
+        """Aggregate institutional activities into a flow summary.
 
-        for act in activities:
-            val = act.change_in_millions
-            if val >= 0:
-                inflow += val
-            else:
-                outflow += abs(val)
-
+        When ``aggregate_data`` is available (from symbol-positions-summary),
+        uses ALL-institution buyer/seller counts + net share change to
+        compute realistic gross buy/sell via ``_estimate_buy_sell()``.
+        Falls back to summing the (now price-appreciation-stripped)
+        per-holder activities when aggregate data is unavailable.
+        """
         # Use PREVIOUS quarter to match FMP fetch logic in get_institutional_holder.
-        # Current-quarter 13F filings aren't available yet, so FMP returns
-        # the prior quarter's data. The label must reflect that.
         now = datetime.now(timezone.utc)
         month = now.month
         if month <= 3:
@@ -631,6 +684,43 @@ class HoldersService:
             data_year, data_quarter = now.year, 2
         else:
             data_year, data_quarter = now.year, 3
+
+        if aggregate_data is not None:
+            # ── Primary path: use ALL-institution aggregate data ──
+            buyers = (
+                int(aggregate_data.get("newPositions") or 0)
+                + int(aggregate_data.get("increasedPositions") or 0)
+            )
+            sellers = (
+                int(aggregate_data.get("closedPositions") or 0)
+                + int(aggregate_data.get("reducedPositions") or 0)
+            )
+            shares_change = float(aggregate_data.get("numberOf13FsharesChange") or 0)
+
+            # Quarter-end price (same approach as _build_hedge_fund_smart_money)
+            qtr_prices = self._quarter_end_prices(daily_prices)
+            price = qtr_prices.get((data_year, data_quarter), 0.0)
+            if price <= 0:
+                total_inv = float(aggregate_data.get("totalInvested") or 0)
+                total_shares = float(aggregate_data.get("numberOf13Fshares") or 1)
+                price = total_inv / total_shares if total_shares > 0 else 0
+
+            net_millions = (shares_change * price) / 1_000_000
+            buy_vol, sell_vol = self._estimate_buy_sell(net_millions, buyers, sellers)
+            inflow = buy_vol / 1000   # millions → billions
+            outflow = sell_vol / 1000
+        else:
+            # ── Fallback: sum per-holder activities (already price-stripped) ──
+            inflow_m = 0.0
+            outflow_m = 0.0
+            for act in activities:
+                val = act.change_in_millions
+                if val >= 0:
+                    inflow_m += val
+                else:
+                    outflow_m += abs(val)
+            inflow = inflow_m / 1000
+            outflow = outflow_m / 1000
 
         quarter_start_month = (data_quarter - 1) * 3 + 1
         month_names = [
@@ -643,8 +733,8 @@ class HoldersService:
         return RecentActivitiesFlowSummarySchema(
             period_description=f"{period_start} - {period_end} {data_year}",
             quarter_description=f"Q{data_quarter}",
-            in_flow_in_billions=round(inflow / 1000, 1),
-            out_flow_in_billions=round(outflow / 1000, 1),
+            in_flow_in_billions=round(inflow, 1),
+            out_flow_in_billions=round(outflow, 1),
         )
 
     def _build_insider_activities(
@@ -662,7 +752,7 @@ class HoldersService:
                 title_map[name.lower()] = title
 
         result = []
-        for tx in trades[:30]:  # Process up to 30 trades
+        for tx in trades:
             # Only show equity trades (common stock), not RSUs/options/warrants
             security_name = (tx.get("securityName") or "").lower()
             if security_name and "common stock" not in security_name:
@@ -676,6 +766,10 @@ class HoldersService:
             shares = abs(_safe_float(tx, "securitiesTransacted", 0.0))
             price = _safe_float(tx, "price", 0.0)
             value_millions = (shares * price) / 1_000_000 if price > 0 else 0.0
+
+            # Skip zero-value entries (RSU conversions at price $0)
+            if value_millions == 0.0:
+                continue
 
             # Sign convention: negative for sells
             if "Sell" in classified:
@@ -698,9 +792,9 @@ class HoldersService:
                 price_at_transaction=round(price, 2),
             ))
 
-        # Sort by date descending
+        # Sort by date descending; caller truncates for display
         result.sort(key=lambda a: a.date, reverse=True)
-        return result[:10]
+        return result
 
     def _build_insider_activity_summary(
         self, activities: List[InsiderActivitySchema]
@@ -723,6 +817,138 @@ class HoldersService:
             period_description="Last 12 Months",
             informative_buys_in_millions=round(informative_buys, 2),
             informative_sells_in_millions=round(informative_sells, 2),
+            num_buyers=len(buyer_names),
+            num_sellers=len(seller_names),
+        )
+
+    # ── Congress Recent Activities ─────────────────────────────────
+
+    def _build_congress_activities(
+        self,
+        senate_trades: List[Dict[str, Any]],
+        house_trades: List[Dict[str, Any]],
+        daily_prices: Optional[List[DailyPricePointSchema]] = None,
+    ) -> List[CongressActivitySchema]:
+        """Convert FMP congressional trades into CongressActivity entries."""
+        # Build a date→price lookup from daily prices
+        price_lookup: Dict[str, float] = {}
+        if daily_prices:
+            for dp in daily_prices:
+                price_lookup[dp.date] = dp.price
+
+        def _find_price_at_date(date_str: str) -> float:
+            """Find closest price on or before the given date."""
+            if date_str in price_lookup:
+                return price_lookup[date_str]
+            # Try up to 5 days back (weekends/holidays)
+            from datetime import timedelta
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                for i in range(1, 6):
+                    prev = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
+                    if prev in price_lookup:
+                        return price_lookup[prev]
+            except ValueError:
+                pass
+            return 0.0
+
+        def _format_district(district: str, chamber: str) -> str:
+            """Format district into role string.
+
+            Senate: district='KY' → 'Senator (KY)'
+            House: district='TX11' → 'Representative (TX-11)'
+            """
+            if not district:
+                return "Senator" if chamber == "senate" else "Representative"
+            if chamber == "senate":
+                return f"Senator ({district})"
+            # House district: 'TX11' → 'TX-11', 'CA12' → 'CA-12'
+            # Extract state letters and district number
+            match = re.match(r"([A-Z]{2})(\d+)", district)
+            if match:
+                return f"Representative ({match.group(1)}-{match.group(2)})"
+            return f"Representative ({district})"
+
+        result: List[CongressActivitySchema] = []
+
+        for chamber, trades in [("senate", senate_trades), ("house", house_trades)]:
+            for trade in trades:
+                first = (trade.get("firstName") or trade.get("first_name") or "").strip()
+                last = (trade.get("lastName") or trade.get("last_name") or "").strip()
+                if not last:
+                    continue
+
+                name = f"{last}, {first}" if first else last
+                district = (trade.get("district") or "").strip()
+                role = _format_district(district, chamber)
+
+                tx_date = (trade.get("transactionDate") or "")[:10]
+                if not tx_date:
+                    continue
+
+                tx_type_raw = (trade.get("type") or "").lower()
+                amount_str = trade.get("amount", "")
+                amount_millions = self._parse_congress_amount(amount_str)
+                amount_max_millions = self._parse_congress_amount_max(amount_str)
+
+                if amount_millions <= 0:
+                    continue
+
+                # Determine buy/sell
+                is_buy = "purchase" in tx_type_raw or "buy" in tx_type_raw or "exchange" in tx_type_raw
+                is_sell = "sale" in tx_type_raw or "sell" in tx_type_raw
+
+                if not is_buy and not is_sell:
+                    continue
+
+                tx_type = "Purchase" if is_buy else "Sale"
+                signed_amount = amount_millions if is_buy else -amount_millions
+
+                # Owner field
+                owner_raw = (trade.get("owner") or "").strip()
+                owner = owner_raw if owner_raw else "Self"
+
+                # Price at transaction date
+                price = _find_price_at_date(tx_date)
+
+                result.append(CongressActivitySchema(
+                    name=name,
+                    role=role,
+                    date=tx_date,
+                    change_in_millions=round(signed_amount, 4),
+                    amount_range=amount_str,
+                    amount_range_max_millions=round(amount_max_millions, 4),
+                    owner=owner,
+                    transaction_type=tx_type,
+                    price_at_transaction=round(price, 2),
+                ))
+
+        # Sort by date descending
+        result.sort(key=lambda a: a.date, reverse=True)
+        return result
+
+    @staticmethod
+    def _build_congress_activity_summary(
+        activities: List[CongressActivitySchema],
+    ) -> CongressActivitySummarySchema:
+        """Aggregate congress activities into a summary."""
+        total_buys = 0.0
+        total_sells = 0.0
+        buyer_names: set = set()
+        seller_names: set = set()
+
+        for act in activities:
+            if act.transaction_type == "Purchase":
+                total_buys += abs(act.change_in_millions)
+                buyer_names.add(act.name)
+            elif act.transaction_type == "Sale":
+                total_sells += abs(act.change_in_millions)
+                seller_names.add(act.name)
+
+        return CongressActivitySummarySchema(
+            period_description="Last 12 Months",
+            total_buys_in_millions=round(total_buys, 2),
+            total_sells_in_millions=round(total_sells, 2),
             num_buyers=len(buyer_names),
             num_sellers=len(seller_names),
         )
@@ -1215,7 +1441,7 @@ class HoldersService:
         price_data = self._build_quarterly_price_data(daily_prices, target_pairs)
 
         return SmartMoneyDataSchema(
-            tab="Hedge Funds",
+            tab="Institutions",
             price_data=price_data,
             daily_prices=daily_prices or [],
             flow_data=flow_data,
@@ -1265,11 +1491,15 @@ class HoldersService:
         seen: set = set()
         result: List[Dict[str, Any]] = []
         for trade in primary + secondary:
+            # Normalize type to base form: "Sale (Full)" / "Sale (Partial)" → "sale"
+            # FMP returns each trade twice with different type variants.
+            raw_type = (trade.get("type") or "").lower()
+            base_type = raw_type.split("(")[0].strip()
             key = (
                 trade.get("transactionDate", ""),
                 (trade.get("firstName") or trade.get("first_name", "")).lower(),
                 (trade.get("lastName") or trade.get("last_name", "")).lower(),
-                (trade.get("type") or "").lower(),
+                base_type,
                 trade.get("amount", ""),
             )
             if key not in seen:
@@ -1308,6 +1538,37 @@ class HoldersService:
                 pass
 
         # Try as single number
+        try:
+            return float(clean) / 1_000_000
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def _parse_congress_amount_max(amount_str: str) -> float:
+        """Parse FMP congressional amount range to MAX value in millions.
+
+        Used for sorting — users care about the maximum potential exposure.
+        """
+        if not amount_str:
+            return 0.0
+
+        clean = amount_str.replace("$", "").replace(",", "").strip()
+
+        if " - " in clean:
+            parts = clean.split(" - ")
+            try:
+                high = float(parts[1].strip())
+                return high / 1_000_000
+            except (ValueError, IndexError):
+                pass
+
+        if clean.lower().startswith("over "):
+            try:
+                base = float(clean[5:].strip())
+                return base / 1_000_000
+            except ValueError:
+                pass
+
         try:
             return float(clean) / 1_000_000
         except ValueError:

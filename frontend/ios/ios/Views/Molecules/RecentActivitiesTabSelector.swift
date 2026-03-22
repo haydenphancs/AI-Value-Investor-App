@@ -24,9 +24,7 @@ struct RecentActivitiesTabSelector: View {
 
                 Button {
                     if !isDisabled {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selectedTab = tab
-                        }
+                        selectedTab = tab
                     }
                 } label: {
                     Text(tab.rawValue)

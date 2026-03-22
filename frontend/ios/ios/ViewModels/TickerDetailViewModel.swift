@@ -1147,7 +1147,7 @@ class TickerDetailViewModel: ObservableObject {
             return [
                 TickerAISuggestion(text: "Who are the top holders?"),
                 TickerAISuggestion(text: "Any insider buying recently?"),
-                TickerAISuggestion(text: "Is institutional ownership increasing?"),
+                TickerAISuggestion(text: "Hedge funds vs institutions?"),
                 TickerAISuggestion(text: "Smart money sentiment?")
             ]
         default:
@@ -1164,10 +1164,16 @@ class TickerDetailViewModel: ObservableObject {
         lines.append("Stock: \(td.symbol) (\(td.companyName))")
         lines.append("Price: \(td.formattedPrice) \(td.formattedChange) \(td.formattedChangePercent)")
 
-        // Key stats (P/E, EPS, Market Cap, etc.)
-        let statsSummary = td.keyStatistics.prefix(8).map { "\($0.label): \($0.value)" }.joined(separator: " | ")
-        if !statsSummary.isEmpty {
-            lines.append(statsSummary)
+        // Key Statistics — include ALL stats grouped for AI context
+        if !td.keyStatisticsGroups.isEmpty {
+            lines.append("Key Statistics:")
+            for group in td.keyStatisticsGroups {
+                let groupStr = group.statistics.map { "\($0.label): \($0.value)" }.joined(separator: " | ")
+                lines.append("  \(groupStr)")
+            }
+        } else if !td.keyStatistics.isEmpty {
+            let statsSummary = td.keyStatistics.map { "\($0.label): \($0.value)" }.joined(separator: " | ")
+            lines.append("Key Statistics: \(statsSummary)")
         }
 
         lines.append("Sector: \(td.sectorIndustry.sector) > \(td.sectorIndustry.industry)")
@@ -1332,7 +1338,7 @@ class TickerDetailViewModel: ObservableObject {
         parts.append("Insider 12M Net Flow: \(insiderFlow.formattedNetFlow) (\(insiderFlow.isPositive ? "Bullish" : "Bearish"))")
 
         let hfFlow = data.hedgeFundsData.summary
-        parts.append("Hedge Fund 12M Net Flow: \(hfFlow.formattedNetFlow) (\(hfFlow.isPositive ? "Bullish" : "Bearish"))")
+        parts.append("Institutional 12M Net Flow: \(hfFlow.formattedNetFlow) (\(hfFlow.isPositive ? "Bullish" : "Bearish"))")
 
         let congressFlow = data.congressData.summary
         parts.append("Congress 12M Net Flow: \(congressFlow.formattedNetFlow) (\(congressFlow.isPositive ? "Bullish" : "Bearish"))")

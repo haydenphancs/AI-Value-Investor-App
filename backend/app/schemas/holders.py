@@ -138,6 +138,34 @@ class InsiderActivitiesDataSchema(BaseModel):
     activities: List[InsiderActivitySchema] = []
 
 
+class CongressActivitySummarySchema(BaseModel):
+    """Summary of congressional trading activity."""
+    period_description: str = "Last 12 Months"
+    total_buys_in_millions: float = Field(0.0)
+    total_sells_in_millions: float = Field(0.0)
+    num_buyers: int = 0
+    num_sellers: int = 0
+
+
+class CongressActivitySchema(BaseModel):
+    """A single recent congressional trading activity."""
+    name: str                                      # "Pelosi, Nancy"
+    role: str = "Representative"                   # "Senator (KY)" or "Representative (TX-11)"
+    date: str                                      # ISO date string "yyyy-MM-dd"
+    change_in_millions: float = Field(0.0)         # midpoint of range, signed
+    amount_range: str = ""                         # raw range "$1,001 - $15,000"
+    amount_range_max_millions: float = Field(0.0)  # max of range in millions (for sorting)
+    owner: str = "Self"                            # "Self", "Spouse", "Joint"
+    transaction_type: str = "Purchase"             # "Purchase" or "Sale"
+    price_at_transaction: float = Field(0.0)
+
+
+class CongressActivitiesDataSchema(BaseModel):
+    """Congress activities with summary."""
+    summary: CongressActivitySummarySchema = CongressActivitySummarySchema()
+    activities: List[CongressActivitySchema] = []
+
+
 class RecentActivitiesSchema(BaseModel):
     """Combined recent activities data."""
     institutional_flow_summary: RecentActivitiesFlowSummarySchema = (
@@ -145,6 +173,7 @@ class RecentActivitiesSchema(BaseModel):
     )
     institutional_activities: List[InstitutionalActivitySchema] = []
     insider_activities: InsiderActivitiesDataSchema = InsiderActivitiesDataSchema()
+    congress_activities: CongressActivitiesDataSchema = CongressActivitiesDataSchema()
 
 
 # ── Top-level response ───────────────────────────────────────────
@@ -159,6 +188,6 @@ class HoldersResponse(BaseModel):
     symbol: str
     shareholder_breakdown: ShareholderBreakdownSchema = ShareholderBreakdownSchema()
     insider_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Insider")
-    hedge_funds_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Hedge Funds")
+    hedge_funds_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Institutions")
     congress_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Congress")
     recent_activities: RecentActivitiesSchema = RecentActivitiesSchema()

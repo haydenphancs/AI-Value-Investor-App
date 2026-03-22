@@ -80,7 +80,7 @@ struct InstitutionalHolder: Identifiable {
 
 enum SmartMoneyTab: String, CaseIterable {
     case insider = "Insider"
-    case hedgeFunds = "Hedge Funds"
+    case hedgeFunds = "Institutions"
     case congress = "Congress"
 }
 
@@ -496,11 +496,30 @@ extension Top10OwnersData {
     )
 }
 
+// MARK: - Shared Date Formatters (avoid per-render instantiation)
+
+private enum HoldersDateFormatters {
+    static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM/dd/yyyy"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    static let isoFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+}
+
 // MARK: - Recent Activities Tab
 
 enum RecentActivitiesTab: String, CaseIterable {
-    case institutions = "Institutions"
     case insiders = "Insiders"
+    case institutions = "Institutions"
+    case congress = "Congress"
 }
 
 // MARK: - Recent Activities Sort Option
@@ -547,9 +566,7 @@ struct InstitutionalActivity: Identifiable {
     }
 
     var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM/dd/yyyy"
-        return formatter.string(from: date)
+        HoldersDateFormatters.displayFormatter.string(from: date)
     }
 
     var changeColor: Color {
@@ -608,6 +625,7 @@ struct RecentActivitiesData {
     let institutionalFlowSummary: RecentActivitiesFlowSummary
     let institutionalActivities: [InstitutionalActivity]
     let insiderActivities: InsiderActivitiesData
+    let congressActivities: CongressActivitiesData
 
     func sortedInstitutionalActivities(by option: RecentActivitiesSortOption) -> [InstitutionalActivity] {
         switch option {
@@ -711,7 +729,8 @@ extension RecentActivitiesData {
     static let sampleData = RecentActivitiesData(
         institutionalFlowSummary: RecentActivitiesFlowSummary.sampleData,
         institutionalActivities: InstitutionalActivity.sampleData,
-        insiderActivities: InsiderActivitiesData.sampleData
+        insiderActivities: InsiderActivitiesData.sampleData,
+        congressActivities: CongressActivitiesData.sampleData
     )
 }
 
@@ -780,9 +799,7 @@ struct InsiderActivity: Identifiable {
     }
 
     var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM/dd/yyyy"
-        return formatter.string(from: date)
+        HoldersDateFormatters.displayFormatter.string(from: date)
     }
 
     var formattedPrice: String {
@@ -876,6 +893,203 @@ struct InsiderActivitiesData {
     }
 }
 
+// MARK: - Congress Activity
+
+/// Represents a recent congressional trading activity
+struct CongressActivity: Identifiable {
+    let id = UUID()
+    let name: String           // "Pelosi, Nancy"
+    let role: String           // "Representative (CA-11)" or "Senator (KY)"
+    let date: Date
+    let changeInMillions: Double  // Midpoint of range, signed (for summary aggregation)
+    let amountRange: String    // "$1,001 - $15,000"
+    let amountRangeMaxMillions: Double  // Max of range in millions (for sorting)
+    let owner: String          // "Self", "Spouse", "Joint"
+    let transactionType: String // "Purchase" or "Sale"
+    let priceAtTransaction: Double
+
+    var isBuy: Bool {
+        transactionType == "Purchase"
+    }
+
+    var isPositive: Bool {
+        changeInMillions >= 0
+    }
+
+    /// Formats the raw range into a human-readable display string.
+    /// "$1,001 - $15,000" → "+$1K - $15K"
+    /// "$5,000,001 - $25,000,000" → "-$5M - $25M"
+    var formattedRange: String {
+        let sign = isPositive ? "+" : "-"
+        // Parse the raw range string
+        let clean = amountRange.replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespaces)
+
+        if clean.contains(" - ") {
+            let parts = clean.components(separatedBy: " - ")
+            if parts.count == 2,
+               let low = Double(parts[0].trimmingCharacters(in: .whitespaces)),
+               let high = Double(parts[1].trimmingCharacters(in: .whitespaces)) {
+                return "\(sign)\(Self.formatDollarCompact(low)) - \(Self.formatDollarCompact(high))"
+            }
+        }
+
+        // Handle "Over X" format
+        if clean.lowercased().hasPrefix("over ") {
+            let numStr = String(clean.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            if let val = Double(numStr) {
+                return "\(sign)Over \(Self.formatDollarCompact(val))"
+            }
+        }
+
+        // Fallback to midpoint display
+        return formattedChange
+    }
+
+    /// Fallback: format midpoint as single number
+    var formattedChange: String {
+        let sign = changeInMillions >= 0 ? "+" : "-"
+        if abs(changeInMillions) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
+        }
+        if abs(changeInMillions) >= 1 {
+            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
+        }
+        return "\(sign)$\(String(format: "%.0f", abs(changeInMillions) * 1000))K"
+    }
+
+    var formattedDate: String {
+        HoldersDateFormatters.displayFormatter.string(from: date)
+    }
+
+    var formattedPrice: String {
+        if priceAtTransaction > 0 {
+            return String(format: "$%.2f", priceAtTransaction)
+        }
+        return ""
+    }
+
+    var changeColor: Color {
+        isPositive ? AppColors.bullish : AppColors.bearish
+    }
+
+    var ownerLabel: String {
+        owner
+    }
+
+    var ownerColor: Color {
+        switch owner {
+        case "Spouse", "Joint":
+            return AppColors.textSecondary
+        default:
+            return AppColors.textMuted
+        }
+    }
+
+    /// Format a dollar amount into compact notation: $1K, $50K, $5M, $25M, $1B
+    static func formatDollarCompact(_ value: Double) -> String {
+        if value >= 1_000_000_000 {
+            let b = value / 1_000_000_000
+            return b.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "$%.0fB", b)
+                : String(format: "$%.1fB", b)
+        }
+        if value >= 1_000_000 {
+            let m = value / 1_000_000
+            return m.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "$%.0fM", m)
+                : String(format: "$%.1fM", m)
+        }
+        if value >= 1_000 {
+            let k = value / 1_000
+            return k.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "$%.0fK", k)
+                : String(format: "$%.1fK", k)
+        }
+        return String(format: "$%.0f", value)
+    }
+}
+
+// MARK: - Congress Activity Summary
+
+struct CongressActivitySummary {
+    let periodDescription: String  // "Last 12 Months"
+    let totalBuysInMillions: Double
+    let totalSellsInMillions: Double
+    let numBuyers: Int
+    let numSellers: Int
+
+    var netFlowInMillions: Double {
+        totalBuysInMillions - totalSellsInMillions
+    }
+
+    var isNetPositive: Bool {
+        netFlowInMillions >= 0
+    }
+
+    var formattedBuys: String {
+        if totalBuysInMillions >= 1000 {
+            return String(format: "$%.2fB", totalBuysInMillions / 1000)
+        }
+        if totalBuysInMillions >= 1 {
+            return String(format: "$%.2fM", totalBuysInMillions)
+        }
+        return String(format: "$%.0fK", totalBuysInMillions * 1000)
+    }
+
+    var formattedSells: String {
+        if totalSellsInMillions >= 1000 {
+            return String(format: "$%.2fB", totalSellsInMillions / 1000)
+        }
+        if totalSellsInMillions >= 1 {
+            return String(format: "$%.2fM", totalSellsInMillions)
+        }
+        return String(format: "$%.0fK", totalSellsInMillions * 1000)
+    }
+
+    var formattedNetFlow: String {
+        let net = netFlowInMillions
+        let sign = net >= 0 ? "+ " : "- "
+        if abs(net) >= 1000 {
+            return "\(sign)$\(String(format: "%.2f", abs(net) / 1000))B"
+        }
+        if abs(net) >= 1 {
+            return "\(sign)$\(String(format: "%.2f", abs(net)))M"
+        }
+        return "\(sign)$\(String(format: "%.0f", abs(net) * 1000))K"
+    }
+
+    var netFlowColor: Color {
+        isNetPositive ? AppColors.bullish : AppColors.bearish
+    }
+
+    var buyersLabel: String {
+        "\(numBuyers) Buyer\(numBuyers == 1 ? "" : "s")"
+    }
+
+    var sellersLabel: String {
+        "\(numSellers) Seller\(numSellers == 1 ? "" : "s")"
+    }
+}
+
+// MARK: - Congress Activities Data
+
+struct CongressActivitiesData {
+    let summary: CongressActivitySummary
+    let activities: [CongressActivity]
+
+    func sortedActivities(by option: RecentActivitiesSortOption) -> [CongressActivity] {
+        switch option {
+        case .byValue:
+            // Sort by max of range (largest potential exposure first)
+            return activities.sorted { $0.amountRangeMaxMillions > $1.amountRangeMaxMillions }
+        case .byDate:
+            return activities.sorted { $0.date > $1.date }
+        }
+    }
+}
+
 // MARK: - Insider Activities Sample Data
 
 extension InsiderActivitySummary {
@@ -961,5 +1175,62 @@ extension InsiderActivitiesData {
     static let sampleData = InsiderActivitiesData(
         summary: InsiderActivitySummary.sampleData,
         activities: InsiderActivity.sampleData
+    )
+}
+
+// MARK: - Congress Sample Data
+
+extension CongressActivitySummary {
+    static let sampleData = CongressActivitySummary(
+        periodDescription: "Last 12 Months",
+        totalBuysInMillions: 0.15,
+        totalSellsInMillions: 0.08,
+        numBuyers: 3,
+        numSellers: 2
+    )
+}
+
+extension CongressActivity {
+    static let sampleData: [CongressActivity] = [
+        CongressActivity(
+            name: "Pelosi, Nancy",
+            role: "Representative (CA-11)",
+            date: InstitutionalActivity.createDate(1, 15, 2026),
+            changeInMillions: 0.033,
+            amountRange: "$15,001 - $50,000",
+            amountRangeMaxMillions: 0.05,
+            owner: "Spouse",
+            transactionType: "Purchase",
+            priceAtTransaction: 242.50
+        ),
+        CongressActivity(
+            name: "Tuberville, Tommy",
+            role: "Senator (AL)",
+            date: InstitutionalActivity.createDate(1, 10, 2026),
+            changeInMillions: -0.075,
+            amountRange: "$50,001 - $100,000",
+            amountRangeMaxMillions: 0.1,
+            owner: "Self",
+            transactionType: "Sale",
+            priceAtTransaction: 238.20
+        ),
+        CongressActivity(
+            name: "Mullin, Markwayne",
+            role: "Senator (OK)",
+            date: InstitutionalActivity.createDate(12, 20, 2025),
+            changeInMillions: 0.008,
+            amountRange: "$1,001 - $15,000",
+            amountRangeMaxMillions: 0.015,
+            owner: "Joint",
+            transactionType: "Purchase",
+            priceAtTransaction: 255.10
+        ),
+    ]
+}
+
+extension CongressActivitiesData {
+    static let sampleData = CongressActivitiesData(
+        summary: CongressActivitySummary.sampleData,
+        activities: CongressActivity.sampleData
     )
 }

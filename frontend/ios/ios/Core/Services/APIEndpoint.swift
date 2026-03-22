@@ -104,7 +104,7 @@ enum APIEndpoint: Sendable {
     // MARK: - Chat
     case listChatSessions(limit: Int, offset: Int)
     case createChatSession(stockId: String?)
-    case sendChatMessage(sessionId: String, message: String)
+    case sendChatMessage(sessionId: String, message: String, context: String? = nil)
     case getChatHistory(sessionId: String)
     case updateChatSession(sessionId: String, title: String?, isSaved: Bool?)
     case deleteChatSession(sessionId: String)
@@ -252,7 +252,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/chat/sessions"
         case .createChatSession:
             return "/api/v1/chat/sessions"
-        case .sendChatMessage(let sessionId, _):
+        case .sendChatMessage(let sessionId, _, _):
             return "/api/v1/chat/sessions/\(sessionId)/messages"
         case .getChatHistory(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
@@ -413,8 +413,8 @@ enum APIEndpoint: Sendable {
         case .createChatSession(let stockId):
             return CreateChatSessionRequest(stockId: stockId)
 
-        case .sendChatMessage(_, let message):
-            return SendChatMessageRequest(message: message)
+        case .sendChatMessage(_, let message, let context):
+            return SendChatMessageRequest(message: message, context: context)
 
         case .updateChatSession(_, let title, let isSaved):
             return UpdateChatSessionRequestBody(title: title, isSaved: isSaved)
@@ -538,6 +538,7 @@ nonisolated struct CreateChatSessionRequest: Encodable, Sendable {
 
 nonisolated struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
+    let context: String?
 }
 
 nonisolated struct UpdateChatSessionRequestBody: Encodable, Sendable {

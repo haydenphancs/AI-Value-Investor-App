@@ -1622,6 +1622,15 @@ struct SignalOfConfidenceResponseDTO: Codable {
 
 // MARK: - Holders DTOs
 
+private enum HoldersISODateFormatter {
+    static let shared: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+}
+
 struct HoldersResponseDTO: Codable {
     let symbol: String
     let shareholderBreakdown: ShareholderBreakdownDTO
@@ -1789,7 +1798,7 @@ struct SmartMoneyDataDTO: Codable {
         let smartTab: SmartMoneyTab
         switch tab {
         case "Insider": smartTab = .insider
-        case "Hedge Funds": smartTab = .hedgeFunds
+        case "Institutions": smartTab = .hedgeFunds
         case "Congress": smartTab = .congress
         default: smartTab = .insider
         }
@@ -1868,18 +1877,21 @@ struct RecentActivitiesDTO: Codable {
     let institutionalFlowSummary: RecentActivitiesFlowSummaryDTO
     let institutionalActivities: [InstitutionalActivityDTO]
     let insiderActivities: InsiderActivitiesDataDTO
+    let congressActivities: CongressActivitiesDataDTO?
 
     enum CodingKeys: String, CodingKey {
         case institutionalFlowSummary = "institutional_flow_summary"
         case institutionalActivities = "institutional_activities"
         case insiderActivities = "insider_activities"
+        case congressActivities = "congress_activities"
     }
 
     func toDisplayModel() -> RecentActivitiesData {
         return RecentActivitiesData(
             institutionalFlowSummary: institutionalFlowSummary.toDisplayModel(),
             institutionalActivities: institutionalActivities.map { $0.toDisplayModel() },
-            insiderActivities: insiderActivities.toDisplayModel()
+            insiderActivities: insiderActivities.toDisplayModel(),
+            congressActivities: congressActivities?.toDisplayModel() ?? CongressActivitiesData.sampleData
         )
     }
 }
@@ -1924,10 +1936,7 @@ struct InstitutionalActivityDTO: Codable {
     }
 
     func toDisplayModel() -> InstitutionalActivity {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        let parsedDate = dateFormatter.date(from: date) ?? Date()
+        let parsedDate = HoldersISODateFormatter.shared.date(from: date) ?? Date()
 
         return InstitutionalActivity(
             institutionName: institutionName,
@@ -1994,10 +2003,7 @@ struct InsiderActivityDTO: Codable {
     }
 
     func toDisplayModel() -> InsiderActivity {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        let parsedDate = dateFormatter.date(from: date) ?? Date()
+        let parsedDate = HoldersISODateFormatter.shared.date(from: date) ?? Date()
 
         let txType: InsiderTransactionType
         switch transactionType {
@@ -2014,6 +2020,83 @@ struct InsiderActivityDTO: Codable {
             date: parsedDate,
             changeInMillions: changeInMillions,
             transactionType: txType,
+            priceAtTransaction: priceAtTransaction
+        )
+    }
+}
+
+// MARK: - Congress DTOs
+
+struct CongressActivitiesDataDTO: Codable {
+    let summary: CongressActivitySummaryDTO
+    let activities: [CongressActivityDTO]
+
+    func toDisplayModel() -> CongressActivitiesData {
+        return CongressActivitiesData(
+            summary: summary.toDisplayModel(),
+            activities: activities.map { $0.toDisplayModel() }
+        )
+    }
+}
+
+struct CongressActivitySummaryDTO: Codable {
+    let periodDescription: String
+    let totalBuysInMillions: Double
+    let totalSellsInMillions: Double
+    let numBuyers: Int
+    let numSellers: Int
+
+    enum CodingKeys: String, CodingKey {
+        case periodDescription = "period_description"
+        case totalBuysInMillions = "total_buys_in_millions"
+        case totalSellsInMillions = "total_sells_in_millions"
+        case numBuyers = "num_buyers"
+        case numSellers = "num_sellers"
+    }
+
+    func toDisplayModel() -> CongressActivitySummary {
+        return CongressActivitySummary(
+            periodDescription: periodDescription,
+            totalBuysInMillions: totalBuysInMillions,
+            totalSellsInMillions: totalSellsInMillions,
+            numBuyers: numBuyers,
+            numSellers: numSellers
+        )
+    }
+}
+
+struct CongressActivityDTO: Codable {
+    let name: String
+    let role: String
+    let date: String
+    let changeInMillions: Double
+    let amountRange: String
+    let amountRangeMaxMillions: Double
+    let owner: String
+    let transactionType: String
+    let priceAtTransaction: Double
+
+    enum CodingKeys: String, CodingKey {
+        case name, role, date, owner
+        case changeInMillions = "change_in_millions"
+        case amountRange = "amount_range"
+        case amountRangeMaxMillions = "amount_range_max_millions"
+        case transactionType = "transaction_type"
+        case priceAtTransaction = "price_at_transaction"
+    }
+
+    func toDisplayModel() -> CongressActivity {
+        let parsedDate = HoldersISODateFormatter.shared.date(from: date) ?? Date()
+
+        return CongressActivity(
+            name: name,
+            role: role,
+            date: parsedDate,
+            changeInMillions: changeInMillions,
+            amountRange: amountRange,
+            amountRangeMaxMillions: amountRangeMaxMillions,
+            owner: owner,
+            transactionType: transactionType,
             priceAtTransaction: priceAtTransaction
         )
     }

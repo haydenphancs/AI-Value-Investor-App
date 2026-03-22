@@ -5,8 +5,8 @@ Currently used for:
   - Short interest data (shortPercentOfFloat, shortRatio, sharesShort)
 
 Two-tier cache-aside pattern:
-  Tier 1: In-memory dict (1-hour TTL)
-  Tier 2: Supabase short_interest_cache table (24-hour TTL)
+  Tier 1: In-memory dict (24-hour TTL)
+  Tier 2: Supabase short_interest_cache table (1-week TTL)
   Miss:   Yahoo Finance API call → cache in both tiers
 
 Short interest updates bi-monthly (FINRA), so aggressive caching is safe.
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache (Tier 1) ─────────────────────────────────────
 
 _cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL = 3600  # 1 hour
+_CACHE_TTL = 86400  # 24 hours in-memory (survives within server uptime)
 
 # Yahoo auth tokens (shared across requests, refreshed as needed)
 _crumb: Optional[str] = None
@@ -32,7 +32,7 @@ _cookies: Optional[httpx.Cookies] = None
 _auth_ts: float = 0
 _AUTH_TTL = 1800  # refresh auth every 30 min
 
-_SUPABASE_TTL_HOURS = 24
+_SUPABASE_TTL_DAYS = 7  # 1 week — FINRA updates bi-monthly, no need to call Yahoo more often
 
 
 def _mem_cache_get(key: str) -> Optional[Any]:
@@ -74,7 +74,7 @@ def _supabase_cache_get(ticker: str) -> Optional[Dict[str, Any]]:
 
         cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
         age = datetime.now(timezone.utc) - cached_at
-        if age > timedelta(hours=_SUPABASE_TTL_HOURS):
+        if age > timedelta(days=_SUPABASE_TTL_DAYS):
             logger.info(f"Short interest Supabase cache STALE (age={age}) for {ticker}")
             return None
 

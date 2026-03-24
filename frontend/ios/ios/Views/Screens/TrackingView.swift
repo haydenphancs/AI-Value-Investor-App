@@ -34,6 +34,7 @@ struct TrackingContentView: View {
     @Environment(\.appState) private var appState
     @StateObject private var viewModel = TrackingViewModel()
     @State private var showProfile = false
+    @State private var showSearch = false
 
     var body: some View {
         NavigationStack {
@@ -111,12 +112,24 @@ struct TrackingContentView: View {
                     .environment(\.appState, appState)
                     .preferredColorScheme(.dark)
             }
+            .sheet(isPresented: $showSearch) {
+                TickerLiveSearchSheet(
+                    onTickerSelected: { ticker in
+                        showSearch = false
+                        viewModel.selectedTickerSymbol = ticker
+                    },
+                    onDismiss: {
+                        showSearch = false
+                    }
+                )
+                .preferredColorScheme(.dark)
+            }
         }
     }
 
     // MARK: - Action Handlers
     private func handleSearchTapped() {
-        print("Search tapped")
+        showSearch = true
     }
 
     private func handleProfileTapped() {
@@ -131,6 +144,7 @@ struct TrackingContentViewWithBinding: View {
     @Binding var selectedTab: HomeTab
     @Binding var researchTickerSymbol: String?
     @State private var showProfile = false
+    @State private var showSearch = false
 
     var body: some View {
         NavigationStack {
@@ -211,12 +225,24 @@ struct TrackingContentViewWithBinding: View {
                     .environment(\.appState, appState)
                     .preferredColorScheme(.dark)
             }
+            .sheet(isPresented: $showSearch) {
+                TickerLiveSearchSheet(
+                    onTickerSelected: { ticker in
+                        showSearch = false
+                        viewModel.selectedTickerSymbol = ticker
+                    },
+                    onDismiss: {
+                        showSearch = false
+                    }
+                )
+                .preferredColorScheme(.dark)
+            }
         }
     }
 
     // MARK: - Action Handlers
     private func handleSearchTapped() {
-        print("Search tapped")
+        showSearch = true
     }
 
     private func handleProfileTapped() {

@@ -32,6 +32,9 @@ class SearchViewModel: ObservableObject {
     // Track whether initial data has loaded from backend
     private var hasLoadedInitialData = false
 
+    // Combine subscription for debounced live search
+    private var cancellables = Set<AnyCancellable>()
+
     // MARK: - Initialization
     init(stockRepository: StockRepository? = nil, apiClient: APIClient? = nil) {
         self.stockRepository = stockRepository ?? .shared
@@ -43,6 +46,25 @@ class SearchViewModel: ObservableObject {
 
         // Show sample news as placeholder until backend data arrives
         latestNews = SearchNewsItem.sampleData
+
+        // Live debounced search as user types
+        $searchText
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] query in
+                guard let self else { return }
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    self.searchResults = []
+                    self.recentSearches = []
+                    return
+                }
+                self.searchTask?.cancel()
+                self.searchTask = Task { [weak self] in
+                    await self?.performSearchAsync()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Initial Data Loading
@@ -138,11 +160,27 @@ class SearchViewModel: ObservableObject {
 
             // Convert API results to SearchResultItem for the existing UI
             recentSearches = results.map { stock in
-                SearchResultItem(
-                    type: .stock,
+                let resultType: SearchResultType
+                let subtitle: String
+                switch stock.type {
+                case "crypto":
+                    resultType = .crypto
+                    subtitle = "Crypto"
+                case "etf":
+                    resultType = .etf
+                    subtitle = "ETF"
+                case "fund":
+                    resultType = .etf  // Display funds with ETF icon
+                    subtitle = "Fund"
+                default:
+                    resultType = .stock
+                    subtitle = stock.exchange ?? stock.sector ?? "Stock"
+                }
+                return SearchResultItem(
+                    type: resultType,
                     ticker: stock.ticker,
                     name: stock.companyName,
-                    subtitle: stock.exchange ?? stock.sector ?? "Stock",
+                    subtitle: subtitle,
                     imageName: nil,
                     isFollowable: false,
                     isFollowing: false

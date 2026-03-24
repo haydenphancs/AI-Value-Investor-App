@@ -16,6 +16,8 @@ struct TickerPriceHeader: View {
     let isPositive: Bool
     let marketStatus: MarketStatus
 
+    @State private var priceFlashColor: Color?
+
     private var changeColor: Color {
         isPositive ? AppColors.bullish : AppColors.bearish
     }
@@ -41,7 +43,9 @@ struct TickerPriceHeader: View {
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(price)
                     .font(AppTypography.title)
-                    .foregroundColor(AppColors.textPrimary)
+                    .foregroundColor(priceFlashColor ?? AppColors.textPrimary)
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.3), value: price)
 
                 // Price change
                 HStack(spacing: 4) {
@@ -53,10 +57,19 @@ struct TickerPriceHeader: View {
                         .font(AppTypography.labelSmall)
                         .fontWeight(.semibold)
                         .foregroundColor(changeColor)
+                        .contentTransition(.numericText())
+                        .animation(.snappy(duration: 0.3), value: priceChange)
                 }
             }
         }
         .padding(.horizontal, AppSpacing.lg)
+        .onChange(of: price) { _, _ in
+            // Brief color flash on price update (green for positive, red for negative)
+            priceFlashColor = isPositive ? AppColors.bullish : AppColors.bearish
+            withAnimation(.easeOut(duration: 0.6)) {
+                priceFlashColor = nil
+            }
+        }
     }
 }
 

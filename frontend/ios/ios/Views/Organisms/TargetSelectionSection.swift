@@ -115,8 +115,8 @@ struct TargetSelectionSection: View {
             searchText: .constant("App"),
             quickTickers: QuickTicker.defaults,
             searchResults: [
-                StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: nil, logoUrl: nil),
-                StockSearchResult(ticker: "APLE", companyName: "Apple Hospitality REIT Inc.", exchange: "NYSE", sector: nil, logoUrl: nil),
+                StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: nil, logoUrl: nil, type: nil),
+                StockSearchResult(ticker: "APLE", companyName: "Apple Hospitality REIT Inc.", exchange: "NYSE", sector: nil, logoUrl: nil, type: nil),
             ],
             isSearching: false,
             showSearchResults: true

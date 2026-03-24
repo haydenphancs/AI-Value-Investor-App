@@ -162,6 +162,18 @@ struct TickerDetailView: View {
         .task {
             viewModel.loadTickerData()
         }
+        .onDisappear {
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if let status = viewModel.tickerData?.marketStatus,
+               MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                viewModel.connectLivePrice()
+            }
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in

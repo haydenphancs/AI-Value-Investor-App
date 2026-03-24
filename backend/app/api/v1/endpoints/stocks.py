@@ -49,6 +49,9 @@ router = APIRouter()
 # Major US stock exchanges — used to filter search results.
 _US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 
+# Crypto exchanges returned by FMP
+_CRYPTO_EXCHANGES = {"CRYPTO", "CCC", "CC", "CRYPTOCURRENCY"}
+
 
 def _get_exchange_short_name(item: Dict[str, Any]) -> Optional[str]:
     """
@@ -81,8 +84,8 @@ def _get_exchange_short_name(item: Dict[str, Any]) -> Optional[str]:
     return exchange or None
 
 
-def _is_us_stock(item: Dict[str, Any]) -> bool:
-    """Return True if the FMP result is a primary US-listed equity."""
+def _is_us_listed(item: Dict[str, Any]) -> bool:
+    """Return True if the FMP result is listed on a US exchange."""
     symbol = item.get("symbol", "")
 
     # Skip international suffixes (APC.F, AAPL.MX, etc.)
@@ -93,34 +96,28 @@ def _is_us_stock(item: Dict[str, Any]) -> bool:
     return (short or "").upper() in _US_EXCHANGES
 
 
-# Keywords in the company name that indicate non-company securities
-_NON_COMPANY_KEYWORDS = {
-    "etf", "fund", "index", "trust", "proshares", "ishares", "vanguard",
-    "spdr", "direxion", "wisdomtree", "vaneck", "invesco", "schwab",
-    "fidelity", "grayscale", "bitcoin", "ethereum", "crypto", "commodity",
-    "bond", "treasury", "municipal", "reit", "futures", "leveraged",
-    "inverse", "ultra", "3x", "2x", "-x", "short", "bear", "bull",
-}
+def _is_crypto(item: Dict[str, Any]) -> bool:
+    """Return True if the FMP result is a cryptocurrency."""
+    short = _get_exchange_short_name(item)
+    return (short or "").upper() in _CRYPTO_EXCHANGES
 
 
-def _is_company(item: Dict[str, Any]) -> bool:
-    """Return True if the result looks like an operating company (not ETF/fund/index/crypto)."""
+def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
+    """Determine the asset type for a search result. Returns None if it should be excluded."""
+    if _is_crypto(item):
+        return "crypto"
+    if not _is_us_listed(item):
+        return None  # Skip international listings
+
     name = (item.get("name") or "").lower()
-    symbol = (item.get("symbol") or "").upper()
-
-    # Check name for non-company keywords
-    for kw in _NON_COMPANY_KEYWORDS:
-        if kw in name:
-            return False
-
-    # Common ETF symbol patterns: 3-5 letter symbols that are known ETF-like
-    # Skip symbols that end with common ETF suffixes
-    if symbol.endswith(("X", "Q")) and len(symbol) <= 4:
-        # Many mutual funds end in X, but so do real companies (e.g., SLX, NVAX)
-        # Only filter if name also looks fund-like
-        pass
-
-    return True
+    # Detect ETFs
+    if any(kw in name for kw in ("etf", "proshares", "ishares", "vanguard", "spdr",
+                                  "direxion", "wisdomtree", "vaneck", "invesco", "schwab")):
+        return "etf"
+    # Detect indices/funds
+    if any(kw in name for kw in ("index", "fund", "trust")):
+        return "fund"
+    return "stock"
 
 
 @router.get("/search", response_model=List[StockSearchResult])
@@ -140,10 +137,10 @@ async def search_stocks(
         for item in raw:
             if len(results) >= limit:
                 break
-            if not _is_us_stock(item):
-                continue
-            if not _is_company(item):
-                continue
+
+            asset_type = _get_asset_type(item)
+            if asset_type is None:
+                continue  # Skip international listings
 
             short_name = _get_exchange_short_name(item)
             results.append(StockSearchResult(
@@ -152,6 +149,7 @@ async def search_stocks(
                 currency=item.get("currency"),
                 exchange_short_name=short_name,
                 exchange_full_name=item.get("stockExchange") or item.get("exchange"),
+                type=asset_type,
             ))
 
         return results

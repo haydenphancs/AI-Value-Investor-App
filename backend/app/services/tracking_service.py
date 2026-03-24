@@ -151,7 +151,7 @@ class TrackingService:
                 quote = quotes_map.get(ticker, {})
                 sparkline = sparklines_map.get(ticker, [])
 
-                change_pct = quote.get("changesPercentage") or 0
+                change_pct = quote.get("changePercentage") or 0
                 price = quote.get("price") or 0
                 market_cap_raw = quote.get("marketCap")
 
@@ -219,7 +219,8 @@ class TrackingService:
                     _sparkline_cache_set(ticker, sparkline)
                     return (ticker, sparkline)
 
-                historical = data.get("historical", [])
+                # FMP stable API returns a flat list; legacy v3 nests under "historical"
+                historical = data if isinstance(data, list) else data.get("historical", [])
                 if not historical:
                     sparkline = _synthetic_sparkline(True)
                     _sparkline_cache_set(ticker, sparkline)

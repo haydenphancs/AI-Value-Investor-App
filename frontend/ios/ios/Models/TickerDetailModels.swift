@@ -451,9 +451,9 @@ struct TickerDetailData: Identifiable {
     let id = UUID()
     let symbol: String
     let companyName: String
-    let currentPrice: Double
-    let priceChange: Double
-    let priceChangePercent: Double
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
     let marketStatus: MarketStatus
     let chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]

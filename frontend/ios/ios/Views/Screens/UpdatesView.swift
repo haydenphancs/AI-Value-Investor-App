@@ -13,6 +13,7 @@ struct UpdatesView: View {
     @Binding var selectedTab: HomeTab
     @State private var showManageAssetsSheet = false
     @State private var showProfile = false
+    @State private var showSearch = false
     @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
@@ -103,12 +104,16 @@ struct UpdatesView: View {
                     .environment(\.appState, appState)
                     .preferredColorScheme(.dark)
             }
+            .fullScreenCover(isPresented: $showSearch) {
+                SearchView()
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 
     // MARK: - Action Handlers
     private func handleSearchTapped() {
-        print("Search tapped")
+        showSearch = true
     }
 
     private func handleProfileTapped() {

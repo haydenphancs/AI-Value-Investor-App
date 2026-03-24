@@ -49,6 +49,9 @@ class TickerDetailViewModel: ObservableObject {
     @Published var stockDetail: StockDetail?
     @Published var stockQuote: StockQuote?
 
+    // MARK: - Live Price
+    let livePriceManager = LivePriceWebSocketManager()
+
     // MARK: - Private Properties
 
     private let tickerSymbol: String
@@ -104,6 +107,18 @@ class TickerDetailViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Observe live price updates from WebSocket and apply to tickerData
+        livePriceManager.$livePrice
+            .compactMap { $0 }
+            .sink { [weak self] newPrice in
+                guard let self = self, var data = self.tickerData else { return }
+                data.currentPrice = newPrice
+                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
+                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+                self.tickerData = data
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -152,6 +167,12 @@ class TickerDetailViewModel: ObservableObject {
             // Show UI immediately — price/chart/overview are ready
             self.isLoading = false
 
+            // Start live price streaming if market is active
+            if let status = self.tickerData?.marketStatus,
+               MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                self.connectLivePrice()
+            }
+
             // Phase 2: Fetch supplementary data in parallel (non-blocking)
             await withTaskGroup(of: Void.self) { group in
                 group.addTask { await self.fetchStockNews(ticker) }
@@ -172,6 +193,17 @@ class TickerDetailViewModel: ObservableObject {
                 self.newsArticles = TickerNewsArticle.sampleDataForTicker(ticker)
             }
         }
+    }
+
+    // MARK: - Live Price
+
+    func connectLivePrice() {
+        guard let token = KeychainService.shared.get("access_token") else { return }
+        livePriceManager.connect(ticker: tickerSymbol, authToken: token)
+    }
+
+    func disconnectLivePrice() {
+        livePriceManager.disconnect()
     }
 
     // MARK: - API Fetching

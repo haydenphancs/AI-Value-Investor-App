@@ -17,6 +17,7 @@ struct LearnContentView: View {
     @State private var showingMoneyMovesDetail = false
     @State private var showingBookLibrary = false
     @State private var showProfile = false
+    @State private var showSearch = false
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
 
@@ -77,6 +78,10 @@ struct LearnContentView: View {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(isPresented: $showSearch) {
+            SearchView()
                 .preferredColorScheme(.dark)
         }
         .navigationBarHidden(true)
@@ -157,7 +162,7 @@ struct LearnContentView: View {
 
     // MARK: - Action Handlers
     private func handleSearchTapped() {
-        print("Search tapped")
+        showSearch = true
     }
 
     private func handleProfileTapped() {

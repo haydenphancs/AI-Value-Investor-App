@@ -474,8 +474,9 @@ struct StockSearchResult: Codable, Identifiable {
     let exchange: String?
     let sector: String?
     let logoUrl: String?
+    let type: String?  // "stock" or "crypto"
 
-    // Backend GET /api/v1/stocks/search returns: symbol, name, exchange_short_name, exchange_full_name, currency
+    // Backend GET /api/v1/stocks/search returns: symbol, name, exchange_short_name, exchange_full_name, currency, type
     // sector and logo_url are not in search results (Optional — decode as nil)
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
@@ -483,6 +484,7 @@ struct StockSearchResult: Codable, Identifiable {
         case exchange = "exchange_short_name"
         case sector
         case logoUrl = "logo_url"
+        case type
     }
 }
 
@@ -2151,8 +2153,8 @@ final class MockStockRepository: StockRepositoryProtocol {
 
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult] {
         [
-            StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil),
-            StockSearchResult(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil)
+            StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil, type: "stock"),
+            StockSearchResult(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ", sector: "Technology", logoUrl: nil, type: "stock")
         ]
     }
 

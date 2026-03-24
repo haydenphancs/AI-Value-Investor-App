@@ -21,6 +21,7 @@ from app.api.v1.endpoints import (
     ticker_report,
     tracking,
     whales,
+    live_price,
 )
 
 api_router = APIRouter()
@@ -41,3 +42,4 @@ api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
 api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
+api_router.include_router(live_price.router, tags=["Live Price"])

@@ -17,6 +17,7 @@ from app.config import settings
 from app.database import check_supabase_health
 from app.api.v1.api import api_router
 from app.integrations.fmp import close_fmp_client
+from app.services.live_price_manager import get_live_price_manager
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -44,7 +45,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown: close persistent HTTP clients
+    # Graceful shutdown: close live price WebSocket connections
+    await get_live_price_manager().shutdown()
+
+    # Close persistent HTTP clients
     await close_fmp_client()
     logger.info("Shutting down")
 

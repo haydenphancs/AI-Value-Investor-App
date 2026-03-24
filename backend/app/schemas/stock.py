@@ -10,6 +10,7 @@ class StockSearchResult(BaseModel):
     currency: Optional[str] = None
     exchange_short_name: Optional[str] = None
     exchange_full_name: Optional[str] = None
+    type: Optional[str] = None  # "stock" or "crypto"
 
 
 class StockProfile(BaseModel):

@@ -547,20 +547,23 @@ class FMPClient:
     async def get_batch_quotes(
         self, symbols: List[str]
     ) -> List[Dict[str, Any]]:
-        """Get quotes for multiple symbols in a single request."""
+        """Get quotes for multiple symbols via parallel individual requests.
+
+        The FMP stable API does not support comma-separated symbols in a
+        single /quote call, so we fetch each symbol individually in parallel.
+        """
         if not symbols:
             return []
-        symbol_str = ",".join(s.upper() for s in symbols)
-        try:
-            data = await self._make_request(
-                "quote", params={"symbol": symbol_str}
-            )
-            if isinstance(data, list):
-                return data
-            return [data] if data else []
-        except Exception as e:
-            logger.warning(f"Batch quote request failed: {e}")
-            return []
+
+        async def _fetch_one(sym: str) -> Optional[Dict[str, Any]]:
+            try:
+                return await self.get_stock_price_quote(sym)
+            except Exception as e:
+                logger.warning("Quote fetch failed for %s: %s", sym, e)
+                return None
+
+        results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
+        return [r for r in results if r]
 
     # ── Search ──────────────────────────────────────────────────────
 

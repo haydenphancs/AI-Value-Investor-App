@@ -5,7 +5,7 @@ pre-computed sector medians from the sector_benchmarks table.
 
 Uses a two-tier cache-aside pattern:
   Tier 1 — in-memory dict (5-minute TTL)
-  Tier 2 — Supabase ``snapshot_profitability_cache`` table (24-hour TTL)
+  Tier 2 — Supabase ``snapshot_cache`` table (24-hour TTL)
 
 Matches the iOS SnapshotItemDTO struct.
 """
@@ -194,9 +194,10 @@ class ProfitabilitySnapshotService:
         """Return cached response if fresh (< 24h). Synchronous — call via to_thread."""
         try:
             row = (
-                self.supabase.table("snapshot_profitability_cache")
+                self.supabase.table("snapshot_cache")
                 .select("response_json, cached_at")
                 .eq("ticker", ticker)
+                .eq("category", "Profitability")
                 .limit(1)
                 .execute()
             )
@@ -224,13 +225,14 @@ class ProfitabilitySnapshotService:
     def _upsert_supabase_cache(self, ticker: str, result: SnapshotItemResponse) -> None:
         """Upsert to Supabase. Synchronous — call via run_in_executor."""
         try:
-            self.supabase.table("snapshot_profitability_cache").upsert(
+            self.supabase.table("snapshot_cache").upsert(
                 {
                     "ticker": ticker,
+                    "category": "Profitability",
                     "response_json": result.model_dump(),
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
-                on_conflict="ticker",
+                on_conflict="ticker,category",
             ).execute()
         except Exception as e:
             logger.warning(f"Profitability snapshot upsert failed for {ticker}: {e}")
@@ -268,7 +270,10 @@ class ProfitabilitySnapshotService:
             km = km_raw
 
         roe = _to_pct(_safe_float(km, "returnOnEquity"))
-        roa = _to_pct(_safe_float(km, "returnOnAssets") or _safe_float(km, "returnOnTangibleAssets"))
+        roa_raw = _safe_float(km, "returnOnAssets")
+        if roa_raw is None:
+            roa_raw = _safe_float(km, "returnOnTangibleAssets")
+        roa = _to_pct(roa_raw)
 
         # Sector for benchmark comparison
         profile_raw = results[2]

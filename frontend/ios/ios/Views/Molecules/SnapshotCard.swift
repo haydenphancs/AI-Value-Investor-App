@@ -9,7 +9,7 @@ import SwiftUI
 
 struct SnapshotCard: View {
     let snapshot: SnapshotItem
-    @State private var isExpanded: Bool = true
+    @State private var isExpanded: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

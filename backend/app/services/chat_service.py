@@ -8,6 +8,7 @@ and returns a structured ``StockChartWidget`` alongside Gemini's text
 analysis so the SwiftUI frontend can render a native chart widget.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
@@ -144,12 +145,17 @@ class ChatService:
             logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
 
         # Step 3: Build prompt (includes RAG context + history)
-        # Enrich with live margin data for stock sessions
+        # Enrich with live margin data + profitability snapshot for stock sessions
         profit_summary = None
+        snapshot_summary = None
         if stock_id:
-            profit_summary = await self._get_profit_summary(stock_id)
+            profit_summary, snapshot_summary = await asyncio.gather(
+                self._get_profit_summary(stock_id),
+                self._get_snapshot_summary(stock_id),
+            )
         system_instruction = self._build_system_instruction(
             session_type, stock_id, profit_summary=profit_summary,
+            snapshot_summary=snapshot_summary,
             client_context=context,
         )
         prompt = self._build_prompt(user_message, history, chunks)
@@ -364,9 +370,40 @@ class ChatService:
             logger.warning(f"Profit summary fetch failed for {ticker}: {e}")
             return None
 
+    async def _get_snapshot_summary(self, ticker: str) -> Optional[str]:
+        """Fetch cached snapshot data and format compact summary strings."""
+        try:
+            from app.services.profitability_snapshot_service import get_profitability_snapshot_service
+            from app.services.growth_snapshot_service import get_growth_snapshot_service
+
+            prof_snap, growth_snap = await asyncio.gather(
+                get_profitability_snapshot_service().get_profitability_snapshot(ticker),
+                get_growth_snapshot_service().get_growth_snapshot(ticker),
+                return_exceptions=True,
+            )
+
+            rating_labels = {5: "High", 4: "Solid", 3: "Moderate", 2: "Soft", 1: "Low"}
+            parts = []
+
+            if not isinstance(prof_snap, Exception):
+                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in prof_snap.metrics)
+                label = rating_labels.get(prof_snap.rating, "Unknown")
+                parts.append(f"Profitability: {label} ({prof_snap.rating}/5). {metrics_str}.")
+
+            if not isinstance(growth_snap, Exception):
+                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in growth_snap.metrics)
+                label = rating_labels.get(growth_snap.rating, "Unknown")
+                parts.append(f"Growth: {label} ({growth_snap.rating}/5). {metrics_str}.")
+
+            return f"Snapshots for {ticker}: " + " ".join(parts) if parts else None
+        except Exception as e:
+            logger.warning(f"Snapshot summary fetch failed for {ticker}: {e}")
+            return None
+
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
         profit_summary: Optional[str] = None,
+        snapshot_summary: Optional[str] = None,
         client_context: Optional[str] = None,
     ) -> str:
         base = (
@@ -396,6 +433,8 @@ class ChatService:
             )
             if profit_summary:
                 base += f"\n{profit_summary}"
+            if snapshot_summary:
+                base += f"\n{snapshot_summary}"
         if client_context:
             base += (
                 f"\n\nCLIENT CONTEXT (current data visible to the user):\n"

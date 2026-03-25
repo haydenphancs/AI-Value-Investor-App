@@ -12,26 +12,45 @@ struct TickerDetailSnapshotsSection: View {
     var onDeepResearchTap: (() -> Void)?
     @State private var showInfoSheet: Bool = false
 
+    private static var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        formatter.timeZone = TimeZone(identifier: "America/New_York")
+        return formatter.string(from: Date())
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section title with info button inside card styling
-            HStack {
-                Text("Snapshots")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                HStack {
+                    Text("Snapshots")
+                        .font(AppTypography.heading)
+                        .foregroundColor(AppColors.textPrimary)
 
-                Spacer()
+                    Spacer()
 
-                // What's Snapshots? link
-                Button(action: {
-                    showInfoSheet = true
-                }) {
-                    Text("What's Snapshots?")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    // What's Snapshots? link
+                    Button(action: {
+                        showInfoSheet = true
+                    }) {
+                        Text("What's Snapshots?")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .buttonStyle(PlainButtonStyle())
+
+                Text("Updated on \(Self.formattedDate) ET")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
             }
+
+            // Radar chart
+            SnapshotRadarChart(snapshots: snapshots)
+                .drawingGroup()
+                .padding(.bottom, -AppSpacing.md)
+                .padding(.bottom, -AppSpacing.sm)
 
             // Snapshot cards
             VStack(spacing: 0) {

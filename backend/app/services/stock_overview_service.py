@@ -271,12 +271,18 @@ class StockOverviewService:
         # ── Fetch fundamentals (cached 24h), volatile (live), and snapshot services in parallel ──
         from app.services.profitability_snapshot_service import get_profitability_snapshot_service
         from app.services.growth_snapshot_service import get_growth_snapshot_service
+        from app.services.valuation_snapshot_service import get_valuation_snapshot_service
+        from app.services.health_snapshot_service import get_health_snapshot_service
+        from app.services.ownership_snapshot_service import get_ownership_snapshot_service
         fund_task = self._get_fundamentals(ticker)
         vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
         prof_task = get_profitability_snapshot_service().get_profitability_snapshot(ticker)
         growth_task = get_growth_snapshot_service().get_growth_snapshot(ticker)
-        fundamentals, volatile, prof_snapshot, growth_snapshot = await asyncio.gather(
-            fund_task, vol_task, prof_task, growth_task, return_exceptions=True,
+        val_task = get_valuation_snapshot_service().get_valuation_snapshot(ticker)
+        health_task = get_health_snapshot_service().get_health_snapshot(ticker)
+        ownership_task = get_ownership_snapshot_service().get_ownership_snapshot(ticker)
+        fundamentals, volatile, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot = await asyncio.gather(
+            fund_task, vol_task, prof_task, growth_task, val_task, health_task, ownership_task, return_exceptions=True,
         )
         # Handle snapshot failures gracefully
         if isinstance(prof_snapshot, Exception):
@@ -285,12 +291,24 @@ class StockOverviewService:
         if isinstance(growth_snapshot, Exception):
             logger.warning(f"Growth snapshot failed for {ticker}: {growth_snapshot}")
             growth_snapshot = None
+        if isinstance(val_snapshot, Exception):
+            logger.warning(f"Valuation snapshot failed for {ticker}: {val_snapshot}")
+            val_snapshot = None
+        if isinstance(health_snapshot, Exception):
+            logger.warning(f"Health snapshot failed for {ticker}: {health_snapshot}")
+            health_snapshot = None
+        if isinstance(ownership_snapshot, Exception):
+            logger.warning(f"Ownership snapshot failed for {ticker}: {ownership_snapshot}")
+            ownership_snapshot = None
 
         # ── Build response from both data sources ─────────────────
         response = self._build_full_response(
             ticker, fundamentals, volatile, chart_range, interval, extended_hours,
             profitability_snapshot=prof_snapshot,
             growth_snapshot=growth_snapshot,
+            valuation_snapshot=val_snapshot,
+            health_snapshot=health_snapshot,
+            ownership_snapshot=ownership_snapshot,
         )
 
         # Related tickers (async call, uses its own caching)
@@ -484,7 +502,8 @@ class StockOverviewService:
     def _build_full_response(
         self, ticker: str, fund: Dict, vol: Dict,
         chart_range: str, interval: str, extended_hours: bool,
-        profitability_snapshot=None, growth_snapshot=None,
+        profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
+        health_snapshot=None, ownership_snapshot=None,
     ) -> StockOverviewResponse:
         """Combine fundamentals + volatile into one response."""
         profile = fund.get("profile", {})
@@ -552,6 +571,9 @@ class StockOverviewService:
             sector_name,
             profitability_snapshot=profitability_snapshot,
             growth_snapshot=growth_snapshot,
+            valuation_snapshot=valuation_snapshot,
+            health_snapshot=health_snapshot,
+            ownership_snapshot=ownership_snapshot,
         )
 
         # Sector & Industry
@@ -833,7 +855,8 @@ class StockOverviewService:
         self, key_metrics: List[Dict], fin_ratios: List[Dict],
         income_annual: List[Dict], balance_annual: List[Dict],
         cashflow_annual: List[Dict], price: float, market_cap: float,
-        sector: str, profitability_snapshot=None, growth_snapshot=None,
+        sector: str, profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
+        health_snapshot=None, ownership_snapshot=None,
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -858,14 +881,23 @@ class StockOverviewService:
         else:
             snapshots.append(self._build_growth_snapshot(inc0, inc1, cf0, cf1, km, key_metrics))
 
-        # 3. Price / Valuation
-        snapshots.append(self._build_valuation_snapshot(fr, km, sector))
+        # 3. Price / Valuation (use cached sector-relative snapshot if available)
+        if valuation_snapshot is not None:
+            snapshots.append(valuation_snapshot)
+        else:
+            snapshots.append(self._build_valuation_snapshot(fr, km, sector))
 
-        # 4. Financial Health
-        snapshots.append(self._build_health_snapshot(bs, inc0, cf0, fr, km, market_cap))
+        # 4. Financial Health (use cached sector-relative snapshot if available)
+        if health_snapshot is not None:
+            snapshots.append(health_snapshot)
+        else:
+            snapshots.append(self._build_health_snapshot(bs, inc0, cf0, fr, km, market_cap))
 
-        # 5. Insiders & Ownership
-        snapshots.append(self._build_ownership_snapshot(km))
+        # 5. Insiders & Ownership (use cached snapshot if available)
+        if ownership_snapshot is not None:
+            snapshots.append(ownership_snapshot)
+        else:
+            snapshots.append(self._build_ownership_snapshot(km))
 
         return snapshots
 

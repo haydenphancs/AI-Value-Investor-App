@@ -371,29 +371,32 @@ class ChatService:
             return None
 
     async def _get_snapshot_summary(self, ticker: str) -> Optional[str]:
-        """Fetch cached snapshot data and format compact summary strings."""
+        """Fetch all 5 cached snapshots and format compact summary strings."""
         try:
             from app.services.profitability_snapshot_service import get_profitability_snapshot_service
             from app.services.growth_snapshot_service import get_growth_snapshot_service
+            from app.services.valuation_snapshot_service import get_valuation_snapshot_service
+            from app.services.health_snapshot_service import get_health_snapshot_service
+            from app.services.ownership_snapshot_service import get_ownership_snapshot_service
 
-            prof_snap, growth_snap = await asyncio.gather(
+            results = await asyncio.gather(
                 get_profitability_snapshot_service().get_profitability_snapshot(ticker),
                 get_growth_snapshot_service().get_growth_snapshot(ticker),
+                get_valuation_snapshot_service().get_valuation_snapshot(ticker),
+                get_health_snapshot_service().get_health_snapshot(ticker),
+                get_ownership_snapshot_service().get_ownership_snapshot(ticker),
                 return_exceptions=True,
             )
 
             rating_labels = {5: "High", 4: "Solid", 3: "Moderate", 2: "Soft", 1: "Low"}
             parts = []
 
-            if not isinstance(prof_snap, Exception):
-                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in prof_snap.metrics)
-                label = rating_labels.get(prof_snap.rating, "Unknown")
-                parts.append(f"Profitability: {label} ({prof_snap.rating}/5). {metrics_str}.")
-
-            if not isinstance(growth_snap, Exception):
-                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in growth_snap.metrics)
-                label = rating_labels.get(growth_snap.rating, "Unknown")
-                parts.append(f"Growth: {label} ({growth_snap.rating}/5). {metrics_str}.")
+            for snap in results:
+                if isinstance(snap, Exception):
+                    continue
+                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in snap.metrics)
+                label = rating_labels.get(snap.rating, "Unknown")
+                parts.append(f"{snap.category}: {label} ({snap.rating}/5). {metrics_str}.")
 
             return f"Snapshots for {ticker}: " + " ".join(parts) if parts else None
         except Exception as e:

@@ -7,7 +7,7 @@ Operating Income, along with their sector benchmarks, then scores 1-5.
 
 Uses a two-tier cache-aside pattern:
   Tier 1 — in-memory dict (5-minute TTL)
-  Tier 2 — Supabase ``snapshot_growth_cache`` table (24-hour TTL)
+  Tier 2 — Supabase ``snapshot_cache`` table (24-hour TTL)
 
 Matches the iOS SnapshotItemDTO struct.
 """
@@ -155,9 +155,10 @@ class GrowthSnapshotService:
     def _check_supabase_cache(self, ticker: str) -> Optional[SnapshotItemResponse]:
         try:
             row = (
-                self.supabase.table("snapshot_growth_cache")
+                self.supabase.table("snapshot_cache")
                 .select("response_json, cached_at")
                 .eq("ticker", ticker)
+                .eq("category", "Growth")
                 .limit(1)
                 .execute()
             )
@@ -184,13 +185,14 @@ class GrowthSnapshotService:
 
     def _upsert_supabase_cache(self, ticker: str, result: SnapshotItemResponse) -> None:
         try:
-            self.supabase.table("snapshot_growth_cache").upsert(
+            self.supabase.table("snapshot_cache").upsert(
                 {
                     "ticker": ticker,
+                    "category": "Growth",
                     "response_json": result.model_dump(),
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
-                on_conflict="ticker",
+                on_conflict="ticker,category",
             ).execute()
         except Exception as e:
             logger.warning(f"Growth snapshot upsert failed for {ticker}: {e}")
@@ -204,13 +206,17 @@ class GrowthSnapshotService:
         growth = await get_growth_service().get_growth(ticker)
 
         # Extract the most recent annual YoY + sector benchmark for each metric.
-        # GrowthResponse lists are sorted oldest→newest, so [-1] is most recent.
+        # GrowthResponse lists are sorted oldest→newest. Walk backwards to find
+        # the most recent point with a non-None yoy_change_percent (handles cases
+        # where prior year's value was 0, making YoY computation impossible).
         def _latest(points) -> Tuple[Optional[float], Optional[float]]:
-            """Return (yoy_change_percent, sector_average_yoy) from latest point."""
+            """Return (yoy_change_percent, sector_average_yoy) from most recent valid point."""
             if not points:
                 return None, None
-            latest = points[-1]
-            return latest.yoy_change_percent, latest.sector_average_yoy
+            for pt in reversed(points):
+                if pt.yoy_change_percent is not None:
+                    return pt.yoy_change_percent, pt.sector_average_yoy
+            return None, None
 
         rev_growth, sector_rev = _latest(growth.revenue_annual)
         eps_growth, sector_eps = _latest(growth.eps_annual)

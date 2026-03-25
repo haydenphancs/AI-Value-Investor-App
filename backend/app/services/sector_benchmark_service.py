@@ -105,6 +105,9 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     # Valuation
     {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},
     {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
+    {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
+    {"name": "pfcf_ratio",          "source": "ratios",    "field": "priceToFreeCashFlowsRatio", "type": "direct"},
+    {"name": "ev_ebitda",           "source": "key_metrics", "field": "enterpriseValueOverEBITDA", "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
     {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct"},
@@ -566,6 +569,7 @@ class SectorBenchmarkService:
                         period_values.setdefault(label, []).append(val)
 
         return period_values
+
 
 
 # ── Singleton ─────────────────────────────────────────────────────

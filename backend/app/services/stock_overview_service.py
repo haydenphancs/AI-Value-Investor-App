@@ -268,14 +268,29 @@ class StockOverviewService:
         if cached_full is not None:
             return cached_full
 
-        # ── Fetch fundamentals (cached 24h) and volatile (live) in parallel ──
+        # ── Fetch fundamentals (cached 24h), volatile (live), and snapshot services in parallel ──
+        from app.services.profitability_snapshot_service import get_profitability_snapshot_service
+        from app.services.growth_snapshot_service import get_growth_snapshot_service
         fund_task = self._get_fundamentals(ticker)
         vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
-        fundamentals, volatile = await asyncio.gather(fund_task, vol_task)
+        prof_task = get_profitability_snapshot_service().get_profitability_snapshot(ticker)
+        growth_task = get_growth_snapshot_service().get_growth_snapshot(ticker)
+        fundamentals, volatile, prof_snapshot, growth_snapshot = await asyncio.gather(
+            fund_task, vol_task, prof_task, growth_task, return_exceptions=True,
+        )
+        # Handle snapshot failures gracefully
+        if isinstance(prof_snapshot, Exception):
+            logger.warning(f"Profitability snapshot failed for {ticker}: {prof_snapshot}")
+            prof_snapshot = None
+        if isinstance(growth_snapshot, Exception):
+            logger.warning(f"Growth snapshot failed for {ticker}: {growth_snapshot}")
+            growth_snapshot = None
 
         # ── Build response from both data sources ─────────────────
         response = self._build_full_response(
             ticker, fundamentals, volatile, chart_range, interval, extended_hours,
+            profitability_snapshot=prof_snapshot,
+            growth_snapshot=growth_snapshot,
         )
 
         # Related tickers (async call, uses its own caching)
@@ -469,6 +484,7 @@ class StockOverviewService:
     def _build_full_response(
         self, ticker: str, fund: Dict, vol: Dict,
         chart_range: str, interval: str, extended_hours: bool,
+        profitability_snapshot=None, growth_snapshot=None,
     ) -> StockOverviewResponse:
         """Combine fundamentals + volatile into one response."""
         profile = fund.get("profile", {})
@@ -483,6 +499,21 @@ class StockOverviewService:
         inst_ownership = fund.get("inst_ownership", [])
         income_quarterly = fund.get("income_quarterly", [])
         short_interest = fund.get("short_interest", {})
+        # If fundamentals cache has empty short interest, check the dedicated
+        # short_interest_cache (longer TTL, background-populated by Yahoo worker)
+        if not short_interest:
+            from app.integrations.yahoo_finance import (
+                _supabase_cache_get, _supabase_cache_get_stale,
+                _mem_cache_get, _enqueue_fetch,
+            )
+            mem_key = f"yahoo_short:{ticker.upper()}"
+            short_interest = _mem_cache_get(mem_key) or {}
+            if not short_interest:
+                short_interest = _supabase_cache_get(ticker.upper()) or {}
+            if not short_interest:
+                short_interest = _supabase_cache_get_stale(ticker.upper()) or {}
+            if not short_interest:
+                _enqueue_fetch(ticker.upper())
         sector_perf = fund.get("sector_perf", [])
         stock_historical = fund.get("stock_historical", [])
         spy_historical = fund.get("spy_historical", [])
@@ -519,6 +550,8 @@ class StockOverviewService:
             cashflow_annual, price,
             _safe_float(profile, "mktCap") or _safe_float(quote, "marketCap"),
             sector_name,
+            profitability_snapshot=profitability_snapshot,
+            growth_snapshot=growth_snapshot,
         )
 
         # Sector & Industry
@@ -713,12 +746,21 @@ class StockOverviewService:
         ])
 
         # Ownership group
-        # Short % of Float: from Yahoo Finance (cached in Supabase, 24h TTL)
+        # Short % of Float: compute from sharesShort / floatShares when possible
         short_interest = short_interest or {}
-        short_pct_val = short_interest.get("short_percent_of_float")
+        short_pct_val = None
 
+        # Primary: compute from sharesShort (Yahoo) / floatShares (FMP)
+        shares_short = short_interest.get("shares_short")
+        if shares_short and shares_short > 0 and float_shares_val and float_shares_val > 0:
+            short_pct_val = round((shares_short / float_shares_val) * 100, 2)
+
+        # Fallback 1: use Yahoo's pre-computed short_percent_of_float
         if short_pct_val is None:
-            # Fallback: try FMP key_metrics (rarely available on stable API)
+            short_pct_val = short_interest.get("short_percent_of_float")
+
+        # Fallback 2: try FMP key_metrics (rarely available on stable API)
+        if short_pct_val is None:
             km = key_metrics[0] if key_metrics else {}
             raw = km.get("shortPercentOutstanding") or km.get("shortPercentFloat")
             if raw is not None:
@@ -791,7 +833,7 @@ class StockOverviewService:
         self, key_metrics: List[Dict], fin_ratios: List[Dict],
         income_annual: List[Dict], balance_annual: List[Dict],
         cashflow_annual: List[Dict], price: float, market_cap: float,
-        sector: str,
+        sector: str, profitability_snapshot=None, growth_snapshot=None,
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -804,11 +846,17 @@ class StockOverviewService:
         cf0 = cashflow_annual[0] if cashflow_annual else {}
         cf1 = cashflow_annual[1] if len(cashflow_annual) > 1 else {}
 
-        # 1. Profitability
-        snapshots.append(self._build_profitability_snapshot(km, fr, inc0))
+        # 1. Profitability (use cached sector-relative snapshot if available)
+        if profitability_snapshot is not None:
+            snapshots.append(profitability_snapshot)
+        else:
+            snapshots.append(self._build_profitability_snapshot(km, fr, inc0))
 
-        # 2. Growth
-        snapshots.append(self._build_growth_snapshot(inc0, inc1, cf0, cf1, km, key_metrics))
+        # 2. Growth (use cached sector-relative snapshot if available)
+        if growth_snapshot is not None:
+            snapshots.append(growth_snapshot)
+        else:
+            snapshots.append(self._build_growth_snapshot(inc0, inc1, cf0, cf1, km, key_metrics))
 
         # 3. Price / Valuation
         snapshots.append(self._build_valuation_snapshot(fr, km, sector))
@@ -873,9 +921,10 @@ class StockOverviewService:
             return None
 
         rev_growth = _yoy_growth(inc0, inc1, "revenue")
-        eps_curr = _safe_float(km, "netIncomePerShare") if km else None
+        # EPS: prefer epsDiluted from income statement, fallback to key-metrics
+        eps_curr = _safe_float(inc0, "epsDiluted") or _safe_float(inc0, "eps") or (_safe_float(km, "netIncomePerShare") if km else None)
         km1 = key_metrics[1] if len(key_metrics) > 1 else {}
-        eps_prev = _safe_float(km1, "netIncomePerShare") if km1 else None
+        eps_prev = _safe_float(inc1, "epsDiluted") or _safe_float(inc1, "eps") or (_safe_float(km1, "netIncomePerShare") if km1 else None)
         eps_growth = None
         if eps_curr and eps_prev and eps_prev != 0:
             eps_growth = ((eps_curr - eps_prev) / abs(eps_prev)) * 100

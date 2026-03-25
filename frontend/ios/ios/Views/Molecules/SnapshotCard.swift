@@ -13,11 +13,10 @@ struct SnapshotCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+
             // Header row
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
-                }
+                isExpanded.toggle()
             }) {
                 HStack(spacing: AppSpacing.md) {
                     // Rating indicator icon
@@ -26,17 +25,11 @@ struct SnapshotCard: View {
                         rating: snapshot.rating
                     )
 
-                    // Rating label and category
+                    // Category and star rating
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: AppSpacing.xs) {
-                            Text(snapshot.rating.displayName)
-                                .font(AppTypography.bodySmallEmphasis)
-                                .foregroundColor(snapshot.rating.color)
-
-                            Text(snapshot.category.rawValue)
-                                .font(AppTypography.bodySmall)
-                                .foregroundColor(AppColors.textPrimary)
-                        }
+                        Text(snapshot.category.rawValue)
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textPrimary)
 
                         // Star rating
                         SnapshotStarRating(rating: snapshot.rating, starSize: 10)
@@ -54,25 +47,24 @@ struct SnapshotCard: View {
             .buttonStyle(PlainButtonStyle())
 
             // Metrics list (when expanded)
-            if isExpanded {
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    ForEach(snapshot.metrics) { metric in
-                        HStack {
-                            Text(metric.name)
-                                .font(AppTypography.labelSmall)
-                                .foregroundColor(AppColors.textSecondary)
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                ForEach(snapshot.metrics) { metric in
+                    HStack {
+                        Text(metric.name)
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
 
-                            Spacer()
+                        Spacer()
 
-                            Text(metric.value)
-                                .font(AppTypography.labelSmallEmphasis)
-                                .foregroundColor(AppColors.textPrimary)
-                        }
+                        Text(metric.value)
+                            .font(AppTypography.labelSmallEmphasis)
+                            .foregroundColor(AppColors.textPrimary)
                     }
-
                 }
-                .padding(.bottom, AppSpacing.md)
             }
+            .padding(.bottom, isExpanded ? AppSpacing.md : 0)
+            .frame(maxHeight: isExpanded ? .none : 0, alignment: .top)
+            .clipped()
 
             // Divider (except for last item)
             Rectangle()

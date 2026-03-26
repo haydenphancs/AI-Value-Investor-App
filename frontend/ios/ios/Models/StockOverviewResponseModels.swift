@@ -112,6 +112,15 @@ struct CompanyProfileDTO: Decodable {
     let employees: Int
     let headquarters: String
     let website: String
+    let sector: String
+    let industry: String
+    let sectorPerformance: Double
+
+    enum CodingKeys: String, CodingKey {
+        case description, ceo, founded, employees, headquarters, website
+        case sector, industry
+        case sectorPerformance = "sector_performance"
+    }
 }
 
 // MARK: - DTO → Display Model Conversion
@@ -186,14 +195,17 @@ extension StockOverviewResponseDTO {
             industryRank: sectorIndustry.industryRank
         )
 
-        // Company Profile
+        // Company Profile (includes sector & industry)
         let profile = CompanyProfile(
             description: companyProfile.description,
             ceo: companyProfile.ceo,
             founded: companyProfile.founded,
             employees: companyProfile.employees,
             headquarters: companyProfile.headquarters,
-            website: companyProfile.website
+            website: companyProfile.website,
+            sector: companyProfile.sector,
+            industry: companyProfile.industry,
+            sectorPerformance: companyProfile.sectorPerformance
         )
 
         // Related Tickers

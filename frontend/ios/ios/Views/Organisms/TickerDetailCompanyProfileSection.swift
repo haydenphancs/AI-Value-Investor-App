@@ -57,6 +57,13 @@ struct TickerDetailCompanyProfileSection: View {
                 CompanyProfileRow(label: "Founded", value: profile.founded)
                 CompanyProfileRow(label: "Employees", value: profile.formattedEmployees)
                 CompanyProfileRow(label: "Headquarters", value: profile.headquarters)
+                CompanyProfileRow(label: "Sector", value: profile.sector)
+                CompanyProfileRow(
+                    label: "Sector Performance (1Y)",
+                    value: profile.formattedSectorPerformance,
+                    valueColor: profile.sectorPerformanceColor
+                )
+                CompanyProfileRow(label: "Industry", value: profile.industry)
 
                 // Additional info shown when expanded
                 if isExpanded {
@@ -130,7 +137,10 @@ struct TickerDetailCompanyProfileSection: View {
                 founded: "April 1, 1976",
                 employees: 161000,
                 headquarters: "Cupertino, CA",
-                website: "www.apple.com"
+                website: "www.apple.com",
+                sector: "Technology",
+                industry: "Consumer Electronics",
+                sectorPerformance: 12.45
             )
         )
     }

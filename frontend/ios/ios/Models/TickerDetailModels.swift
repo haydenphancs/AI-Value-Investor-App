@@ -418,9 +418,21 @@ struct CompanyProfile {
     let employees: Int
     let headquarters: String
     let website: String
+    let sector: String
+    let industry: String
+    let sectorPerformance: Double
 
     var formattedEmployees: String {
         TickerDetailFormatters.decimalFormatter.string(from: NSNumber(value: employees)) ?? "\(employees)"
+    }
+
+    var formattedSectorPerformance: String {
+        let sign = sectorPerformance >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", sectorPerformance))%"
+    }
+
+    var sectorPerformanceColor: Color {
+        sectorPerformance >= 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 
@@ -547,7 +559,10 @@ extension TickerDetailData {
             founded: "April 1, 1976",
             employees: 161000,
             headquarters: "Cupertino, CA",
-            website: "www.apple.com"
+            website: "www.apple.com",
+            sector: "Technology",
+            industry: "Consumer Electronics",
+            sectorPerformance: 12.45
         ),
         relatedTickers: RelatedTicker.sampleData,
         benchmarkSummary: PerformanceBenchmarkSummary(avgAnnualReturn: 28.6, spBenchmark: 10.5)

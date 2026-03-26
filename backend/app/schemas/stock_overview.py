@@ -44,6 +44,9 @@ class CompanyProfileResponse(BaseModel):
     employees: int
     headquarters: str
     website: str
+    sector: str = "N/A"
+    industry: str = "N/A"
+    sector_performance: float = 0.0
 
 
 class StockOverviewResponse(BaseModel):

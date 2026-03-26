@@ -145,17 +145,20 @@ class ChatService:
             logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
 
         # Step 3: Build prompt (includes RAG context + history)
-        # Enrich with live margin data + profitability snapshot for stock sessions
+        # Enrich with live margin data + profitability snapshot + company profile for stock sessions
         profit_summary = None
         snapshot_summary = None
+        company_profile_summary = None
         if stock_id:
-            profit_summary, snapshot_summary = await asyncio.gather(
+            profit_summary, snapshot_summary, company_profile_summary = await asyncio.gather(
                 self._get_profit_summary(stock_id),
                 self._get_snapshot_summary(stock_id),
+                self._get_company_profile_summary(stock_id),
             )
         system_instruction = self._build_system_instruction(
             session_type, stock_id, profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
+            company_profile_summary=company_profile_summary,
             client_context=context,
         )
         prompt = self._build_prompt(user_message, history, chunks)
@@ -403,10 +406,64 @@ class ChatService:
             logger.warning(f"Snapshot summary fetch failed for {ticker}: {e}")
             return None
 
+    async def _get_company_profile_summary(self, ticker: str) -> Optional[str]:
+        """Fetch cached company profile and format as context string for AI."""
+        try:
+            from app.services.stock_overview_service import get_stock_overview_service
+            service = get_stock_overview_service()
+            profile = service.get_cached_company_profile(ticker)
+
+            # Fallback: lightweight FMP fetch if cache is empty
+            if not profile:
+                raw = await self.fmp.get_company_profile(ticker)
+                if raw:
+                    profile = {
+                        "description": raw.get("description", ""),
+                        "ceo": raw.get("ceo", "N/A"),
+                        "sector": raw.get("sector", "N/A"),
+                        "industry": raw.get("industry", "N/A"),
+                        "employees": raw.get("fullTimeEmployees") or raw.get("employees", 0),
+                        "headquarters": f"{raw.get('city', '')}, {raw.get('state', '')}".strip(", "),
+                        "founded": raw.get("ipoDate", "N/A"),
+                    }
+            if not profile:
+                return None
+
+            parts = [f"Company Profile for {ticker}:"]
+            desc = profile.get("description", "")
+            if desc:
+                if len(desc) > 500:
+                    desc = desc[:500] + "..."
+                parts.append(f"Description: {desc}")
+            if profile.get("ceo"):
+                parts.append(f"CEO: {profile['ceo']}")
+            if profile.get("sector"):
+                parts.append(f"Sector: {profile['sector']}")
+            if profile.get("industry"):
+                parts.append(f"Industry: {profile['industry']}")
+            if profile.get("employees"):
+                emp = profile["employees"]
+                parts.append(f"Employees: {emp:,}" if isinstance(emp, int) else f"Employees: {emp}")
+            if profile.get("headquarters"):
+                parts.append(f"HQ: {profile['headquarters']}")
+            if profile.get("founded"):
+                parts.append(f"IPO Date: {profile['founded']}")
+            perf = profile.get("sector_performance")
+            if perf and perf != 0.0:
+                parts.append(f"Sector Performance: {perf}%")
+            rank = profile.get("industry_rank")
+            if rank and rank != "--":
+                parts.append(f"Industry Rank: {rank}")
+            return " | ".join(parts)
+        except Exception as e:
+            logger.warning(f"Company profile summary failed for {ticker}: {e}")
+            return None
+
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
         profit_summary: Optional[str] = None,
         snapshot_summary: Optional[str] = None,
+        company_profile_summary: Optional[str] = None,
         client_context: Optional[str] = None,
     ) -> str:
         base = (
@@ -434,6 +491,8 @@ class ChatService:
                 f"\nYou are currently helping analyze {stock_id}. "
                 "Use the provided financial data and filings context."
             )
+            if company_profile_summary:
+                base += f"\n{company_profile_summary}"
             if profit_summary:
                 base += f"\n{profit_summary}"
             if snapshot_summary:

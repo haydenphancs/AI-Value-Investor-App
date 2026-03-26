@@ -10,6 +10,7 @@ import SwiftUI
 struct CompanyProfileRow: View {
     let label: String
     let value: String
+    var valueColor: Color? = nil
     var isLink: Bool = false
 
     var body: some View {
@@ -22,7 +23,7 @@ struct CompanyProfileRow: View {
 
             Text(value)
                 .font(AppTypography.labelSmallEmphasis)
-                .foregroundColor(isLink ? AppColors.primaryBlue : AppColors.textPrimary)
+                .foregroundColor(valueColor ?? (isLink ? AppColors.primaryBlue : AppColors.textPrimary))
         }
     }
 }

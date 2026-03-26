@@ -16,7 +16,9 @@ struct SnapshotCard: View {
 
             // Header row
             Button(action: {
-                isExpanded.toggle()
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    isExpanded.toggle()
+                }
             }) {
                 HStack(spacing: AppSpacing.md) {
                     // Rating indicator icon
@@ -46,25 +48,26 @@ struct SnapshotCard: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Metrics list (when expanded)
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(snapshot.metrics) { metric in
-                    HStack {
-                        Text(metric.name)
-                            .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.textSecondary)
+            // Metrics list
+            if isExpanded {
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    ForEach(snapshot.metrics) { metric in
+                        HStack {
+                            Text(metric.name)
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textSecondary)
 
-                        Spacer()
+                            Spacer()
 
-                        Text(metric.value)
-                            .font(AppTypography.labelSmallEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
+                            Text(metric.value)
+                                .font(AppTypography.labelSmallEmphasis)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
                     }
                 }
+                .padding(.bottom, AppSpacing.md)
+                .transition(.opacity)
             }
-            .padding(.bottom, isExpanded ? AppSpacing.md : 0)
-            .frame(maxHeight: isExpanded ? .none : 0, alignment: .top)
-            .clipped()
 
             // Divider (except for last item)
             Rectangle()

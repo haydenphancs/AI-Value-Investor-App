@@ -26,14 +26,15 @@ struct SnapshotRadarChart: View {
 
     /// Pre-built axis data from snapshots
     private var axes: [SnapshotAxisData] {
-        Self.orderedCategories.compactMap { cat in
-            guard let item = snapshots.first(where: { $0.category == cat }) else { return nil }
+        let result = Self.orderedCategories.compactMap { cat in
+            guard let item = snapshots.first(where: { $0.category == cat }) else { return nil as SnapshotAxisData? }
             return SnapshotAxisData(
                 category: cat,
                 rating: item.rating,
                 normalized: Double(item.rating.rawValue) / 5.0
             )
         }
+        return result
     }
 
     var body: some View {
@@ -41,7 +42,6 @@ struct SnapshotRadarChart: View {
         let sides = axisData.count
         let values = axisData.map(\.normalized)
         let frameSize = chartSize + 100
-
         ZStack {
             radarGrid(sides: sides, frameSize: frameSize)
             dataPolygon(values: values, frameSize: frameSize)
@@ -101,7 +101,6 @@ struct SnapshotRadarChart: View {
     private func scoreDots(axisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
         let radius = chartSize / 2
         let total = axisData.count
-
         return ForEach(Array(axisData.enumerated()), id: \.element.id) { index, item in
             let angle = angleForIndex(index, total: total)
             let r = radius * CGFloat(item.normalized)
@@ -122,7 +121,6 @@ struct SnapshotRadarChart: View {
     private func axisLabels(axisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
         let labelRadius = chartSize / 2 + 36
         let total = axisData.count
-
         return ForEach(Array(axisData.enumerated()), id: \.element.id) { index, item in
             let angle = angleForIndex(index, total: total)
 
@@ -146,11 +144,13 @@ struct SnapshotRadarChart: View {
     // MARK: - Geometry Helpers
 
     private func angleForIndex(_ index: Int, total: Int) -> CGFloat {
-        startAngle + CGFloat(index) * (2 * .pi / CGFloat(total))
+        guard total > 0 else { return 0 }
+        return startAngle + CGFloat(index) * (2 * .pi / CGFloat(total))
     }
 
     private func polygonPath(center: CGPoint, radius: CGFloat, sides: Int) -> Path {
         var path = Path()
+        guard sides > 0 else { return path }
         for i in 0...sides {
             let angle = angleForIndex(i % sides, total: sides)
             let point = CGPoint(
@@ -165,6 +165,7 @@ struct SnapshotRadarChart: View {
 
     private func dataPolygonPath(center: CGPoint, radius: CGFloat, values: [Double]) -> Path {
         var path = Path()
+        guard !values.isEmpty else { return path }
         for i in 0...values.count {
             let idx = i % values.count
             let angle = angleForIndex(idx, total: values.count)

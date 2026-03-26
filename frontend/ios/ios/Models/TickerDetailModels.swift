@@ -372,14 +372,14 @@ enum SnapshotCategory: String {
 
 // MARK: - Snapshot Metric
 struct SnapshotMetric: Identifiable {
-    let id = UUID()
+    var id: String { name }
     let name: String
     let value: String
 }
 
 // MARK: - Snapshot Item
 struct SnapshotItem: Identifiable {
-    let id = UUID()
+    var id: String { category.rawValue }
     let category: SnapshotCategory
     let rating: SnapshotRatingLevel
     let metrics: [SnapshotMetric]

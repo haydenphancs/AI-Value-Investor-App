@@ -339,18 +339,117 @@ class FMPClient:
 
     # ── Sector & market data ────────────────────────────────────────
 
+    # Sector ETF tickers for fallback sector performance computation
+    _SECTOR_ETFS: Dict[str, str] = {
+        "Technology": "XLK",
+        "Healthcare": "XLV",
+        "Financial Services": "XLF",
+        "Consumer Cyclical": "XLY",
+        "Communication Services": "XLC",
+        "Industrials": "XLI",
+        "Consumer Defensive": "XLP",
+        "Energy": "XLE",
+        "Real Estate": "XLRE",
+        "Utilities": "XLU",
+        "Basic Materials": "XLB",
+    }
+
     async def get_sector_performance(self) -> List[Dict[str, Any]]:
         """
         Get today's sector performance percentages.
 
         Returns list of dicts with keys like:
-          {"sector": "Technology", "changesPercentage": "2.13"}
+          {"sector": "Technology", "changesPercentage": 2.13}
+
+        Falls back to sector ETF quotes if the dedicated endpoint is unavailable.
+        """
+        # Try snapshot endpoint
+        try:
+            data = await self._make_request("sector-performance-snapshot")
+            if isinstance(data, list) and data:
+                return data
+        except Exception:
+            pass
+
+        # Try legacy endpoint
+        try:
+            data = await self._make_request("sectors-performance")
+            if isinstance(data, list) and data:
+                return data
+        except Exception:
+            pass
+
+        # Fallback: compute from sector ETF quotes
+        logger.info("Sector performance endpoints unavailable, using ETF fallback")
+        return await self._sector_perf_from_etfs()
+
+    async def _sector_perf_from_etfs(self) -> List[Dict[str, Any]]:
+        """Compute sector performance (daily + 1Y) from sector ETF data."""
+        try:
+            import asyncio as _asyncio
+            from datetime import datetime, timedelta
+            etf_to_sector = {v: k for k, v in self._SECTOR_ETFS.items()}
+
+            one_year_start = (datetime.utcnow() - timedelta(days=370)).strftime("%Y-%m-%d")
+            one_year_end = (datetime.utcnow() - timedelta(days=360)).strftime("%Y-%m-%d")
+
+            async def _fetch_one(symbol: str):
+                try:
+                    quote = await self.get_stock_price_quote(symbol)
+                    # Fetch prices around 1 year ago (10-day window for market holidays)
+                    hist = await self.get_historical_prices(
+                        symbol, from_date=one_year_start, to_date=one_year_end,
+                    )
+                    return quote, hist
+                except Exception:
+                    return None, None
+
+            results = await _asyncio.gather(
+                *[_fetch_one(etf) for etf in self._SECTOR_ETFS.values()]
+            )
+            output = []
+            for quote, hist in results:
+                if not quote or not isinstance(quote, dict):
+                    continue
+                sector = etf_to_sector.get(quote.get("symbol"))
+                if not sector:
+                    continue
+                daily_pct = quote.get("changePercentage") or quote.get("changesPercentage") or 0.0
+                # Compute 1Y return
+                one_year_pct = 0.0
+                current_price = quote.get("price", 0)
+                # FMP stable returns list directly, legacy returns {"historical": [...]}
+                hist_list = hist if isinstance(hist, list) else (hist.get("historical", []) if isinstance(hist, dict) else [])
+                if hist_list and current_price:
+                    # Use the earliest data point as the 1Y-ago price
+                    old_price = hist_list[0].get("close") or hist_list[-1].get("close")
+                    if old_price and old_price > 0:
+                        one_year_pct = round(((current_price - old_price) / old_price) * 100, 2)
+                output.append({
+                    "sector": sector,
+                    "changesPercentage": round(float(daily_pct), 2),
+                    "oneYearPerformance": one_year_pct,
+                })
+            return output
+        except Exception as e:
+            logger.warning(f"Sector ETF fallback failed: {e}")
+            return []
+
+    async def get_industry_performance(self) -> List[Dict[str, Any]]:
+        """
+        Get industry-level performance snapshot.
+
+        Returns list of dicts with keys like:
+          {"industry": "Consumer Electronics", "sector": "Technology",
+           "changesPercentage": 1.5, "exchange": "NASDAQ"}
         """
         try:
-            return await self._make_request("sectors-performance")
+            data = await self._make_request("industry-performance-snapshot")
+            if isinstance(data, list) and data:
+                return data
         except Exception as e:
-            logger.warning(f"Sector performance endpoint failed: {e}")
-            return []
+            logger.warning(f"Industry performance endpoint failed: {e}")
+        return []
 
     async def get_sp500_constituents(self) -> List[Dict[str, Any]]:
         """Get S&P 500 constituent list with symbol, name, sector, subSector."""

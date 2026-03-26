@@ -29,8 +29,14 @@ from app.schemas.stock_overview import (
     SnapshotMetricResponse,
     StockOverviewResponse,
 )
+from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_sector(name: str) -> str:
+    """Map FMP sector name to canonical app sector name using the shared map."""
+    return _FMP_SECTOR_MAP.get(name, name)
 
 # ── In-memory cache ──────────────────────────────────────────────
 
@@ -304,14 +310,21 @@ class StockOverviewService:
         from app.services.ownership_snapshot_service import get_ownership_snapshot_service
         fund_task = self._get_fundamentals(ticker)
         vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
+        sector_perf_task = self.fmp.get_sector_performance()
+        industry_perf_task = self.fmp.get_industry_performance()
         prof_task = get_profitability_snapshot_service().get_profitability_snapshot(ticker)
         growth_task = get_growth_snapshot_service().get_growth_snapshot(ticker)
         val_task = get_valuation_snapshot_service().get_valuation_snapshot(ticker)
         health_task = get_health_snapshot_service().get_health_snapshot(ticker)
         ownership_task = get_ownership_snapshot_service().get_ownership_snapshot(ticker)
-        fundamentals, volatile, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot = await asyncio.gather(
-            fund_task, vol_task, prof_task, growth_task, val_task, health_task, ownership_task, return_exceptions=True,
+        fundamentals, volatile, live_sector_perf, live_industry_perf, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot = await asyncio.gather(
+            fund_task, vol_task, sector_perf_task, industry_perf_task, prof_task, growth_task, val_task, health_task, ownership_task, return_exceptions=True,
         )
+        # Override cached sector/industry perf with fresh data
+        if not isinstance(live_sector_perf, Exception) and isinstance(live_sector_perf, list) and live_sector_perf:
+            fundamentals["sector_perf"] = live_sector_perf
+        if not isinstance(live_industry_perf, Exception) and isinstance(live_industry_perf, list) and live_industry_perf:
+            fundamentals["industry_perf"] = live_industry_perf
         # Handle snapshot failures gracefully
         if isinstance(prof_snapshot, Exception):
             logger.warning(f"Profitability snapshot failed for {ticker}: {prof_snapshot}")
@@ -403,6 +416,7 @@ class StockOverviewService:
             get_short_interest(ticker),                                          # 10
             self.fmp.get_sector_performance(),                                   # 11
             self.fmp.get_historical_prices(ticker, from_date_10y, to_date),     # 12
+            self.fmp.get_industry_performance(),                                 # 13
         ]
 
         spy_task_idx = None
@@ -451,6 +465,7 @@ class StockOverviewService:
             "sector_perf": _list(11),
             "stock_historical": stock_hist,
             "spy_historical": spy_hist,
+            "industry_perf": _list(13),
         }
 
     def _check_fundamentals_db(self, ticker: str) -> Optional[Dict[str, Any]]:
@@ -500,6 +515,52 @@ class StockOverviewService:
             logger.info(f"Fundamentals cached in Supabase for {ticker}")
         except Exception as e:
             logger.warning(f"Fundamentals Supabase upsert failed for {ticker}: {e}")
+
+    # ── Company Profile Cache (for chat AI context) ────────────────
+
+    def _check_company_profile_db(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Check Supabase company_profile_cache (24h TTL)."""
+        try:
+            row = (
+                self.supabase.table("company_profile_cache")
+                .select("profile_json, cached_at")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=_FUNDAMENTALS_DB_TTL_HOURS):
+                return None
+            return entry.get("profile_json")
+        except Exception as e:
+            logger.warning(f"Company profile cache check failed for {ticker}: {e}")
+            return None
+
+    def _upsert_company_profile_db(self, ticker: str, data: Dict[str, Any]) -> None:
+        """Upsert formatted company profile into Supabase cache."""
+        try:
+            self.supabase.table("company_profile_cache").upsert(
+                {
+                    "ticker": ticker,
+                    "profile_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="ticker",
+            ).execute()
+            logger.info(f"Company profile cached in Supabase for {ticker}")
+        except Exception as e:
+            logger.warning(f"Company profile upsert failed for {ticker}: {e}")
+
+    def get_cached_company_profile(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Public accessor for other services (e.g. chat) to read cached profile."""
+        return self._check_company_profile_db(ticker.upper())
 
     # ── Volatile: live intraday data (120s response-level cache) ──
 
@@ -562,6 +623,7 @@ class StockOverviewService:
             if not short_interest:
                 _enqueue_fetch(ticker.upper())
         sector_perf = fund.get("sector_perf", [])
+        industry_perf = fund.get("industry_perf", [])
         stock_historical = fund.get("stock_historical", [])
         spy_historical = fund.get("spy_historical", [])
 
@@ -605,10 +667,24 @@ class StockOverviewService:
         )
 
         # Sector & Industry
-        sector_industry = self._build_sector_industry(profile, sector_perf)
+        sector_industry = self._build_sector_industry(profile, sector_perf, industry_perf)
 
-        # Company profile
-        company_profile = self._build_company_profile(profile)
+        # Company profile (includes sector/industry data)
+        company_profile = self._build_company_profile(profile, sector_industry=sector_industry)
+
+        # Cache formatted profile for chat AI context
+        self._upsert_company_profile_db(ticker, {
+            "description": company_profile.description,
+            "ceo": company_profile.ceo,
+            "founded": company_profile.founded,
+            "employees": company_profile.employees,
+            "headquarters": company_profile.headquarters,
+            "website": company_profile.website,
+            "sector": sector_industry.sector,
+            "industry": sector_industry.industry,
+            "sector_performance": sector_industry.sector_performance,
+            "industry_rank": sector_industry.industry_rank,
+        })
 
         # Benchmark summary
         benchmark_summary = self._build_benchmark_summary(
@@ -1194,29 +1270,74 @@ class StockOverviewService:
     # ── Sector & Industry ─────────────────────────────────────────
 
     def _build_sector_industry(
-        self, profile: Dict, sector_perf: List[Dict]
+        self, profile: Dict, sector_perf: List[Dict],
+        industry_perf: List[Dict] = None,
     ) -> SectorIndustryResponse:
         sector_name = profile.get("sector") or "N/A"
         industry = profile.get("industry") or "N/A"
 
+        # --- Sector performance (prefer 1Y, fallback to daily) ---
         sector_perf_value = 0.0
-        if isinstance(sector_perf, list):
+        if isinstance(sector_perf, list) and sector_perf:
+            logger.info(f"[SectorIndustry] sector_perf sample: {sector_perf[0]}")
             for sp in sector_perf:
                 sp_sector = sp.get("sector", "")
-                if sp_sector.lower() == sector_name.lower():
-                    sector_perf_value = _safe_float(sp, "changesPercentage")
-                    break
+                if _normalize_sector(sp_sector) == _normalize_sector(sector_name):
+                    # Prefer 1Y performance, fallback to daily
+                    val = _safe_float(sp, "oneYearPerformance")
+                    if val == 0.0:
+                        val = (
+                            _safe_float(sp, "changesPercentage")
+                            or _safe_float(sp, "averageChangePercent")
+                            or _safe_float(sp, "changePercent")
+                            or _safe_float(sp, "change_percentage")
+                        )
+                    if val != 0.0:
+                        sector_perf_value = val
+                        break
+
+        # --- Industry rank within sector ---
+        industry_rank = "--"
+        if industry_perf and isinstance(industry_perf, list):
+            logger.info(f"[SectorIndustry] industry_perf sample: {industry_perf[0] if industry_perf else 'empty'}")
+        if industry_perf and isinstance(industry_perf, list) and sector_name != "N/A":
+            # Filter industries in the same sector, sorted by performance desc
+            same_sector = [
+                ip for ip in industry_perf
+                if _normalize_sector(ip.get("sector") or "") == _normalize_sector(sector_name)
+                and ip.get("industry")
+            ]
+            if same_sector:
+                same_sector.sort(
+                    key=lambda x: _safe_float(x, "changesPercentage")
+                    or _safe_float(x, "averageChangePercent")
+                    or _safe_float(x, "changePercent")
+                    or _safe_float(x, "change_percentage")
+                    or 0.0,
+                    reverse=True,
+                )
+                total = len(same_sector)
+                rank = None
+                for i, ip in enumerate(same_sector):
+                    if (ip.get("industry") or "").lower() == industry.lower():
+                        rank = i + 1
+                        break
+                if rank is not None:
+                    industry_rank = f"#{rank} of {total}"
 
         return SectorIndustryResponse(
             sector=sector_name,
             industry=industry,
             sector_performance=round(sector_perf_value, 2),
-            industry_rank="--",
+            industry_rank=industry_rank,
         )
 
     # ── Company Profile ───────────────────────────────────────────
 
-    def _build_company_profile(self, profile: Dict) -> CompanyProfileResponse:
+    def _build_company_profile(
+        self, profile: Dict,
+        sector_industry: Optional[SectorIndustryResponse] = None,
+    ) -> CompanyProfileResponse:
         city = profile.get("city") or ""
         state = profile.get("state") or ""
         country = profile.get("country") or ""
@@ -1240,6 +1361,9 @@ class StockOverviewService:
             employees=int(profile.get("fullTimeEmployees") or 0),
             headquarters=hq,
             website=website,
+            sector=sector_industry.sector if sector_industry else profile.get("sector") or "N/A",
+            industry=sector_industry.industry if sector_industry else profile.get("industry") or "N/A",
+            sector_performance=sector_industry.sector_performance if sector_industry else 0.0,
         )
 
     # ── Related Tickers ───────────────────────────────────────────
@@ -1265,7 +1389,9 @@ class StockOverviewService:
                     symbol=symbol,
                     name=q.get("name") or symbol,
                     price=round(_safe_float(q, "price"), 2),
-                    change_percent=round(_safe_float(q, "changesPercentage"), 2),
+                    change_percent=round(
+                        _safe_float(q, "changePercentage") or _safe_float(q, "changesPercentage"), 2
+                    ),
                 ))
             return related
         except Exception as e:

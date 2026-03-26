@@ -30,9 +30,6 @@ struct TickerDetailOverviewContent: View {
                 onDeepResearchTap: onDeepResearchTap
             )
 
-            // Sector & Industry
-            TickerDetailSectorIndustrySection(info: tickerData.sectorIndustry)
-
             // Company Profile
             TickerDetailCompanyProfileSection(
                 profile: tickerData.companyProfile,

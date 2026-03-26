@@ -777,7 +777,10 @@ class TickerDetailViewModel: ObservableObject {
             founded: stockDetail?.ipoDate ?? "N/A",
             employees: stockDetail?.fullTimeEmployees ?? 0,
             headquarters: hq,
-            website: stockDetail?.website ?? "N/A"
+            website: stockDetail?.website ?? "N/A",
+            sector: stockDetail?.sector ?? "N/A",
+            industry: stockDetail?.industry ?? "N/A",
+            sectorPerformance: 0.0
         )
 
         // Determine market status based on current time

@@ -48,7 +48,6 @@ struct TickerDetailSnapshotsSection: View {
 
             // Radar chart
             SnapshotRadarChart(snapshots: snapshots)
-                .drawingGroup()
                 .padding(.bottom, -AppSpacing.md)
                 .padding(.bottom, -AppSpacing.sm)
 

@@ -87,6 +87,34 @@ _SECTOR_PS_AVG: Dict[str, float] = {
     "Communication Services": 4.0,
 }
 
+_SECTOR_PFCF_AVG: Dict[str, float] = {
+    "Technology": 30.0,
+    "Healthcare": 25.0,
+    "Financial Services": 15.0,
+    "Consumer Cyclical": 22.0,
+    "Consumer Defensive": 20.0,
+    "Industrials": 22.0,
+    "Energy": 12.0,
+    "Utilities": 15.0,
+    "Real Estate": 30.0,
+    "Basic Materials": 16.0,
+    "Communication Services": 22.0,
+}
+
+_SECTOR_EV_EBITDA_AVG: Dict[str, float] = {
+    "Technology": 22.0,
+    "Healthcare": 16.0,
+    "Financial Services": 12.0,
+    "Consumer Cyclical": 14.0,
+    "Consumer Defensive": 15.0,
+    "Industrials": 14.0,
+    "Energy": 8.0,
+    "Utilities": 12.0,
+    "Real Estate": 20.0,
+    "Basic Materials": 10.0,
+    "Communication Services": 14.0,
+}
+
 
 # ── Number formatting helpers ────────────────────────────────────
 
@@ -1005,6 +1033,8 @@ class StockOverviewService:
 
         sector_pe = _SECTOR_PE_AVG.get(sector, 20.0)
         sector_ps = _SECTOR_PS_AVG.get(sector, 3.0)
+        sector_pfcf = _SECTOR_PFCF_AVG.get(sector, 25.0)
+        sector_ev_ebitda = _SECTOR_EV_EBITDA_AVG.get(sector, 18.0)
 
         # Rating: lower multiples = better (inverted)
         def _val_score(val: float, avg: float) -> int:
@@ -1027,9 +1057,9 @@ class StockOverviewService:
         if ps > 0:
             scores.append(_val_score(ps, sector_ps))
         if pfcf > 0:
-            scores.append(_val_score(pfcf, 25.0))
+            scores.append(_val_score(pfcf, sector_pfcf))
         if ev_ebitda > 0:
-            scores.append(_val_score(ev_ebitda, 18.0))
+            scores.append(_val_score(ev_ebitda, sector_ev_ebitda))
 
         rating = round(sum(scores) / len(scores)) if scores else 3
 
@@ -1050,11 +1080,11 @@ class StockOverviewService:
                 value=f"{ps:.2f}" if ps > 0 else "—"
             ),
             SnapshotMetricResponse(
-                name=f"P/FCF ({_val_ctx(pfcf, 25.0, 'P/FCF')})",
+                name=f"P/FCF ({_val_ctx(pfcf, sector_pfcf, 'P/FCF')})",
                 value=f"{pfcf:.2f}" if pfcf > 0 else "—"
             ),
             SnapshotMetricResponse(
-                name=f"EV/EBITDA ({_val_ctx(ev_ebitda, 18.0, 'EV/EBITDA')})",
+                name=f"EV/EBITDA ({_val_ctx(ev_ebitda, sector_ev_ebitda, 'EV/EBITDA')})",
                 value=f"{ev_ebitda:.2f}" if ev_ebitda > 0 else "—"
             ),
         ]

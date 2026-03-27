@@ -130,6 +130,16 @@ METRIC_DEFS = [
         "lower_is_better": False,
         "is_percentage": False,
     },
+    # Altman Z-Score uses absolute thresholds (no sector benchmark)
+    # Computed separately from balance sheet + income statement + market cap
+    {
+        "type": "altman_z_score",
+        "source": "computed",
+        "fmp_field": None,
+        "benchmark_name": None,
+        "lower_is_better": False,
+        "is_percentage": False,
+    },
 ]
 
 # ── Status thresholds (percent difference) ────────────────────────
@@ -140,6 +150,7 @@ _STATUS_THRESHOLDS = {
     "pe_ratio":       {"positive_below": -10, "negative_above": 35},
     "roe":            {"positive_above": 10,  "negative_below": -20},
     "current_ratio":  {"positive_above": 10,  "negative_below": -25},
+    # altman_z_score uses absolute thresholds, not percent difference
 }
 
 
@@ -404,6 +415,96 @@ def _generate_cr_insight(
         )
 
 
+def _generate_zscore_insight(
+    value: float,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Generate insight text for Altman Z-Score using absolute thresholds.
+
+    Returns (main_text, highlighted_value, highlighted_label).
+    No sector comparison — uses Altman's universal bankruptcy-risk zones.
+    """
+    formatted = f"{value:.1f}"
+
+    if value > 4.5:
+        return (
+            "Fortress balance sheet. Very low bankruptcy risk.",
+            formatted,
+            "Z-Score.",
+        )
+    elif value > 3.0:
+        return (
+            "Safe zone. Low probability of financial distress.",
+            formatted,
+            "Z-Score.",
+        )
+    elif value > 2.5:
+        return (
+            "Grey zone, leaning safe. Monitor closely.",
+            formatted,
+            "Z-Score.",
+        )
+    elif value > 1.8:
+        return (
+            "Grey zone. Moderate financial stress signals.",
+            formatted,
+            "Z-Score.",
+        )
+    elif value > 1.0:
+        return (
+            "Distress zone. Elevated bankruptcy risk.",
+            formatted,
+            "Z-Score.",
+        )
+    else:
+        return (
+            "Deep distress. Imminent default risk.",
+            formatted,
+            "Z-Score.",
+        )
+
+
+def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
+    """Compute Altman Z-Score from balance sheet, income, and market cap."""
+    ta = _safe_float(bs, "totalAssets")
+    tl = _safe_float(bs, "totalLiabilities")
+    ca = _safe_float(bs, "totalCurrentAssets")
+    cl = _safe_float(bs, "totalCurrentLiabilities")
+    re = _safe_float(bs, "retainedEarnings")
+    ebit = _safe_float(inc, "operatingIncome")
+    rev = _safe_float(inc, "revenue")
+
+    if not ta or ta <= 0 or not tl or tl <= 0:
+        return None
+
+    wc = (ca or 0) - (cl or 0)
+    z = (
+        1.2 * (wc / ta)
+        + 1.4 * ((re or 0) / ta)
+        + 3.3 * ((ebit or 0) / ta)
+        + 0.6 * ((mcap or 0) / tl)
+        + 1.0 * ((rev or 0) / ta)
+    )
+    return round(z, 1)
+
+
+def _zscore_gauge(z: float) -> float:
+    """Map Z-Score to 0.0–1.0 gauge using Altman's zones.
+
+    0.0 = deep distress (Z ≤ 0), 0.5 ≈ grey zone boundary (Z = 1.8),
+    1.0 = fortress (Z ≥ 4.5).
+    """
+    return _clamp(z / 4.5, 0.02, 0.98)
+
+
+def _zscore_status(z: float) -> str:
+    """Determine status from Altman Z-Score absolute thresholds."""
+    if z > 3.0:
+        return "positive"
+    elif z > 1.8:
+        return "neutral"
+    return "negative"
+
+
 _INSIGHT_GENERATORS = {
     "debt_to_equity": _generate_de_insight,
     "pe_ratio": _generate_pe_insight,
@@ -428,6 +529,8 @@ def _absolute_gauge(metric_type: str, value: float) -> float:
     elif metric_type == "current_ratio":
         # CR: 0 is bad (0.0), 1.5 is mid (0.5), 3+ is great (1.0)
         return _clamp(value / 3.0, 0.02, 0.98)
+    elif metric_type == "altman_z_score":
+        return _zscore_gauge(value)
     return 0.5
 
 
@@ -458,6 +561,8 @@ def _absolute_status(metric_type: str, value: float) -> str:
         elif value > 0.8:
             return "neutral"
         return "negative"
+    elif metric_type == "altman_z_score":
+        return _zscore_status(value)
     return "neutral"
 
 
@@ -502,6 +607,9 @@ def _fallback_insight(
         elif value > 0.8:
             return ("Tight liquidity. Adequate but limited cushion.", formatted, "current ratio.")
         return ("Low liquidity. May face short-term payment challenges.", formatted, "current ratio.")
+
+    elif metric_type == "altman_z_score":
+        return _generate_zscore_insight(value)
 
     return ("", None, None)
 
@@ -642,12 +750,14 @@ class HealthCheckService:
     async def _build_health_check(
         self, ticker: str
     ) -> Tuple[HealthCheckResponse, Optional[str]]:
-        # Phase 1: parallel FMP fetch (profile + ratios + key-metrics + earnings calendar)
-        profile, ratios_list, key_metrics_list, ec_raw = await asyncio.gather(
+        # Phase 1: parallel FMP fetch (profile + ratios + key-metrics + earnings calendar + BS + IS for Z-Score)
+        profile, ratios_list, key_metrics_list, ec_raw, bs_raw, inc_raw = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
             self.fmp.get_financial_ratios(ticker, period="annual", limit=1),
             self.fmp.get_key_metrics(ticker, period="annual", limit=1),
             self.fmp.get_earning_calendar_full(ticker),
+            self.fmp.get_balance_sheet(ticker, period="annual", limit=1),
+            self.fmp.get_income_statement(ticker, period="annual", limit=1),
             return_exceptions=True,
         )
 
@@ -663,10 +773,24 @@ class HealthCheckService:
         if isinstance(ec_raw, Exception):
             logger.warning(f"Earnings calendar failed for {ticker}: {ec_raw}")
             ec_raw = []
+        if isinstance(bs_raw, Exception):
+            logger.warning(f"Balance sheet fetch failed for {ticker}: {bs_raw}")
+            bs_raw = []
+        if isinstance(inc_raw, Exception):
+            logger.warning(f"Income statement fetch failed for {ticker}: {inc_raw}")
+            inc_raw = []
 
         # Phase 2: extract company ratios from both sources
         ratios = ratios_list[0] if isinstance(ratios_list, list) and ratios_list else {}
         key_metrics = key_metrics_list[0] if isinstance(key_metrics_list, list) and key_metrics_list else {}
+        balance_sheet = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
+        income_stmt = inc_raw[0] if isinstance(inc_raw, list) and inc_raw else {}
+
+        # Extract market cap for Z-Score
+        profile_data = profile if isinstance(profile, dict) else (profile[0] if isinstance(profile, list) and profile else {})
+        mcap = _safe_float(profile_data, "mktCap")
+        if mcap is None:
+            mcap = _safe_float(profile_data, "marketCap")
 
         # Phase 3: get sector and look up benchmarks
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
@@ -691,9 +815,37 @@ class HealthCheckService:
         else:
             logger.warning(f"Health check {ticker}: no sector found, skipping benchmark lookup")
 
+        # Pre-compute Altman Z-Score for use in the metric loop
+        z_score_val = _compute_z_score(balance_sheet, income_stmt, mcap)
+
         # Phase 4: build each metric
         metrics: List[HealthCheckMetricSchema] = []
         for mdef in METRIC_DEFS:
+            # Altman Z-Score is computed separately, not from a single FMP field
+            if mdef["type"] == "altman_z_score":
+                if z_score_val is None:
+                    logger.warning(f"Health check {ticker}: altman_z_score — insufficient data to compute")
+                    continue
+
+                gauge = _zscore_gauge(z_score_val)
+                status = _zscore_status(z_score_val)
+                insight_text, highlighted_value, highlighted_label = _generate_zscore_insight(z_score_val)
+
+                metrics.append(
+                    HealthCheckMetricSchema(
+                        type="altman_z_score",
+                        value=round(z_score_val, 1),
+                        comparison_value=None,
+                        percent_difference=None,
+                        gauge_position=round(gauge, 2),
+                        status=status,
+                        insight_text=insight_text,
+                        highlighted_value=highlighted_value,
+                        highlighted_label=highlighted_label,
+                    )
+                )
+                continue
+
             source = ratios if mdef["source"] == "ratios" else key_metrics
             company_val = _safe_float(source, mdef["fmp_field"])
             if company_val is None:

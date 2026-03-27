@@ -53,6 +53,7 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
     case peRatio = "P/E Ratio"
     case returnOnEquity = "Return on Equity"
     case currentRatio = "Current Ratio"
+    case altmanZScore = "Altman Z-Score"
 
     var id: String { rawValue }
 
@@ -66,6 +67,8 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Profitability"
         case .currentRatio:
             return "Liquidity"
+        case .altmanZScore:
+            return "Bankruptcy risk"
         }
     }
 
@@ -79,6 +82,8 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Poor"
         case .currentRatio:
             return "Low"
+        case .altmanZScore:
+            return "Distress"
         }
     }
 
@@ -92,6 +97,8 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Great"
         case .currentRatio:
             return "High"
+        case .altmanZScore:
+            return "Safe"
         }
     }
 
@@ -106,6 +113,8 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Measures profitability relative to shareholder equity. Higher ROE indicates efficient use of capital, but compare to sector average for context."
         case .currentRatio:
             return "Measures ability to pay short-term obligations. A ratio above 1.0 indicates good liquidity. Value investors look for financial stability."
+        case .altmanZScore:
+            return "Predicts bankruptcy probability using five financial ratios. Z > 3.0 is safe, 1.8–3.0 is a grey zone, and below 1.8 signals distress. A key metric for value investors assessing downside risk."
         }
     }
 }
@@ -153,12 +162,24 @@ struct HealthCheckMetric: Identifiable {
             return String(format: "%.1f%%", value)
         case .currentRatio:
             return String(format: "%.2f", value)
+        case .altmanZScore:
+            return String(format: "%.1f", value)
         }
     }
 
     var formattedComparison: String? {
+        switch type {
+        case .altmanZScore:
+            // Show zone label instead of sector comparison
+            if value > 3.0 { return "Safe zone" }
+            else if value > 1.8 { return "Grey zone" }
+            else { return "Distress zone" }
+        default:
+            break
+        }
+
         guard let comparison = comparisonValue else { return nil }
-        
+
         switch type {
         case .debtToEquity, .currentRatio:
             return "vs \(String(format: "%.2f", comparison))"
@@ -166,6 +187,8 @@ struct HealthCheckMetric: Identifiable {
             return "vs \(String(format: "%.1f", comparison))"
         case .returnOnEquity:
             return "vs \(String(format: "%.1f%%", comparison))"
+        case .altmanZScore:
+            return nil
         }
     }
 
@@ -188,7 +211,7 @@ struct HealthCheckMetric: Identifiable {
                 AppColors.alertOrange,
                 AppColors.bearish
             ]
-        case .returnOnEquity, .currentRatio:
+        case .returnOnEquity, .currentRatio, .altmanZScore:
             // Higher is better: red -> orange -> yellow -> lime -> green
             gradientColors = [
                 AppColors.bearish,
@@ -233,8 +256,8 @@ struct HealthCheckSectionData {
 extension HealthCheckSectionData {
     static let sampleData = HealthCheckSectionData(
         overallRating: .mix,
-        passedCount: 2,
-        totalCount: 4,
+        passedCount: 3,
+        totalCount: 5,
         metrics: [
             HealthCheckMetric(
                 type: .debtToEquity,
@@ -279,6 +302,17 @@ extension HealthCheckSectionData {
                 insightText: "sector average, normal short-term liquidity position.",
                 highlightedValue: "21%",
                 highlightedLabel: "above"
+            ),
+            HealthCheckMetric(
+                type: .altmanZScore,
+                value: 2.4,
+                comparisonValue: nil,
+                percentDifference: nil,
+                gaugePosition: 0.53,
+                status: .neutral,
+                insightText: "Grey zone. Moderate financial stress signals.",
+                highlightedValue: "2.4",
+                highlightedLabel: "Z-Score."
             )
         ]
     )
@@ -286,7 +320,7 @@ extension HealthCheckSectionData {
     static let sampleApple = HealthCheckSectionData(
         overallRating: .good,
         passedCount: 3,
-        totalCount: 4,
+        totalCount: 5,
         metrics: [
             HealthCheckMetric(
                 type: .debtToEquity,
@@ -331,6 +365,17 @@ extension HealthCheckSectionData {
                 insightText: "sector average. Tight but manageable liquidity.",
                 highlightedValue: "34%",
                 highlightedLabel: "below"
+            ),
+            HealthCheckMetric(
+                type: .altmanZScore,
+                value: 4.8,
+                comparisonValue: nil,
+                percentDifference: nil,
+                gaugePosition: 0.98,
+                status: .positive,
+                insightText: "Fortress balance sheet. Very low bankruptcy risk.",
+                highlightedValue: "4.8",
+                highlightedLabel: "Z-Score."
             )
         ]
     )

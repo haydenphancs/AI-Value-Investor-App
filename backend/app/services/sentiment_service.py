@@ -1,17 +1,18 @@
 """
-Sentiment Analysis Service — aggregates FMP social sentiment and
-news sentiment to compute a 0-100 mood score.
+Sentiment Analysis Service — aggregates FMP news articles and price
+momentum to compute a 0-100 mood score.
 
-Uses 4 parallel FMP data sources:
-  1. social-sentiments/change (hourly social data)
-  2. social-sentiments/historical (daily social data, supplement)
-  3. news/stock (raw news articles, high limit)
-  4. stock-news-sentiments-rss-feed (news WITH sentiment scores)
+Data sources:
+  1. news/stock (raw news articles from FMP)
+  2. quote (price momentum for real-time signal)
+  3. ticker_news_cache (Supabase — accumulated articles with sentiment)
 
-Three-tier news scoring ensures every article gets scored:
-  Tier 1: sentimentScore float from RSS feed (-1 to 1)
-  Tier 2: sentiment string label (Bullish/Bearish/Neutral)
-  Tier 3: keyword-based classification on title + text
+Articles are scored using keyword-based classification on title + text,
+persisted to Supabase for rolling 24h/7d window accuracy, and combined
+with price momentum for the final mood score.
+
+Social mentions are derived from news article mention counts (FMP's
+social-sentiments endpoints were removed from the stable API).
 """
 
 import asyncio
@@ -34,6 +35,9 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 900  # 15 minutes
 
+# How often to re-fetch from FMP and refresh the DB cache
+_DB_REFRESH_TTL = 14400  # 4 hours
+
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
     entry = _cache.get(key)
@@ -50,7 +54,7 @@ def _cache_set(key: str, value: Any):
     _cache[key] = (time.time(), value)
 
 
-# ── Keyword-based sentiment classifier (fallback) ────────────────
+# ── Keyword-based sentiment classifier ───────────────────────────
 
 _BULLISH_KEYWORDS: Set[str] = {
     # Price action
@@ -116,6 +120,15 @@ def _classify_headline(text: str) -> str:
     return "neutral"
 
 
+def _sentiment_label_to_db(classification: str) -> str:
+    """Map keyword classification to DB enum: bullish/bearish/neutral."""
+    if classification == "positive":
+        return "bullish"
+    if classification == "negative":
+        return "bearish"
+    return "neutral"
+
+
 # ── Service ───────────────────────────────────────────────────────
 
 class SentimentService:
@@ -131,64 +144,25 @@ class SentimentService:
         if cached is not None:
             return cached
 
-        # Parallel fetch: 5 data sources
+        # Parallel fetch: news articles + price data
+        news_task = self._get_articles(ticker)
+        price_task = self._fetch_price_data(ticker)
+
         results = await asyncio.gather(
-            self._fetch_social_change(ticker),
-            self._fetch_social_historical(ticker),
-            self._fetch_news(ticker),
-            self._fetch_news_sentiments_rss(ticker),
-            self._fetch_price_data(ticker),
-            return_exceptions=True,
+            news_task, price_task, return_exceptions=True,
         )
 
-        source_names = [
-            "social_change", "social_historical",
-            "news_raw", "news_rss", "price",
-        ]
-        fetched = []
-        for i, r in enumerate(results):
-            if isinstance(r, Exception):
-                logger.warning(
-                    f"Sentiment fetch '{source_names[i]}' failed for "
-                    f"{ticker}: {r}"
-                )
-                fetched.append([] if i < 4 else {})
-            else:
-                fetched.append(r)
+        articles = results[0] if not isinstance(results[0], Exception) else []
+        price_data = results[1] if not isinstance(results[1], Exception) else {}
 
-        social_change = fetched[0]
-        social_historical = fetched[1]
-        news_raw = fetched[2]
-        news_rss = fetched[3]
-        price_data = fetched[4]
-
-        # Extract company name from quote for better article filtering
-        company_name = ""
-        if isinstance(price_data, dict):
-            company_name = price_data.get("name", "")
-
-        # Merge data sources
-        social_merged = self._merge_social_data(
-            social_change, social_historical
-        )
-        all_news = self._merge_news_data(news_raw, news_rss)
-
-        # Filter news to articles relevant to this ticker
-        news_merged = self._filter_articles_for_ticker(
-            all_news, ticker, company_name
-        )
-        logger.info(
-            f"News filtering for {ticker} ({company_name}): "
-            f"{len(all_news)} fetched → {len(news_merged)} relevant"
-        )
+        if isinstance(results[0], Exception):
+            logger.warning(f"Article fetch failed for {ticker}: {results[0]}")
+        if isinstance(results[1], Exception):
+            logger.warning(f"Price fetch failed for {ticker}: {results[1]}")
 
         logger.info(
             f"Sentiment data for {ticker}: "
-            f"social_change={len(social_change)}, "
-            f"social_hist={len(social_historical)}, "
-            f"social_merged={len(social_merged)}, "
-            f"news_raw={len(news_raw)}, news_rss={len(news_rss)}, "
-            f"news_merged={len(news_merged)}"
+            f"articles={len(articles)}"
         )
 
         # ── Price momentum score (always available) ────────────
@@ -196,49 +170,38 @@ class SentimentService:
 
         # ── 24-hour window ────────────────────────────────────────
         news_score_24h, news_cur_24h, news_prev_24h = (
-            self._compute_news_score(news_merged, hours=24)
+            self._compute_news_score(articles, hours=24)
         )
-        social_score_24h, social_cur_24h, social_prev_24h = (
-            self._compute_social_score(social_merged, days=1)
+        # Social mentions = ticker mention count in news articles
+        social_cur_24h = self._count_ticker_mentions(
+            articles, ticker, hours=24
         )
-
-        # When FMP social endpoints are unavailable, derive
-        # mention counts from news data as a buzz proxy.
-        if social_cur_24h == 0 and not social_merged:
-            social_cur_24h = self._count_ticker_mentions(
-                news_merged, ticker, hours=24
-            )
-            social_prev_24h = self._count_ticker_mentions(
-                news_merged, ticker, hours=24, previous=True
-            )
+        social_prev_24h = self._count_ticker_mentions(
+            articles, ticker, hours=24, previous=True
+        )
 
         has_news_24h = news_cur_24h > 0
         has_social_24h = social_cur_24h > 0
         combined_24h = self._combine_scores(
-            news_score_24h, social_score_24h,
+            news_score_24h, 50,
             has_social_24h, has_news_24h, price_score,
         )
 
         # ── 7-day window ──────────────────────────────────────────
         news_score_7d, news_cur_7d, news_prev_7d = (
-            self._compute_news_score(news_merged, hours=168)
+            self._compute_news_score(articles, hours=168)
         )
-        social_score_7d, social_cur_7d, social_prev_7d = (
-            self._compute_social_score(social_merged, days=7)
+        social_cur_7d = self._count_ticker_mentions(
+            articles, ticker, hours=168
         )
-
-        if social_cur_7d == 0 and not social_merged:
-            social_cur_7d = self._count_ticker_mentions(
-                news_merged, ticker, hours=168
-            )
-            social_prev_7d = self._count_ticker_mentions(
-                news_merged, ticker, hours=168, previous=True
-            )
+        social_prev_7d = self._count_ticker_mentions(
+            articles, ticker, hours=168, previous=True
+        )
 
         has_news_7d = news_cur_7d > 0
         has_social_7d = social_cur_7d > 0
         combined_7d = self._combine_scores(
-            news_score_7d, social_score_7d,
+            news_score_7d, 50,
             has_social_7d, has_news_7d, price_score,
         )
 
@@ -280,29 +243,168 @@ class SentimentService:
         _cache_set(f"sentiment:{ticker}", response)
         return response
 
-    # ── Data fetching ─────────────────────────────────────────────
+    # ── Article pipeline (DB-backed) ─────────────────────────────
 
-    async def _fetch_social_change(
+    async def _get_articles(
         self, ticker: str
     ) -> List[Dict[str, Any]]:
-        """Fetch hourly social sentiment from social-sentiments/change."""
-        try:
-            return await self.fmp.get_social_sentiment(ticker)
-        except Exception as e:
-            logger.warning(f"Social change fetch failed for {ticker}: {e}")
+        """
+        Get articles from DB cache, refreshing from FMP if stale.
+
+        Returns articles in a unified format with publishedDate and
+        sentiment fields suitable for scoring.
+        """
+        # Check if DB has fresh enough articles for this ticker
+        db_articles = await asyncio.to_thread(
+            self._load_from_db, ticker
+        )
+
+        if db_articles is not None:
+            logger.info(
+                f"Sentiment DB cache HIT for {ticker}: "
+                f"{len(db_articles)} articles"
+            )
+            return db_articles
+
+        # DB is stale or empty — fetch from FMP
+        logger.info(f"Sentiment DB cache MISS for {ticker} — fetching FMP")
+        fmp_articles = await self._fetch_news(ticker)
+
+        if not fmp_articles:
+            # Try loading stale DB data as fallback
+            stale = await asyncio.to_thread(
+                self._load_from_db, ticker, stale_ok=True
+            )
+            if stale:
+                logger.info(
+                    f"Using stale DB articles for {ticker}: {len(stale)}"
+                )
+                return stale
             return []
 
-    async def _fetch_social_historical(
-        self, ticker: str
-    ) -> List[Dict[str, Any]]:
-        """Fetch daily historical social sentiment."""
+        # Persist to DB in background (fire-and-forget)
+        asyncio.get_running_loop().run_in_executor(
+            None, self._persist_articles, ticker, fmp_articles
+        )
+
+        return fmp_articles
+
+    def _load_from_db(
+        self, ticker: str, stale_ok: bool = False,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Load cached articles from Supabase ticker_news_cache."""
         try:
-            return await self.fmp.get_social_sentiment_historical(ticker)
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=14)
+            ).isoformat()
+
+            result = (
+                self.supabase.table("ticker_news_cache")
+                .select(
+                    "headline, summary, sentiment, "
+                    "sentiment_confidence, published_at, "
+                    "source_name, cached_at"
+                )
+                .eq("ticker", ticker)
+                .gte("published_at", cutoff)
+                .order("published_at", desc=True)
+                .execute()
+            )
+
+            if not result.data:
+                return None
+
+            # Check freshness — is the most recent cached_at within 4h?
+            if not stale_ok:
+                latest_cached = max(
+                    (r.get("cached_at") or "") for r in result.data
+                )
+                if latest_cached:
+                    cached_dt = datetime.fromisoformat(
+                        latest_cached.replace("Z", "+00:00")
+                    )
+                    age = datetime.now(timezone.utc) - cached_dt
+                    if age > timedelta(seconds=_DB_REFRESH_TTL):
+                        logger.info(
+                            f"DB cache STALE for {ticker} "
+                            f"(age={age})"
+                        )
+                        return None
+
+            # Convert DB rows to article-like dicts for scoring
+            articles = []
+            for row in result.data:
+                articles.append({
+                    "title": row.get("headline") or "",
+                    "text": row.get("summary") or "",
+                    "publishedDate": row.get("published_at") or "",
+                    "sentiment": row.get("sentiment") or "",
+                    "site": row.get("source_name") or "",
+                })
+            return articles
+
         except Exception as e:
             logger.warning(
-                f"Social historical fetch failed for {ticker}: {e}"
+                f"DB article load failed for {ticker}: {e}"
             )
-            return []
+            return None
+
+    def _persist_articles(
+        self, ticker: str, articles: List[Dict[str, Any]]
+    ):
+        """Upsert FMP articles into ticker_news_cache with sentiment."""
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=14)).isoformat()
+        rows = []
+
+        for a in articles:
+            url = a.get("url") or ""
+            title = a.get("title") or ""
+            text = a.get("text") or ""
+            published = a.get("publishedDate") or ""
+
+            if not url or not title:
+                continue
+
+            # Score sentiment using keyword classifier
+            combined = f"{title} {text[:300]}"
+            classification = _classify_headline(combined)
+            sentiment_db = _sentiment_label_to_db(classification)
+            confidence = 60 if classification != "neutral" else 40
+
+            rows.append({
+                "ticker": ticker,
+                "external_id": url,  # Use URL as dedup key
+                "headline": title[:500],
+                "summary": (text or "")[:2000],
+                "sentiment": sentiment_db,
+                "sentiment_confidence": confidence,
+                "source_name": a.get("site") or a.get("source") or "",
+                "published_at": published,
+                "thumbnail_url": a.get("image") or "",
+                "article_url": url,
+                "cached_at": now.isoformat(),
+                "expires_at": expires,
+            })
+
+        if not rows:
+            return
+
+        try:
+            # Batch upsert (Supabase handles UNIQUE constraint)
+            self.supabase.table("ticker_news_cache").upsert(
+                rows, on_conflict="ticker,external_id"
+            ).execute()
+            logger.info(
+                f"Persisted {len(rows)} articles for {ticker} "
+                f"to ticker_news_cache"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Article persist failed for {ticker}: {e}"
+            )
+
+    # ── Data fetching ─────────────────────────────────────────────
 
     async def _fetch_news(self, ticker: str) -> List[Dict[str, Any]]:
         """
@@ -326,20 +428,7 @@ class SentimentService:
             return articles if articles else []
         except Exception as e:
             logger.warning(
-                f"FMP news fetch failed for {ticker}, "
-                f"falling back to cache: {e}"
-            )
-            return await self._fetch_news_from_cache(ticker)
-
-    async def _fetch_news_sentiments_rss(
-        self, ticker: str
-    ) -> List[Dict[str, Any]]:
-        """Fetch news with FMP-computed sentiment scores."""
-        try:
-            return await self.fmp.get_news_sentiments_rss(ticker)
-        except Exception as e:
-            logger.warning(
-                f"News sentiments RSS failed for {ticker}: {e}"
+                f"FMP news fetch failed for {ticker}: {e}"
             )
             return []
 
@@ -353,152 +442,6 @@ class SentimentService:
             logger.warning(f"Price data fetch failed for {ticker}: {e}")
             return {}
 
-    async def _fetch_news_from_cache(
-        self, ticker: str
-    ) -> List[Dict[str, Any]]:
-        """Fallback: fetch from Supabase ticker_news_cache."""
-        try:
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(days=14)
-            ).isoformat()
-            result = (
-                self.supabase.table("ticker_news_cache")
-                .select(
-                    "published_at, sentiment, sentiment_confidence, "
-                    "ai_processed"
-                )
-                .eq("ticker", ticker)
-                .gte("published_at", cutoff)
-                .order("published_at", desc=True)
-                .execute()
-            )
-            return result.data or []
-        except Exception as e:
-            logger.warning(
-                f"News cache fallback also failed for {ticker}: {e}"
-            )
-            return []
-
-    # ── Article filtering ──────────────────────────────────────
-
-    @staticmethod
-    def _filter_articles_for_ticker(
-        articles: List[Dict[str, Any]],
-        ticker: str,
-        company_name: str = "",
-    ) -> List[Dict[str, Any]]:
-        """
-        Filter articles to those relevant to the ticker.
-
-        Checks symbol field, title, and text for the ticker symbol,
-        $TICKER, or company name. Compensates for FMP's news/stock
-        endpoint not filtering by ticker properly.
-        """
-        ticker_upper = ticker.upper()
-        dollar_ticker = f"${ticker_upper}"
-
-        # Build search terms (e.g., ["AAPL", "$AAPL", "APPLE"])
-        search_terms = [ticker_upper, dollar_ticker]
-        if company_name:
-            # Use the first word of the company name as a search
-            # term (e.g., "Apple" from "Apple Inc.")
-            name_parts = company_name.split()
-            if name_parts:
-                first_word = name_parts[0].upper()
-                # Only add if it's meaningful (>2 chars, not generic)
-                if len(first_word) > 2:
-                    search_terms.append(first_word)
-
-        filtered = []
-        for a in articles:
-            # Direct symbol match
-            sym = (a.get("symbol") or "").upper()
-            if sym == ticker_upper:
-                filtered.append(a)
-                continue
-
-            # Check title and text for any search term
-            title = (a.get("title") or "").upper()
-            text = (a.get("text") or "").upper()
-            combined = f"{title} {text}"
-
-            if any(term in combined for term in search_terms):
-                filtered.append(a)
-
-        return filtered
-
-    # ── Data merging ─────────────────────────────────────────────
-
-    @staticmethod
-    def _merge_social_data(
-        change_data: List[Dict[str, Any]],
-        historical_data: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Merge hourly (change) and daily (historical) social data.
-
-        Uses hourly data as primary if it has 100+ records.
-        Otherwise supplements with historical data for dates
-        not already covered by change_data.
-        """
-        if len(change_data) >= 100:
-            return change_data
-
-        if not change_data and not historical_data:
-            return []
-        if not change_data:
-            return historical_data
-        if not historical_data:
-            return change_data
-
-        # Get dates already covered by change_data
-        change_dates: Set[str] = set()
-        for r in change_data:
-            d = (r.get("date") or "")[:10]
-            if d:
-                change_dates.add(d)
-
-        # Add historical records for dates NOT in change_data
-        merged = list(change_data)
-        for r in historical_data:
-            d = (r.get("date") or "")[:10]
-            if d and d not in change_dates:
-                merged.append(r)
-
-        return merged
-
-    @staticmethod
-    def _merge_news_data(
-        raw_articles: List[Dict[str, Any]],
-        rss_articles: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Merge news/stock articles with stock-news-sentiments-rss-feed.
-
-        RSS articles have sentimentScore and sentiment fields.
-        Deduplicate by URL, preferring RSS version.
-        """
-        seen_urls: Set[str] = set()
-        merged: List[Dict[str, Any]] = []
-
-        # Add RSS articles first (they have sentiment data)
-        for a in rss_articles:
-            url = a.get("url") or ""
-            if url:
-                seen_urls.add(url)
-            merged.append(a)
-
-        # Add raw articles that aren't already in RSS set
-        for a in raw_articles:
-            url = a.get("url") or ""
-            if url and url in seen_urls:
-                continue
-            if url:
-                seen_urls.add(url)
-            merged.append(a)
-
-        return merged
-
     # ── Ticker mention counting (social mentions proxy) ────────
 
     @staticmethod
@@ -511,9 +454,8 @@ class SentimentService:
         """
         Count ticker mentions across news articles as a buzz proxy.
 
-        When FMP social endpoints are unavailable, this provides
-        a non-zero 'social mentions' count by counting how many
-        times the ticker symbol appears in news titles and text.
+        Counts how many times the ticker symbol appears in news
+        titles and text within the time window.
         """
         now = datetime.now(timezone.utc)
         if previous:
@@ -550,10 +492,7 @@ class SentimentService:
         """
         Returns (score_0_100, current_article_count, previous_article_count).
 
-        Three-tier sentiment resolution ensures every article gets scored:
-          1. sentimentScore float (from RSS, -1 to 1) -> 0-100
-          2. sentiment string label (Bullish/Bearish/Neutral) -> mapped
-          3. keyword-based classification on title + text -> mapped
+        Scores each article using keyword classification on title + text.
         """
         now = datetime.now(timezone.utc)
         current_cutoff = (now - timedelta(hours=hours)).isoformat()
@@ -577,7 +516,7 @@ class SentimentService:
         if not current:
             return 50, 0, len(previous)
 
-        # Score every article using three-tier resolution
+        # Score every article
         scores: List[float] = []
         for a in current:
             scores.append(self._resolve_article_sentiment(a))
@@ -592,28 +531,22 @@ class SentimentService:
         Resolve sentiment for a single article. Returns 0-100 float.
 
         Priority:
-          1. sentimentScore float (from RSS feed, -1..1) -> map to 0..100
-          2. sentiment string label -> fixed score
-          3. keyword classification on title + text -> moderate score
+          1. sentiment string label from DB cache -> fixed score
+          2. keyword classification on title + text -> moderate score
         """
-        # Tier 1: sentimentScore float from RSS feed (-1 to 1)
-        sent_score = article.get("sentimentScore")
-        if sent_score is not None and isinstance(sent_score, (int, float)):
-            return max(0.0, min(100.0, (float(sent_score) + 1) * 50))
-
-        # Tier 2: sentiment string label
+        # Tier 1: sentiment label (from DB cache or RSS feed)
         sent_label = (article.get("sentiment") or "").lower().strip()
         if sent_label in ("positive", "bullish"):
-            return 85.0
+            return 80.0
         if sent_label in ("negative", "bearish"):
-            return 15.0
+            return 20.0
         if sent_label == "neutral":
             return 50.0
 
-        # Tier 3: keyword-based classification on title + text
+        # Tier 2: keyword-based classification on title + text
         title = article.get("title") or article.get("headline") or ""
         text = article.get("text") or article.get("summary") or ""
-        combined = f"{title} {text[:200]}"
+        combined = f"{title} {text[:300]}"
         classification = _classify_headline(combined)
 
         if classification == "positive":
@@ -621,73 +554,6 @@ class SentimentService:
         if classification == "negative":
             return 25.0
         return 50.0
-
-    # ── Social scoring ───────────────────────────────────────────
-
-    def _compute_social_score(
-        self, social_data: List[Dict], days: int
-    ) -> Tuple[int, float, float]:
-        """Returns (score_0_100, current_mentions, previous_mentions)."""
-        if not social_data:
-            return 50, 0.0, 0.0
-
-        today = datetime.now(timezone.utc).date()
-        current_cutoff = (today - timedelta(days=days)).isoformat()
-        previous_cutoff = (today - timedelta(days=days * 2)).isoformat()
-
-        current_records = [
-            r for r in social_data
-            if r.get("date") and r["date"][:10] >= current_cutoff
-        ]
-        previous_records = [
-            r for r in social_data
-            if r.get("date")
-            and previous_cutoff <= r["date"][:10] < current_cutoff
-        ]
-
-        current_mentions = self._count_mentions(current_records)
-        prev_mentions = self._count_mentions(previous_records)
-
-        if not current_records:
-            return 50, 0.0, prev_mentions
-
-        sentiments: List[float] = []
-
-        for r in current_records:
-            sw_sent = r.get("stocktwitsSentiment", 0) or 0
-            tw_sent = r.get("twitterSentiment", 0) or 0
-            sw_posts = r.get("stocktwitsPosts", 0) or 0
-            tw_posts = r.get("twitterPosts", 0) or 0
-
-            posts = sw_posts + tw_posts
-            if posts > 0:
-                weighted = (
-                    (sw_sent * sw_posts + tw_sent * tw_posts) / posts
-                )
-                sentiments.append(weighted)
-            elif sw_sent != 0 or tw_sent != 0:
-                # Records with sentiment values but no post counts
-                vals = [v for v in (sw_sent, tw_sent) if v != 0]
-                if vals:
-                    sentiments.append(sum(vals) / len(vals))
-
-        if not sentiments:
-            return 50, current_mentions, prev_mentions
-
-        avg = sum(sentiments) / len(sentiments)  # -1 to 1
-        score = max(0, min(100, round((avg + 1) * 50)))
-        return score, current_mentions, prev_mentions
-
-    @staticmethod
-    def _count_mentions(records: List[Dict]) -> float:
-        """Sum all social mention counts (posts + comments)."""
-        return sum(
-            (r.get("stocktwitsPosts", 0) or 0)
-            + (r.get("twitterPosts", 0) or 0)
-            + (r.get("stocktwitsComments", 0) or 0)
-            + (r.get("twitterComments", 0) or 0)
-            for r in records
-        )
 
     # ── Price momentum scoring ──────────────────────────────────
 
@@ -728,28 +594,14 @@ class SentimentService:
         """
         Combine sentiment signals with adaptive weighting.
 
-        When news + social are available:
-          45% news + 25% social + 30% price
-        When only news:
+        When news available:
           55% news + 45% price
-        When only social:
-          55% social + 45% price
         When neither:
           100% price (never returns hardcoded 50)
         """
-        if has_news and has_social:
-            return max(0, min(100, round(
-                news_score * 0.45
-                + social_score * 0.25
-                + price_score * 0.30
-            )))
         if has_news:
             return max(0, min(100, round(
                 news_score * 0.55 + price_score * 0.45
-            )))
-        if has_social:
-            return max(0, min(100, round(
-                social_score * 0.55 + price_score * 0.45
             )))
         return price_score
 

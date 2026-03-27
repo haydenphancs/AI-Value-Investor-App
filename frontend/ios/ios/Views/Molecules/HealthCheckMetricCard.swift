@@ -68,16 +68,40 @@ struct HealthCheckMetricCard: View {
                 metricType: metric.type
             )
 
-            HStack {
-                Text(metric.type.leftLabel)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+            if metric.type == .altmanZScore {
+                // Zone labels aligned to segment widths: Distress 30%, Grey 20%, Safe 50%
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    HStack(spacing: 0) {
+                        Text("< 1.8")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.bearish)
+                            .frame(width: w * 0.30, alignment: .center)
 
-                Spacer()
+                        Text("1.8 – 3.0")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.neutral)
+                            .frame(width: w * 0.20, alignment: .center)
 
-                Text(metric.type.rightLabel)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                        Text("> 3.0")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.bullish)
+                            .frame(width: w * 0.50, alignment: .center)
+                    }
+                }
+                .frame(height: 16)
+            } else {
+                HStack {
+                    Text(metric.type.leftLabel)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+
+                    Spacer()
+
+                    Text(metric.type.rightLabel)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
         }
     }

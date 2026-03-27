@@ -69,6 +69,7 @@ _DISPLAY_NAMES = {
     "pe_ratio": "P/E Ratio",
     "roe": "Return on Equity (ROE)",
     "current_ratio": "Current Ratio",
+    "altman_z_score": "Altman Z-Score",
 }
 
 # Map health check overall_rating to 1-5 snapshot rating
@@ -293,15 +294,22 @@ class HealthSnapshotService:
                 value = _fmt_value(m.type, m.value)
                 metrics.append(SnapshotMetricResponse(name=name, value=value))
 
-        # Compute Altman Z-Score
-        z_score = _compute_z_score(bs, inc, mcap)
-
-        # Add Z-Score as metric (uses Altman's universal thresholds, no sector benchmark needed)
-        z_value = f"{z_score}" if z_score is not None else "—"
-        metrics.append(SnapshotMetricResponse(name="Altman Z-Score", value=z_value))
+        # Z-Score now comes from health check metrics (altman_z_score type).
+        # Check if it was included; if not (e.g. insufficient data), compute as fallback.
+        has_zscore = any(m.type == "altman_z_score" for m in (health.metrics if health else []))
+        if not has_zscore:
+            z_score = _compute_z_score(bs, inc, mcap)
+            z_value = f"{z_score}" if z_score is not None else "—"
+            metrics.append(SnapshotMetricResponse(name="Altman Z-Score", value=z_value))
+            z_rating = _zscore_rating(z_score)
+        else:
+            # Extract Z-Score value from health check metrics for rating blend
+            z_val_from_hc = next(
+                (m.value for m in health.metrics if m.type == "altman_z_score"), None
+            )
+            z_rating = _zscore_rating(z_val_from_hc)
 
         # Blend rating: 60% health check + 40% Z-Score
-        z_rating = _zscore_rating(z_score)
         rating = max(1, min(5, round(0.6 * health_rating + 0.4 * z_rating)))
 
         if not metrics:

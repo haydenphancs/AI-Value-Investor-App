@@ -8,7 +8,12 @@
 import SwiftUI
 
 struct TickerAnalysisContent: View {
-    let analysisData: TickerAnalysisData
+    let analystRatingsData: AnalystRatingsData?
+    let sentimentAnalysisData: SentimentAnalysisData?
+    let technicalAnalysisData: TechnicalAnalysisData?
+    let isAnalystLoaded: Bool
+    let isSentimentLoaded: Bool
+    let isTechnicalLoaded: Bool
     @Binding var selectedMomentumPeriod: AnalystMomentumPeriod
     @Binding var selectedSentimentTimeframe: SentimentTimeframe
     var onAnalystRatingsMoreTap: (() -> Void)?
@@ -19,33 +24,45 @@ struct TickerAnalysisContent: View {
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
             // Analyst Ratings Section
-            AnalystRatingsSection(
-                ratingsData: analysisData.analystRatings,
-                selectedMomentumPeriod: $selectedMomentumPeriod,
-                onMoreTapped: {
-                    onAnalystRatingsMoreTap?()
-                },
-                onActionsTapped: {
-                    onAnalystActionsTap?()
-                }
-            )
+            if let ratingsData = analystRatingsData {
+                AnalystRatingsSection(
+                    ratingsData: ratingsData,
+                    selectedMomentumPeriod: $selectedMomentumPeriod,
+                    onMoreTapped: {
+                        onAnalystRatingsMoreTap?()
+                    },
+                    onActionsTapped: {
+                        onAnalystActionsTap?()
+                    }
+                )
+            } else if !isAnalystLoaded {
+                analysisSectionPlaceholder(height: 280)
+            }
 
             // Sentiment Analysis Section
-            SentimentAnalysisSection(
-                sentimentData: analysisData.sentimentAnalysis,
-                selectedTimeframe: $selectedSentimentTimeframe,
-                onMoreTapped: {
-                    onSentimentMoreTap?()
-                }
-            )
+            if let sentimentData = sentimentAnalysisData {
+                SentimentAnalysisSection(
+                    sentimentData: sentimentData,
+                    selectedTimeframe: $selectedSentimentTimeframe,
+                    onMoreTapped: {
+                        onSentimentMoreTap?()
+                    }
+                )
+            } else if !isSentimentLoaded {
+                analysisSectionPlaceholder(height: 200)
+            }
 
             // Technical Analysis Section
-            TechnicalAnalysisSection(
-                technicalData: analysisData.technicalAnalysis,
-                onDetailTapped: {
-                    onTechnicalDetailTap?()
-                }
-            )
+            if let technicalData = technicalAnalysisData {
+                TechnicalAnalysisSection(
+                    technicalData: technicalData,
+                    onDetailTapped: {
+                        onTechnicalDetailTap?()
+                    }
+                )
+            } else if !isTechnicalLoaded {
+                analysisSectionPlaceholder(height: 180)
+            }
 
             // Bottom spacing for AI bar
             Spacer()
@@ -54,12 +71,24 @@ struct TickerAnalysisContent: View {
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)
     }
+
+    private func analysisSectionPlaceholder(height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 12)
+            .fill(AppColors.cardBackground)
+            .frame(height: height)
+            .shimmer()
+    }
 }
 
 #Preview {
     ScrollView {
         TickerAnalysisContent(
-            analysisData: TickerAnalysisData.sampleData,
+            analystRatingsData: AnalystRatingsData.sampleData,
+            sentimentAnalysisData: nil,
+            technicalAnalysisData: TechnicalAnalysisData.sampleData,
+            isAnalystLoaded: true,
+            isSentimentLoaded: false,
+            isTechnicalLoaded: true,
             selectedMomentumPeriod: .constant(.sixMonths),
             selectedSentimentTimeframe: .constant(.last24h)
         )

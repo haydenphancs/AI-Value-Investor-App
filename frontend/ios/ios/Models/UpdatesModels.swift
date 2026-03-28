@@ -62,6 +62,19 @@ struct NewsSource: Identifiable, Hashable {
     let name: String
     let iconName: String?
 
+    /// Display name with domain suffixes like .com, .net, .org stripped
+    var displayName: String {
+        let suffixes = [".com", ".net", ".org", ".co", ".io", ".us", ".uk", ".ca", ".au"]
+        var result = name
+        for suffix in suffixes {
+            if result.lowercased().hasSuffix(suffix) {
+                result = String(result.dropLast(suffix.count))
+                break
+            }
+        }
+        return result
+    }
+
     var systemIconName: String {
         "newspaper.fill"
     }

@@ -164,41 +164,33 @@ struct TechnicalGauge: View {
     }
 }
 
-// MARK: - Technical Gauge Zones (5 colored segments)
+// MARK: - Technical Gauge Zones (5 colored segments with smooth gradients)
 struct TechnicalGaugeZones: View {
     let size: CGFloat
 
     var body: some View {
-
-
-            ZStack {
-                // Strong sell – red
-                TechnicalArcSegment(startAngle: 36, endAngle: 0)
-                    .stroke(Color(hex: "991B1B"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                    .frame(width: size, height: size / 2)
-                // Sell – light red
-                TechnicalArcSegment(startAngle: 72, endAngle: 36)
-                    .stroke(Color.red.opacity(0.8), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                    .frame(width: size, height: size / 2)
-
-                // Neutral – Yellow
-                TechnicalArcSegment(startAngle: 108, endAngle: 72)
-                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                    .frame(width: size, height: size / 2)
-
-                // Buy – Light Green
-                TechnicalArcSegment(startAngle: 144, endAngle: 108)
-                    .stroke(Color.green.opacity(0.8), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                    .frame(width: size, height: size / 2)
-
-                // Strong Buy – Green
-                TechnicalArcSegment(startAngle: 180, endAngle: 144)
-
-                    .stroke(Color(hex: "15803D"), style: StrokeStyle(lineWidth: 24, lineCap: .butt))
-                    .frame(width: size, height: size / 2)
-
-            }
-
+        TechnicalArc()
+            .stroke(
+                AngularGradient(
+                    stops: [
+                        .init(color: Color(hex: "991B1B"), location: 0.0),
+                        .init(color: Color(hex: "991B1B"), location: 0.12),
+                        .init(color: Color.red.opacity(0.8), location: 0.28),
+                        .init(color: Color.red.opacity(0.8), location: 0.32),
+                        .init(color: Color.yellow, location: 0.48),
+                        .init(color: Color.yellow, location: 0.52),
+                        .init(color: Color.green.opacity(0.8), location: 0.68),
+                        .init(color: Color.green.opacity(0.8), location: 0.72),
+                        .init(color: Color(hex: "15803D"), location: 0.88),
+                        .init(color: Color(hex: "15803D"), location: 1.0),
+                    ],
+                    center: UnitPoint(x: 0.5, y: 1.0),
+                    startAngle: .degrees(-180),
+                    endAngle: .degrees(0)
+                ),
+                style: StrokeStyle(lineWidth: 24, lineCap: .round)
+            )
+            .frame(width: size, height: size / 2)
     }
 }
 

@@ -13,13 +13,15 @@ struct AnalystRatingsSection: View {
     var onMoreTapped: (() -> Void)?
     var onActionsTapped: (() -> Void)?
 
+    @State private var showInfoSheet: Bool = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             AnalysisSectionHeader(
                 title: "Analyst Ratings",
                 subtitle: "Total Analysts \(ratingsData.totalAnalysts)\nUpdated On \(ratingsData.formattedUpdatedDate) ET",
-                onAction: { onMoreTapped?() },
+                onAction: { showInfoSheet = true },
                 iconType: .info
             )
 
@@ -65,6 +67,9 @@ struct AnalystRatingsSection: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .sheet(isPresented: $showInfoSheet) {
+            AnalystRatingsInfoSheet()
+        }
     }
 }
 

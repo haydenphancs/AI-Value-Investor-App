@@ -12,15 +12,9 @@ struct SignalOfConfidenceInfoIcon: View {
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 24, height: 24)
-
-                Image(systemName: "info")
-                    .font(AppTypography.iconXS).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textSecondary)
-            }
+            Image(systemName: "info.circle")
+                .font(AppTypography.iconSmall).fontWeight(.medium)
+                .foregroundColor(AppColors.textMuted)
         }
         .buttonStyle(.plain)
     }

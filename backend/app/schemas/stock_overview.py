@@ -25,7 +25,7 @@ class SnapshotMetricResponse(BaseModel):
 
 class SnapshotItemResponse(BaseModel):
     category: str          # "Profitability", "Growth", "Price", "Financial Health", "Insiders & Ownership"
-    rating: int            # 1-5 mapping to Swift SnapshotRatingLevel
+    rating: int            # 0 = unavailable, 1-5 mapping to Swift SnapshotRatingLevel
     metrics: List[SnapshotMetricResponse]
     full_report_available: bool = True
 

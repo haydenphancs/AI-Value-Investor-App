@@ -156,11 +156,11 @@ extension StockOverviewResponseDTO {
 
         // Key statistics
         let keyStats = keyStatistics.map {
-            KeyStatistic(label: $0.label, value: $0.value, isHighlighted: $0.isHighlighted)
+            KeyStatistic(label: $0.label, value: $0.value, isHighlighted: $0.isHighlighted, colorState: $0.colorState)
         }
         let keyStatsGroups = keyStatisticsGroups.map { group in
             KeyStatisticsGroup(statistics: group.statistics.map {
-                KeyStatistic(label: $0.label, value: $0.value, isHighlighted: $0.isHighlighted)
+                KeyStatistic(label: $0.label, value: $0.value, isHighlighted: $0.isHighlighted, colorState: $0.colorState)
             })
         }
 
@@ -170,14 +170,15 @@ extension StockOverviewResponseDTO {
                 label: $0.label,
                 changePercent: $0.changePercent,
                 vsMarketPercent: $0.vsMarketPercent,
-                benchmarkLabel: $0.benchmarkLabel ?? "S&P"
+                benchmarkLabel: $0.benchmarkLabel ?? "S&P",
+                spReturnPercent: $0.spReturnPercent
             )
         }
 
         // Snapshots
         let snapshotItems = snapshots.map { dto in
             let category = SnapshotCategory(rawValue: dto.category) ?? .profitability
-            let rating = SnapshotRatingLevel(rawValue: dto.rating) ?? .average
+            let rating = SnapshotRatingLevel(rawValue: dto.rating) ?? .unavailable
             let metrics = dto.metrics.map { SnapshotMetric(name: $0.name, value: $0.value) }
             return SnapshotItem(
                 category: category,

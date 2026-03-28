@@ -816,6 +816,8 @@ struct SentimentAnalysisDTO: Codable {
     let socialMentionsChange7d: Double
     let newsArticles7d: Int
     let newsArticlesChange7d: Double
+    // Social data availability
+    let socialDataAvailable: Bool
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -831,6 +833,7 @@ struct SentimentAnalysisDTO: Codable {
         case socialMentionsChange7d = "social_mentions_change_7d"
         case newsArticles7d = "news_articles_7d"
         case newsArticlesChange7d = "news_articles_change_7d"
+        case socialDataAvailable = "social_data_available"
     }
 
     func toDisplayModel() -> SentimentAnalysisData {
@@ -846,7 +849,8 @@ struct SentimentAnalysisDTO: Codable {
             socialMentions7d: socialMentions7d,
             socialMentionsChange7d: socialMentionsChange7d,
             newsArticles7d: newsArticles7d,
-            newsArticlesChange7d: newsArticlesChange7d
+            newsArticlesChange7d: newsArticlesChange7d,
+            socialDataAvailable: socialDataAvailable
         )
     }
 }

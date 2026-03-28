@@ -18,7 +18,12 @@ class TickerDetailViewModel: ObservableObject {
     @Published var isNewsLoading: Bool = false
     @Published var hasMoreNews: Bool = false
     @Published var isLoadingMoreNews: Bool = false
-    @Published var analysisData: TickerAnalysisData?
+    @Published var analystRatingsData: AnalystRatingsData?
+    @Published var sentimentAnalysisData: SentimentAnalysisData?
+    @Published var technicalAnalysisData: TechnicalAnalysisData?
+    @Published var isAnalystLoaded: Bool = false
+    @Published var isSentimentLoaded: Bool = false
+    @Published var isTechnicalLoaded: Bool = false
     @Published var earningsData: EarningsData?
     @Published var growthData: GrowthSectionData?
     @Published var profitPowerData: ProfitPowerSectionData?
@@ -264,9 +269,9 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     private enum AnalysisPayload: Sendable {
-        case ratings(AnalystRatingsData)
-        case sentiment(SentimentAnalysisData)
-        case technical(TechnicalAnalysisData)
+        case ratings(AnalystRatingsData?)
+        case sentiment(SentimentAnalysisData?)
+        case technical(TechnicalAnalysisData?)
     }
 
     private func fetchChartEvents(_ ticker: String) async {
@@ -357,12 +362,8 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     private func fetchAnalystAnalysis(_ ticker: String) async {
-        // Fetch analyst + sentiment + technical in parallel — no sample-data fallback
-        var ratingsData: AnalystRatingsData?
-        var sentimentData: SentimentAnalysisData?
-        var techData: TechnicalAnalysisData?
-
-        let results = await withTaskGroup(of: AnalysisPayload?.self) { group -> [AnalysisPayload] in
+        // Fetch analyst + sentiment + technical in parallel — each updates UI as it arrives
+        await withTaskGroup(of: AnalysisPayload.self) { group in
             group.addTask { [self] in
                 do {
                     let dto = try await stockRepository.getAnalystAnalysis(ticker: ticker)
@@ -370,7 +371,7 @@ class TickerDetailViewModel: ObservableObject {
                     return await .ratings(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Analyst analysis failed for \(ticker): \(error)")
-                    return nil
+                    return .ratings(nil)
                 }
             }
             group.addTask { [self] in
@@ -380,7 +381,7 @@ class TickerDetailViewModel: ObservableObject {
                     return await .sentiment(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Sentiment analysis failed for \(ticker): \(error)")
-                    return nil
+                    return .sentiment(nil)
                 }
             }
             group.addTask { [self] in
@@ -390,37 +391,25 @@ class TickerDetailViewModel: ObservableObject {
                     return await .technical(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Technical analysis failed for \(ticker): \(error)")
-                    return nil
+                    return .technical(nil)
                 }
             }
 
-            var collected: [AnalysisPayload] = []
+            // Set each property as it arrives — UI updates progressively
             for await result in group {
-                if let result { collected.append(result) }
+                switch result {
+                case .ratings(let data):
+                    self.analystRatingsData = data
+                    self.isAnalystLoaded = true
+                case .sentiment(let data):
+                    self.sentimentAnalysisData = data
+                    self.isSentimentLoaded = true
+                case .technical(let data):
+                    self.technicalAnalysisData = data
+                    self.isTechnicalLoaded = true
+                }
             }
-            return collected
         }
-
-        // Unpack results — only real API data, no sample fallback
-        for payload in results {
-            switch payload {
-            case .ratings(let data): ratingsData = data
-            case .sentiment(let data): sentimentData = data
-            case .technical(let data): techData = data
-            }
-        }
-
-        // Only set analysisData if we got at least one real response
-        guard ratingsData != nil || sentimentData != nil || techData != nil else {
-            print("⚠️ TickerDetailVM: All analysis calls failed for \(ticker) — no data to show")
-            return
-        }
-
-        self.analysisData = TickerAnalysisData(
-            analystRatings: ratingsData ?? AnalystRatingsData.sampleData,
-            sentimentAnalysis: sentimentData ?? SentimentAnalysisData.sampleData,
-            technicalAnalysis: techData ?? TechnicalAnalysisData.sampleData
-        )
     }
 
     func fetchTechnicalAnalysisDetail() {
@@ -1322,30 +1311,28 @@ class TickerDetailViewModel: ObservableObject {
 
     /// Analysis tab context — analyst ratings, price targets, technicals
     private var analysisContext: String? {
-        guard let data = analysisData else { return nil }
         var parts: [String] = []
 
-        let ar = data.analystRatings
-        parts.append("Analyst Consensus: \(ar.consensus.rawValue) (\(ar.totalAnalysts) analysts)")
-        parts.append("Price Target: Low $\(String(format: "%.0f", ar.priceTarget.lowPrice)), Avg $\(String(format: "%.0f", ar.priceTarget.averagePrice)), High $\(String(format: "%.0f", ar.priceTarget.highPrice))")
-        parts.append("Target Upside: \(ar.formattedUpside)")
+        if let ar = analystRatingsData {
+            parts.append("Analyst Consensus: \(ar.consensus.rawValue) (\(ar.totalAnalysts) analysts)")
+            parts.append("Price Target: Low $\(String(format: "%.0f", ar.priceTarget.lowPrice)), Avg $\(String(format: "%.0f", ar.priceTarget.averagePrice)), High $\(String(format: "%.0f", ar.priceTarget.highPrice))")
+            parts.append("Target Upside: \(ar.formattedUpside)")
 
-        // Rating distribution
-        let distStr = ar.distributions.map { "\($0.label): \($0.count)" }.joined(separator: ", ")
-        parts.append("Ratings: \(distStr)")
+            let distStr = ar.distributions.map { "\($0.label): \($0.count)" }.joined(separator: ", ")
+            parts.append("Ratings: \(distStr)")
 
-        // Recent actions
-        let recentActions = ar.actions.prefix(3)
-        if !recentActions.isEmpty {
-            let actStr = recentActions.map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }.joined(separator: "; ")
-            parts.append("Recent: \(actStr)")
+            let recentActions = ar.actions.prefix(3)
+            if !recentActions.isEmpty {
+                let actStr = recentActions.map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }.joined(separator: "; ")
+                parts.append("Recent: \(actStr)")
+            }
         }
 
-        // Technical analysis
-        let ta = data.technicalAnalysis
-        parts.append("Technical: Daily \(ta.dailySignal.signal.rawValue), Weekly \(ta.weeklySignal.signal.rawValue), Overall \(ta.overallSignal.rawValue)")
+        if let ta = technicalAnalysisData {
+            parts.append("Technical: Daily \(ta.dailySignal.signal.rawValue), Weekly \(ta.weeklySignal.signal.rawValue), Overall \(ta.overallSignal.rawValue)")
+        }
 
-        return parts.joined(separator: ". ")
+        return parts.isEmpty ? nil : parts.joined(separator: ". ")
     }
 
     /// Financials tab context — growth, margins, health check, earnings

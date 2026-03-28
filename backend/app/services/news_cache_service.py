@@ -136,7 +136,7 @@ class NewsCacheService:
             })
 
         # 4. Batch enrich with Gemini
-        enrichments = await self._batch_enrich_articles(articles_for_gemini)
+        enrichments = await self._batch_enrich_articles(articles_for_gemini, ticker=ticker)
 
         if not enrichments:
             logger.warning(
@@ -159,10 +159,23 @@ class NewsCacheService:
                 newly_enriched.append(self._format_single_row(row))
                 continue
 
+            # Merge Gemini-extracted tickers with existing FMP-derived tickers
+            gemini_tickers = enrichment.get("related_tickers", [])
+            existing_tickers = row.get("related_tickers", [])
+            if isinstance(existing_tickers, str):
+                try:
+                    existing_tickers = json.loads(existing_tickers)
+                except Exception:
+                    existing_tickers = []
+            merged_tickers = list(
+                dict.fromkeys(existing_tickers + gemini_tickers)
+            )[:8]
+
             update_data = {
                 "summary_bullets": json.dumps(enrichment.get("bullets", [])),
                 "sentiment": self._normalize_sentiment(enrichment.get("sentiment", "")),
                 "sentiment_confidence": enrichment.get("confidence", 0),
+                "related_tickers": merged_tickers,
                 "ai_processed": True,
                 "ai_model": NEWS_AI_MODEL,
             }
@@ -303,6 +316,10 @@ class NewsCacheService:
                     "enum": ["bullish", "bearish", "neutral"],
                 },
                 "confidence": {"type": "INTEGER"},
+                "related_tickers": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                },
             },
             "required": ["index", "bullets", "sentiment", "confidence"],
         },
@@ -319,7 +336,7 @@ class NewsCacheService:
         return "neutral"
 
     async def _batch_enrich_articles(
-        self, articles: List[Dict[str, Any]]
+        self, articles: List[Dict[str, Any]], ticker: str = ""
     ) -> Dict[int, Dict[str, Any]]:
         """
         Enrich all articles in a single Gemini API call.
@@ -353,12 +370,16 @@ For EACH article, provide:
    - "bearish": ONLY use if the article indicates a direct downward catalyst for the stock price (e.g., missed revenue, SEC investigation, product recall, analyst downgrade, lawsuit loss, executive fraud, data breach).
    - "neutral": Use for EVERYTHING else — macroeconomic noise, educational articles, history lessons, CEO interviews without financial guidance, mixed signals, industry commentary, or any article where the directional impact on the stock is unclear.
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
+4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.
+
+{f'These articles were fetched for ticker {ticker}. Always include {ticker} in related_tickers if the article is relevant to it.' if ticker else ''}
 
 Return a JSON array with one object per article in order. Each object must have:
 - "index": the article number (0-based)
 - "bullets": array of 2-5 strings (last one explains why investors should care — vary the opening naturally)
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral"
 - "confidence": integer 0-100
+- "related_tickers": array of uppercase ticker symbol strings (max 8)
 
 {chr(10).join(articles_text)}"""
 
@@ -384,12 +405,21 @@ Return a JSON array with one object per article in order. Each object must have:
             if isinstance(parsed, list):
                 for item in parsed:
                     idx = item.get("index", 0)
+                    raw_tickers = item.get("related_tickers", [])
+                    cleaned_tickers = list(
+                        dict.fromkeys(
+                            t.strip().upper()
+                            for t in raw_tickers
+                            if t.strip()
+                        )
+                    )[:8]
                     result[idx] = {
                         "bullets": item.get("bullets", [])[:5],
                         "sentiment": self._normalize_sentiment(
                             item.get("sentiment", "")
                         ),
                         "confidence": item.get("confidence", 0),
+                        "related_tickers": cleaned_tickers,
                     }
 
             logger.info(
@@ -401,7 +431,7 @@ Return a JSON array with one object per article in order. Each object must have:
             logger.error(f"Gemini batch enrichment failed: {e}", exc_info=True)
             # Fallback: return Neutral for every article so the frontend doesn't crash
             return {
-                i: {"bullets": [], "sentiment": "Neutral", "confidence": 0}
+                i: {"bullets": [], "sentiment": "Neutral", "confidence": 0, "related_tickers": []}
                 for i in range(len(articles))
             }
 

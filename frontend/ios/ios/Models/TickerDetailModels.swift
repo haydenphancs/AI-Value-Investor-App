@@ -261,11 +261,13 @@ struct KeyStatistic: Identifiable {
     let label: String
     let value: String
     let isHighlighted: Bool
+    let colorState: String?
 
-    init(label: String, value: String, isHighlighted: Bool = false) {
+    init(label: String, value: String, isHighlighted: Bool = false, colorState: String? = nil) {
         self.label = label
         self.value = value
         self.isHighlighted = isHighlighted
+        self.colorState = colorState
     }
 }
 
@@ -282,12 +284,14 @@ struct PerformancePeriod: Identifiable {
     let changePercent: Double
     let vsMarketPercent: Double?
     let benchmarkLabel: String
+    let spReturnPercent: Double?
 
-    init(label: String, changePercent: Double, vsMarketPercent: Double? = nil, benchmarkLabel: String = "S&P") {
+    init(label: String, changePercent: Double, vsMarketPercent: Double? = nil, benchmarkLabel: String = "S&P", spReturnPercent: Double? = nil) {
         self.label = label
         self.changePercent = changePercent
         self.vsMarketPercent = vsMarketPercent
         self.benchmarkLabel = benchmarkLabel
+        self.spReturnPercent = spReturnPercent
     }
 
     var isPositive: Bool {
@@ -300,6 +304,11 @@ struct PerformancePeriod: Identifiable {
     }
 
     var formattedVsMarket: String? {
+        // Prefer actual S&P return when available, fall back to vs_market delta
+        if let spReturn = spReturnPercent {
+            let sign = spReturn >= 0 ? "+" : ""
+            return "\(benchmarkLabel): \(sign)\(Self.formatLargePercent(spReturn, defaultFormat: "%.1f"))%"
+        }
         guard let vs = vsMarketPercent else { return nil }
         let sign = vs >= 0 ? "+" : ""
         return "\(benchmarkLabel): \(sign)\(Self.formatLargePercent(vs, defaultFormat: "%.1f"))%"
@@ -320,14 +329,16 @@ struct PerformancePeriod: Identifiable {
 
 // MARK: - Snapshot Rating Level
 enum SnapshotRatingLevel: Int, CaseIterable {
-    case excellent = 5
-    case strong = 4
-    case average = 3
-    case weak = 2
+    case unavailable = 0
     case poor = 1
+    case weak = 2
+    case average = 3
+    case strong = 4
+    case excellent = 5
 
     var displayName: String {
         switch self {
+        case .unavailable: return "--"
         case .excellent: return "High"
         case .strong: return "Solid"
         case .average: return "Moderate"
@@ -340,6 +351,7 @@ enum SnapshotRatingLevel: Int, CaseIterable {
 
     var color: Color {
         switch self {
+        case .unavailable: return AppColors.textMuted
         case .excellent, .strong: return AppColors.bullish
         case .average: return AppColors.neutral
         case .weak, .poor: return AppColors.bearish
@@ -348,6 +360,10 @@ enum SnapshotRatingLevel: Int, CaseIterable {
 
     var hasStroke: Bool {
         self == .excellent || self == .poor
+    }
+
+    var isAvailable: Bool {
+        self != .unavailable
     }
 }
 
@@ -1159,6 +1175,8 @@ struct SentimentAnalysisData {
     let socialMentionsChange7d: Double
     let newsArticles7d: Int
     let newsArticlesChange7d: Double
+    // Social data availability
+    let socialDataAvailable: Bool
 
     // MARK: - Timeframe-aware accessors
 
@@ -1221,7 +1239,8 @@ extension SentimentAnalysisData {
         socialMentions7d: 12400,
         socialMentionsChange7d: 15,
         newsArticles7d: 847,
-        newsArticlesChange7d: 12
+        newsArticlesChange7d: 12,
+        socialDataAvailable: true
     )
 }
 

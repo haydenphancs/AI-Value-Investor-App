@@ -13,6 +13,7 @@ struct SnapshotRadarChart: View {
 
     private let chartSize: CGFloat = 200
     private let rings = 5
+    private let sides = 5
     private let startAngle: CGFloat = -.pi / 2
 
     /// Ordered categories for the pentagon axes (clockwise from top)
@@ -24,29 +25,33 @@ struct SnapshotRadarChart: View {
         .price               // upper-left
     ]
 
-    /// Pre-built axis data from snapshots
-    private var axes: [SnapshotAxisData] {
-        let result = Self.orderedCategories.compactMap { cat in
-            guard let item = snapshots.first(where: { $0.category == cat }) else { return nil as SnapshotAxisData? }
-            return SnapshotAxisData(
-                category: cat,
-                rating: item.rating,
-                normalized: Double(item.rating.rawValue) / 5.0
-            )
+    /// All axis data (including unavailable) — used for grid and labels
+    private var allAxes: [SnapshotAxisData] {
+        Self.orderedCategories.map { cat in
+            if let item = snapshots.first(where: { $0.category == cat }) {
+                return SnapshotAxisData(
+                    category: cat,
+                    rating: item.rating,
+                    normalized: Double(item.rating.rawValue) / 5.0
+                )
+            } else {
+                return SnapshotAxisData(
+                    category: cat,
+                    rating: .unavailable,
+                    normalized: 0
+                )
+            }
         }
-        return result
     }
 
     var body: some View {
-        let axisData = axes
-        let sides = axisData.count
-        let values = axisData.map(\.normalized)
+        let allAxisData = allAxes
         let frameSize = chartSize + 100
         ZStack {
-            radarGrid(sides: sides, frameSize: frameSize)
-            dataPolygon(values: values, frameSize: frameSize)
-            scoreDots(axisData: axisData, frameSize: frameSize)
-            axisLabels(axisData: axisData, frameSize: frameSize)
+            radarGrid(frameSize: frameSize)
+            dataPolygon(allAxisData: allAxisData, frameSize: frameSize)
+            scoreDots(allAxisData: allAxisData, frameSize: frameSize)
+            axisLabels(axisData: allAxisData, frameSize: frameSize)
         }
         .frame(width: frameSize, height: frameSize)
         .frame(maxWidth: .infinity)
@@ -54,11 +59,22 @@ struct SnapshotRadarChart: View {
 
     // MARK: - Grid
 
-    private func radarGrid(sides: Int, frameSize: CGFloat) -> some View {
+    private func radarGrid(frameSize: CGFloat) -> some View {
         Canvas { context, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius = chartSize / 2
-            guard sides > 0 else { return }
+
+            // Alternating pale gray bands between rings
+            for ring in stride(from: rings, through: 1, by: -1) {
+                guard ring % 2 == 1 else { continue }
+                let outerR = radius * CGFloat(ring) / CGFloat(rings)
+                var bandPath = polygonPath(center: center, radius: outerR, sides: sides)
+                if ring > 1 {
+                    let innerR = radius * CGFloat(ring - 1) / CGFloat(rings)
+                    bandPath.addPath(polygonPath(center: center, radius: innerR, sides: sides))
+                }
+                context.fill(bandPath, with: .color(AppColors.textSecondary.opacity(0.03)), style: FillStyle(eoFill: true))
+            }
 
             for ring in 1...rings {
                 let r = radius * CGFloat(ring) / CGFloat(rings)
@@ -83,13 +99,15 @@ struct SnapshotRadarChart: View {
 
     // MARK: - Data Polygon
 
-    private func dataPolygon(values: [Double], frameSize: CGFloat) -> some View {
+    private func dataPolygon(allAxisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
         Canvas { context, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius = chartSize / 2
-            guard !values.isEmpty else { return }
+            let available = allAxisData.filter { $0.rating.isAvailable }
+            guard !available.isEmpty else { return }
 
-            let path = dataPolygonPath(center: center, radius: radius, values: values)
+            // Build polygon using each available axis at its fixed angle position
+            let path = dataPolygonPathForAvailable(center: center, radius: radius, allAxisData: allAxisData)
             context.fill(path, with: .color(AppColors.primaryBlue.opacity(0.2)))
             context.stroke(path, with: .color(AppColors.primaryBlue), style: StrokeStyle(lineWidth: 2))
         }
@@ -98,21 +116,22 @@ struct SnapshotRadarChart: View {
 
     // MARK: - Score Dots
 
-    private func scoreDots(axisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
+    private func scoreDots(allAxisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
         let radius = chartSize / 2
-        let total = axisData.count
-        return ForEach(Array(axisData.enumerated()), id: \.element.id) { index, item in
-            let angle = angleForIndex(index, total: total)
-            let r = radius * CGFloat(item.normalized)
+        return ForEach(Array(allAxisData.enumerated()), id: \.element.id) { index, item in
+            if item.rating.isAvailable {
+                let angle = angleForIndex(index, total: sides)
+                let r = radius * CGFloat(item.normalized)
 
-            Circle()
-                .fill(AppColors.primaryBlue)
-                .frame(width: 6, height: 6)
-                .shadow(color: AppColors.primaryBlue.opacity(0.6), radius: 4)
-                .offset(
-                    x: r * cos(angle),
-                    y: r * sin(angle)
-                )
+                Circle()
+                    .fill(AppColors.primaryBlue)
+                    .frame(width: 6, height: 6)
+                    .shadow(color: AppColors.primaryBlue.opacity(0.6), radius: 4)
+                    .offset(
+                        x: r * cos(angle),
+                        y: r * sin(angle)
+                    )
+            }
         }
     }
 
@@ -120,9 +139,8 @@ struct SnapshotRadarChart: View {
 
     private func axisLabels(axisData: [SnapshotAxisData], frameSize: CGFloat) -> some View {
         let labelRadius = chartSize / 2 + 36
-        let total = axisData.count
         return ForEach(Array(axisData.enumerated()), id: \.element.id) { index, item in
-            let angle = angleForIndex(index, total: total)
+            let angle = angleForIndex(index, total: sides)
 
             VStack(spacing: 1) {
                 Text(item.category.rawValue)
@@ -163,18 +181,24 @@ struct SnapshotRadarChart: View {
         return path
     }
 
-    private func dataPolygonPath(center: CGPoint, radius: CGFloat, values: [Double]) -> Path {
+    /// Build polygon path connecting only available axes at their fixed positions
+    private func dataPolygonPathForAvailable(center: CGPoint, radius: CGFloat, allAxisData: [SnapshotAxisData]) -> Path {
         var path = Path()
-        guard !values.isEmpty else { return path }
-        for i in 0...values.count {
-            let idx = i % values.count
-            let angle = angleForIndex(idx, total: values.count)
-            let r = radius * min(max(CGFloat(values[idx]), 0), 1.0)
+        var firstPoint = true
+        for (index, item) in allAxisData.enumerated() {
+            guard item.rating.isAvailable else { continue }
+            let angle = angleForIndex(index, total: sides)
+            let r = radius * min(max(CGFloat(item.normalized), 0), 1.0)
             let point = CGPoint(
                 x: center.x + r * cos(angle),
                 y: center.y + r * sin(angle)
             )
-            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            if firstPoint {
+                path.move(to: point)
+                firstPoint = false
+            } else {
+                path.addLine(to: point)
+            }
         }
         path.closeSubpath()
         return path

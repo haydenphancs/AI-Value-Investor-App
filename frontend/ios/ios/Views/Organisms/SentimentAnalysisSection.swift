@@ -12,12 +12,14 @@ struct SentimentAnalysisSection: View {
     @Binding var selectedTimeframe: SentimentTimeframe
     var onMoreTapped: (() -> Void)?
 
+    @State private var showInfoSheet: Bool = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header
             AnalysisSectionHeader(
                 title: "Sentiment Analysis",
-                onAction: { onMoreTapped?() },
+                onAction: { showInfoSheet = true },
                 iconType: .info
             )
 
@@ -40,6 +42,9 @@ struct SentimentAnalysisSection: View {
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .sheet(isPresented: $showInfoSheet) {
+            SentimentInfoSheet()
+        }
     }
 }
 

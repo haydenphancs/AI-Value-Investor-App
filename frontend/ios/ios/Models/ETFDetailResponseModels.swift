@@ -284,13 +284,13 @@ extension ETFDetailResponseDTO {
 
         // Map flat key statistics
         let keyStats = keyStatistics.map { item in
-            KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted)
+            KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted, colorState: item.colorState)
         }
 
         // Map key statistics groups
         let keyStatsGroups = keyStatisticsGroups.map { group in
             KeyStatisticsGroup(statistics: group.statistics.map { item in
-                KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted)
+                KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted, colorState: item.colorState)
             })
         }
 

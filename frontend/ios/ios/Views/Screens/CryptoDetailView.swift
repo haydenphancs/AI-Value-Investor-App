@@ -240,21 +240,22 @@ struct CryptoDetailView: View {
                 onRelatedTickerTap: viewModel.handleNewsTickerTap
             )
         case .analysis:
-            if let analysisData = viewModel.analysisData {
-                TickerAnalysisContent(
-                    analysisData: analysisData,
-                    selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
-                    selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
-                    onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
-                    onAnalystActionsTap: {},
-                    onSentimentMoreTap: viewModel.handleSentimentMore,
-                    onTechnicalDetailTap: {
-                        showTechnicalAnalysisDetail = true
-                    }
-                )
-            } else {
-                placeholderContent(title: "Analysis", description: "Loading analysis data...")
-            }
+            TickerAnalysisContent(
+                analystRatingsData: viewModel.analystRatingsData,
+                sentimentAnalysisData: viewModel.sentimentAnalysisData,
+                technicalAnalysisData: viewModel.technicalAnalysisData,
+                isAnalystLoaded: true,
+                isSentimentLoaded: true,
+                isTechnicalLoaded: true,
+                selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
+                selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
+                onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
+                onAnalystActionsTap: {},
+                onSentimentMoreTap: viewModel.handleSentimentMore,
+                onTechnicalDetailTap: {
+                    showTechnicalAnalysisDetail = true
+                }
+            )
         }
     }
 

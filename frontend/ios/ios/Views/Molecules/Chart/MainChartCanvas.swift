@@ -180,13 +180,12 @@ struct MainChartCanvas: View {
                         OverlayRenderer(overlays: overlays, pricePoints: pricePoints, coord: coord, lookbackCloses: lookbackCloses)
                     }
 
-                    // Earnings & Dividend markers
+                    // Earnings markers
                     if let events = chartEventDates {
                         ChartEventMarkers(
                             pricePoints: pricePoints,
                             coord: coord,
-                            earningsDates: Set(events.earningsDates),
-                            dividendDates: Set(events.dividendDates)
+                            earningsDates: Set(events.earningsDates)
                         )
                     }
                 }
@@ -243,44 +242,24 @@ private struct ExtendedHoursBackground: View {
     }
 }
 
-// MARK: - Earnings & Dividend Event Markers
+// MARK: - Earnings Event Markers
 
 private struct ChartEventMarkers: View {
     let pricePoints: [StockPricePoint]
     let coord: ChartCoordinateSystem
     let earningsDates: Set<String>
-    let dividendDates: Set<String>
 
     var body: some View {
         Canvas { context, canvasSize in
             guard pricePoints.count > 1 else { return }
 
-            // Use nearest-date matching so markers work for all intervals
-            // (daily, weekly, monthly, intraday). For each event date, find
-            // the first price point whose date >= the event date. This maps
-            // events to the correct aggregation bar even for weekly/monthly charts.
             let earningsIndices = eventIndices(for: earningsDates)
-            let dividendIndices = eventIndices(for: dividendDates)
 
-            for index in 0..<pricePoints.count {
-                let isEarnings = earningsIndices.contains(index)
-                let isDividend = dividendIndices.contains(index)
-
-                guard isEarnings || isDividend else { continue }
-
+            for index in earningsIndices {
                 let x = coord.xPosition(for: index)
                 let markerY = canvasSize.height - 14
-
-                if isEarnings {
-                    drawMarker(context: context, text: "E", x: x, y: markerY,
-                               bgColor: Color.orange.opacity(0.85), textColor: .white)
-                }
-                if isDividend {
-                    // Offset slightly higher if both fall on same bar
-                    let dY = isEarnings ? markerY - 18 : markerY
-                    drawMarker(context: context, text: "D", x: x, y: dY,
-                               bgColor: AppColors.bullish.opacity(0.85), textColor: .white)
-                }
+                drawMarker(context: context, text: "E", x: x, y: markerY,
+                           bgColor: Color.orange.opacity(0.85), textColor: .white)
             }
         }
     }

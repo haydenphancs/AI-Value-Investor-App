@@ -19,6 +19,8 @@ final class LivePriceWebSocketManager: ObservableObject {
     @Published private(set) var livePrice: Double?
     @Published private(set) var livePriceChange: Double?
     @Published private(set) var livePriceChangePercent: Double?
+    @Published private(set) var liveTimestamp: Int?
+    @Published private(set) var liveVolume: Int?
     @Published private(set) var isConnected: Bool = false
 
     // MARK: - Private
@@ -148,6 +150,8 @@ final class LivePriceWebSocketManager: ObservableObject {
                 self.livePrice = price
                 self.livePriceChange = msg.change
                 self.livePriceChangePercent = msg.changePercent
+                self.liveTimestamp = msg.timestamp
+                self.liveVolume = msg.volume
             }
 
         case "market_closed":

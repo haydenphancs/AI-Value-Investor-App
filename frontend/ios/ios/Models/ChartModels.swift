@@ -128,8 +128,8 @@ class ChartSettings: ObservableObject {
     }
     @Published var selectedInterval: ChartInterval = .fiveMin
     @Published var enabledIndicators: Set<TechnicalIndicatorType> = []
-    @Published var showExtendedHours: Bool = false
-    @Published var showEarningsDividendDates: Bool = false
+    @Published var showExtendedHours: Bool = true
+    @Published var showEarningsDates: Bool = false
 
     init() {
         // Restore persisted chart type, default to .line
@@ -175,6 +175,15 @@ class ChartViewportState: ObservableObject {
     /// Whether the chart is currently zoomed in
     var isZoomed: Bool {
         visibleEnd - visibleStart + 1 < totalCount
+    }
+
+    /// Extend the visible range to include newly appended data points
+    /// without resetting zoom/pan state.
+    func extendToEnd(newTotalCount: Int) {
+        guard newTotalCount > totalCount else { return }
+        let added = newTotalCount - totalCount
+        totalCount = newTotalCount
+        visibleEnd = min(visibleEnd + added, totalCount - 1)
     }
 
     /// The number of currently visible points

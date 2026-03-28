@@ -1,6 +1,11 @@
 """
-Crypto Detail Service — aggregates FMP data, computes derived stats,
+Crypto Detail Service — aggregates CoinGecko + FMP data, computes derived stats,
 and generates AI-powered snapshot stories via Gemini.
+
+Data sources:
+  - CoinGecko: key statistics (supply, volume, FDV, market cap, ATH/ATL)
+  - FMP: chart/intraday data, news, related crypto quotes
+  - Gemini: AI-powered snapshot stories
 
 Serves the CryptoDetailView screen on iOS.
 """
@@ -12,6 +17,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.database import get_supabase
+from app.integrations.coingecko import get_coingecko_client, CoinGeckoClient
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.gemini import get_gemini_client
 from app.schemas.crypto import (
@@ -233,34 +240,251 @@ _CRYPTO_PROFILES: Dict[str, Dict[str, Any]] = {
         "whitepaper": None,
         "max_supply": None,
     },
+    "TRX": {
+        "name": "TRON",
+        "description": (
+            "TRON is a blockchain platform founded by Justin Sun in 2017, focused on "
+            "decentralizing the internet and building infrastructure for a decentralized web. "
+            "It uses a Delegated Proof of Stake consensus mechanism and is known for extremely "
+            "low transaction fees. TRON has become the dominant network for USDT stablecoin "
+            "transfers, processing more stablecoin volume than any other blockchain."
+        ),
+        "launch_date": "September 2017",
+        "consensus_mechanism": "Delegated Proof of Stake (DPoS)",
+        "blockchain": "TRON",
+        "website": "tron.network",
+        "whitepaper": "tron.network/static/doc/white_paper_v_2_0.pdf",
+        "max_supply": None,
+    },
+    "TON": {
+        "name": "Toncoin",
+        "description": (
+            "Toncoin is the native cryptocurrency of The Open Network (TON), a Layer 1 "
+            "blockchain originally designed by Telegram. After Telegram stepped back due to "
+            "SEC issues, the TON Foundation took over development. TON is deeply integrated "
+            "with Telegram's 900M+ user base through in-app wallets, mini-apps, and payments, "
+            "making it one of the most accessible blockchains for mainstream users."
+        ),
+        "launch_date": "November 2021",
+        "consensus_mechanism": "Proof of Stake (PoS)",
+        "blockchain": "The Open Network (TON)",
+        "website": "ton.org",
+        "whitepaper": "ton.org/whitepaper.pdf",
+        "max_supply": None,
+    },
+    "SHIB": {
+        "name": "Shiba Inu",
+        "description": (
+            "Shiba Inu is an Ethereum-based meme token that launched in August 2020 as a "
+            "community-driven alternative to Dogecoin. It has evolved beyond its meme origins "
+            "with the launch of Shibarium (its own Layer 2 network), ShibaSwap DEX, and an "
+            "expanding ecosystem of tokens (LEASH, BONE). SHIB has one of the largest crypto "
+            "communities and has been listed on most major exchanges."
+        ),
+        "launch_date": "August 2020",
+        "consensus_mechanism": "ERC-20 (Ethereum PoS)",
+        "blockchain": "Ethereum / Shibarium L2",
+        "website": "shibatoken.com",
+        "whitepaper": None,
+        "max_supply": None,
+    },
+    "SUI": {
+        "name": "Sui",
+        "description": (
+            "Sui is a Layer 1 blockchain built by Mysten Labs, founded by former Meta (Diem) "
+            "engineers. It uses the Move programming language and a novel object-centric data "
+            "model that enables parallel transaction processing. Sui achieves high throughput "
+            "with sub-second finality and is designed for consumer-facing applications, gaming, "
+            "and DeFi with a focus on developer experience."
+        ),
+        "launch_date": "May 3, 2023",
+        "consensus_mechanism": "Delegated Proof of Stake (Mysticeti)",
+        "blockchain": "Sui",
+        "website": "sui.io",
+        "whitepaper": "docs.sui.io/paper/sui.pdf",
+        "max_supply": 10_000_000_000,
+    },
+    "NEAR": {
+        "name": "NEAR Protocol",
+        "description": (
+            "NEAR Protocol is a Layer 1 blockchain designed for usability with human-readable "
+            "account names and a unique sharding architecture called Nightshade. Founded by "
+            "Alex Skidanov and Illia Polosukhin (co-author of the 'Attention Is All You Need' "
+            "transformer paper), NEAR focuses on being developer-friendly with its JavaScript SDK "
+            "and has become a hub for AI x crypto projects."
+        ),
+        "launch_date": "April 22, 2020",
+        "consensus_mechanism": "Proof of Stake (Nightshade Sharding)",
+        "blockchain": "NEAR",
+        "website": "near.org",
+        "whitepaper": "near.org/papers/the-official-near-white-paper",
+        "max_supply": None,
+    },
+    "UNI": {
+        "name": "Uniswap",
+        "description": (
+            "Uniswap is the largest decentralized exchange (DEX) by volume, pioneering the "
+            "automated market maker (AMM) model that eliminated the need for order books. "
+            "Launched in 2018 by Hayden Adams, Uniswap V3 introduced concentrated liquidity "
+            "positions. The UNI governance token gives holders voting power over protocol "
+            "parameters and the community treasury worth billions."
+        ),
+        "launch_date": "November 2, 2018",
+        "consensus_mechanism": "ERC-20 (Ethereum PoS)",
+        "blockchain": "Ethereum / Multi-chain",
+        "website": "uniswap.org",
+        "whitepaper": "uniswap.org/whitepaper-v3.pdf",
+        "max_supply": 1_000_000_000,
+    },
+    "APT": {
+        "name": "Aptos",
+        "description": (
+            "Aptos is a Layer 1 blockchain built by former Meta (Diem/Libra) engineers using "
+            "the Move programming language. It uses a novel parallel execution engine (Block-STM) "
+            "that enables high throughput by processing transactions concurrently. Aptos focuses "
+            "on safety, scalability, and upgradeability with a modular architecture."
+        ),
+        "launch_date": "October 17, 2022",
+        "consensus_mechanism": "Proof of Stake (AptosBFT)",
+        "blockchain": "Aptos",
+        "website": "aptoslabs.com",
+        "whitepaper": "aptos.dev/assets/files/Aptos-Whitepaper.pdf",
+        "max_supply": None,
+    },
 }
 
 # ── Related crypto mappings ──────────────────────────────────────
 
 _RELATED_CRYPTOS: Dict[str, List[str]] = {
+    # Layer 1 majors
     "BTC": ["ETH", "SOL", "BNB", "XRP", "ADA", "DOGE"],
-    "ETH": ["BTC", "SOL", "BNB", "MATIC", "ARB", "OP"],
-    "SOL": ["ETH", "AVAX", "ADA", "DOT", "ARB", "OP"],
-    "BNB": ["ETH", "SOL", "AVAX", "XRP", "ADA", "DOGE"],
-    "XRP": ["BTC", "ADA", "DOT", "LINK", "BNB", "SOL"],
-    "ADA": ["ETH", "SOL", "DOT", "AVAX", "XRP", "LINK"],
-    "DOGE": ["BTC", "BNB", "XRP", "SOL", "ETH", "ADA"],
-    "AVAX": ["SOL", "ETH", "DOT", "ADA", "ARB", "OP"],
-    "DOT": ["ETH", "ADA", "AVAX", "LINK", "SOL", "ARB"],
-    "LINK": ["ETH", "DOT", "ARB", "OP", "SOL", "AVAX"],
-    "MATIC": ["ETH", "ARB", "OP", "SOL", "AVAX", "BNB"],
-    "ARB": ["OP", "ETH", "MATIC", "SOL", "AVAX", "BNB"],
-    "OP": ["ARB", "ETH", "MATIC", "SOL", "AVAX", "BNB"],
+    "ETH": ["BTC", "SOL", "BNB", "ARB", "OP", "MATIC"],
+    "SOL": ["ETH", "SUI", "AVAX", "APT", "NEAR", "ADA"],
+    "BNB": ["ETH", "SOL", "AVAX", "XRP", "CRO", "OKB"],
+    "XRP": ["BTC", "XLM", "ADA", "DOT", "LINK", "ALGO"],
+    "ADA": ["ETH", "SOL", "DOT", "AVAX", "XRP", "ALGO"],
+    "TRX": ["BNB", "SOL", "ETH", "XRP", "ADA", "EOS"],
+    "AVAX": ["SOL", "ETH", "DOT", "NEAR", "SUI", "FTM"],
+    "DOT": ["ETH", "ADA", "ATOM", "AVAX", "LINK", "NEAR"],
+    "TON": ["ETH", "SOL", "SUI", "NEAR", "BNB", "TRX"],
+    "SUI": ["SOL", "APT", "NEAR", "AVAX", "ETH", "SEI"],
+    "NEAR": ["SOL", "SUI", "APT", "AVAX", "ETH", "FET"],
+    "APT": ["SUI", "SOL", "NEAR", "AVAX", "ETH", "SEI"],
+    "HBAR": ["XRP", "XLM", "ALGO", "VET", "ADA", "DOT"],
+    # Layer 2
+    "MATIC": ["ETH", "ARB", "OP", "STRK", "ZK", "IMX"],
+    "POL": ["ETH", "ARB", "OP", "STRK", "ZK", "IMX"],
+    "ARB": ["OP", "ETH", "MATIC", "STRK", "ZK", "IMX"],
+    "OP": ["ARB", "ETH", "MATIC", "STRK", "ZK", "IMX"],
+    "STRK": ["ARB", "OP", "ZK", "MATIC", "ETH", "IMX"],
+    "ZK": ["STRK", "ARB", "OP", "MATIC", "ETH", "IMX"],
+    "IMX": ["ARB", "OP", "MATIC", "GALA", "AXS", "SAND"],
+    "MNT": ["ARB", "OP", "ETH", "MATIC", "STRK", "ZK"],
+    # DeFi
+    "UNI": ["AAVE", "SUSHI", "CRV", "CAKE", "1INCH", "COMP"],
+    "AAVE": ["UNI", "COMP", "CRV", "LDO", "PENDLE", "SNX"],
+    "LINK": ["ETH", "DOT", "GRT", "PYTH", "FET", "RENDER"],
+    "LDO": ["AAVE", "ETHFI", "PENDLE", "ETH", "COMP", "CRV"],
+    "CRV": ["UNI", "AAVE", "SNX", "BAL", "SUSHI", "COMP"],
+    "PENDLE": ["AAVE", "LDO", "ETHFI", "COMP", "CRV", "UNI"],
+    "COMP": ["AAVE", "UNI", "CRV", "SNX", "LDO", "PENDLE"],
+    "SNX": ["CRV", "COMP", "AAVE", "UNI", "DYDX", "GMX"],
+    "SUSHI": ["UNI", "CAKE", "1INCH", "CRV", "BAL", "AAVE"],
+    "BAL": ["CRV", "UNI", "SUSHI", "AAVE", "1INCH", "COMP"],
+    "CAKE": ["UNI", "SUSHI", "1INCH", "BNB", "CRV", "AAVE"],
+    "1INCH": ["UNI", "SUSHI", "CAKE", "CRV", "BAL", "AAVE"],
+    "DYDX": ["GMX", "SNX", "INJ", "JUP", "UNI", "AAVE"],
+    "GMX": ["DYDX", "SNX", "INJ", "JUP", "ARB", "UNI"],
+    "JUP": ["SOL", "BONK", "PYTH", "WIF", "RENDER", "DYDX"],
+    "ETHFI": ["LDO", "PENDLE", "AAVE", "ETH", "EIGEN", "COMP"],
+    "ONDO": ["AAVE", "PENDLE", "ETHFI", "ETH", "LINK", "UNI"],
+    # AI / Compute
+    "RENDER": ["FET", "TAO", "NEAR", "LINK", "GRT", "THETA"],
+    "FET": ["RENDER", "TAO", "NEAR", "LINK", "GRT", "THETA"],
+    "TAO": ["RENDER", "FET", "NEAR", "LINK", "GRT", "THETA"],
+    "GRT": ["LINK", "FET", "RENDER", "THETA", "PYTH", "TAO"],
+    "THETA": ["RENDER", "FET", "GRT", "TAO", "LINK", "FIL"],
+    # Meme coins
+    "DOGE": ["SHIB", "PEPE", "BONK", "FLOKI", "WIF", "BTC"],
+    "SHIB": ["DOGE", "PEPE", "BONK", "FLOKI", "WIF", "ETH"],
+    "PEPE": ["DOGE", "SHIB", "BONK", "FLOKI", "WIF", "ETH"],
+    "BONK": ["SOL", "DOGE", "SHIB", "PEPE", "WIF", "FLOKI"],
+    "FLOKI": ["DOGE", "SHIB", "PEPE", "BONK", "WIF", "BNB"],
+    "WIF": ["SOL", "BONK", "DOGE", "PEPE", "SHIB", "FLOKI"],
+    "TRUMP": ["DOGE", "PEPE", "SHIB", "BONK", "WIF", "SOL"],
+    # Gaming / Metaverse
+    "AXS": ["GALA", "SAND", "MANA", "IMX", "FLOW", "BEAM"],
+    "SAND": ["MANA", "AXS", "GALA", "IMX", "FLOW", "BEAM"],
+    "MANA": ["SAND", "AXS", "GALA", "IMX", "FLOW", "ENS"],
+    "GALA": ["AXS", "SAND", "MANA", "IMX", "BEAM", "FLOW"],
+    "BEAM": ["GALA", "AXS", "SAND", "IMX", "MANA", "FLOW"],
+    "FLOW": ["AXS", "GALA", "SAND", "MANA", "IMX", "BEAM"],
+    # Infrastructure
+    "ATOM": ["DOT", "AVAX", "TIA", "INJ", "SEI", "NEAR"],
+    "FIL": ["RENDER", "AR", "THETA", "GRT", "LINK", "STX"],
+    "STX": ["BTC", "NEAR", "ICP", "FIL", "RENDER", "LINK"],
+    "ICP": ["ETH", "NEAR", "DOT", "FIL", "ATOM", "STX"],
+    "VET": ["HBAR", "XRP", "ALGO", "XDC", "LINK", "DOT"],
+    "ALGO": ["HBAR", "XRP", "XLM", "ADA", "VET", "DOT"],
+    "XLM": ["XRP", "ALGO", "HBAR", "ADA", "VET", "DOT"],
+    "INJ": ["SEI", "DYDX", "ATOM", "GMX", "SUI", "SOL"],
+    "SEI": ["SUI", "INJ", "APT", "NEAR", "SOL", "ATOM"],
+    "TIA": ["ATOM", "DOT", "EIGEN", "NEAR", "AVAX", "SOL"],
+    "PYTH": ["LINK", "GRT", "SOL", "JUP", "RENDER", "FET"],
+    "KAS": ["BTC", "LTC", "BCH", "XMR", "DASH", "ZEC"],
+    # Privacy / PoW
+    "LTC": ["BTC", "BCH", "DOGE", "XMR", "DASH", "ZEC"],
+    "BCH": ["BTC", "LTC", "XMR", "DASH", "ZEC", "ETC"],
+    "XMR": ["ZEC", "DASH", "BTC", "LTC", "BCH", "DCR"],
+    "ZEC": ["XMR", "DASH", "BTC", "LTC", "BCH", "DCR"],
+    "DASH": ["LTC", "BCH", "XMR", "ZEC", "BTC", "DCR"],
+    "DCR": ["XMR", "ZEC", "DASH", "LTC", "BTC", "ATOM"],
+    "ETC": ["ETH", "BTC", "BCH", "LTC", "DOT", "ADA"],
+    # Other
+    "EOS": ["TRX", "NEO", "XTZ", "ADA", "ETH", "DOT"],
+    "NEO": ["EOS", "XTZ", "ETH", "DOT", "ADA", "IOTA"],
+    "XTZ": ["EOS", "NEO", "ADA", "ALGO", "DOT", "ATOM"],
+    "IOTA": ["VET", "HBAR", "XLM", "DOT", "ADA", "ALGO"],
+    "ENS": ["UNI", "AAVE", "ETH", "LINK", "MANA", "SAND"],
+    "CHZ": ["GALA", "AXS", "FLOW", "IMX", "SAND", "ENS"],
+    "QNT": ["LINK", "DOT", "ATOM", "HBAR", "VET", "XDC"],
+    "ROSE": ["DOT", "NEAR", "AVAX", "ATOM", "FIL", "RENDER"],
+    "ONE": ["DOT", "NEAR", "AVAX", "ATOM", "ADA", "SOL"],
+    "CELO": ["NEAR", "ALGO", "XLM", "ADA", "DOT", "HBAR"],
+    "CFX": ["NEAR", "SOL", "AVAX", "SUI", "APT", "ETH"],
+    "ZIL": ["ONE", "NEAR", "DOT", "ADA", "AVAX", "ALGO"],
+    "KAVA": ["ATOM", "AVAX", "DOT", "AAVE", "COMP", "NEAR"],
+    "FTM": ["AVAX", "SOL", "NEAR", "SUI", "ETH", "DOT"],
+    "LEO": ["BNB", "CRO", "OKB", "BGB", "ETH", "BTC"],
+    "CRO": ["BNB", "LEO", "OKB", "BGB", "ETH", "BTC"],
+    "MASK": ["ENS", "GRT", "LINK", "UNI", "ETH", "DOT"],
+    "BLUR": ["ENS", "SAND", "MANA", "ETH", "UNI", "IMX"],
+    "EIGEN": ["ETHFI", "LDO", "TIA", "ETH", "AAVE", "PENDLE"],
+    "JASMY": ["IOTA", "VET", "FET", "RENDER", "LINK", "DOT"],
+    "HYPE": ["SOL", "SUI", "DYDX", "GMX", "INJ", "JUP"],
+    "PI": ["TON", "BTC", "ETH", "SOL", "DOGE", "XRP"],
+    "VIRTUAL": ["RENDER", "FET", "TAO", "NEAR", "GALA", "BEAM"],
+    "PENGU": ["SOL", "BONK", "WIF", "DOGE", "PEPE", "SHIB"],
+    "WLD": ["FET", "RENDER", "TAO", "NEAR", "ETH", "LINK"],
+    "ENA": ["AAVE", "PENDLE", "ETHFI", "LDO", "UNI", "ETH"],
+    "MORPHO": ["AAVE", "COMP", "PENDLE", "LDO", "ETHFI", "CRV"],
+    "SKY": ["AAVE", "UNI", "COMP", "ETH", "LDO", "CRV"],
+    "FLR": ["XRP", "XLM", "ALGO", "HBAR", "DOT", "LINK"],
+    "OKB": ["BNB", "CRO", "LEO", "BGB", "ETH", "BTC"],
+    "BGB": ["BNB", "CRO", "OKB", "LEO", "ETH", "BTC"],
+    "NEXO": ["AAVE", "COMP", "CRO", "LEO", "BNB", "ETH"],
+    "XDC": ["VET", "HBAR", "XRP", "ALGO", "LINK", "QNT"],
 }
 
 # Default related if symbol not in map
-_DEFAULT_RELATED = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA"]
+_DEFAULT_RELATED = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"]
 
 
 # ── Simple in-memory cache ───────────────────────────────────────
 
 _cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL_SECONDS = 120  # 2 minutes for crypto (24/7 market)
+_CACHE_TTL_SECONDS = 300  # 5 minutes for CoinGecko data (rate-limit friendly)
+_DB_CACHE_TTL_HOURS = 12  # 12 hours in Supabase (budget-friendly for 10K/month)
 _AI_CACHE_TTL_SECONDS = 1800  # 30 minutes for AI-generated stories
 
 
@@ -347,14 +571,102 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     return None
 
 
+def _compute_all_time_return(prices: List[Dict]) -> Optional[float]:
+    """Compute % return from first available price to latest."""
+    if not prices or len(prices) < 2:
+        return None
+    start = prices[0].get("close") or prices[0].get("adjClose")
+    end = prices[-1].get("close") or prices[-1].get("adjClose")
+    if not start or not end or start == 0:
+        return None
+    return ((end - start) / start) * 100
+
+
 # ── Main service ─────────────────────────────────────────────────
 
 
 class CryptoService:
-    """Aggregates FMP data + Gemini AI for the Crypto Detail screen."""
+    """Aggregates CoinGecko + FMP data + Gemini AI for the Crypto Detail screen."""
 
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
+        self.coingecko: CoinGeckoClient = get_coingecko_client()
+        self.supabase = get_supabase()
+
+    # ── Two-tier cache for CoinGecko fundamentals ────────────────
+
+    async def _get_coin_fundamentals(self, symbol: str) -> Dict[str, Any]:
+        """
+        Two-tier cache for CoinGecko coin data:
+          Tier 1: in-memory (5 min TTL)
+          Tier 2: Supabase crypto_fundamentals_cache (6h TTL)
+          Miss:   CoinGecko API call → cache in both tiers
+        """
+        mem_key = f"cg_fundamentals:{symbol}"
+
+        # Tier 1: in-memory
+        cached = _cache_get(mem_key, _CACHE_TTL_SECONDS)
+        if cached is not None:
+            logger.debug(f"CoinGecko mem cache hit for {symbol}")
+            return cached
+
+        # Tier 2: Supabase
+        db_data = await asyncio.to_thread(self._check_crypto_cache_db, symbol)
+        if db_data is not None:
+            logger.debug(f"CoinGecko DB cache hit for {symbol}")
+            _cache_set(mem_key, db_data)
+            return db_data
+
+        # Miss: fetch from CoinGecko
+        logger.info(f"CoinGecko cache miss — fetching /coins/ for {symbol}")
+        coin_data = await self.coingecko.get_coin_data(symbol)
+        if coin_data:
+            _cache_set(mem_key, coin_data)
+            asyncio.get_event_loop().run_in_executor(
+                None, self._upsert_crypto_cache_db, symbol, coin_data,
+            )
+
+        return coin_data or {}
+
+    def _check_crypto_cache_db(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Check Supabase crypto_fundamentals_cache (6h TTL)."""
+        try:
+            row = (
+                self.supabase.table("crypto_fundamentals_cache")
+                .select("response_json, cached_at")
+                .eq("symbol", symbol)
+                .limit(1)
+                .execute()
+            )
+            if row.data and len(row.data) > 0:
+                cached_at_str = row.data[0].get("cached_at", "")
+                if cached_at_str:
+                    cached_at = datetime.fromisoformat(
+                        cached_at_str.replace("Z", "+00:00")
+                    )
+                    age_hours = (
+                        datetime.now(timezone.utc) - cached_at
+                    ).total_seconds() / 3600
+                    if age_hours < _DB_CACHE_TTL_HOURS:
+                        return row.data[0].get("response_json")
+                    logger.debug(f"Crypto DB cache expired for {symbol} ({age_hours:.1f}h)")
+        except Exception as e:
+            logger.warning(f"Crypto DB cache read failed for {symbol}: {e}")
+        return None
+
+    def _upsert_crypto_cache_db(self, symbol: str, data: Dict[str, Any]) -> None:
+        """Upsert CoinGecko response into Supabase cache."""
+        try:
+            self.supabase.table("crypto_fundamentals_cache").upsert(
+                {
+                    "symbol": symbol,
+                    "response_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="symbol",
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Crypto DB cache write failed for {symbol}: {e}")
 
     async def get_crypto_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -371,13 +683,14 @@ class CryptoService:
         symbol = symbol.upper()
         fmp_symbol = f"{symbol}USD"
 
-        # Resolve profile metadata
+        # Resolve profile metadata (may be enriched after CoinGecko fetch)
         profile_meta = _CRYPTO_PROFILES.get(symbol, {})
         crypto_name = profile_meta.get("name", symbol)
+        _has_curated_profile = bool(profile_meta)
 
-        # ── Step 1: Parallel FMP fetches ──────────────────────────
+        # ── Step 1: Parallel fetches (CoinGecko + FMP) ────────────
         today = datetime.now(tz=timezone.utc).date()
-        from_date = (today - timedelta(days=365 * 2)).isoformat()
+        from_date = (today - timedelta(days=365 * 6)).isoformat()  # 6 years for 5Y + All Time
         to_date = today.isoformat()
 
         # Related crypto symbols
@@ -385,20 +698,21 @@ class CryptoService:
         related_symbols = [s for s in related_symbols if s != symbol][:6]
         related_fmp_symbols = [f"{s}USD" for s in related_symbols]
 
-        quote_task = self.fmp.get_stock_price_quote(fmp_symbol)
+        # CoinGecko for fundamentals, FMP for chart/news/related
+        coin_data_task = self._get_coin_fundamentals(symbol)
         hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
         news_task = self.fmp.get_stock_news(fmp_symbol, limit=10)
         related_task = self.fmp.get_batch_quotes(related_fmp_symbols)
 
-        quote, hist_raw, news_raw, related_raw = await asyncio.gather(
-            quote_task, hist_task, news_task, related_task,
+        coin_data, hist_raw, news_raw, related_raw = await asyncio.gather(
+            coin_data_task, hist_task, news_task, related_task,
             return_exceptions=True,
         )
 
         # Handle exceptions gracefully
-        if isinstance(quote, Exception):
-            logger.error(f"Crypto quote fetch failed for {fmp_symbol}: {quote}")
-            quote = {}
+        if isinstance(coin_data, Exception):
+            logger.error(f"CoinGecko fetch failed for {symbol}: {coin_data}")
+            coin_data = {}
         if isinstance(hist_raw, Exception):
             logger.error(f"Crypto historical fetch failed for {fmp_symbol}: {hist_raw}")
             hist_raw = {}
@@ -417,31 +731,127 @@ class CryptoService:
             historical = hist_raw
         historical.sort(key=lambda p: p.get("date", ""))
 
-        # ── Step 2: Extract quote data ────────────────────────────
-        price = quote.get("price") or 0
-        change = quote.get("change") or 0
-        change_pct = quote.get("changesPercentage") or 0
-        day_high = quote.get("dayHigh") or 0
-        day_low = quote.get("dayLow") or 0
-        year_high = quote.get("yearHigh") or 0
-        year_low = quote.get("yearLow") or 0
-        volume = quote.get("volume") or 0
-        avg_volume = quote.get("avgVolume") or 0
-        market_cap = quote.get("marketCap") or 0
-        open_price = quote.get("open") or 0
-        prev_close = quote.get("previousClose") or 0
-        shares_outstanding = quote.get("sharesOutstanding") or 0
+        # ── Step 2: Extract data from CoinGecko ──────────────────
+        md = coin_data.get("market_data", {}) if isinstance(coin_data, dict) else {}
+        price = md.get("current_price", {}).get("usd", 0) or 0
+        change = md.get("price_change_24h", 0) or 0
+        change_pct = md.get("price_change_percentage_24h", 0) or 0
+        day_high = md.get("high_24h", {}).get("usd", 0) or 0
+        day_low = md.get("low_24h", {}).get("usd", 0) or 0
+        volume = md.get("total_volume", {}).get("usd", 0) or 0
+        market_cap = md.get("market_cap", {}).get("usd", 0) or 0
+        circulating_supply = md.get("circulating_supply", 0) or 0
+        total_supply = md.get("total_supply", 0) or 0
+        max_supply_cg = md.get("max_supply")  # None if no cap
+        fdv = md.get("fully_diluted_valuation", {}).get("usd", 0) or 0
+
+        # 52-week from historical data (more accurate than ATH/ATL)
+        year_high = 0
+        year_low = 0
+        if historical:
+            one_year_ago = (today - timedelta(days=365)).isoformat()
+            year_prices = [
+                p for p in historical
+                if p.get("date", "") >= one_year_ago
+            ]
+            if year_prices:
+                highs = [p.get("high", 0) or 0 for p in year_prices]
+                lows = [p.get("low", 0) or 0 for p in year_prices if (p.get("low", 0) or 0) > 0]
+                year_high = max(highs) if highs else 0
+                year_low = min(lows) if lows else 0
+
+        # Fallback to CoinGecko ATH/ATL if no historical data
+        if year_high == 0:
+            year_high = md.get("ath", {}).get("usd", 0) or 0
+        if year_low == 0:
+            year_low = md.get("atl", {}).get("usd", 0) or 0
+
+        # Avg volume from FMP (CoinGecko doesn't provide 30D avg directly)
+        avg_volume = volume  # fallback to current volume
+
+        # ── Auto-generate profile from CoinGecko if no curated profile ──
+        if not _has_curated_profile and isinstance(coin_data, dict):
+            profile_meta = self._build_profile_from_coingecko(symbol, coin_data)
+            crypto_name = profile_meta.get("name", symbol)
 
         # ── Step 3: Compute derived stats ─────────────────────────
+        # Prefer CoinGecko's pre-computed percentages, fall back to historical
+        one_month_return = md.get("price_change_percentage_30d", None) or _compute_return(historical, 30)
+        one_year_return = md.get("price_change_percentage_1y", None) or _compute_return(historical, 365)
         ytd_return = _compute_ytd_return(historical)
-        seven_day_return = _compute_return(historical, 7)
-        one_month_return = _compute_return(historical, 30)
-        one_year_return = _compute_return(historical, 365)
         three_year_return = (
             _compute_return(historical, 365 * 3)
             if len(historical) > 365 * 3
             else None
         )
+        five_year_return = (
+            _compute_return(historical, 365 * 5)
+            if len(historical) > 365 * 5
+            else None
+        )
+        all_time_return = _compute_all_time_return(historical)
+
+        # ── Step 3b: Fetch benchmark data ────────────────────────
+        # Altcoins benchmark vs BTC; BTC benchmarks vs S&P 500
+        bench_1m = bench_ytd = bench_1y = bench_3y = bench_5y = bench_all = None
+        if symbol == "BTC":
+            benchmark_label = "S&P 500"
+            # Fetch SPY historical from FMP (cached in memory)
+            spy_cache_key = f"spy_hist:{from_date}:{to_date}"
+            spy_hist = _cache_get(spy_cache_key, 3600)  # 1h cache
+            if spy_hist is None:
+                try:
+                    spy_raw = await self.fmp.get_historical_prices("SPY", from_date, to_date)
+                    if isinstance(spy_raw, dict):
+                        spy_hist = spy_raw.get("historical", [])
+                    elif isinstance(spy_raw, list):
+                        spy_hist = spy_raw
+                    else:
+                        spy_hist = []
+                    spy_hist.sort(key=lambda p: p.get("date", ""))
+                    if spy_hist:
+                        _cache_set(spy_cache_key, spy_hist)
+                except Exception as e:
+                    logger.warning(f"SPY historical fetch failed: {e}")
+                    spy_hist = []
+            if spy_hist:
+                bench_1m = _compute_return(spy_hist, 30)
+                bench_ytd = _compute_ytd_return(spy_hist)
+                bench_1y = _compute_return(spy_hist, 365)
+                bench_3y = _compute_return(spy_hist, 252 * 3) if len(spy_hist) > 252 * 3 else None
+                bench_5y = _compute_return(spy_hist, 252 * 5) if len(spy_hist) > 252 * 5 else None
+                bench_all = _compute_all_time_return(spy_hist)
+        else:
+            benchmark_label = "BTC"
+            # Fetch BTC data from CoinGecko (likely already cached)
+            btc_coin_data = await self._get_coin_fundamentals("BTC")
+            btc_md = btc_coin_data.get("market_data", {}) if isinstance(btc_coin_data, dict) else {}
+            bench_1m = btc_md.get("price_change_percentage_30d")
+            bench_1y = btc_md.get("price_change_percentage_1y")
+            # For YTD, 3Y, 5Y, All Time — compute from BTC historical
+            btc_fmp_symbol = "BTCUSD"
+            btc_hist_cache_key = f"btc_hist:{from_date}:{to_date}"
+            btc_hist = _cache_get(btc_hist_cache_key, 3600)
+            if btc_hist is None:
+                try:
+                    btc_raw = await self.fmp.get_historical_prices(btc_fmp_symbol, from_date, to_date)
+                    if isinstance(btc_raw, dict):
+                        btc_hist = btc_raw.get("historical", [])
+                    elif isinstance(btc_raw, list):
+                        btc_hist = btc_raw
+                    else:
+                        btc_hist = []
+                    btc_hist.sort(key=lambda p: p.get("date", ""))
+                    if btc_hist:
+                        _cache_set(btc_hist_cache_key, btc_hist)
+                except Exception as e:
+                    logger.warning(f"BTC historical fetch failed: {e}")
+                    btc_hist = []
+            if btc_hist:
+                bench_ytd = _compute_ytd_return(btc_hist)
+                bench_3y = _compute_return(btc_hist, 365 * 3) if len(btc_hist) > 365 * 3 else None
+                bench_5y = _compute_return(btc_hist, 365 * 5) if len(btc_hist) > 365 * 5 else None
+                bench_all = _compute_all_time_return(btc_hist)
 
         # ── Step 4: Build chart data ──────────────────────────────
         from app.services.chart_helper import fetch_chart_data, resolve_interval
@@ -452,7 +862,6 @@ class CryptoService:
             chart_data = self._extract_chart_data(historical, chart_range)
 
         # ── Step 5: Build key statistics ──────────────────────────
-        max_supply = profile_meta.get("max_supply")
         key_stats = self._build_key_statistics(
             price=price,
             market_cap=market_cap,
@@ -462,18 +871,28 @@ class CryptoService:
             day_low=day_low,
             year_high=year_high,
             year_low=year_low,
-            shares_outstanding=shares_outstanding,
-            max_supply=max_supply,
+            circulating_supply=circulating_supply,
+            total_supply=total_supply,
+            max_supply=max_supply_cg or profile_meta.get("max_supply"),
+            fdv=fdv,
             symbol=symbol,
         )
 
         # ── Step 6: Build performance periods ─────────────────────
         perf_periods = self._build_performance_periods(
-            seven_day=seven_day_return,
             one_month=one_month_return,
             ytd=ytd_return,
             one_year=one_year_return,
             three_year=three_year_return,
+            five_year=five_year_return,
+            all_time=all_time_return,
+            bench_1m=bench_1m,
+            bench_ytd=bench_ytd,
+            bench_1y=bench_1y,
+            bench_3y=bench_3y,
+            bench_5y=bench_5y,
+            bench_all_time=bench_all,
+            benchmark_label=benchmark_label,
         )
 
         # ── Step 7: Build snapshots (AI-enhanced) ─────────────────
@@ -509,10 +928,29 @@ class CryptoService:
             news_raw if isinstance(news_raw, list) else []
         )
 
-        # ── Step 11: Build benchmark summary ──────────────────────
+        # ── Step 11: Build benchmark summary (CAGR) ─────────────────
+        # Compute annualized return for asset and benchmark
+        asset_annual = 0.0
+        bench_annual = 0.0
+        years_of_data = len(historical) / 365.0 if historical else 0
+
+        if one_year_return is not None and years_of_data >= 1:
+            # Use CAGR: ((end/start)^(1/years) - 1) * 100
+            start_price = historical[0].get("close", 0) or 0
+            end_price = historical[-1].get("close", 0) or 0
+            if start_price > 0 and end_price > 0:
+                asset_annual = round(
+                    ((end_price / start_price) ** (1 / min(years_of_data, 5)) - 1) * 100, 1
+                )
+        elif one_year_return is not None:
+            asset_annual = round(one_year_return, 1)
+
+        if bench_1y is not None:
+            bench_annual = round(bench_1y, 1)
+
         benchmark = BenchmarkSummaryResponse(
-            avg_annual_return=round(one_year_return, 1) if one_year_return else 0,
-            sp_benchmark=0,  # Will compare vs BTC
+            avg_annual_return=asset_annual,
+            sp_benchmark=bench_annual,
             benchmark_name="Bitcoin (BTC)" if symbol != "BTC" else "S&P 500",
             since_date=profile_meta.get("launch_date", "")[:8] if profile_meta.get("launch_date") else None,
         )
@@ -570,13 +1008,8 @@ class CryptoService:
     def _build_key_statistics(
         self, *, price, market_cap, volume, avg_volume,
         day_high, day_low, year_high, year_low,
-        shares_outstanding, max_supply, symbol,
+        circulating_supply, total_supply, max_supply, fdv, symbol,
     ) -> List[KeyStatisticsGroupResponse]:
-        circulating = shares_outstanding
-        fdv = price * max_supply if max_supply and price else market_cap
-
-        # Dominance approximation — we don't have total crypto market cap
-        # from FMP, so we leave it as computed if market_cap > 0
         vol_mkt_ratio = (volume / market_cap * 100) if market_cap > 0 else 0
 
         return [
@@ -588,15 +1021,15 @@ class CryptoService:
                 KeyStatisticItem(label="24h High", value=_fmt(day_high)),
                 KeyStatisticItem(label="24h Low", value=_fmt(day_low)),
             ]),
-            # Column 2: Supply
+            # Column 2: Supply (CoinGecko provides accurate supply data)
             KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(
                     label="Circulating Supply",
-                    value=_fmt_supply(circulating, symbol),
+                    value=_fmt_supply(circulating_supply, symbol),
                 ),
                 KeyStatisticItem(
                     label="Total Supply",
-                    value=_fmt_supply(circulating, symbol),
+                    value=_fmt_supply(total_supply, symbol),
                 ),
                 KeyStatisticItem(
                     label="Max Supply",
@@ -604,11 +1037,11 @@ class CryptoService:
                 ),
                 KeyStatisticItem(
                     label="Fully Diluted Val.",
-                    value=_fmt(fdv),
+                    value=_fmt(fdv) if fdv else _fmt(price * max_supply if max_supply and price else market_cap),
                 ),
                 KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt(avg_volume)),
             ]),
-            # Column 3: Historical (52-week from FMP)
+            # Column 3: Historical (52-week from FMP historical + CoinGecko fallback)
             KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
                 KeyStatisticItem(
@@ -621,28 +1054,129 @@ class CryptoService:
                     value=_pct(((price - year_low) / year_low * 100) if year_low > 0 else None),
                     is_highlighted=True,
                 ),
-                KeyStatisticItem(label="52-Week Range", value=f"{_fmt(year_low)} - {_fmt(year_high)}"),
+                KeyStatisticItem(
+                    label="52-Week % Range",
+                    value=f"{((year_high - year_low) / year_low * 100):.2f}%" if year_low > 0 and year_high > 0 else "—",
+                ),
             ]),
         ]
+
+    # ── Auto-profile builder from CoinGecko data ──────────────────
+
+    def _build_profile_from_coingecko(
+        self, symbol: str, coin_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build a profile dict from CoinGecko /coins/{id} response.
+        Used for coins without a curated profile in _CRYPTO_PROFILES.
+        Returns same shape as _CRYPTO_PROFILES entries.
+        """
+        name = coin_data.get("name", symbol)
+
+        # Description — truncate to ~500 chars at sentence boundary
+        raw_desc = coin_data.get("description", {}).get("en", "")
+        if raw_desc:
+            # Strip HTML tags
+            import re
+            clean = re.sub(r"<[^>]+>", "", raw_desc).strip()
+            if len(clean) > 500:
+                # Cut at sentence boundary
+                cut = clean[:500]
+                last_period = cut.rfind(".")
+                if last_period > 200:
+                    clean = cut[: last_period + 1]
+                else:
+                    clean = cut.rstrip() + "..."
+            description = clean
+        else:
+            description = f"{name} ({symbol}) is a cryptocurrency."
+
+        # Launch date
+        genesis = coin_data.get("genesis_date")
+        launch_date = genesis if genesis else "Unknown"
+
+        # Consensus / hashing
+        hashing = coin_data.get("hashing_algorithm")
+        categories = coin_data.get("categories", []) or []
+        consensus = "Unknown"
+        if hashing:
+            consensus = f"{hashing}"
+        else:
+            for cat in categories:
+                cat_lower = (cat or "").lower()
+                if "proof of stake" in cat_lower:
+                    consensus = "Proof of Stake (PoS)"
+                    break
+                elif "proof of work" in cat_lower:
+                    consensus = "Proof of Work (PoW)"
+                    break
+
+        # Blockchain — derive from categories
+        blockchain = name
+        for cat in categories:
+            cat_lower = (cat or "").lower()
+            if "layer 2" in cat_lower or "l2" in cat_lower:
+                blockchain = f"{name} (Layer 2)"
+                break
+            elif "layer 1" in cat_lower or "l1" in cat_lower:
+                blockchain = name
+                break
+
+        # Links
+        links = coin_data.get("links", {})
+        homepages = links.get("homepage", [])
+        website = ""
+        for hp in homepages:
+            if hp:
+                website = hp.replace("https://", "").replace("http://", "").rstrip("/")
+                break
+        whitepaper = links.get("whitepaper") or None
+
+        # Max supply
+        md = coin_data.get("market_data", {})
+        max_supply = md.get("max_supply")
+
+        return {
+            "name": name,
+            "description": description,
+            "launch_date": launch_date,
+            "consensus_mechanism": consensus,
+            "blockchain": blockchain,
+            "website": website,
+            "whitepaper": whitepaper,
+            "max_supply": max_supply,
+        }
 
     # ── Performance periods builder ──────────────────────────────
 
     def _build_performance_periods(
-        self, *, seven_day, one_month, ytd, one_year, three_year,
+        self, *, one_month, ytd, one_year, three_year, five_year, all_time,
+        bench_1m, bench_ytd, bench_1y, bench_3y, bench_5y, bench_all_time,
+        benchmark_label,
     ) -> List[PerformancePeriodResponse]:
         periods = []
-        for label, val in [
-            ("7 Days", seven_day),
-            ("1 Month", one_month),
-            ("YTD", ytd),
-            ("1 Year", one_year),
-            ("3 Years", three_year),
+        for label, asset_val, bench_val in [
+            ("1 Month", one_month, bench_1m),
+            ("YTD", ytd, bench_ytd),
+            ("1 Year", one_year, bench_1y),
+            ("3 Years", three_year, bench_3y),
+            ("5 Years", five_year, bench_5y),
+            ("All Time", all_time, bench_all_time),
         ]:
+            # Skip periods where the crypto doesn't have enough history
+            if asset_val is None:
+                continue
+
+            asset_ret = round(asset_val, 2)
+            bench_ret = round(bench_val, 2) if bench_val is not None else None
+            vs_market = round(asset_ret - bench_ret, 2) if bench_ret is not None else None
+
             periods.append(PerformancePeriodResponse(
                 label=label,
-                change_percent=round(val, 2) if val is not None else 0,
-                vs_market_percent=round(val, 2) if val is not None else 0,
-                benchmark_label="BTC",
+                change_percent=asset_ret,
+                vs_market_percent=vs_market,
+                sp_return_percent=bench_ret,
+                benchmark_label=benchmark_label,
             ))
         return periods
 
@@ -652,16 +1186,41 @@ class CryptoService:
         self, *, symbol, crypto_name, price, market_cap, volume,
         change_pct, profile_meta,
     ) -> List[CryptoSnapshotResponse]:
-        """Generate AI-powered snapshots for the 4 categories."""
+        """
+        Return snapshots immediately — never block the response.
 
+        If AI snapshots are cached, return them.
+        Otherwise return template defaults and fire Gemini in the background.
+        Next request will get the AI-generated content from cache.
+        """
         cache_key = f"crypto_snapshots_{symbol}"
         cached = _cache_get(cache_key, _AI_CACHE_TTL_SECONDS)
         if cached:
             return cached
 
-        # Default template snapshots
+        # Return defaults immediately — don't block
         defaults = self._default_snapshots(symbol, crypto_name, profile_meta)
+        _cache_set(cache_key, defaults)
 
+        # Fire Gemini in the background — result cached for next request
+        asyncio.create_task(self._generate_ai_snapshots(
+            symbol=symbol,
+            crypto_name=crypto_name,
+            price=price,
+            market_cap=market_cap,
+            volume=volume,
+            change_pct=change_pct,
+            profile_meta=profile_meta,
+            cache_key=cache_key,
+        ))
+
+        return defaults
+
+    async def _generate_ai_snapshots(
+        self, *, symbol, crypto_name, price, market_cap, volume,
+        change_pct, profile_meta, cache_key,
+    ) -> None:
+        """Background task: generate AI snapshots via Gemini and cache them."""
         try:
             gemini = get_gemini_client()
 
@@ -707,14 +1266,10 @@ Separate each category with "===CATEGORY===" followed by the category name.
 
             if len(snapshots) == 4:
                 _cache_set(cache_key, snapshots)
-                logger.info(f"Generated AI snapshots for {symbol}")
-                return snapshots
+                logger.info(f"Background: AI snapshots ready for {symbol}")
 
         except Exception as e:
-            logger.warning(f"Gemini snapshot generation failed for {symbol}, using defaults: {e}")
-
-        _cache_set(cache_key, defaults)
-        return defaults
+            logger.warning(f"Background Gemini failed for {symbol}: {e}")
 
     def _parse_ai_snapshots(self, text: str) -> List[CryptoSnapshotResponse]:
         """Parse Gemini's response into structured snapshots."""
@@ -819,7 +1374,12 @@ Separate each category with "===CATEGORY===" followed by the category name.
         for sym in expected_symbols:
             fmp_sym = f"{sym}USD"
             q = quote_map.get(fmp_sym, {})
-            name = _CRYPTO_PROFILES.get(sym, {}).get("name", sym)
+            # Use curated name, or derive from CoinGecko ID (e.g. "bitcoin" → "Bitcoin")
+            name = _CRYPTO_PROFILES.get(sym, {}).get("name")
+            if not name:
+                from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+                cg_id = SYMBOL_TO_COINGECKO_ID.get(sym, "")
+                name = cg_id.replace("-", " ").title() if cg_id else sym
             result.append(RelatedCryptoResponse(
                 symbol=sym,
                 name=name,

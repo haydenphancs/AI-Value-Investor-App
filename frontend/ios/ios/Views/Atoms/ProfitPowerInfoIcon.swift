@@ -12,15 +12,9 @@ struct ProfitPowerInfoIcon: View {
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .stroke(AppColors.textMuted, lineWidth: 1.5)
-                    .frame(width: 20, height: 20)
-
-                Text("i")
-                    .font(.system(size: 12, weight: .semibold, design: .serif))
-                    .foregroundColor(AppColors.textMuted)
-            }
+            Image(systemName: "info.circle")
+                .font(AppTypography.iconSmall).fontWeight(.medium)
+                .foregroundColor(AppColors.textMuted)
         }
         .buttonStyle(.plain)
     }

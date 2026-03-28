@@ -21,12 +21,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import math
+
 from app.database import get_supabase
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.sentiment import (
     MarketMoodLevel,
     SentimentAnalysisResponse,
 )
+from app.services.social_mentions_service import get_social_mentions_service
 
 logger = logging.getLogger(__name__)
 
@@ -144,25 +147,33 @@ class SentimentService:
         if cached is not None:
             return cached
 
-        # Parallel fetch: news articles + price data
-        news_task = self._get_articles(ticker)
-        price_task = self._fetch_price_data(ticker)
+        social_svc = get_social_mentions_service()
 
+        # Parallel fetch: news + price + social (24h + 7d)
         results = await asyncio.gather(
-            news_task, price_task, return_exceptions=True,
+            self._get_articles(ticker),
+            self._fetch_price_data(ticker),
+            social_svc.get_mentions_24h(ticker),
+            social_svc.get_mentions_7d(ticker),
+            return_exceptions=True,
         )
 
         articles = results[0] if not isinstance(results[0], Exception) else []
         price_data = results[1] if not isinstance(results[1], Exception) else {}
+        social_24h = results[2] if not isinstance(results[2], Exception) else (0, 0)
+        social_7d = results[3] if not isinstance(results[3], Exception) else (0, 0)
 
-        if isinstance(results[0], Exception):
-            logger.warning(f"Article fetch failed for {ticker}: {results[0]}")
-        if isinstance(results[1], Exception):
-            logger.warning(f"Price fetch failed for {ticker}: {results[1]}")
+        for i, name in enumerate(["articles", "price", "social_24h", "social_7d"]):
+            if isinstance(results[i], Exception):
+                logger.warning(f"Sentiment fetch '{name}' failed for {ticker}: {results[i]}")
+
+        social_cur_24h, social_prev_24h = social_24h
+        social_cur_7d, social_prev_7d = social_7d
 
         logger.info(
             f"Sentiment data for {ticker}: "
-            f"articles={len(articles)}"
+            f"articles={len(articles)}, "
+            f"social_24h={social_cur_24h}, social_7d={social_cur_7d}"
         )
 
         # ── Price momentum score (always available) ────────────
@@ -172,18 +183,14 @@ class SentimentService:
         news_score_24h, news_cur_24h, news_prev_24h = (
             self._compute_news_score(articles, hours=24)
         )
-        # Social mentions = ticker mention count in news articles
-        social_cur_24h = self._count_ticker_mentions(
-            articles, ticker, hours=24
-        )
-        social_prev_24h = self._count_ticker_mentions(
-            articles, ticker, hours=24, previous=True
+        social_score_24h = self._compute_social_buzz_score(
+            social_cur_24h, social_prev_24h
         )
 
         has_news_24h = news_cur_24h > 0
         has_social_24h = social_cur_24h > 0
         combined_24h = self._combine_scores(
-            news_score_24h, 50,
+            news_score_24h, social_score_24h,
             has_social_24h, has_news_24h, price_score,
         )
 
@@ -191,17 +198,14 @@ class SentimentService:
         news_score_7d, news_cur_7d, news_prev_7d = (
             self._compute_news_score(articles, hours=168)
         )
-        social_cur_7d = self._count_ticker_mentions(
-            articles, ticker, hours=168
-        )
-        social_prev_7d = self._count_ticker_mentions(
-            articles, ticker, hours=168, previous=True
+        social_score_7d = self._compute_social_buzz_score(
+            social_cur_7d, social_prev_7d
         )
 
         has_news_7d = news_cur_7d > 0
         has_social_7d = social_cur_7d > 0
         combined_7d = self._combine_scores(
-            news_score_7d, 50,
+            news_score_7d, social_score_7d,
             has_social_7d, has_news_7d, price_score,
         )
 
@@ -209,9 +213,11 @@ class SentimentService:
             f"Sentiment scores for {ticker} — "
             f"price={price_score} | "
             f"24h: news={news_score_24h}({news_cur_24h} articles) "
-            f"mentions={social_cur_24h} combined={combined_24h} | "
+            f"social={social_score_24h}({social_cur_24h} mentions) "
+            f"combined={combined_24h} | "
             f"7d: news={news_score_7d}({news_cur_7d} articles) "
-            f"mentions={social_cur_7d} combined={combined_7d}"
+            f"social={social_score_7d}({social_cur_7d} mentions) "
+            f"combined={combined_7d}"
         )
 
         response = SentimentAnalysisResponse(
@@ -219,9 +225,9 @@ class SentimentService:
             # 24h
             mood_score=combined_24h,
             last_24h_mood=self._score_to_mood(combined_24h),
-            social_mentions=social_cur_24h,
+            social_mentions=float(social_cur_24h),
             social_mentions_change=self._pct_change(
-                social_cur_24h, social_prev_24h
+                float(social_cur_24h), float(social_prev_24h)
             ),
             news_articles=news_cur_24h,
             news_articles_change=self._pct_change(
@@ -230,14 +236,15 @@ class SentimentService:
             # 7d
             mood_score_7d=combined_7d,
             last_7d_mood=self._score_to_mood(combined_7d),
-            social_mentions_7d=social_cur_7d,
+            social_mentions_7d=float(social_cur_7d),
             social_mentions_change_7d=self._pct_change(
-                social_cur_7d, social_prev_7d
+                float(social_cur_7d), float(social_prev_7d)
             ),
             news_articles_7d=news_cur_7d,
             news_articles_change_7d=self._pct_change(
                 float(news_cur_7d), float(news_prev_7d)
             ),
+            social_data_available=has_social_24h or has_social_7d,
         )
 
         _cache_set(f"sentiment:{ticker}", response)
@@ -442,47 +449,42 @@ class SentimentService:
             logger.warning(f"Price data fetch failed for {ticker}: {e}")
             return {}
 
-    # ── Ticker mention counting (social mentions proxy) ────────
+    # ── Social buzz scoring ─────────────────────────────────────
 
     @staticmethod
-    def _count_ticker_mentions(
-        articles: List[Dict[str, Any]],
-        ticker: str,
-        hours: int,
-        previous: bool = False,
-    ) -> float:
+    def _compute_social_buzz_score(
+        current: int, previous: int
+    ) -> int:
         """
-        Count ticker mentions across news articles as a buzz proxy.
+        Map Reddit mention count to a 0-100 buzz score.
 
-        Counts how many times the ticker symbol appears in news
-        titles and text within the time window.
+        Uses logarithmic scale so both small and large tickers
+        get meaningful scores:
+          0 mentions → 30 (low buzz is slightly bearish)
+          1-5 → 40, 5-20 → 50, 20-100 → 60-70,
+          100-500 → 70-80, 500+ → 80-90
+
+        Adjusted by trend: rising mentions boost +5, falling -5.
         """
-        now = datetime.now(timezone.utc)
-        if previous:
-            start = (now - timedelta(hours=hours * 2)).isoformat()
-            end = (now - timedelta(hours=hours)).isoformat()
-        else:
-            start = (now - timedelta(hours=hours)).isoformat()
-            end = now.isoformat()
+        if current <= 0:
+            return 30
 
-        def _pub_date(a: Dict) -> str:
-            return a.get("publishedDate") or a.get("published_at") or ""
+        # Log scale: log2(mentions) mapped to 30-90 range
+        # log2(1)=0, log2(5)≈2.3, log2(20)≈4.3, log2(100)≈6.6,
+        # log2(500)≈9, log2(1000)≈10
+        log_val = math.log2(current + 1)  # +1 to avoid log(0)
+        # Map 0-10 log range to 35-85 score range
+        base_score = 35 + (log_val / 10.0) * 50
+        base_score = max(30, min(85, base_score))
 
-        ticker_lower = ticker.lower()
-        ticker_dollar = f"${ticker_lower}"
-        count = 0.0
+        # Trend adjustment
+        if previous > 0:
+            if current > previous:
+                base_score += 5
+            elif current < previous:
+                base_score -= 5
 
-        for a in articles:
-            pd = _pub_date(a)
-            if not (start <= pd <= end):
-                continue
-            title = (a.get("title") or "").lower()
-            text = (a.get("text") or a.get("summary") or "").lower()
-            combined = f"{title} {text}"
-            count += combined.count(ticker_lower)
-            count += combined.count(ticker_dollar)
-
-        return count
+        return max(0, min(100, round(base_score)))
 
     # ── News scoring ─────────────────────────────────────────────
 
@@ -594,14 +596,24 @@ class SentimentService:
         """
         Combine sentiment signals with adaptive weighting.
 
-        When news available:
-          55% news + 45% price
-        When neither:
-          100% price (never returns hardcoded 50)
+        All 3 available: 40% news + 30% social + 30% price
+        News + price only: 55% news + 45% price
+        Social + price only: 55% social + 45% price
+        Price only: 100% price
         """
+        if has_news and has_social:
+            return max(0, min(100, round(
+                news_score * 0.40
+                + social_score * 0.30
+                + price_score * 0.30
+            )))
         if has_news:
             return max(0, min(100, round(
                 news_score * 0.55 + price_score * 0.45
+            )))
+        if has_social:
+            return max(0, min(100, round(
+                social_score * 0.55 + price_score * 0.45
             )))
         return price_score
 

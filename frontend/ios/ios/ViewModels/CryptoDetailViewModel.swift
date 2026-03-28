@@ -16,7 +16,9 @@ class CryptoDetailViewModel: ObservableObject {
 
     @Published var cryptoData: CryptoDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
-    @Published var analysisData: TickerAnalysisData?
+    @Published var analystRatingsData: AnalystRatingsData?
+    @Published var sentimentAnalysisData: SentimentAnalysisData?
+    @Published var technicalAnalysisData: TechnicalAnalysisData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
@@ -97,7 +99,9 @@ class CryptoDetailViewModel: ObservableObject {
                 self.newsArticles = response.newsArticles.map { $0.toModel() }
 
                 // Analysis tab: use sample data for now (will be added to backend later)
-                self.analysisData = TickerAnalysisData.sampleData
+                self.analystRatingsData = AnalystRatingsData.sampleData
+                self.sentimentAnalysisData = SentimentAnalysisData.sampleData
+                self.technicalAnalysisData = TechnicalAnalysisData.sampleData
 
                 self.isLoading = false
                 self.errorMessage = nil
@@ -127,7 +131,9 @@ class CryptoDetailViewModel: ObservableObject {
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
             self.newsArticles = response.newsArticles.map { $0.toModel() }
-            self.analysisData = TickerAnalysisData.sampleData
+            self.analystRatingsData = AnalystRatingsData.sampleData
+            self.sentimentAnalysisData = SentimentAnalysisData.sampleData
+            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
             self.isLoading = false
         } catch {
             print("❌ [CryptoDetail] Refresh failed: \(error)")
@@ -197,7 +203,9 @@ class CryptoDetailViewModel: ObservableObject {
         print("   🔄 Falling back to sample data for \(cryptoSymbol)")
         self.cryptoData = CryptoDetailData.sampleEthereum
         self.newsArticles = TickerNewsArticle.sampleDataForTicker(cryptoSymbol)
-        self.analysisData = TickerAnalysisData.sampleData
+        self.analystRatingsData = AnalystRatingsData.sampleData
+        self.sentimentAnalysisData = SentimentAnalysisData.sampleData
+        self.technicalAnalysisData = TechnicalAnalysisData.sampleData
     }
 
     // MARK: - User Actions

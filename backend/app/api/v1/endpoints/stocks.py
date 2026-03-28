@@ -13,7 +13,7 @@ import asyncio
 import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
-from app.integrations.yahoo_finance import get_short_interest
+from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse

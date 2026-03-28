@@ -16,7 +16,7 @@ struct SourceLabel: View {
                 .font(AppTypography.iconTiny).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
 
-            Text(source.name)
+            Text(source.displayName)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }

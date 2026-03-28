@@ -112,17 +112,11 @@ struct EarningsSectionCard: View {
                 Button {
                     showInfoSheet = true
                 } label: {
-                    ZStack {
-                        Circle()
-                            .stroke(AppColors.textMuted, lineWidth: 1.5)
-                            .frame(width: 20, height: 20)
-
-                        Text("i")
-                            .font(AppTypography.labelSmallEmphasis)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+                    Image(systemName: "info.circle")
+                        .font(AppTypography.iconSmall).fontWeight(.medium)
+                        .foregroundColor(AppColors.textMuted)
                 }
-                .buttonStyle(PlainButtonStyle())
+                .buttonStyle(.plain)
             }
 
             Spacer()

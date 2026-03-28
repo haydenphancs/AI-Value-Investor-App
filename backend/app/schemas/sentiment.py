@@ -31,3 +31,5 @@ class SentimentAnalysisResponse(BaseModel):
     social_mentions_change_7d: float   # % change vs previous 7d
     news_articles_7d: int              # news articles in 7d
     news_articles_change_7d: float     # % change vs previous 7d
+    # Social data availability
+    social_data_available: bool         # True if ApeWisdom has data for this ticker

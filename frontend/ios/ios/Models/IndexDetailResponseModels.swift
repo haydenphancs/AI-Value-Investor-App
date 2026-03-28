@@ -75,10 +75,12 @@ struct KeyStatisticItemDTO: Decodable {
     let label: String
     let value: String
     let isHighlighted: Bool
+    let colorState: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value
         case isHighlighted = "is_highlighted"
+        case colorState = "color_state"
     }
 }
 
@@ -261,7 +263,7 @@ extension IndexDetailResponse {
         // Map key statistics groups
         let keyStatsGroups = keyStatisticsGroups.map { group in
             KeyStatisticsGroup(statistics: group.statistics.map { item in
-                KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted)
+                KeyStatistic(label: item.label, value: item.value, isHighlighted: item.isHighlighted, colorState: item.colorState)
             })
         }
 

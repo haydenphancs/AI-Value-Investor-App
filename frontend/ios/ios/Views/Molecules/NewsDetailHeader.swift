@@ -30,7 +30,7 @@ struct NewsDetailHeader: View {
             HStack(spacing: AppSpacing.sm) {
                 NewsSourceBrandIcon(source: source, size: 28, cornerRadius: 6)
 
-                Text(source.name)
+                Text(source.displayName)
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
             }

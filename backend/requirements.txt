@@ -16,7 +16,7 @@ python-multipart==0.0.18
 google-generativeai==0.8.3
 
 # HTTP client (for FMP API)
-httpx==0.27.2
+httpx[socks]==0.27.2
 
 # WebSocket (for live price streaming)
 websockets>=12.0

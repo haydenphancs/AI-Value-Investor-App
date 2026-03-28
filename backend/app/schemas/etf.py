@@ -16,6 +16,7 @@ class KeyStatisticItem(BaseModel):
     label: str
     value: str
     is_highlighted: bool = False
+    color_state: Optional[str] = None  # "warning" (red), "squeeze" (green), or None
 
 
 class KeyStatisticsGroupResponse(BaseModel):
@@ -26,6 +27,7 @@ class PerformancePeriodResponse(BaseModel):
     label: str
     change_percent: float
     vs_market_percent: Optional[float] = None
+    sp_return_percent: Optional[float] = None
 
 
 class MarketStatusResponse(BaseModel):

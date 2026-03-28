@@ -14,13 +14,24 @@ struct SentimentMetricsRow: View {
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
             // Social Mentions
-            SentimentMetricCard(
-                iconName: "bubble.left.and.bubble.right.fill",
-                title: "Social Mentions",
-                value: sentimentData.formattedSocialMentions(for: selectedTimeframe),
-                change: sentimentData.formattedSocialChange(for: selectedTimeframe),
-                changeColor: sentimentData.socialChangeColor(for: selectedTimeframe)
-            )
+            if sentimentData.socialDataAvailable {
+                SentimentMetricCard(
+                    iconName: "bubble.left.and.bubble.right.fill",
+                    title: "Social Mentions",
+                    value: sentimentData.formattedSocialMentions(for: selectedTimeframe),
+                    change: sentimentData.formattedSocialChange(for: selectedTimeframe),
+                    changeColor: sentimentData.socialChangeColor(for: selectedTimeframe)
+                )
+            } else {
+                SentimentMetricCard(
+                    iconName: "bubble.left.and.bubble.right.fill",
+                    title: "Social Mentions",
+                    value: "N/A",
+                    change: "Not tracked on Reddit",
+                    changeColor: AppColors.textMuted,
+                    isDimmed: true
+                )
+            }
 
             // News Articles
             SentimentMetricCard(
@@ -41,6 +52,7 @@ struct SentimentMetricCard: View {
     let value: String
     let change: String
     let changeColor: Color
+    var isDimmed: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -57,7 +69,7 @@ struct SentimentMetricCard: View {
             Text(value)
                 .font(AppTypography.titleCompact)
                 .fontWeight(.bold)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(isDimmed ? AppColors.textMuted : AppColors.textPrimary)
 
             Text(change)
                 .font(AppTypography.caption)

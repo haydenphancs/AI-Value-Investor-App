@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
-from app.integrations.yahoo_finance import get_short_interest
+from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
     KeyStatisticItem,
@@ -342,6 +342,11 @@ class StockOverviewService:
             logger.warning(f"Ownership snapshot failed for {ticker}: {ownership_snapshot}")
             ownership_snapshot = None
 
+        # ── Ensure short interest is populated (FINRA/Nasdaq/Yahoo) ──
+        if not fundamentals.get("short_interest"):
+            from app.integrations.finra_short_interest import get_short_interest
+            fundamentals["short_interest"] = await get_short_interest(ticker)
+
         # ── Build response from both data sources ─────────────────
         response = self._build_full_response(
             ticker, fundamentals, volatile, chart_range, interval, extended_hours,
@@ -607,21 +612,6 @@ class StockOverviewService:
         inst_ownership = fund.get("inst_ownership", [])
         income_quarterly = fund.get("income_quarterly", [])
         short_interest = fund.get("short_interest", {})
-        # If fundamentals cache has empty short interest, check the dedicated
-        # short_interest_cache (longer TTL, background-populated by Yahoo worker)
-        if not short_interest:
-            from app.integrations.yahoo_finance import (
-                _supabase_cache_get, _supabase_cache_get_stale,
-                _mem_cache_get, _enqueue_fetch,
-            )
-            mem_key = f"yahoo_short:{ticker.upper()}"
-            short_interest = _mem_cache_get(mem_key) or {}
-            if not short_interest:
-                short_interest = _supabase_cache_get(ticker.upper()) or {}
-            if not short_interest:
-                short_interest = _supabase_cache_get_stale(ticker.upper()) or {}
-            if not short_interest:
-                _enqueue_fetch(ticker.upper())
         sector_perf = fund.get("sector_perf", [])
         industry_perf = fund.get("industry_perf", [])
         stock_historical = fund.get("stock_historical", [])
@@ -753,12 +743,15 @@ class StockOverviewService:
         pe = None
         if income_quarterly and len(income_quarterly) >= 4:
             try:
-                ttm_eps = sum(
-                    float(q.get("epsDiluted") or q.get("eps") or 0)
-                    for q in income_quarterly[:4]
-                )
-                if ttm_eps > 0:
-                    eps = round(ttm_eps, 2)
+                eps_vals = []
+                for q in income_quarterly[:4]:
+                    val = q.get("epsDiluted") or q.get("eps")
+                    if val is not None:
+                        eps_vals.append(float(val))
+                if len(eps_vals) == 4:
+                    ttm_eps = sum(eps_vals)
+                    if ttm_eps > 0:
+                        eps = round(ttm_eps, 2)
             except (ValueError, TypeError):
                 pass
 
@@ -835,7 +828,7 @@ class StockOverviewService:
             KeyStatisticItem(label="52-Week High", value=f"{year_high:.2f}" if year_high else "—"),
             KeyStatisticItem(label="52-Week Low", value=f"{year_low:.2f}" if year_low else "—"),
             KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
-            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd else "—"),
+            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd and pe_fwd > 0 else "—"),
             KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
@@ -865,7 +858,7 @@ class StockOverviewService:
 
         group3 = KeyStatisticsGroupResponse(statistics=[
             KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
-            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd else "—"),
+            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd and pe_fwd > 0 else "—"),
             KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
@@ -898,7 +891,24 @@ class StockOverviewService:
 
         short_pct_str = f"{short_pct_val:.2f}%" if short_pct_val is not None else "N/A"
 
-        # Float shares from shares-float endpoint (or fallback calculation)
+        # 3M Short Change — with color state
+        short_change_3m = short_interest.get("short_change_3m")
+        short_change_color = None
+        if short_change_3m is not None:
+            sign = "+" if short_change_3m > 0 else ""
+            short_change_str = f"{sign}{short_change_3m:.2f}%"
+            if short_change_3m >= 20:
+                short_change_color = "warning"   # red — short interest rising fast
+            elif short_change_3m <= -20:
+                short_change_color = "squeeze"   # green — short squeeze potential
+        else:
+            short_change_str = "—"
+
+        # Days to Cover
+        days_to_cover = short_interest.get("short_ratio")
+        dtc_str = f"{days_to_cover:.2f}" if days_to_cover is not None else "—"
+
+        # Free Float from shares-float endpoint (or fallback calculation)
         if not float_shares_val and shares_out and insider_pct is not None:
             try:
                 ins = float(insider_pct)
@@ -909,15 +919,12 @@ class StockOverviewService:
                 pass
         float_str = _fmt_large(float_shares_val) if float_shares_val else "—"
 
-        insider_str = _pct(insider_pct) if insider_pct is not None else "—"
-        inst_str = _pct(inst_pct) if inst_pct is not None else "—"
-
         group4 = KeyStatisticsGroupResponse(statistics=[
             KeyStatisticItem(label="Short % of Float", value=short_pct_str, is_highlighted=True),
+            KeyStatisticItem(label="3M Short Change", value=short_change_str, color_state=short_change_color),
+            KeyStatisticItem(label="Days to Cover", value=dtc_str),
             KeyStatisticItem(label="Shares Outstanding", value=_fmt_large(shares_out) if shares_out else "—"),
-            KeyStatisticItem(label="Float", value=float_str),
-            KeyStatisticItem(label="% Held by Insiders", value=insider_str),
-            KeyStatisticItem(label="% Held Inst.", value=inst_str),
+            KeyStatisticItem(label="Free Float", value=float_str),
         ])
 
         return flat_stats, [group1, group2, group3, group4]
@@ -950,6 +957,7 @@ class StockOverviewService:
                     label=label,
                     change_percent=round(stock_ret, 2),
                     vs_market_percent=vs_market,
+                    sp_return_percent=round(sp_ret, 2) if sp_ret is not None else None,
                 ))
         return periods
 
@@ -1221,7 +1229,7 @@ class StockOverviewService:
             else:
                 rating = 1
         else:
-            rating = 3  # neutral if can't compute
+            rating = 0  # unavailable if can't compute
 
         metrics = [
             SnapshotMetricResponse(name="Altman Z-Score", value=f"{z_score}" if z_score else "—"),
@@ -1253,8 +1261,8 @@ class StockOverviewService:
                 v *= 100
             return f"{v:.1f}%"
 
-        # Default neutral rating
-        rating = 3
+        # Unavailable by default — only rate if we have actual data
+        rating = 0
 
         metrics = [
             SnapshotMetricResponse(name="Institutional Ownership", value=_fmt_own(inst_pct)),

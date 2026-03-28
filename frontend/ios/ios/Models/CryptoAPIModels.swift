@@ -49,14 +49,16 @@ struct KeyStatisticDTO: Codable {
     let label: String
     let value: String
     let isHighlighted: Bool
+    let colorState: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value
         case isHighlighted = "is_highlighted"
+        case colorState = "color_state"
     }
 
     func toModel() -> KeyStatistic {
-        KeyStatistic(label: label, value: value, isHighlighted: isHighlighted)
+        KeyStatistic(label: label, value: value, isHighlighted: isHighlighted, colorState: colorState)
     }
 }
 
@@ -75,12 +77,14 @@ struct PerformancePeriodDTO: Codable {
     let changePercent: Double
     let vsMarketPercent: Double?
     let benchmarkLabel: String?
+    let spReturnPercent: Double?
 
     enum CodingKeys: String, CodingKey {
         case label
         case changePercent = "change_percent"
         case vsMarketPercent = "vs_market_percent"
         case benchmarkLabel = "benchmark_label"
+        case spReturnPercent = "sp_return_percent"
     }
 
     func toModel() -> PerformancePeriod {
@@ -88,7 +92,8 @@ struct PerformancePeriodDTO: Codable {
             label: label,
             changePercent: changePercent,
             vsMarketPercent: vsMarketPercent,
-            benchmarkLabel: benchmarkLabel ?? "BTC"
+            benchmarkLabel: benchmarkLabel ?? "BTC",
+            spReturnPercent: spReturnPercent
         )
     }
 }

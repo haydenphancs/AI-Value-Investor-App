@@ -23,7 +23,7 @@ struct KeyStatisticsCard: View {
                     // Value
                     Text(statistic.value)
                         .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(statistic.isHighlighted ? AppColors.primaryBlue : AppColors.textPrimary)
+                        .foregroundColor(valueColor(for: statistic))
                         .lineLimit(1)
                 }
             }
@@ -32,6 +32,17 @@ struct KeyStatisticsCard: View {
         .frame(width: 160)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+    }
+
+    private func valueColor(for statistic: KeyStatistic) -> Color {
+        if let state = statistic.colorState {
+            switch state {
+            case "warning": return AppColors.bearish
+            case "squeeze": return AppColors.bullish
+            default: break
+            }
+        }
+        return statistic.isHighlighted ? AppColors.primaryBlue : AppColors.textPrimary
     }
 }
 

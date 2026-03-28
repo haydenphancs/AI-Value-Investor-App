@@ -202,8 +202,8 @@ struct TickerDetailView: View {
             ShareSheet(items: shareItems)
         }
         .sheet(isPresented: $showUpgradesDowngrades) {
-            if let analysisData = viewModel.analysisData {
-                UpgradesDowngradesView(actions: analysisData.analystRatings.actions)
+            if let ratingsData = viewModel.analystRatingsData {
+                UpgradesDowngradesView(actions: ratingsData.actions)
             }
         }
         .sheet(isPresented: $showTechnicalAnalysisDetail) {
@@ -282,23 +282,24 @@ struct TickerDetailView: View {
                 onLoadMore: { viewModel.loadMoreNews() }
             )
         case .analysis:
-            if let analysisData = viewModel.analysisData {
-                TickerAnalysisContent(
-                    analysisData: analysisData,
-                    selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
-                    selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
-                    onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
-                    onAnalystActionsTap: {
-                        showUpgradesDowngrades = true
-                    },
-                    onSentimentMoreTap: viewModel.handleSentimentMore,
-                    onTechnicalDetailTap: {
-                        showTechnicalAnalysisDetail = true
-                    }
-                )
-            } else {
-                placeholderContent(title: "Analysis", description: "Loading analysis data...")
-            }
+            TickerAnalysisContent(
+                analystRatingsData: viewModel.analystRatingsData,
+                sentimentAnalysisData: viewModel.sentimentAnalysisData,
+                technicalAnalysisData: viewModel.technicalAnalysisData,
+                isAnalystLoaded: viewModel.isAnalystLoaded,
+                isSentimentLoaded: viewModel.isSentimentLoaded,
+                isTechnicalLoaded: viewModel.isTechnicalLoaded,
+                selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
+                selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
+                onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
+                onAnalystActionsTap: {
+                    showUpgradesDowngrades = true
+                },
+                onSentimentMoreTap: viewModel.handleSentimentMore,
+                onTechnicalDetailTap: {
+                    showTechnicalAnalysisDetail = true
+                }
+            )
         case .financials:
             TickerFinancialsContent(
                 earningsData: viewModel.earningsData,

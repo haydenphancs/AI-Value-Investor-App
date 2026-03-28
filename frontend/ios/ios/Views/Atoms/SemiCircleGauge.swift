@@ -15,13 +15,13 @@ enum GaugeType {
     var zoneColors: [Color] {
         switch self {
         case .sentiment:
-            // Green (Bearish) -> Grey (Neutral) -> Red (Bullish)
+            // Red (Bearish) -> Grey (Neutral) -> Green (Bullish)
             return [
-                AppColors.bullish,           // 0-30: Green (Bearish)
-                AppColors.bullish,
+                AppColors.bearish,           // 0-30: Red (Bearish)
+                AppColors.bearish,
                 Color(hex: "6B7280"),         // 31-70: Grey (Neutral)
                 Color(hex: "6B7280"),
-                AppColors.bearish            // 71-100: Red (Bullish)
+                AppColors.bullish            // 71-100: Green (Bullish)
             ]
         case .technical:
             // 5 distinct zones
@@ -144,61 +144,64 @@ struct SemiCircleGauge: View {
     }
 }
 
-// MARK: - Sentiment Gauge Arcs (3 zones)
+// MARK: - Sentiment Gauge Arcs (3 zones with smooth AngularGradient)
+// Single arc with AngularGradient — no segments, no z-ordering issues
 struct SentimentGaugeArcs: View {
     let size: CGFloat
+    private let lineWidth: CGFloat = 20
 
     var body: some View {
-        ZStack {
-            // Zone 1: Bearish (0-30) - Red - Left side
-            SemiCircleArcSegment(startAngle: 180, endAngle: 126)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 2: Neutral (31-70) - Grey - Middle
-            SemiCircleArcSegment(startAngle: 126, endAngle: 54)
-                .stroke(Color(hex: "6B7280"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 3: Bullish (71-100) - Green - Right side
-            SemiCircleArcSegment(startAngle: 54, endAngle: 0)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-        }
+        // AngularGradient sweeps from left (0°=red) to right (180°=green)
+        // Location = ourAngle / 180
+        SemiCircleArc()
+            .stroke(
+                AngularGradient(
+                    stops: [
+                        .init(color: AppColors.bearish, location: 0.0),
+                        .init(color: AppColors.bearish, location: 0.25),
+                        .init(color: Color(hex: "6B7280"), location: 0.32),
+                        .init(color: Color(hex: "6B7280"), location: 0.68),
+                        .init(color: AppColors.bullish, location: 0.75),
+                        .init(color: AppColors.bullish, location: 1.0),
+                    ],
+                    center: UnitPoint(x: 0.5, y: 1.0),
+                    startAngle: .degrees(-180),
+                    endAngle: .degrees(0)
+                ),
+                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            )
+            .frame(width: size, height: size / 2)
     }
 }
 
-// MARK: - Technical Gauge Arcs (5 zones)
+// MARK: - Technical Gauge Arcs (5 zones with smooth AngularGradient)
 struct TechnicalGaugeArcs: View {
     let size: CGFloat
+    private let lineWidth: CGFloat = 20
 
     var body: some View {
-        ZStack {
-            // Zone 1: Strong Sell (0-20) - Dark Red
-            SemiCircleArcSegment(startAngle: 180, endAngle: 144)
-                .stroke(Color(hex: "991B1B"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 2: Sell (21-40) - Red
-            SemiCircleArcSegment(startAngle: 144, endAngle: 108)
-                .stroke(AppColors.bearish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 3: Hold (41-60) - Yellow
-            SemiCircleArcSegment(startAngle: 108, endAngle: 72)
-                .stroke(AppColors.neutral, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 4: Buy (61-80) - Light Green
-            SemiCircleArcSegment(startAngle: 72, endAngle: 36)
-                .stroke(Color(hex: "4ADE80"), style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-
-            // Zone 5: Strong Buy (81-100) - Green
-            SemiCircleArcSegment(startAngle: 36, endAngle: 0)
-                .stroke(AppColors.bullish, style: StrokeStyle(lineWidth: 20, lineCap: .butt))
-                .frame(width: size, height: size / 2)
-        }
+        SemiCircleArc()
+            .stroke(
+                AngularGradient(
+                    stops: [
+                        .init(color: Color(hex: "991B1B"), location: 0.0),
+                        .init(color: Color(hex: "991B1B"), location: 0.12),
+                        .init(color: AppColors.bearish, location: 0.28),
+                        .init(color: AppColors.bearish, location: 0.32),
+                        .init(color: AppColors.neutral, location: 0.48),
+                        .init(color: AppColors.neutral, location: 0.52),
+                        .init(color: Color(hex: "4ADE80"), location: 0.68),
+                        .init(color: Color(hex: "4ADE80"), location: 0.72),
+                        .init(color: AppColors.bullish, location: 0.88),
+                        .init(color: AppColors.bullish, location: 1.0),
+                    ],
+                    center: UnitPoint(x: 0.5, y: 1.0),
+                    startAngle: .degrees(-180),
+                    endAngle: .degrees(0)
+                ),
+                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            )
+            .frame(width: size, height: size / 2)
     }
 }
 

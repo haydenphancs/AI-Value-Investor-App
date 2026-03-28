@@ -23,6 +23,7 @@ class PerformancePeriodResponse(BaseModel):
     label: str
     change_percent: float
     vs_market_percent: Optional[float] = None
+    sp_return_percent: Optional[float] = None
 
 
 class BenchmarkSummaryResponse(BaseModel):

@@ -41,7 +41,7 @@ struct TickerNewsCard: View {
 
                     Spacer()
 
-                    Text(article.source.name)
+                    Text(article.source.displayName)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }

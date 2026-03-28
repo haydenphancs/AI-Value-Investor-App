@@ -18,7 +18,9 @@ class IndexDetailViewModel: ObservableObject {
 
     @Published var indexData: IndexDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
-    @Published var analysisData: TickerAnalysisData?
+    @Published var analystRatingsData: AnalystRatingsData?
+    @Published var sentimentAnalysisData: SentimentAnalysisData?
+    @Published var technicalAnalysisData: TechnicalAnalysisData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
@@ -219,7 +221,9 @@ class IndexDetailViewModel: ObservableObject {
             self.newsArticles = response.toNewsArticles()
 
             // Analysis data is not yet served by the backend — use sample
-            self.analysisData = TickerAnalysisData.sampleData
+            self.analystRatingsData = AnalystRatingsData.sampleData
+            self.sentimentAnalysisData = SentimentAnalysisData.sampleData
+            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
 
             self.isLoading = false
 
@@ -286,8 +290,10 @@ class IndexDetailViewModel: ObservableObject {
             newsArticles = TickerNewsArticle.sampleDataForTicker(indexSymbol)
             print("🔄 [IndexDetailVM] Using fallback sample news")
         }
-        if analysisData == nil {
-            analysisData = TickerAnalysisData.sampleData
+        if analystRatingsData == nil {
+            analystRatingsData = AnalystRatingsData.sampleData
+            sentimentAnalysisData = SentimentAnalysisData.sampleData
+            technicalAnalysisData = TechnicalAnalysisData.sampleData
             print("🔄 [IndexDetailVM] Using fallback sample analysis")
         }
     }

@@ -132,7 +132,7 @@ struct TickerChartView: View {
                     overlays: chartSettings.activeOverlays,
                     showExtendedHours: chartSettings.showExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
-                    chartEventDates: chartSettings.showEarningsDividendDates ? chartEventDates : nil
+                    chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil
                 )
 
                 ChartCrosshairGesture(
@@ -239,8 +239,12 @@ struct TickerChartView: View {
             viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
         }
         .onChange(of: pricePoints.count) {
-            // Fallback: also reset when data count changes (covers views without chartDataVersion)
-            viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
+            // When zoomed, extend to include new candles without resetting zoom/pan
+            if viewportState.isZoomed {
+                viewportState.extendToEnd(newTotalCount: pricePoints.count)
+            } else {
+                viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)
+            }
         }
         .onAppear {
             viewportState.reset(totalCount: pricePoints.count, displayStart: warmupCount)

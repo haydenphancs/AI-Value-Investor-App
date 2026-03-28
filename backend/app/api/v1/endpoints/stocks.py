@@ -748,34 +748,22 @@ async def get_technical_analysis(ticker: str):
 @router.get("/{ticker}/chart-events")
 async def get_chart_events(ticker: str):
     """
-    Get earnings and ex-dividend dates for chart markers.
+    Get earnings dates for chart markers.
 
-    Returns lists of dates (yyyy-MM-dd) so the frontend can render
-    "E" (earnings) and "D" (dividend) markers on the price chart.
+    Returns list of dates (yyyy-MM-dd) so the frontend can render
+    "E" (earnings) markers on the price chart.
     """
     ticker = ticker.upper()
     fmp = get_fmp_client()
     try:
-        earnings_dates, dividend_data = await asyncio.gather(
-            fmp.get_historical_earnings_dates(ticker),
-            fmp.get_dividend_history(ticker, limit=50),
-        )
-        # Defensive extraction — dividend dates can be under different field names
-        dividend_dates = []
-        for item in dividend_data:
-            if not isinstance(item, dict):
-                continue
-            d = item.get("date") or item.get("recordDate") or ""
-            if d:
-                dividend_dates.append(d)
+        earnings_dates = await fmp.get_historical_earnings_dates(ticker)
 
         logger.info(
-            f"Chart events for {ticker}: "
-            f"{len(earnings_dates)} earnings, {len(dividend_dates)} dividends"
+            f"Chart events for {ticker}: {len(earnings_dates)} earnings"
         )
         return {
             "earnings_dates": earnings_dates,
-            "dividend_dates": dividend_dates,
+            "dividend_dates": [],  # Kept for backward compatibility
         }
     except Exception as e:
         logger.error(f"Chart events failed for {ticker}: {e}", exc_info=True)

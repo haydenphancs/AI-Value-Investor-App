@@ -65,6 +65,7 @@ class TickerDetailViewModel: ObservableObject {
     private var allNewsArticles: [TickerNewsArticle] = []  // full set from API
     private var newsDisplayCount: Int = 10
     private let newsPageSize: Int = 10
+    private var chartRefreshTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -80,6 +81,14 @@ class TickerDetailViewModel: ObservableObject {
                 guard let self = self else { return }
                 print("📈 TickerDetailVM: Chart range changed to \(range.rawValue)")
                 self.chartSettings.selectedInterval = range.defaultInterval
+
+                // Restart or stop chart refresh timer based on new range
+                if range.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                    self.startChartRefreshTimer()
+                } else {
+                    self.stopChartRefreshTimer()
+                }
+
                 Task { [weak self] in
                     guard let self = self else { return }
                     await self.fetchChartData(self.tickerSymbol, range: range)
@@ -113,7 +122,7 @@ class TickerDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe live price updates from WebSocket and apply to tickerData
+        // Observe live price updates from WebSocket and apply to tickerData + chart
         livePriceManager.$livePrice
             .compactMap { $0 }
             .sink { [weak self] newPrice in
@@ -121,6 +130,23 @@ class TickerDetailViewModel: ObservableObject {
                 data.currentPrice = newPrice
                 data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
                 data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+
+                // Update last chart candle for intraday ranges
+                if self.chartSettings.selectedInterval.isIntraday,
+                   !data.chartPricePoints.isEmpty {
+                    let lastIndex = data.chartPricePoints.count - 1
+                    let last = data.chartPricePoints[lastIndex]
+                    let updatedPoint = StockPricePoint(
+                        date: last.date,
+                        close: newPrice,
+                        open: last.open,
+                        high: max(last.high ?? newPrice, newPrice),
+                        low: min(last.low ?? newPrice, newPrice),
+                        volume: last.volume
+                    )
+                    data.chartPricePoints[lastIndex] = updatedPoint
+                }
+
                 self.tickerData = data
             }
             .store(in: &cancellables)
@@ -172,10 +198,11 @@ class TickerDetailViewModel: ObservableObject {
             // Show UI immediately — price/chart/overview are ready
             self.isLoading = false
 
-            // Start live price streaming if market is active
+            // Start live price streaming + chart refresh if market is active
             if let status = self.tickerData?.marketStatus,
                MarketHoursUtil.shouldStreamLivePrice(for: status) {
                 self.connectLivePrice()
+                self.startChartRefreshTimer()
             }
 
             // Phase 2: Fetch supplementary data in parallel (non-blocking)
@@ -209,6 +236,31 @@ class TickerDetailViewModel: ObservableObject {
 
     func disconnectLivePrice() {
         livePriceManager.disconnect()
+        stopChartRefreshTimer()
+    }
+
+    // MARK: - Chart Refresh Timer
+
+    private func startChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                // Only refresh if market is active and we're on an intraday interval
+                guard self.chartSettings.selectedInterval.isIntraday,
+                      MarketHoursUtil.isMarketActive() else { continue }
+
+                await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)
+            }
+        }
+    }
+
+    private func stopChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = nil
     }
 
     // MARK: - API Fetching
@@ -704,26 +756,15 @@ class TickerDetailViewModel: ObservableObject {
             let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString, extendedHours: useExtendedHours)
             let pricePoints = chartResponse.prices
             print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
-            if !pricePoints.isEmpty, let currentData = self.tickerData {
-                // Rebuild tickerData with new chart prices
-                self.tickerData = TickerDetailData(
-                    symbol: currentData.symbol,
-                    companyName: currentData.companyName,
-                    currentPrice: currentData.currentPrice,
-                    priceChange: currentData.priceChange,
-                    priceChangePercent: currentData.priceChangePercent,
-                    marketStatus: currentData.marketStatus,
-                    chartPricePoints: pricePoints,
-                    keyStatistics: currentData.keyStatistics,
-                    keyStatisticsGroups: currentData.keyStatisticsGroups,
-                    performancePeriods: currentData.performancePeriods,
-                    snapshots: currentData.snapshots,
-                    sectorIndustry: currentData.sectorIndustry,
-                    companyProfile: currentData.companyProfile,
-                    relatedTickers: currentData.relatedTickers,
-                    benchmarkSummary: currentData.benchmarkSummary
-                )
-                self.chartDataVersion += 1
+            if !pricePoints.isEmpty, var currentData = self.tickerData {
+                let previousCount = currentData.chartPricePoints.count
+                // Update chart prices in-place
+                currentData.chartPricePoints = pricePoints
+                self.tickerData = currentData
+                // Only reset viewport when new candles appeared (not just values updated)
+                if pricePoints.count != previousCount {
+                    self.chartDataVersion += 1
+                }
             }
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch chart data for \(ticker): \(error)")

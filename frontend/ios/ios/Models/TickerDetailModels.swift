@@ -483,7 +483,7 @@ struct TickerDetailData: Identifiable {
     var priceChange: Double
     var priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartPricePoints: [StockPricePoint]
+    var chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]

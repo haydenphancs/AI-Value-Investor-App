@@ -296,46 +296,43 @@ class FMPClient:
     ) -> List[str]:
         """Return list of earnings report dates (yyyy-MM-dd) for a specific ticker.
 
-        Tries the per-symbol `earning_calendar` endpoint first (historical),
-        then falls back to `earnings-calendar` with symbol filter.
+        Uses the historical/earning_calendar/{symbol} endpoint for past dates,
+        then merges with earning_calendar?symbol= for upcoming dates.
         """
         symbol = ticker.upper()
+        all_dates: set = set()
+
+        # Primary: historical earnings endpoint (past dates)
         try:
-            # Primary: per-symbol historical earnings endpoint
+            data = await self._make_request(
+                f"historical/earning_calendar/{symbol}"
+            )
+            if isinstance(data, list) and data:
+                for item in data:
+                    if isinstance(item, dict) and item.get("date"):
+                        all_dates.add(item["date"])
+                if all_dates:
+                    logger.info(f"historical/earning_calendar returned {len(all_dates)} dates for {symbol}")
+        except Exception as e:
+            logger.warning(f"historical/earning_calendar failed for {symbol}: {e}")
+
+        # Also fetch upcoming earnings so future dates appear on chart
+        try:
             data = await self._make_request(
                 "earning_calendar", params={"symbol": symbol}
             )
-            if isinstance(data, list) and data:
-                dates = sorted(set(
-                    item["date"] for item in data
-                    if isinstance(item, dict)
-                    and item.get("date")
-                    and item.get("symbol", "").upper() == symbol
-                ), reverse=True)
-                if dates:
-                    logger.info(f"earning_calendar returned {len(dates)} dates for {symbol}")
-                    return dates
+            if isinstance(data, list):
+                for item in data:
+                    if (isinstance(item, dict)
+                            and item.get("date")
+                            and item.get("symbol", "").upper() == symbol):
+                        all_dates.add(item["date"])
         except Exception as e:
             logger.warning(f"earning_calendar failed for {symbol}: {e}")
 
-        try:
-            # Fallback: general calendar filtered by symbol
-            data = await self._make_request(
-                "earnings-calendar", params={"symbol": symbol}
-            )
-            if isinstance(data, list):
-                dates = sorted(set(
-                    item["date"] for item in data
-                    if isinstance(item, dict)
-                    and item.get("date")
-                    and item.get("symbol", "").upper() == symbol
-                ), reverse=True)
-                logger.info(f"earnings-calendar returned {len(dates)} dates for {symbol}")
-                return dates
-        except Exception as e:
-            logger.warning(f"earnings-calendar with symbol failed for {symbol}: {e}")
-
-        return []
+        dates = sorted(all_dates, reverse=True)
+        logger.info(f"Total earnings dates for {symbol}: {len(dates)}")
+        return dates
 
     # ── Sector & market data ────────────────────────────────────────
 

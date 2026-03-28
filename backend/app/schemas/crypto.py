@@ -6,7 +6,7 @@ explicit CodingKeys (snake_case raw values), so no aliases needed.
 """
 
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 
 
 class KeyStatisticItem(BaseModel):
@@ -77,7 +77,7 @@ class CryptoDetailResponse(BaseModel):
     price_change: float
     price_change_percent: float
     market_status: str  # "24/7 Trading" or "Maintenance"
-    chart_data: List[float]
+    chart_data: List[Dict[str, Any]]
     key_statistics_groups: List[KeyStatisticsGroupResponse]
     performance_periods: List[PerformancePeriodResponse]
     snapshots: List[CryptoSnapshotResponse]

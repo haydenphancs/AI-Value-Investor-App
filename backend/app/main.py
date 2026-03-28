@@ -16,6 +16,7 @@ from typing import Any
 from app.config import settings
 from app.database import check_supabase_health
 from app.api.v1.api import api_router
+from app.integrations.coingecko import close_coingecko_client
 from app.integrations.fmp import close_fmp_client
 from app.services.live_price_manager import get_live_price_manager
 
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
 
     # Close persistent HTTP clients
     await close_fmp_client()
+    await close_coingecko_client()
     logger.info("Shutting down")
 
 

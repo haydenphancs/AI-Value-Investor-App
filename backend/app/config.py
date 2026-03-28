@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     FMP_API_KEY: str
     FMP_BASE_URL: str = "https://financialmodelingprep.com/stable"
 
+    # CoinGecko (Demo API — free tier, 30 calls/min, 10K/month)
+    COINGECKO_API_KEY: str = ""
+    COINGECKO_BASE_URL: str = "https://api.coingecko.com/api/v3"
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

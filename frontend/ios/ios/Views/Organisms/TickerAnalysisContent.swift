@@ -11,11 +11,14 @@ struct TickerAnalysisContent: View {
     let analystRatingsData: AnalystRatingsData?
     let sentimentAnalysisData: SentimentAnalysisData?
     let technicalAnalysisData: TechnicalAnalysisData?
+    var fearGreedData: CryptoFearGreedData? = nil
     let isAnalystLoaded: Bool
+    var isFearGreedLoaded: Bool = true
     let isSentimentLoaded: Bool
     let isTechnicalLoaded: Bool
     @Binding var selectedMomentumPeriod: AnalystMomentumPeriod
     @Binding var selectedSentimentTimeframe: SentimentTimeframe
+    var selectedFearGreedTimeframe: Binding<FearGreedTimeframe>? = nil
     var onAnalystRatingsMoreTap: (() -> Void)?
     var onAnalystActionsTap: (() -> Void)?
     var onSentimentMoreTap: (() -> Void)?
@@ -23,8 +26,13 @@ struct TickerAnalysisContent: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
-            // Analyst Ratings Section
-            if let ratingsData = analystRatingsData {
+            // Fear & Greed Index (crypto) OR Analyst Ratings (stocks)
+            if let fgData = fearGreedData,
+               let fgTimeframe = selectedFearGreedTimeframe {
+                CryptoFearGreedSection(data: fgData, selectedTimeframe: fgTimeframe)
+            } else if !isFearGreedLoaded && analystRatingsData == nil {
+                analysisSectionPlaceholder(height: 280)
+            } else if let ratingsData = analystRatingsData {
                 AnalystRatingsSection(
                     ratingsData: ratingsData,
                     selectedMomentumPeriod: $selectedMomentumPeriod,

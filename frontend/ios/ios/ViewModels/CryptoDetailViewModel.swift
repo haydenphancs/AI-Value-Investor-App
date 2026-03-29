@@ -16,8 +16,12 @@ class CryptoDetailViewModel: ObservableObject {
 
     @Published var cryptoData: CryptoDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
-    @Published var analystRatingsData: AnalystRatingsData?
+    @Published var isNewsLoading: Bool = false
+    @Published var hasMoreNews: Bool = false
+    @Published var fearGreedData: CryptoFearGreedData?
+    @Published var isFearGreedLoading: Bool = false
     @Published var sentimentAnalysisData: SentimentAnalysisData?
+    @Published var isSentimentLoading: Bool = false
     @Published var technicalAnalysisData: TechnicalAnalysisData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
@@ -29,6 +33,7 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var aiInputText: String = ""
 
     // Analysis tab state
+    @Published var selectedFearGreedTimeframe: FearGreedTimeframe = .today
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
@@ -38,7 +43,13 @@ class CryptoDetailViewModel: ObservableObject {
 
     private let cryptoSymbol: String
     private let apiClient = APIClient.shared
+    private let stockRepository: StockRepository = .shared
     private var cancellables = Set<AnyCancellable>()
+
+    // News pagination
+    private var allNewsArticles: [TickerNewsArticle] = []
+    private var newsDisplayCount: Int = 10
+    private let newsPageSize: Int = 10
 
     // MARK: - Initialization
 
@@ -96,15 +107,16 @@ class CryptoDetailViewModel: ObservableObject {
                 // Map API response → UI models
                 self.cryptoData = response.toModel()
                 self.chartDataVersion += 1
-                self.newsArticles = response.newsArticles.map { $0.toModel() }
 
-                // Analysis tab: use sample data for now (will be added to backend later)
-                self.analystRatingsData = AnalystRatingsData.sampleData
-                self.sentimentAnalysisData = SentimentAnalysisData.sampleData
+                // Technical analysis: sample data for now
                 self.technicalAnalysisData = TechnicalAnalysisData.sampleData
 
                 self.isLoading = false
                 self.errorMessage = nil
+
+                // Fetch news + analysis data in parallel
+                await self.fetchCryptoNews()
+                await self.fetchCryptoAnalysis()
 
             } catch {
                 print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
@@ -130,11 +142,12 @@ class CryptoDetailViewModel: ObservableObject {
             print("✅ [CryptoDetail] Refreshed \(response.name)")
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
-            self.newsArticles = response.newsArticles.map { $0.toModel() }
-            self.analystRatingsData = AnalystRatingsData.sampleData
-            self.sentimentAnalysisData = SentimentAnalysisData.sampleData
             self.technicalAnalysisData = TechnicalAnalysisData.sampleData
             self.isLoading = false
+
+            // Refresh news + analysis data
+            await fetchCryptoNews()
+            await fetchCryptoAnalysis()
         } catch {
             print("❌ [CryptoDetail] Refresh failed: \(error)")
             handleLoadError(error)
@@ -164,7 +177,6 @@ class CryptoDetailViewModel: ObservableObject {
 
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
-            self.newsArticles = response.newsArticles.map { $0.toModel() }
             print("✅ [CryptoDetail] Chart range updated — \(response.chartData.count) data points")
         } catch {
             print("⚠️ [CryptoDetail] Chart range update failed — \(error)")
@@ -203,8 +215,6 @@ class CryptoDetailViewModel: ObservableObject {
         print("   🔄 Falling back to sample data for \(cryptoSymbol)")
         self.cryptoData = CryptoDetailData.sampleEthereum
         self.newsArticles = TickerNewsArticle.sampleDataForTicker(cryptoSymbol)
-        self.analystRatingsData = AnalystRatingsData.sampleData
-        self.sentimentAnalysisData = SentimentAnalysisData.sampleData
         self.technicalAnalysisData = TechnicalAnalysisData.sampleData
     }
 
@@ -258,10 +268,6 @@ class CryptoDetailViewModel: ObservableObject {
     }
 
     // MARK: - Analysis Tab Handlers
-
-    func handleAnalystRatingsMore() {
-        print("Analyst ratings more options for \(cryptoSymbol)")
-    }
 
     func handleSentimentMore() {
         print("Sentiment analysis more options for \(cryptoSymbol)")
@@ -320,5 +326,252 @@ class CryptoDetailViewModel: ObservableObject {
 
     var aiSuggestions: [CryptoAISuggestion] {
         CryptoAISuggestion.defaultSuggestions
+    }
+
+    // MARK: - News (Cache-Aside + Enrichment)
+
+    private func fetchCryptoNews() async {
+        self.isNewsLoading = true
+        do {
+            let response = try await stockRepository.getCryptoNews(symbol: cryptoSymbol, limit: 50)
+            let apiNews = response.articles
+            let cached = response.cached ?? false
+            print("📰 [CryptoDetail] Got \(apiNews.count) news articles for \(cryptoSymbol) (cached: \(cached))")
+
+            self.allNewsArticles = apiNews.map { mapApiToUiArticle($0) }
+            self.newsDisplayCount = newsPageSize
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+
+            // Show articles immediately with raw data
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.isNewsLoading = false
+
+            // Enrich in background, then update displayed articles
+            let unenrichedIds = self.newsArticles
+                .filter { !$0.aiProcessed }
+                .map { $0.apiId }
+                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+
+            if !unenrichedIds.isEmpty {
+                await attemptEnrichment(symbol: cryptoSymbol, articleIds: unenrichedIds)
+                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            }
+        } catch {
+            print("⚠️ [CryptoDetail] Failed to fetch news for \(cryptoSymbol): \(error)")
+        }
+        self.isNewsLoading = false
+    }
+
+    func loadMoreNews() {
+        guard hasMoreNews else { return }
+
+        newsDisplayCount += newsPageSize
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        hasMoreNews = allNewsArticles.count > newsDisplayCount
+
+        Task {
+            await enrichVisibleArticles()
+        }
+    }
+
+    private func attemptEnrichment(symbol: String, articleIds: [String], maxAttempts: Int = 2) async {
+        for attempt in 1...maxAttempts {
+            do {
+                let enrichResponse = try await stockRepository.enrichCryptoNews(
+                    symbol: symbol,
+                    articleIds: articleIds
+                )
+                mergeEnrichment(enrichResponse.articles)
+
+                let enrichedCount = allNewsArticles.prefix(newsDisplayCount)
+                    .filter { $0.aiProcessed }.count
+                if enrichedCount > 0 {
+                    print("✅ [CryptoDetail] Attempt \(attempt) enriched \(enrichedCount) articles")
+                    return
+                } else if attempt < maxAttempts {
+                    print("⚠️ [CryptoDetail] Attempt \(attempt) returned 0 enriched, retrying in 3s...")
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [CryptoDetail] Enrichment returned 0 enriched after \(maxAttempts) attempts")
+                }
+            } catch {
+                if attempt < maxAttempts {
+                    print("⚠️ [CryptoDetail] Enrichment attempt \(attempt) failed: \(error), retrying...")
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [CryptoDetail] Enrichment failed after \(maxAttempts) attempts: \(error)")
+                }
+            }
+        }
+    }
+
+    private func enrichVisibleArticles() async {
+        let unenriched = newsArticles.filter { !$0.aiProcessed }
+        guard !unenriched.isEmpty else { return }
+
+        let ids = unenriched.map { $0.apiId }.filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+        guard !ids.isEmpty else { return }
+
+        await attemptEnrichment(symbol: cryptoSymbol, articleIds: ids)
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+    }
+
+    private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
+        let enrichedById = Dictionary(
+            enrichedArticles.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var actuallyEnriched = 0
+        for i in allNewsArticles.indices {
+            if let enriched = enrichedById[allNewsArticles[i].apiId] {
+                let wasProcessed = enriched.aiProcessed ?? false
+                let hasBullets = enriched.summaryBullets?.isEmpty == false
+
+                if wasProcessed || hasBullets {
+                    let bullets: [String] = {
+                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                        if let s = enriched.summary, !s.isEmpty { return [s] }
+                        return allNewsArticles[i].summaryBullets
+                    }()
+                    allNewsArticles[i].summaryBullets = bullets
+                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                    allNewsArticles[i].aiProcessed = true
+                    actuallyEnriched += 1
+                }
+            }
+        }
+        print("📰 [CryptoDetail] Merged \(actuallyEnriched)/\(enrichedArticles.count) truly enriched articles")
+    }
+
+    // MARK: - News Helpers
+
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
+        let bullets: [String] = {
+            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
+                return aiBullets
+            }
+            if let summary = article.summary, !summary.isEmpty {
+                return [summary]
+            }
+            return []
+        }()
+
+        return TickerNewsArticle(
+            apiId: article.id,
+            headline: article.title,
+            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            sentiment: mapSentiment(article.sentiment),
+            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            thumbnailName: nil,
+            imageURL: article.imageUrl.flatMap { URL(string: $0) },
+            relatedTickers: article.relatedTickers ?? [],
+            summaryBullets: bullets,
+            articleURL: article.url.flatMap { URL(string: $0) },
+            aiProcessed: article.aiProcessed ?? false
+        )
+    }
+
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
+        switch sentiment?.lowercased() {
+        case "positive", "bullish": return .positive
+        case "negative", "bearish": return .negative
+        default: return .neutral
+        }
+    }
+
+    private func parseDate(_ dateString: String) -> Date? {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: dateString) { return date }
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateString) { return date }
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let date = dateFormatter.date(from: dateString) { return date }
+
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        return dateFormatter.date(from: dateString)
+    }
+
+    // MARK: - Analysis Data (Fear & Greed + Sentiment)
+
+    private func fetchCryptoAnalysis() async {
+        self.isFearGreedLoading = true
+        self.isSentimentLoading = true
+
+        // Fetch Fear & Greed and Sentiment in parallel
+        async let fearGreedTask: () = fetchFearGreed()
+        async let sentimentTask: () = fetchSentiment()
+        _ = await (fearGreedTask, sentimentTask)
+    }
+
+    private func fetchFearGreed() async {
+        do {
+            let dto = try await stockRepository.getCryptoFearGreed()
+            self.fearGreedData = dto.toDisplayModel()
+            print("✅ [CryptoDetail] Got Fear & Greed Index: \(dto.value) (\(dto.classification))")
+        } catch {
+            print("⚠️ [CryptoDetail] Fear & Greed failed: \(error)")
+        }
+        self.isFearGreedLoading = false
+    }
+
+    private func fetchSentiment() async {
+        do {
+            let dto = try await stockRepository.getCryptoSentiment(symbol: cryptoSymbol)
+            self.sentimentAnalysisData = dto.toDisplayModel()
+            print("✅ [CryptoDetail] Got sentiment for \(cryptoSymbol): mood \(dto.moodScore)")
+        } catch {
+            print("⚠️ [CryptoDetail] Sentiment failed for \(cryptoSymbol): \(error)")
+        }
+        self.isSentimentLoading = false
+    }
+
+    // MARK: - Contextual Chat Context
+
+    /// News tab context — recent headlines with sentiment
+    private var newsContext: String? {
+        let recent = newsArticles.prefix(3)
+        guard !recent.isEmpty else { return nil }
+        var parts: [String] = []
+        parts.append("Recent Headlines:")
+        for article in recent {
+            let sentiment = article.sentiment.displayName
+            parts.append("- [\(sentiment)] \(article.headline)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// Build context string for the current tab to inject into AI chat
+    var contextForCurrentTab: String? {
+        var sections: [String] = []
+
+        // Base crypto context
+        if let data = cryptoData {
+            var base: [String] = []
+            base.append("\(data.name) (\(data.symbol))")
+            base.append("Price: \(data.formattedPrice) \(data.formattedChange) (\(data.formattedChangePercent))")
+            if let profile = Optional(data.cryptoProfile), !profile.description.isEmpty {
+                base.append("About: \(profile.description.prefix(200))")
+            }
+            sections.append(base.joined(separator: ". "))
+        }
+
+        switch selectedTab {
+        case .overview:
+            break
+        case .news:
+            if let ctx = newsContext { sections.append(ctx) }
+        case .analysis:
+            break
+        }
+
+        sections.append("User is viewing the \(selectedTab.rawValue) tab.")
+
+        return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
     }
 }

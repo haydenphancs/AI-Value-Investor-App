@@ -39,7 +39,7 @@ class NewsCacheService:
     # ── Public: Get raw/cached news ───────────────────────────────────
 
     async def get_ticker_news(
-        self, ticker: str, limit: int = 50
+        self, ticker: str, limit: int = 50, is_crypto: bool = False,
     ) -> Dict[str, Any]:
         """
         Get news for a ticker. Cache-first, NO automatic AI enrichment.
@@ -73,7 +73,7 @@ class NewsCacheService:
         # ── 2. Cache miss → fetch from FMP, store raw (no Gemini) ──
         logger.info(f"News cache MISS for {ticker}: fetching from FMP")
         try:
-            articles = await self._fetch_and_cache_raw(ticker, limit)
+            articles = await self._fetch_and_cache_raw(ticker, limit, is_crypto=is_crypto)
             return {
                 "articles": articles,
                 "ticker": ticker,
@@ -224,10 +224,13 @@ class NewsCacheService:
     # ── Private: Fetch from FMP and cache raw ─────────────────────────
 
     async def _fetch_and_cache_raw(
-        self, ticker: str, limit: int
+        self, ticker: str, limit: int, is_crypto: bool = False,
     ) -> List[Dict[str, Any]]:
         """Fetch from FMP, cache raw in Supabase (no AI enrichment)."""
-        raw_articles = await self.fmp.get_stock_news(ticker, limit=limit)
+        if is_crypto:
+            raw_articles = await self.fmp.get_crypto_news(ticker, limit=limit)
+        else:
+            raw_articles = await self.fmp.get_stock_news(ticker, limit=limit)
         if not raw_articles:
             logger.info(f"No FMP news found for {ticker}")
             return []

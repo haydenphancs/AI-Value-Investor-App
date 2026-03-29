@@ -55,7 +55,7 @@ struct SentimentMetricCard: View {
     var isDimmed: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+        VStack(spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: iconName)
                     .font(AppTypography.iconXS)
@@ -75,7 +75,7 @@ struct SentimentMetricCard: View {
                 .font(AppTypography.caption)
                 .foregroundColor(changeColor)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .padding(AppSpacing.md)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.medium)

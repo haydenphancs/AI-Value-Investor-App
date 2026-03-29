@@ -24,7 +24,7 @@ struct TechnicalMeter: View {
         }
     }
 
-    // Gauge value derived from the selected period's indicator ratio
+    // Map signal to gauge value (needle position) and level
     private var activeGaugeValue: Double {
         let result: TechnicalIndicatorResult
         switch selectedPeriod {
@@ -32,17 +32,31 @@ struct TechnicalMeter: View {
         case .weekly: result = technicalData.weeklySignal
         }
         guard result.totalIndicators > 0 else { return 0.5 }
-        return Double(result.matchingIndicators) / Double(result.totalIndicators)
+        let ratio = Double(result.matchingIndicators) / Double(result.totalIndicators)
+
+        // Map ratio into the correct zone based on signal
+        // Each zone spans 0.2 of the gauge (5 zones: 0-0.2, 0.2-0.4, 0.4-0.6, 0.6-0.8, 0.8-1.0)
+        let zoneBase: Double
+        switch activeSignal {
+        case .strongSell: zoneBase = 0.0
+        case .sell:       zoneBase = 0.2
+        case .hold:       zoneBase = 0.4
+        case .buy:        zoneBase = 0.6
+        case .strongBuy:  zoneBase = 0.8
+        }
+        // Position needle within the zone based on ratio
+        let zoneOffset = min(ratio, 1.0) * 0.15 + 0.025
+        return min(zoneBase + zoneOffset, 0.99)
     }
 
-    // Map gauge value to 1-5 level
+    // Level derived from signal (always consistent with label)
     private var activeGaugeLevel: Int {
-        switch activeGaugeValue {
-        case 0..<0.2: return 1
-        case 0.2..<0.4: return 2
-        case 0.4..<0.6: return 3
-        case 0.6..<0.8: return 4
-        default: return 5
+        switch activeSignal {
+        case .strongSell: return 1
+        case .sell:       return 2
+        case .hold:       return 3
+        case .buy:        return 4
+        case .strongBuy:  return 5
         }
     }
 

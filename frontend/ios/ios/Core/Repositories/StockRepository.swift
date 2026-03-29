@@ -186,6 +186,68 @@ final class StockRepository: StockRepositoryProtocol {
         return response
     }
 
+    // MARK: - Crypto News
+
+    func getCryptoNews(symbol: String, limit: Int = 50) async throws -> TickerNewsFeedResponse {
+        let cacheKey = "crypto_news_\(symbol)"
+
+        if let cached: TickerNewsFeedResponse = getCached(cacheKey, maxAge: CacheTTL.news) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCryptoNews(symbol: symbol, limit: limit),
+            responseType: TickerNewsFeedResponse.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    func enrichCryptoNews(symbol: String, articleIds: [String]) async throws -> EnrichStockNewsResponse {
+        let response = try await apiClient.request(
+            endpoint: .enrichCryptoNews(symbol: symbol, articleIds: articleIds),
+            responseType: EnrichStockNewsResponse.self
+        )
+        return response
+    }
+
+    // MARK: - Crypto Fear & Greed
+
+    func getCryptoFearGreed() async throws -> CryptoFearGreedDTO {
+        let cacheKey = "crypto_fear_greed"
+
+        if let cached: CryptoFearGreedDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCryptoFearGreed,
+            responseType: CryptoFearGreedDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    // MARK: - Crypto Sentiment
+
+    func getCryptoSentiment(symbol: String) async throws -> SentimentAnalysisDTO {
+        let cacheKey = "crypto_sentiment_\(symbol)"
+
+        if let cached: SentimentAnalysisDTO = getCached(cacheKey, maxAge: CacheTTL.analysis) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCryptoSentiment(symbol: symbol),
+            responseType: SentimentAnalysisDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
     // MARK: - Chart
 
     func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
@@ -878,6 +940,50 @@ struct TechnicalAnalysisDTO: Codable {
             weeklySignal: weeklySignal,
             overallSignal: overallSignal,
             gaugeValue: gaugeValue
+        )
+    }
+}
+
+// MARK: - Crypto Fear & Greed DTO
+
+struct FearGreedHistoryEntryDTO: Codable {
+    let value: Int
+    let classification: String
+    let timestamp: String
+}
+
+struct CryptoFearGreedDTO: Codable {
+    let value: Int
+    let classification: String
+    let value7d: Int
+    let classification7d: String
+    let value30d: Int
+    let classification30d: String
+    let history: [FearGreedHistoryEntryDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case value, classification, history
+        case value7d = "value_7d"
+        case classification7d = "classification_7d"
+        case value30d = "value_30d"
+        case classification30d = "classification_30d"
+    }
+
+    func toDisplayModel() -> CryptoFearGreedData {
+        CryptoFearGreedData(
+            value: value,
+            classification: classification,
+            value7d: value7d,
+            classification7d: classification7d,
+            value30d: value30d,
+            classification30d: classification30d,
+            history: history.map { entry in
+                FearGreedHistoryEntry(
+                    value: entry.value,
+                    classification: entry.classification,
+                    timestamp: entry.timestamp
+                )
+            }
         )
     }
 }

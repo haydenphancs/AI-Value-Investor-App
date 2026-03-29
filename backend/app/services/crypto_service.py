@@ -690,7 +690,7 @@ class CryptoService:
 
         # ── Step 1: Parallel fetches (CoinGecko + FMP) ────────────
         today = datetime.now(tz=timezone.utc).date()
-        from_date = (today - timedelta(days=365 * 6)).isoformat()  # 6 years for 5Y + All Time
+        from_date = (today - timedelta(days=365 * 15)).isoformat()  # 15 years for full All Time history
         to_date = today.isoformat()
 
         # Related crypto symbols

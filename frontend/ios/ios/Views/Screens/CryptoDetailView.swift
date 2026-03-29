@@ -197,7 +197,7 @@ struct CryptoDetailView: View {
                 ZStack {
                     AppColors.background
                         .ignoresSafeArea()
-                    ChatTabView(initialPrompt: "Deep Analysis \(cryptoSymbol)")
+                    ChatTabView(initialPrompt: "Deep Analysis \(cryptoSymbol)", initialStockId: cryptoSymbol)
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -235,22 +235,26 @@ struct CryptoDetailView: View {
             TickerNewsContent(
                 articles: viewModel.newsArticles,
                 currentTicker: cryptoSymbol,
+                isLoading: viewModel.isNewsLoading,
+                hasMoreNews: viewModel.hasMoreNews,
                 onArticleTap: viewModel.handleNewsArticleTap,
                 onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap
+                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onLoadMore: { viewModel.loadMoreNews() }
             )
         case .analysis:
             TickerAnalysisContent(
-                analystRatingsData: viewModel.analystRatingsData,
+                analystRatingsData: nil,
                 sentimentAnalysisData: viewModel.sentimentAnalysisData,
                 technicalAnalysisData: viewModel.technicalAnalysisData,
+                fearGreedData: viewModel.fearGreedData,
                 isAnalystLoaded: true,
-                isSentimentLoaded: true,
+                isFearGreedLoaded: !viewModel.isFearGreedLoading,
+                isSentimentLoaded: !viewModel.isSentimentLoading,
                 isTechnicalLoaded: true,
                 selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
                 selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
-                onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
-                onAnalystActionsTap: {},
+                selectedFearGreedTimeframe: $viewModel.selectedFearGreedTimeframe,
                 onSentimentMoreTap: viewModel.handleSentimentMore,
                 onTechnicalDetailTap: {
                     showTechnicalAnalysisDetail = true

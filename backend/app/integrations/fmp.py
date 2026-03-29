@@ -493,6 +493,28 @@ class FMPClient:
             logger.warning(f"Stock news request failed: {e}")
             return []
 
+    async def get_crypto_news(
+        self,
+        ticker: Optional[str] = None,
+        limit: int = 10,
+        page: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get crypto news from FMP (stable API: news/crypto).
+
+        Uses the dedicated crypto news endpoint which properly filters
+        by crypto symbols (BTCUSD, ETHUSD, etc.).
+        """
+        params: Dict[str, Any] = {"limit": limit, "page": page}
+        if ticker:
+            params["tickers"] = ticker.upper()
+
+        try:
+            return await self._make_request("news/crypto", params=params)
+        except Exception as e:
+            logger.warning(f"Crypto news request failed: {e}")
+            return []
+
     async def get_social_sentiment(
         self, ticker: str, max_pages: int = 10
     ) -> List[Dict[str, Any]]:

@@ -15,6 +15,71 @@ enum CryptoDetailTab: String, CaseIterable {
     case analysis = "Analysis"
 }
 
+// MARK: - Fear & Greed Timeframe
+
+enum FearGreedTimeframe: String, CaseIterable {
+    case today = "1D"
+    case sevenDay = "7D"
+    case thirtyDay = "30D"
+}
+
+// MARK: - Crypto Fear & Greed Index
+
+struct FearGreedHistoryEntry: Identifiable {
+    let id = UUID()
+    let value: Int
+    let classification: String
+    let timestamp: String
+}
+
+struct CryptoFearGreedData {
+    let value: Int
+    let classification: String
+    let value7d: Int
+    let classification7d: String
+    let value30d: Int
+    let classification30d: String
+    let history: [FearGreedHistoryEntry]
+
+    func score(for timeframe: FearGreedTimeframe) -> Int {
+        switch timeframe {
+        case .today: return value
+        case .sevenDay: return value7d
+        case .thirtyDay: return value30d
+        }
+    }
+
+    func label(for timeframe: FearGreedTimeframe) -> String {
+        switch timeframe {
+        case .today: return classification
+        case .sevenDay: return classification7d
+        case .thirtyDay: return classification30d
+        }
+    }
+
+    func color(for timeframe: FearGreedTimeframe) -> Color {
+        Self.colorForValue(score(for: timeframe))
+    }
+
+    func gaugeValue(for timeframe: FearGreedTimeframe) -> Double {
+        Double(score(for: timeframe)) / 100.0
+    }
+
+    static func colorForValue(_ val: Int) -> Color {
+        if val <= 25 {
+            return AppColors.bearish
+        } else if val <= 45 {
+            return Color.orange
+        } else if val <= 55 {
+            return AppColors.textMuted
+        } else if val <= 75 {
+            return Color(red: 0.6, green: 0.8, blue: 0.2)
+        } else {
+            return AppColors.bullish
+        }
+    }
+}
+
 // MARK: - Crypto Market Status
 enum CryptoMarketStatus {
     case trading

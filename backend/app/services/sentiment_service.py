@@ -140,8 +140,14 @@ class SentimentService:
         self.fmp: FMPClient = get_fmp_client()
         self.supabase = get_supabase()
 
-    async def get_sentiment(self, ticker: str) -> SentimentAnalysisResponse:
+    async def get_sentiment(
+        self, ticker: str, social_ticker: Optional[str] = None,
+        is_crypto: bool = False,
+    ) -> SentimentAnalysisResponse:
         ticker = ticker.upper()
+        # For crypto: FMP uses "ETHUSD" but ApeWisdom uses "ETH"
+        social_key = (social_ticker or ticker).upper()
+        self._is_crypto = is_crypto
 
         cached = _cache_get(f"sentiment:{ticker}")
         if cached is not None:
@@ -149,12 +155,24 @@ class SentimentService:
 
         social_svc = get_social_mentions_service()
 
+        # Wrap social calls with a 10s timeout to avoid blocking on
+        # ApeWisdom cold cache (full fetch can take 30+ seconds).
+        async def _social_24h():
+            return await asyncio.wait_for(
+                social_svc.get_mentions_24h(social_key), timeout=10
+            )
+
+        async def _social_7d():
+            return await asyncio.wait_for(
+                social_svc.get_mentions_7d(social_key), timeout=10
+            )
+
         # Parallel fetch: news + price + social (24h + 7d)
         results = await asyncio.gather(
             self._get_articles(ticker),
             self._fetch_price_data(ticker),
-            social_svc.get_mentions_24h(ticker),
-            social_svc.get_mentions_7d(ticker),
+            _social_24h(),
+            _social_7d(),
             return_exceptions=True,
         )
 
@@ -426,12 +444,15 @@ class SentimentService:
             from_date = (now - timedelta(days=14)).strftime("%Y-%m-%d")
             to_date = now.strftime("%Y-%m-%d")
 
-            articles = await self.fmp.get_stock_news(
-                ticker=ticker,
-                limit=1000,
-                from_date=from_date,
-                to_date=to_date,
-            )
+            if getattr(self, '_is_crypto', False):
+                articles = await self.fmp.get_crypto_news(
+                    ticker=ticker, limit=1000,
+                )
+            else:
+                articles = await self.fmp.get_stock_news(
+                    ticker=ticker, limit=1000,
+                    from_date=from_date, to_date=to_date,
+                )
             return articles if articles else []
         except Exception as e:
             logger.warning(

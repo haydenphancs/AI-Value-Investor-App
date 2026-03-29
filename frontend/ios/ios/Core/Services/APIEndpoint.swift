@@ -70,6 +70,10 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Crypto
     case getCryptoDetail(symbol: String, range: String, interval: String? = nil)
+    case getCryptoNews(symbol: String, limit: Int)
+    case enrichCryptoNews(symbol: String, articleIds: [String])
+    case getCryptoFearGreed
+    case getCryptoSentiment(symbol: String)
 
     // MARK: - ETFs
     case getETFDetail(symbol: String, range: String, interval: String? = nil)
@@ -196,6 +200,14 @@ enum APIEndpoint: Sendable {
         // Crypto
         case .getCryptoDetail(let symbol, _, _):
             return "/api/v1/crypto/\(symbol)"
+        case .getCryptoNews(let symbol, _):
+            return "/api/v1/crypto/\(symbol)/news"
+        case .enrichCryptoNews(let symbol, _):
+            return "/api/v1/crypto/\(symbol)/news/enrich"
+        case .getCryptoFearGreed:
+            return "/api/v1/crypto/fear-greed"
+        case .getCryptoSentiment(let symbol):
+            return "/api/v1/crypto/\(symbol)/sentiment"
 
         // Indices
         case .getIndexDetail(let symbol, _, _):
@@ -299,7 +311,7 @@ enum APIEndpoint: Sendable {
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport, .addHolding,
-             .followWhale, .enrichStockNews:
+             .followWhale, .enrichStockNews, .enrichCryptoNews:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -325,6 +337,9 @@ enum APIEndpoint: Sendable {
             return ["q": query, "limit": String(limit)]
 
         case .getStockNews(_, let limit):
+            return ["limit": String(limit)]
+
+        case .getCryptoNews(_, let limit):
             return ["limit": String(limit)]
 
         case .getStockOverview(_, let range, let interval, let extendedHours):
@@ -431,6 +446,9 @@ enum APIEndpoint: Sendable {
         case .enrichStockNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
 
+        case .enrichCryptoNews(_, let articleIds):
+            return EnrichStockNewsRequest(articleIds: articleIds)
+
         default:
             return nil
         }
@@ -446,7 +464,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
@@ -484,6 +502,8 @@ enum APIEndpoint: Sendable {
             return 60 // 1 minute for aggregated overview (many FMP calls)
         case .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return 60 // 1 minute for aggregated detail
+        case .getCryptoSentiment:
+            return 60 // 1 minute — first call may warm ApeWisdom cache
         case .getWhaleProfile:
             return 60 // 1 minute for whale profile (may fetch from FMP)
         default:

@@ -767,7 +767,13 @@ class CryptoService:
             year_low = md.get("atl", {}).get("usd", 0) or 0
 
         # Avg volume from FMP (CoinGecko doesn't provide 30D avg directly)
-        avg_volume = volume  # fallback to current volume
+        # Compute 30-day average volume from historical data
+        avg_volume = volume  # fallback
+        if historical:
+            last_30 = historical[-30:] if len(historical) >= 30 else historical
+            vols = [p.get("volume", 0) or 0 for p in last_30 if (p.get("volume", 0) or 0) > 0]
+            if vols:
+                avg_volume = sum(vols) / len(vols)
 
         # ── Auto-generate profile from CoinGecko if no curated profile ──
         if not _has_curated_profile and isinstance(coin_data, dict):
@@ -794,6 +800,8 @@ class CryptoService:
         # ── Step 3b: Fetch benchmark data ────────────────────────
         # Altcoins benchmark vs BTC; BTC benchmarks vs S&P 500
         bench_1m = bench_ytd = bench_1y = bench_3y = bench_5y = bench_all = None
+        spy_hist = []
+        btc_hist = []
         if symbol == "BTC":
             benchmark_label = "S&P 500"
             # Fetch SPY historical from FMP (cached in memory)
@@ -899,10 +907,6 @@ class CryptoService:
         snapshots = await self._build_snapshots(
             symbol=symbol,
             crypto_name=crypto_name,
-            price=price,
-            market_cap=market_cap,
-            volume=volume,
-            change_pct=change_pct,
             profile_meta=profile_meta,
         )
 
@@ -929,30 +933,37 @@ class CryptoService:
         )
 
         # ── Step 11: Build benchmark summary (CAGR) ─────────────────
-        # Compute annualized return for asset and benchmark
-        asset_annual = 0.0
+        # CAGR = ((end/start)^(1/years) - 1) * 100
+        # Use 1-year return if less than 1 year of data
+
+        def _cagr(prices: list) -> float:
+            """Compute compound annual growth rate from price history."""
+            if not prices or len(prices) < 2:
+                return 0.0
+            start = prices[0].get("close") or prices[0].get("adjClose") or 0
+            end = prices[-1].get("close") or prices[-1].get("adjClose") or 0
+            if start <= 0 or end <= 0:
+                return 0.0
+            years = len(prices) / 365.0
+            if years < 1:
+                # Less than 1 year — just return total return
+                return round(((end - start) / start) * 100, 1)
+            return round(((end / start) ** (1 / years) - 1) * 100, 1)
+
+        asset_annual = _cagr(historical)
+
+        # Benchmark CAGR
         bench_annual = 0.0
-        years_of_data = len(historical) / 365.0 if historical else 0
-
-        if one_year_return is not None and years_of_data >= 1:
-            # Use CAGR: ((end/start)^(1/years) - 1) * 100
-            start_price = historical[0].get("close", 0) or 0
-            end_price = historical[-1].get("close", 0) or 0
-            if start_price > 0 and end_price > 0:
-                asset_annual = round(
-                    ((end_price / start_price) ** (1 / min(years_of_data, 5)) - 1) * 100, 1
-                )
-        elif one_year_return is not None:
-            asset_annual = round(one_year_return, 1)
-
-        if bench_1y is not None:
-            bench_annual = round(bench_1y, 1)
+        if symbol == "BTC" and spy_hist:
+            bench_annual = _cagr(spy_hist)
+        elif symbol != "BTC" and btc_hist:
+            bench_annual = _cagr(btc_hist)
 
         benchmark = BenchmarkSummaryResponse(
             avg_annual_return=asset_annual,
             sp_benchmark=bench_annual,
             benchmark_name="Bitcoin (BTC)" if symbol != "BTC" else "S&P 500",
-            since_date=profile_meta.get("launch_date", "")[:8] if profile_meta.get("launch_date") else None,
+            since_date=profile_meta.get("launch_date") or None,
         )
 
         return CryptoDetailResponse(
@@ -1005,6 +1016,43 @@ class CryptoService:
 
     # ── Key statistics builder ───────────────────────────────────
 
+    def _build_supply_stats(
+        self, *, circulating_supply, total_supply, max_supply,
+        fdv, market_cap, avg_volume, symbol,
+    ) -> List[KeyStatisticItem]:
+        """Build supply column, skipping redundant stats."""
+        stats = []
+
+        stats.append(KeyStatisticItem(
+            label="Circulating Supply",
+            value=_fmt_supply(circulating_supply, symbol),
+        ))
+
+        # Only show Total Supply if it differs from Circulating
+        if total_supply and abs(total_supply - circulating_supply) > 1:
+            stats.append(KeyStatisticItem(
+                label="Total Supply",
+                value=_fmt_supply(total_supply, symbol),
+            ))
+
+        # Max Supply
+        stats.append(KeyStatisticItem(
+            label="Max Supply",
+            value=_fmt_supply(max_supply, symbol) if max_supply else "No Cap",
+        ))
+
+        stats.append(KeyStatisticItem(
+            label="Fully Diluted Val.",
+            value=_fmt(fdv) if fdv else _fmt(market_cap),
+        ))
+
+        stats.append(KeyStatisticItem(
+            label="Avg. Volume (30D)",
+            value=_fmt(avg_volume),
+        ))
+
+        return stats
+
     def _build_key_statistics(
         self, *, price, market_cap, volume, avg_volume,
         day_high, day_low, year_high, year_low,
@@ -1022,25 +1070,15 @@ class CryptoService:
                 KeyStatisticItem(label="24h Low", value=_fmt(day_low)),
             ]),
             # Column 2: Supply (CoinGecko provides accurate supply data)
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(
-                    label="Circulating Supply",
-                    value=_fmt_supply(circulating_supply, symbol),
-                ),
-                KeyStatisticItem(
-                    label="Total Supply",
-                    value=_fmt_supply(total_supply, symbol),
-                ),
-                KeyStatisticItem(
-                    label="Max Supply",
-                    value=_fmt_supply(max_supply, symbol) if max_supply else "No Cap",
-                ),
-                KeyStatisticItem(
-                    label="Fully Diluted Val.",
-                    value=_fmt(fdv) if fdv else _fmt(price * max_supply if max_supply and price else market_cap),
-                ),
-                KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt(avg_volume)),
-            ]),
+            KeyStatisticsGroupResponse(statistics=self._build_supply_stats(
+                circulating_supply=circulating_supply,
+                total_supply=total_supply,
+                max_supply=max_supply,
+                fdv=fdv,
+                market_cap=market_cap,
+                avg_volume=avg_volume,
+                symbol=symbol,
+            )),
             # Column 3: Historical (52-week from FMP historical + CoinGecko fallback)
             KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
@@ -1183,80 +1221,144 @@ class CryptoService:
     # ── Snapshots builder (with Gemini AI) ───────────────────────
 
     async def _build_snapshots(
-        self, *, symbol, crypto_name, price, market_cap, volume,
-        change_pct, profile_meta,
+        self, *, symbol, crypto_name, profile_meta,
     ) -> List[CryptoSnapshotResponse]:
         """
         Return snapshots immediately — never block the response.
 
-        If AI snapshots are cached, return them.
-        Otherwise return template defaults and fire Gemini in the background.
-        Next request will get the AI-generated content from cache.
+        Lookup order:
+          1. In-memory cache (fast)
+          2. Supabase crypto_snapshots table (permanent)
+          3. Template defaults (instant) + fire Gemini background → saves to DB
         """
         cache_key = f"crypto_snapshots_{symbol}"
-        cached = _cache_get(cache_key, _AI_CACHE_TTL_SECONDS)
+
+        # Tier 1: in-memory
+        cached = _cache_get(cache_key)
         if cached:
             return cached
 
-        # Return defaults immediately — don't block
+        # Tier 2: Supabase (permanent)
+        db_snapshots = await asyncio.to_thread(self._load_snapshots_db, symbol)
+        if db_snapshots and len(db_snapshots) == 4:
+            _cache_set(cache_key, db_snapshots)
+            return db_snapshots
+
+        # Tier 3: return defaults immediately, generate AI in background
         defaults = self._default_snapshots(symbol, crypto_name, profile_meta)
         _cache_set(cache_key, defaults)
 
-        # Fire Gemini in the background — result cached for next request
         asyncio.create_task(self._generate_ai_snapshots(
             symbol=symbol,
             crypto_name=crypto_name,
-            price=price,
-            market_cap=market_cap,
-            volume=volume,
-            change_pct=change_pct,
             profile_meta=profile_meta,
             cache_key=cache_key,
         ))
 
         return defaults
 
+    def _load_snapshots_db(self, symbol: str) -> Optional[List[CryptoSnapshotResponse]]:
+        """Load snapshots from Supabase (permanent storage)."""
+        try:
+            rows = (
+                self.supabase.table("crypto_snapshots")
+                .select("category, paragraphs")
+                .eq("symbol", symbol)
+                .execute()
+            )
+            if rows.data and len(rows.data) >= 4:
+                # Order: Origin, Tokenomics, Next Big Moves, Risks
+                category_order = {
+                    "Origin and Technology": 0,
+                    "Tokenomics": 1,
+                    "Next Big Moves": 2,
+                    "Risks": 3,
+                }
+                sorted_rows = sorted(
+                    rows.data,
+                    key=lambda r: category_order.get(r.get("category", ""), 99),
+                )
+                return [
+                    CryptoSnapshotResponse(
+                        category=r["category"],
+                        paragraphs=r["paragraphs"],
+                    )
+                    for r in sorted_rows
+                ]
+        except Exception as e:
+            logger.debug(f"Snapshots DB read failed for {symbol}: {e}")
+        return None
+
+    def _save_snapshots_db(self, symbol: str, snapshots: List[CryptoSnapshotResponse]) -> None:
+        """Save snapshots to Supabase permanently."""
+        try:
+            for snap in snapshots:
+                self.supabase.table("crypto_snapshots").upsert(
+                    {
+                        "symbol": symbol,
+                        "category": snap.category,
+                        "paragraphs": snap.paragraphs,
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "generated_by": "gemini-2.5-flash",
+                    },
+                    on_conflict="symbol,category",
+                ).execute()
+            logger.info(f"Saved {len(snapshots)} snapshots to DB for {symbol}")
+        except Exception as e:
+            logger.warning(f"Snapshots DB write failed for {symbol}: {e}")
+
     async def _generate_ai_snapshots(
-        self, *, symbol, crypto_name, price, market_cap, volume,
-        change_pct, profile_meta, cache_key,
+        self, *, symbol, crypto_name, profile_meta, cache_key,
     ) -> None:
-        """Background task: generate AI snapshots via Gemini and cache them."""
+        """
+        Background task: generate stable AI snapshots via Gemini.
+        Focuses on technology, tokenomics, catalysts, risks — NOT volatile market data.
+        Result saved to Supabase permanently.
+        """
         try:
             gemini = get_gemini_client()
 
             prompt = f"""You are a cryptocurrency analyst writing educational content about {crypto_name} ({symbol}).
 
-Current data:
-- Price: ${price:,.2f}
-- Market Cap: ${market_cap:,.0f}
-- 24h Volume: ${volume:,.0f}
-- 24h Change: {change_pct:+.2f}%
-- Consensus: {profile_meta.get('consensus_mechanism', 'Unknown')}
-- Launch: {profile_meta.get('launch_date', 'Unknown')}
-- Max Supply: {profile_meta.get('max_supply', 'No cap')}
+Background:
+- Consensus mechanism: {profile_meta.get('consensus_mechanism', 'Unknown')}
+- Launch date: {profile_meta.get('launch_date', 'Unknown')}
+- Blockchain: {profile_meta.get('blockchain', 'Unknown')}
+- Max supply: {profile_meta.get('max_supply', 'No cap')}
+- Description: {profile_meta.get('description', '')[:300]}
 
-Generate content for these 4 categories. For each, write exactly 3 paragraphs (2-4 sentences each). Write in a confident, conversational tone that educates without jargon. Be specific and mention real names, dates, and numbers.
+Generate content for these 4 categories.
+
+FORMATTING RULES:
+- Each paragraph: 2-3 sentences max. Keep it tight.
+- Use 2 to 4 paragraphs per category — choose the count that best fits the content. Some topics need more depth, others are better kept brief. Do NOT use the same count for every category.
+
+Focus on STABLE knowledge: how the technology works, the economic model, upcoming developments, and structural risks. Do NOT mention current prices, market cap, volume, or any volatile market data — this content will be displayed for months.
+
+Write in a confident, conversational tone — like a sharp analyst briefing a smart friend. Be specific: real names, dates, version numbers. No filler sentences.
 
 Separate each category with "===CATEGORY===" followed by the category name.
 
 ===CATEGORY===Origin and Technology
-[3 paragraphs about founding team, technology, consensus, key innovations]
+[who built it and when, core tech innovation, consensus mechanism, what makes it unique]
 
 ===CATEGORY===Tokenomics
-[3 paragraphs about supply mechanics, fees/burns, staking, revenue model]
+[supply model, fee/burn mechanics, staking/yield, token utility]
 
 ===CATEGORY===Next Big Moves
-[3 paragraphs about upcoming upgrades, institutional adoption, catalysts]
+[upcoming upgrades, ecosystem catalysts, institutional signals]
 
 ===CATEGORY===Risks
-[3 paragraphs about regulatory, technical, competition risks]"""
+[regulatory risks, technical/security risks, competition, adoption challenges]"""
 
             ai_response = await gemini.generate_text(
                 prompt=prompt,
                 system_instruction=(
-                    "You are a senior crypto analyst providing educational, balanced commentary. "
-                    "Write factually. Each paragraph should be 2-4 sentences. "
-                    "Avoid hype. Mention specific names, dates, and data points."
+                    "You are a senior crypto analyst providing sharp, concise educational content. "
+                    "Write factually. Keep paragraphs to 2-3 sentences max — no fluff. "
+                    "Use 2 to 4 paragraphs per section — let the content dictate the count. "
+                    "Mention specific names, dates, and technical details. "
+                    "Do NOT include any current market prices or volatile data."
                 ),
                 model_name="gemini-2.5-flash",
             )
@@ -1265,8 +1367,11 @@ Separate each category with "===CATEGORY===" followed by the category name.
             snapshots = self._parse_ai_snapshots(text)
 
             if len(snapshots) == 4:
+                # Save to memory cache
                 _cache_set(cache_key, snapshots)
-                logger.info(f"Background: AI snapshots ready for {symbol}")
+                # Save to Supabase permanently
+                await asyncio.to_thread(self._save_snapshots_db, symbol, snapshots)
+                logger.info(f"Background: AI snapshots generated and saved for {symbol}")
 
         except Exception as e:
             logger.warning(f"Background Gemini failed for {symbol}: {e}")
@@ -1310,7 +1415,7 @@ Separate each category with "===CATEGORY===" followed by the category name.
             if paragraphs:
                 snapshots.append(CryptoSnapshotResponse(
                     category=matched_category,
-                    paragraphs=paragraphs[:3],
+                    paragraphs=paragraphs[:4],
                 ))
 
         return snapshots
@@ -1384,7 +1489,7 @@ Separate each category with "===CATEGORY===" followed by the category name.
                 symbol=sym,
                 name=name,
                 price=q.get("price") or 0,
-                change_percent=q.get("changesPercentage") or 0,
+                change_percent=q.get("changesPercentage") or q.get("changePercentage") or 0,
             ))
 
         return result

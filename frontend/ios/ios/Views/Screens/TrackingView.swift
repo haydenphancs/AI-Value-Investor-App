@@ -92,6 +92,16 @@ struct TrackingContentView: View {
             .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
                 TickerDetailView(tickerSymbol: ticker)
             }
+            .navigationDestination(item: $viewModel.selectedSearchResult) { selection in
+                switch selection.type {
+                case "crypto":
+                    CryptoDetailView(cryptoSymbol: selection.symbol)
+                case "etf":
+                    ETFDetailView(etfSymbol: selection.symbol)
+                default:
+                    TickerDetailView(tickerSymbol: selection.symbol)
+                }
+            }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)
             }
@@ -114,9 +124,9 @@ struct TrackingContentView: View {
             }
             .sheet(isPresented: $showSearch) {
                 TickerLiveSearchSheet(
-                    onTickerSelected: { ticker in
+                    onTickerSelected: { selection in
                         showSearch = false
-                        viewModel.selectedTickerSymbol = ticker
+                        viewModel.selectedSearchResult = selection
                     },
                     onDismiss: {
                         showSearch = false
@@ -205,6 +215,16 @@ struct TrackingContentViewWithBinding: View {
                     selectedTab = .research
                 })
             }
+            .navigationDestination(item: $viewModel.selectedSearchResult) { selection in
+                switch selection.type {
+                case "crypto":
+                    CryptoDetailView(cryptoSymbol: selection.symbol)
+                case "etf":
+                    ETFDetailView(etfSymbol: selection.symbol)
+                default:
+                    TickerDetailView(tickerSymbol: selection.symbol)
+                }
+            }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)
             }
@@ -227,9 +247,9 @@ struct TrackingContentViewWithBinding: View {
             }
             .sheet(isPresented: $showSearch) {
                 TickerLiveSearchSheet(
-                    onTickerSelected: { ticker in
+                    onTickerSelected: { selection in
                         showSearch = false
-                        viewModel.selectedTickerSymbol = ticker
+                        viewModel.selectedSearchResult = selection
                     },
                     onDismiss: {
                         showSearch = false

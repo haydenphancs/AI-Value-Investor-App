@@ -3,9 +3,17 @@
 //  ios
 //
 //  Molecule: Simple ticker-only search sheet for navigating to a ticker detail page
+//  Supports routing to Stock, Crypto, ETF, Index, and Commodity detail views.
 //
 
 import SwiftUI
+
+/// Lightweight struct to carry search selection with asset type info.
+struct SearchSelection: Identifiable, Hashable {
+    var id: String { "\(symbol)_\(type)" }
+    let symbol: String
+    let type: String  // "stock", "crypto", "etf", "fund", "index", "commodity"
+}
 
 struct TickerLiveSearchSheet: View {
     @State private var searchText = ""
@@ -13,7 +21,7 @@ struct TickerLiveSearchSheet: View {
     @State private var isSearching = false
     @State private var searchTask: Task<Void, Never>?
 
-    var onTickerSelected: ((String) -> Void)?
+    var onTickerSelected: ((SearchSelection) -> Void)?
     var onDismiss: (() -> Void)?
 
     private let stockRepository = StockRepository.shared
@@ -27,7 +35,7 @@ struct TickerLiveSearchSheet: View {
                 VStack(spacing: AppSpacing.lg) {
                     SearchBar(
                         text: $searchText,
-                        placeholder: "Search ticker symbol..."
+                        placeholder: "Search stocks, crypto, ETFs..."
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
@@ -37,7 +45,7 @@ struct TickerLiveSearchSheet: View {
                                 .font(AppTypography.iconHero)
                                 .foregroundColor(AppColors.textMuted)
 
-                            Text("Search for a stock ticker")
+                            Text("Search stocks, crypto, ETFs...")
                                 .font(AppTypography.body)
                                 .foregroundColor(AppColors.textSecondary)
                                 .multilineTextAlignment(.center)
@@ -62,7 +70,10 @@ struct TickerLiveSearchSheet: View {
                             LazyVStack(spacing: AppSpacing.sm) {
                                 ForEach(searchResults) { result in
                                     Button {
-                                        onTickerSelected?(result.ticker)
+                                        onTickerSelected?(SearchSelection(
+                                            symbol: result.ticker,
+                                            type: result.type ?? "stock"
+                                        ))
                                     } label: {
                                         HStack(spacing: AppSpacing.md) {
                                             VStack(alignment: .leading, spacing: AppSpacing.xxs) {

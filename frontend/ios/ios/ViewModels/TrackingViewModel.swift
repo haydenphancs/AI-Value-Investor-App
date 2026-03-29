@@ -56,6 +56,7 @@ class TrackingViewModel: ObservableObject {
 
     // Navigation States
     @Published var selectedTickerSymbol: String?
+    @Published var selectedSearchResult: SearchSelection?
     @Published var selectedWhaleId: String?
     @Published var selectedTradeGroup: TradeGroupNavigation?
     @Published var selectedAlert: AppAlert?

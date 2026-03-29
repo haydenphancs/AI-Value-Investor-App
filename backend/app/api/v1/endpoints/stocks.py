@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 
+from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
@@ -51,6 +52,48 @@ _US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 
 # Crypto exchanges returned by FMP
 _CRYPTO_EXCHANGES = {"CRYPTO", "CCC", "CC", "CRYPTOCURRENCY"}
+
+# Crypto display names derived from CoinGecko ID map (zero API cost)
+_CRYPTO_NAMES: Dict[str, str] = {
+    sym: cg_id.replace("-", " ").title()
+    for sym, cg_id in SYMBOL_TO_COINGECKO_ID.items()
+}
+# Override common names that don't title-case well from IDs
+_CRYPTO_NAMES.update({
+    "BTC": "Bitcoin", "ETH": "Ethereum", "BNB": "BNB",
+    "XRP": "XRP", "SOL": "Solana", "DOGE": "Dogecoin",
+    "ADA": "Cardano", "TRX": "TRON", "AVAX": "Avalanche",
+    "DOT": "Polkadot", "SHIB": "Shiba Inu", "TON": "Toncoin",
+    "LINK": "Chainlink", "XLM": "Stellar", "HBAR": "Hedera",
+    "BCH": "Bitcoin Cash", "LTC": "Litecoin", "UNI": "Uniswap",
+    "NEAR": "NEAR Protocol", "AAVE": "Aave", "PEPE": "Pepe",
+    "TAO": "Bittensor", "ICP": "Internet Computer",
+    "ETC": "Ethereum Classic", "RENDER": "Render",
+    "POL": "Polygon", "MATIC": "Polygon", "APT": "Aptos",
+    "MNT": "Mantle", "KAS": "Kaspa", "ATOM": "Cosmos",
+    "FIL": "Filecoin", "ARB": "Arbitrum", "VET": "VeChain",
+    "FET": "Artificial Superintelligence Alliance",
+    "ONDO": "Ondo", "WLD": "Worldcoin", "ALGO": "Algorand",
+    "OP": "Optimism", "CRO": "Cronos", "JUP": "Jupiter",
+    "BONK": "Bonk", "STX": "Stacks", "INJ": "Injective",
+    "SEI": "Sei", "IMX": "Immutable X", "GRT": "The Graph",
+    "SUI": "Sui", "THETA": "Theta", "RUNE": "THORChain",
+    "FTM": "Fantom", "FLOKI": "Floki", "TIA": "Celestia",
+    "PYTH": "Pyth Network", "QNT": "Quant", "ENA": "Ethena",
+    "SAND": "The Sandbox", "MANA": "Decentraland",
+    "AXS": "Axie Infinity", "GALA": "Gala", "FLOW": "Flow",
+    "ENS": "Ethereum Name Service", "CHZ": "Chiliz",
+    "PENDLE": "Pendle", "CAKE": "PancakeSwap",
+    "EOS": "EOS", "NEO": "Neo", "XTZ": "Tezos",
+    "IOTA": "IOTA", "COMP": "Compound", "SNX": "Synthetix",
+    "CRV": "Curve DAO", "DYDX": "dYdX", "GMX": "GMX",
+    "1INCH": "1inch", "SUSHI": "SushiSwap",
+    "WIF": "dogwifhat", "JASMY": "JasmyCoin",
+    "TRUMP": "Official Trump", "PI": "Pi Network",
+    "HYPE": "Hyperliquid", "VIRTUAL": "Virtuals Protocol",
+    "PENGU": "Pudgy Penguins", "XMR": "Monero",
+    "DASH": "Dash", "ZEC": "Zcash",
+})
 
 
 def _get_exchange_short_name(item: Dict[str, Any]) -> Optional[str]:
@@ -125,34 +168,67 @@ async def search_stocks(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, le=50),
 ):
-    """Search stocks by ticker or company name via FMP."""
+    """Search stocks and crypto by ticker or name. Crypto matched from local map (zero API cost)."""
     fmp = get_fmp_client()
     try:
-        # Over-fetch to compensate for international/fund results we'll discard
-        raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
-        if not raw:
-            return []
+        # ── Match crypto from hardcoded map (instant, free) ──
+        query_upper = q.upper().strip()
+        query_lower = q.lower().strip()
+        crypto_results: List[StockSearchResult] = []
 
-        results: List[StockSearchResult] = []
-        for item in raw:
-            if len(results) >= limit:
-                break
+        for sym, name in _CRYPTO_NAMES.items():
+            if (query_upper in sym or
+                query_lower in name.lower() or
+                sym.startswith(query_upper)):
+                crypto_results.append(StockSearchResult(
+                    symbol=sym,
+                    name=name,
+                    currency="USD",
+                    exchange_short_name="CRYPTO",
+                    exchange_full_name="Cryptocurrency",
+                    type="crypto",
+                ))
+
+        # Exact symbol match goes first
+        crypto_results.sort(
+            key=lambda r: (0 if r.symbol == query_upper else 1, r.symbol)
+        )
+
+        # ── FMP search for stocks/ETFs ──
+        raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
+
+        stock_results: List[StockSearchResult] = []
+        seen_symbols = {r.symbol for r in crypto_results}
+
+        for item in (raw or []):
+            symbol = item.get("symbol", "")
+            if symbol in seen_symbols:
+                continue  # Skip duplicates already in crypto results
 
             asset_type = _get_asset_type(item)
             if asset_type is None:
-                continue  # Skip international listings
+                continue
+            if asset_type == "crypto":
+                continue  # Prefer our crypto results over FMP's
 
             short_name = _get_exchange_short_name(item)
-            results.append(StockSearchResult(
-                symbol=item.get("symbol", ""),
+            stock_results.append(StockSearchResult(
+                symbol=symbol,
                 name=item.get("name", ""),
                 currency=item.get("currency"),
                 exchange_short_name=short_name,
                 exchange_full_name=item.get("stockExchange") or item.get("exchange"),
                 type=asset_type,
             ))
+            seen_symbols.add(symbol)
 
-        return results
+        # ── Merge: stocks first, crypto appended after ──
+        # Exception: exact symbol match for crypto goes to top
+        exact_crypto = [r for r in crypto_results if r.symbol == query_upper]
+        other_crypto = [r for r in crypto_results if r.symbol != query_upper]
+        combined = exact_crypto + stock_results + other_crypto
+        return combined[:limit]
+
     except Exception as e:
         logger.error(f"Stock search failed for q={q!r}: {e}")
         raise HTTPException(status_code=502, detail="Stock search service unavailable")

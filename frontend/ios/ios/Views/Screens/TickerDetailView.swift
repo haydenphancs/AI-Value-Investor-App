@@ -18,7 +18,7 @@ struct TickerDetailView: View {
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
     @State private var scrollOffset: CGFloat = 0
-    @State private var selectedSearchTicker: String?
+    @State private var selectedSearchResult: SearchSelection?
     @StateObject private var chatViewModel = ChatViewModel()
 
     let tickerSymbol: String
@@ -218,9 +218,9 @@ struct TickerDetailView: View {
         }
         .sheet(isPresented: $showSearch) {
             TickerLiveSearchSheet(
-                onTickerSelected: { ticker in
+                onTickerSelected: { selection in
                     showSearch = false
-                    selectedSearchTicker = ticker
+                    selectedSearchResult = selection
                 },
                 onDismiss: {
                     showSearch = false
@@ -228,8 +228,15 @@ struct TickerDetailView: View {
             )
             .preferredColorScheme(.dark)
         }
-        .navigationDestination(item: $selectedSearchTicker) { ticker in
-            TickerDetailView(tickerSymbol: ticker)
+        .navigationDestination(item: $selectedSearchResult) { selection in
+            switch selection.type {
+            case "crypto":
+                CryptoDetailView(cryptoSymbol: selection.symbol)
+            case "etf":
+                ETFDetailView(etfSymbol: selection.symbol)
+            default:
+                TickerDetailView(tickerSymbol: selection.symbol)
+            }
         }
         .sheet(isPresented: $showAIChat) {
             NavigationStack {

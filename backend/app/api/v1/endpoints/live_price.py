@@ -111,7 +111,7 @@ async def live_price_ws(
                 # No action needed — the loop keeps the connection open
             except asyncio.TimeoutError:
                 # Check if market closed during this session
-                if not is_market_active():
+                if not is_crypto and not is_market_active():
                     await websocket.send_json({
                         "type": "market_closed",
                         "message": "US markets are now closed"

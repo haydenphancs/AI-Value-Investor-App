@@ -38,9 +38,12 @@ struct TickerChartView: View {
         let now = Date()
         let displayStart: Date?
 
+        // Crypto trades 24/7 — show exact 1D/1W windows (Robinhood-style).
+        // Stocks need extra calendar days to cover weekends/holidays.
+        let isCrypto = assetContext == .crypto
         switch selectedRange {
-        case .oneDay:       displayStart = calendar.date(byAdding: .day, value: -3, to: now)
-        case .oneWeek:      displayStart = calendar.date(byAdding: .day, value: -10, to: now)
+        case .oneDay:       displayStart = calendar.date(byAdding: .day, value: isCrypto ? -1 : -3, to: now)
+        case .oneWeek:      displayStart = calendar.date(byAdding: .day, value: isCrypto ? -7 : -10, to: now)
         case .threeMonths:  displayStart = calendar.date(byAdding: .month, value: -3, to: now)
         case .sixMonths:    displayStart = calendar.date(byAdding: .month, value: -6, to: now)
         case .oneYear:      displayStart = calendar.date(byAdding: .year, value: -1, to: now)
@@ -50,13 +53,9 @@ struct TickerChartView: View {
 
         guard let start = displayStart else { return 0 }
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        let startStr = formatter.string(from: start)
-
         for (index, point) in pricePoints.enumerated() {
-            let dateStr = String(point.date.prefix(10))
-            if dateStr >= startStr {
+            if let pointDate = ChartDateFormatters.parseDate(point.date),
+               pointDate >= start {
                 return index
             }
         }
@@ -105,7 +104,7 @@ struct TickerChartView: View {
                             .foregroundColor(AppColors.textMuted)
                     }
 
-                    if chartSettings.showExtendedHours && point.isExtendedHours {
+                    if chartSettings.showExtendedHours && assetContext.supportsExtendedHours && point.isExtendedHours {
                         Text("EXT")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(AppColors.textMuted)
@@ -130,7 +129,7 @@ struct TickerChartView: View {
                     isPositive: isPositive,
                     chartType: chartSettings.chartType,
                     overlays: chartSettings.activeOverlays,
-                    showExtendedHours: chartSettings.showExtendedHours,
+                    showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
                     chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil
                 )

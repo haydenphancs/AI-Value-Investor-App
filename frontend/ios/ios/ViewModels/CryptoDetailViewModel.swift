@@ -338,14 +338,18 @@ class CryptoDetailViewModel: ObservableObject {
         chartRefreshTask = nil
     }
 
-    /// Lightweight chart-only refresh (reuses stock chart endpoint with crypto symbol)
+    /// Lightweight chart-only refresh — bypasses cache for fresh intraday data
     private func refreshChartOnly() async {
         let fmpSymbol = "\(cryptoSymbol)USD"
         do {
-            let chartResponse = try await stockRepository.getStockChart(
-                ticker: fmpSymbol,
-                range: selectedChartRange.rawValue,
-                interval: chartSettings.selectedInterval.rawValue
+            let chartResponse = try await apiClient.request(
+                endpoint: .getStockChart(
+                    ticker: fmpSymbol,
+                    range: selectedChartRange.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue,
+                    extendedHours: true
+                ),
+                responseType: StockChartResponse.self
             )
             let pricePoints = chartResponse.prices
             if !pricePoints.isEmpty, var data = self.cryptoData {
@@ -356,9 +360,7 @@ class CryptoDetailViewModel: ObservableObject {
                     data.currentPrice = lastClose
                 }
                 self.cryptoData = data
-                if pricePoints.count != previousCount {
-                    self.chartDataVersion += 1
-                }
+                self.chartDataVersion += 1
             }
         } catch {
             print("⚠️ [CryptoDetail] Chart refresh failed: \(error)")

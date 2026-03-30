@@ -58,7 +58,8 @@ final class StockRepository: StockRepositoryProtocol {
     // MARK: - Cache TTL Constants (aligned with backend split cache)
 
     private enum CacheTTL {
-        static let volatile: TimeInterval = 120        // 2 min — quote, overview, chart
+        static let volatile: TimeInterval = 120        // 2 min — quote, overview
+        static let chart: TimeInterval = 25            // 25 sec — under the 30s refresh interval
         static let news: TimeInterval = 60             // 1 min — news updates frequently
         static let fundamental: TimeInterval = 86400   // 24 hours — matches backend Supabase cache
         static let analysis: TimeInterval = 1800       // 30 min — analyst, sentiment, technical
@@ -253,7 +254,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
         let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
-        if let cached: StockChartResponse = getCached(cacheKey, maxAge: CacheTTL.volatile) {
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: CacheTTL.chart) {
             return cached
         }
 

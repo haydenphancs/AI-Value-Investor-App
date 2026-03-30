@@ -50,10 +50,10 @@ final class LivePriceWebSocketManager: ObservableObject {
     // MARK: - Public API
 
     /// Connect to the live price WebSocket for a given ticker.
-    /// Does nothing if the market is not active.
-    func connect(ticker: String, authToken: String) {
+    /// Auth token is optional — crypto symbols can connect without login.
+    func connect(ticker: String, authToken: String? = nil) {
         self.ticker = ticker.uppercased()
-        self.authToken = authToken
+        self.authToken = authToken ?? ""
         isIntentionalDisconnect = false
         reconnectAttempts = 0
 
@@ -82,7 +82,9 @@ final class LivePriceWebSocketManager: ObservableObject {
         ) else { return }
 
         components.scheme = wsScheme
-        components.queryItems = [URLQueryItem(name: "token", value: authToken)]
+        if !authToken.isEmpty {
+            components.queryItems = [URLQueryItem(name: "token", value: authToken)]
+        }
 
         guard let url = components.url else { return }
 

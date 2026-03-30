@@ -796,10 +796,15 @@ class CryptoService:
             else None
         )
         all_time_return = _compute_all_time_return(historical)
+        ten_year_return = (
+            _compute_return(historical, 365 * 10)
+            if len(historical) > 365 * 10
+            else None
+        )
 
         # ── Step 3b: Fetch benchmark data ────────────────────────
         # Altcoins benchmark vs BTC; BTC benchmarks vs S&P 500
-        bench_1m = bench_ytd = bench_1y = bench_3y = bench_5y = bench_all = None
+        bench_1m = bench_ytd = bench_1y = bench_3y = bench_5y = bench_10y = bench_all = None
         spy_hist = []
         btc_hist = []
         if symbol == "BTC":
@@ -828,6 +833,7 @@ class CryptoService:
                 bench_1y = _compute_return(spy_hist, 365)
                 bench_3y = _compute_return(spy_hist, 252 * 3) if len(spy_hist) > 252 * 3 else None
                 bench_5y = _compute_return(spy_hist, 252 * 5) if len(spy_hist) > 252 * 5 else None
+                bench_10y = _compute_return(spy_hist, 252 * 10) if len(spy_hist) > 252 * 10 else None
                 bench_all = _compute_all_time_return(spy_hist)
         else:
             benchmark_label = "BTC"
@@ -865,7 +871,7 @@ class CryptoService:
         from app.services.chart_helper import fetch_chart_data, resolve_interval
         resolved = resolve_interval(chart_range, interval)
         if resolved != "daily" or chart_range == "ALL":
-            chart_data = await fetch_chart_data(self.fmp, fmp_symbol, chart_range, interval)
+            chart_data = await fetch_chart_data(self.fmp, fmp_symbol, chart_range, interval, extended_hours=True)
         else:
             chart_data = self._extract_chart_data(historical, chart_range)
 
@@ -893,14 +899,17 @@ class CryptoService:
             one_year=one_year_return,
             three_year=three_year_return,
             five_year=five_year_return,
+            ten_year=ten_year_return,
             all_time=all_time_return,
             bench_1m=bench_1m,
             bench_ytd=bench_ytd,
             bench_1y=bench_1y,
             bench_3y=bench_3y,
             bench_5y=bench_5y,
+            bench_10y=bench_10y,
             bench_all_time=bench_all,
             benchmark_label=benchmark_label,
+            symbol=symbol,
         )
 
         # ── Step 7: Build snapshots (AI-enhanced) ─────────────────
@@ -1188,19 +1197,26 @@ class CryptoService:
     # ── Performance periods builder ──────────────────────────────
 
     def _build_performance_periods(
-        self, *, one_month, ytd, one_year, three_year, five_year, all_time,
-        bench_1m, bench_ytd, bench_1y, bench_3y, bench_5y, bench_all_time,
-        benchmark_label,
+        self, *, one_month, ytd, one_year, three_year, five_year,
+        ten_year=None, all_time,
+        bench_1m, bench_ytd, bench_1y, bench_3y, bench_5y,
+        bench_10y=None, bench_all_time,
+        benchmark_label, symbol=None,
     ) -> List[PerformancePeriodResponse]:
         periods = []
-        for label, asset_val, bench_val in [
+        entries = [
             ("1 Month", one_month, bench_1m),
             ("YTD", ytd, bench_ytd),
             ("1 Year", one_year, bench_1y),
             ("3 Years", three_year, bench_3y),
             ("5 Years", five_year, bench_5y),
-            ("All Time", all_time, bench_all_time),
-        ]:
+        ]
+        # BTC has enough history for 10 Years — use that instead of All Time
+        if symbol == "BTC" and ten_year is not None:
+            entries.append(("10 Years", ten_year, bench_10y))
+        else:
+            entries.append(("All Time", all_time, bench_all_time))
+        for label, asset_val, bench_val in entries:
             # Skip periods where the crypto doesn't have enough history
             if asset_val is None:
                 continue

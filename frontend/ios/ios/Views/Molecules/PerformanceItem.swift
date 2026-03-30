@@ -26,11 +26,13 @@ struct PerformanceItem: View {
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(color)
 
-            // S&P comparison (only shown when data exists)
+            // Benchmark comparison (only shown when data exists)
             if let vsText = period.formattedVsMarket {
                 Text(vsText)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

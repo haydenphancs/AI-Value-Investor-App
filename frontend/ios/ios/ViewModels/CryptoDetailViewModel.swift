@@ -28,7 +28,7 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: CryptoDetailTab = .overview
-    @Published var selectedChartRange: ChartTimeRange = .threeMonths
+    @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
 
@@ -44,6 +44,8 @@ class CryptoDetailViewModel: ObservableObject {
     private let cryptoSymbol: String
     private let apiClient = APIClient.shared
     private let stockRepository: StockRepository = .shared
+    let livePriceManager = LivePriceWebSocketManager()
+    private var chartRefreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
     // News pagination
@@ -73,6 +75,35 @@ class CryptoDetailViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 Task { await self.fetchChartForRange() }
+            }
+            .store(in: &cancellables)
+
+        // Observe live price updates from WebSocket and apply to cryptoData + chart
+        livePriceManager.$livePrice
+            .compactMap { $0 }
+            .sink { [weak self] newPrice in
+                guard let self = self, var data = self.cryptoData else { return }
+                data.currentPrice = newPrice
+                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
+                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+
+                // Update last chart candle for intraday ranges
+                if self.chartSettings.selectedInterval.isIntraday,
+                   !data.chartPricePoints.isEmpty {
+                    let lastIndex = data.chartPricePoints.count - 1
+                    let last = data.chartPricePoints[lastIndex]
+                    let updatedPoint = StockPricePoint(
+                        date: last.date,
+                        close: newPrice,
+                        open: last.open,
+                        high: max(last.high ?? newPrice, newPrice),
+                        low: min(last.low ?? newPrice, newPrice),
+                        volume: last.volume
+                    )
+                    data.chartPricePoints[lastIndex] = updatedPoint
+                }
+
+                self.cryptoData = data
             }
             .store(in: &cancellables)
     }
@@ -113,6 +144,10 @@ class CryptoDetailViewModel: ObservableObject {
 
                 self.isLoading = false
                 self.errorMessage = nil
+
+                // Crypto is 24/7 — always connect live price + start chart refresh
+                self.connectLivePrice()
+                self.startChartRefreshTimer()
 
                 // Fetch news + analysis data in parallel
                 await self.fetchCryptoNews()
@@ -265,6 +300,69 @@ class CryptoDetailViewModel: ObservableObject {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         print("AI Query: \(aiInputText)")
         aiInputText = ""
+    }
+
+    // MARK: - Live Price
+
+    func connectLivePrice() {
+        let fmpSymbol = "\(cryptoSymbol)USD"
+        let token = KeychainService.shared.get("access_token")
+        livePriceManager.connect(ticker: fmpSymbol, authToken: token)
+    }
+
+    func disconnectLivePrice() {
+        livePriceManager.disconnect()
+        stopChartRefreshTimer()
+    }
+
+    // MARK: - Chart Refresh Timer
+
+    private func startChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                // Only refresh for intraday intervals (crypto is 24/7 — no market hours check)
+                guard self.chartSettings.selectedInterval.isIntraday else { continue }
+
+                await self.refreshChartOnly()
+            }
+        }
+    }
+
+    private func stopChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = nil
+    }
+
+    /// Lightweight chart-only refresh (reuses stock chart endpoint with crypto symbol)
+    private func refreshChartOnly() async {
+        let fmpSymbol = "\(cryptoSymbol)USD"
+        do {
+            let chartResponse = try await stockRepository.getStockChart(
+                ticker: fmpSymbol,
+                range: selectedChartRange.rawValue,
+                interval: chartSettings.selectedInterval.rawValue
+            )
+            let pricePoints = chartResponse.prices
+            if !pricePoints.isEmpty, var data = self.cryptoData {
+                let previousCount = data.chartPricePoints.count
+                data.chartPricePoints = pricePoints
+                // Update current price from latest candle
+                if let lastClose = pricePoints.last?.close {
+                    data.currentPrice = lastClose
+                }
+                self.cryptoData = data
+                if pricePoints.count != previousCount {
+                    self.chartDataVersion += 1
+                }
+            }
+        } catch {
+            print("⚠️ [CryptoDetail] Chart refresh failed: \(error)")
+        }
     }
 
     // MARK: - Analysis Tab Handlers

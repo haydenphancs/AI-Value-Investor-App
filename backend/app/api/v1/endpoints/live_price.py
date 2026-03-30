@@ -50,15 +50,15 @@ def _validate_ws_token(token: str) -> str | None:
 async def live_price_ws(
     websocket: WebSocket,
     ticker: str,
-    token: str = Query(...),
+    token: str = Query(None),
 ):
     """
-    WebSocket endpoint for real-time stock price streaming.
+    WebSocket endpoint for real-time price streaming.
 
     Connection flow:
-    1. Client connects with JWT token as query param
-    2. Server validates token
-    3. Server checks market hours — if closed, sends market_closed and disconnects
+    1. Client connects with optional JWT token as query param
+    2. Server validates token (optional — allows guest access for crypto)
+    3. Server checks market hours for stocks — crypto is 24/7
     4. Server subscribes client to the ticker's LivePriceManager room
     5. Price updates stream to client as JSON messages
     6. On disconnect, server unsubscribes and cleans up
@@ -71,24 +71,22 @@ async def live_price_ws(
     Auth:
         JWT passed as ?token=eyJ... query parameter (WebSocket doesn't
         support Authorization headers from iOS URLSessionWebSocketTask).
-
-        NOTE: Token in URL means it may appear in server/proxy access logs.
-        Mitigate by keeping JWT expiry short (< 1 hour) and configuring
-        reverse proxies to redact query parameters from logs.
+        Token is optional for crypto symbols (24/7 public data).
     """
-    # Validate JWT
-    user_id = _validate_ws_token(token)
-    if not user_id:
-        await websocket.close(code=4001, reason="Unauthorized")
-        return
+    # Validate JWT (optional — allow guest access)
+    if token:
+        user_id = _validate_ws_token(token)
+    else:
+        user_id = None
 
     # Accept the connection
     await websocket.accept()
 
     ticker_upper = ticker.upper()
+    is_crypto = ticker_upper.endswith("USD") and len(ticker_upper) >= 5
 
-    # Check market hours — if fully closed, notify and disconnect
-    if not is_market_active():
+    # Check market hours for stocks — crypto trades 24/7
+    if not is_crypto and not is_market_active():
         await websocket.send_json({
             "type": "market_closed",
             "message": "US markets are currently closed"

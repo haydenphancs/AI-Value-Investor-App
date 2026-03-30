@@ -152,6 +152,9 @@ struct CryptoDetailView: View {
         .task {
             viewModel.loadCryptoData()
         }
+        .onDisappear {
+            viewModel.disconnectLivePrice()
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in

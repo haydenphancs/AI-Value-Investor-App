@@ -151,11 +151,11 @@ struct CryptoDetailData: Identifiable {
     let id = UUID()
     let symbol: String
     let name: String
-    let currentPrice: Double
-    let priceChange: Double
-    let priceChangePercent: Double
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
     let marketStatus: CryptoMarketStatus
-    let chartPricePoints: [StockPricePoint]
+    var chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]

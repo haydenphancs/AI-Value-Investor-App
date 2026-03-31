@@ -129,7 +129,7 @@ struct SemiCircleGauge: View {
                     .offset(y: size * 0.35)
                 }
             }
-            .frame(width: size, height: size * 0.7)
+            .frame(width: size, height: size * 0.6)
         }
     }
 

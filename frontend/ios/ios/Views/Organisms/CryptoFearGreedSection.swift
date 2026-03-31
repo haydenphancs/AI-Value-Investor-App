@@ -63,7 +63,7 @@ struct CryptoFearGreedSection: View {
                         labelColor: currentColor,
                         gaugeType: .sentiment,
                         showLabels: true,
-                        size: 180
+                        size: 220
                     )
                     .animation(.easeInOut(duration: 0.5), value: currentGaugeValue)
                 }
@@ -72,6 +72,7 @@ struct CryptoFearGreedSection: View {
 
             // Disclaimer
             AnalysisDisclaimerText()
+                .padding(.top, AppSpacing.lg)
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

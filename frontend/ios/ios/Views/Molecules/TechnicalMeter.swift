@@ -133,7 +133,7 @@ struct TechnicalGauge: View {
         ZStack {
             // Background arc
             TechnicalArc()
-                .stroke(AppColors.cardBackgroundLight, lineWidth: 24)
+                .stroke(AppColors.cardBackgroundLight, lineWidth: 20)
                 .frame(width: 220, height: 110)
 
             // 5 distinct zone arcs
@@ -202,7 +202,7 @@ struct TechnicalGaugeZones: View {
                     startAngle: .degrees(-180),
                     endAngle: .degrees(0)
                 ),
-                style: StrokeStyle(lineWidth: 24, lineCap: .round)
+                style: StrokeStyle(lineWidth: 20, lineCap: .round)
             )
             .frame(width: size, height: size / 2)
     }

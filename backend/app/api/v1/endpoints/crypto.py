@@ -14,6 +14,11 @@ import logging
 
 from app.services.crypto_service import get_crypto_service
 from app.schemas.crypto import CryptoDetailResponse
+from app.schemas.technical_analysis import (
+    TechnicalAnalysisResponse,
+    TechnicalAnalysisDetailResponse,
+)
+from app.services.technical_analysis_service import get_technical_analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -177,4 +182,60 @@ async def get_crypto_sentiment(symbol: str):
         logger.error(f"Crypto sentiment failed for {symbol}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500, detail="Crypto sentiment service unavailable"
+        )
+
+
+# ── Crypto Technical Analysis ──────────────────────────────────────
+
+
+@router.get(
+    "/{symbol}/technical-analysis",
+    response_model=TechnicalAnalysisResponse,
+)
+async def get_crypto_technical_analysis(symbol: str):
+    """
+    Get technical analysis gauge data for a crypto symbol.
+
+    Computes 18 indicators (10 MAs + 8 oscillators) on daily and weekly
+    timeframes, producing a 0-1 gauge value and overall signal.
+    Uses W-SUN weekly resampling (crypto trades 24/7).
+    """
+    symbol = symbol.upper().replace("USD", "")
+    fmp_symbol = f"{symbol}USD"
+
+    try:
+        service = get_technical_analysis_service()
+        return await service.get_analysis(fmp_symbol)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Crypto technical analysis failed for {symbol}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Crypto technical analysis unavailable"
+        )
+
+
+@router.get(
+    "/{symbol}/technical-analysis/detail",
+    response_model=TechnicalAnalysisDetailResponse,
+)
+async def get_crypto_technical_analysis_detail(symbol: str):
+    """
+    Get detailed technical analysis breakdown for a crypto symbol.
+
+    Returns individual indicator values and signals, pivot points,
+    volume analysis, Fibonacci retracement, and support/resistance levels.
+    """
+    symbol = symbol.upper().replace("USD", "")
+    fmp_symbol = f"{symbol}USD"
+
+    try:
+        service = get_technical_analysis_service()
+        return await service.get_analysis_detail(fmp_symbol)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Crypto TA detail failed for {symbol}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Crypto technical analysis detail unavailable"
         )

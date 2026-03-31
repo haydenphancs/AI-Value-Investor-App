@@ -139,9 +139,6 @@ class CryptoDetailViewModel: ObservableObject {
                 self.cryptoData = response.toModel()
                 self.chartDataVersion += 1
 
-                // Technical analysis: sample data for now
-                self.technicalAnalysisData = TechnicalAnalysisData.sampleData
-
                 self.isLoading = false
                 self.errorMessage = nil
 
@@ -177,10 +174,10 @@ class CryptoDetailViewModel: ObservableObject {
             print("✅ [CryptoDetail] Refreshed \(response.name)")
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
-            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
             self.isLoading = false
 
-            // Refresh news + analysis data
+            // Refresh news + analysis data (includes TA gauge)
+            self.technicalAnalysisDetailData = nil  // reset so detail refetches
             await fetchCryptoNews()
             await fetchCryptoAnalysis()
         } catch {
@@ -250,7 +247,6 @@ class CryptoDetailViewModel: ObservableObject {
         print("   🔄 Falling back to sample data for \(cryptoSymbol)")
         self.cryptoData = CryptoDetailData.sampleEthereum
         self.newsArticles = TickerNewsArticle.sampleDataForTicker(cryptoSymbol)
-        self.technicalAnalysisData = TechnicalAnalysisData.sampleData
     }
 
     // MARK: - User Actions
@@ -385,7 +381,7 @@ class CryptoDetailViewModel: ObservableObject {
             guard let self = self else { return }
             do {
                 let dto = try await self.apiClient.request(
-                    endpoint: .getTechnicalAnalysisDetail(ticker: self.cryptoSymbol),
+                    endpoint: .getCryptoTechnicalAnalysisDetail(symbol: self.cryptoSymbol),
                     responseType: TechnicalAnalysisDetailDTO.self
                 )
                 self.technicalAnalysisDetailData = dto.toDisplayModel()
@@ -603,10 +599,11 @@ class CryptoDetailViewModel: ObservableObject {
         self.isFearGreedLoading = true
         self.isSentimentLoading = true
 
-        // Fetch Fear & Greed and Sentiment in parallel
+        // Fetch Fear & Greed, Sentiment, and Technical Analysis in parallel
         async let fearGreedTask: () = fetchFearGreed()
         async let sentimentTask: () = fetchSentiment()
-        _ = await (fearGreedTask, sentimentTask)
+        async let technicalTask: () = fetchCryptoTechnicalAnalysis()
+        _ = await (fearGreedTask, sentimentTask, technicalTask)
     }
 
     private func fetchFearGreed() async {
@@ -629,6 +626,19 @@ class CryptoDetailViewModel: ObservableObject {
             print("⚠️ [CryptoDetail] Sentiment failed for \(cryptoSymbol): \(error)")
         }
         self.isSentimentLoading = false
+    }
+
+    private func fetchCryptoTechnicalAnalysis() async {
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .getCryptoTechnicalAnalysis(symbol: cryptoSymbol),
+                responseType: TechnicalAnalysisDTO.self
+            )
+            self.technicalAnalysisData = dto.toDisplayModel()
+            print("✅ [CryptoDetail] Got technical analysis for \(cryptoSymbol) — gauge: \(dto.gaugeValue)")
+        } catch {
+            print("⚠️ [CryptoDetail] Technical analysis failed for \(cryptoSymbol): \(error)")
+        }
     }
 
     // MARK: - Contextual Chat Context

@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache ──────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 43_200  # 12 hours in seconds
+_CACHE_TTL_CRYPTO = 14_400  # 4 hours — crypto is 24/7 and more volatile
 
 TOTAL_INDICATORS = 18
 
@@ -114,13 +115,15 @@ class TechnicalAnalysisService:
     async def get_analysis(self, ticker: str) -> TechnicalAnalysisResponse:
         """Gauge endpoint: daily + weekly signals, overall gauge value."""
         ticker = ticker.upper()
+        is_crypto = ticker.endswith("USD") and not ticker.startswith("$")
 
-        cached = _cache_get(f"ta:{ticker}")
+        ttl = _CACHE_TTL_CRYPTO if is_crypto else _CACHE_TTL
+        cached = _cache_get(f"ta:{ticker}", ttl)
         if cached is not None:
             return cached
 
         df_daily = await self._fetch_daily_ohlcv(ticker)
-        df_weekly = self._daily_to_weekly(df_daily)
+        df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
 
         daily_result, _, _ = self._compute_timeframe_signal(df_daily)
         weekly_result, _, _ = self._compute_timeframe_signal(df_weekly)
@@ -146,8 +149,10 @@ class TechnicalAnalysisService:
     ) -> TechnicalAnalysisDetailResponse:
         """Detail endpoint: full indicator breakdown + extras."""
         ticker = ticker.upper()
+        is_crypto = ticker.endswith("USD") and not ticker.startswith("$")
 
-        cached = _cache_get(f"ta_detail:{ticker}")
+        ttl = _CACHE_TTL_CRYPTO if is_crypto else _CACHE_TTL
+        cached = _cache_get(f"ta_detail:{ticker}", ttl)
         if cached is not None:
             return cached
 
@@ -220,10 +225,15 @@ class TechnicalAnalysisService:
         return df[["open", "high", "low", "close", "volume"]]
 
     @staticmethod
-    def _daily_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
-        """Resample daily OHLCV into weekly bars (week ending Friday)."""
+    def _daily_to_weekly(df: pd.DataFrame, *, is_crypto: bool = False) -> pd.DataFrame:
+        """Resample daily OHLCV into weekly bars.
+
+        Stocks use W-FRI (week ending Friday — US market convention).
+        Crypto uses W-SUN (week ending Sunday — 24/7 market, no sessions).
+        """
+        rule = "W-SUN" if is_crypto else "W-FRI"
         weekly = (
-            df.resample("W-FRI")
+            df.resample(rule)
             .agg(
                 {
                     "open": "first",

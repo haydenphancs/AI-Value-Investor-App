@@ -167,10 +167,11 @@ class SentimentService:
                 social_svc.get_mentions_7d(social_key), timeout=10
             )
 
-        # Parallel fetch: news + price + social (24h + 7d)
+        # Parallel fetch: news + price + historical + social (24h + 7d)
         results = await asyncio.gather(
             self._get_articles(ticker),
             self._fetch_price_data(ticker),
+            self._fetch_historical_prices(ticker),
             _social_24h(),
             _social_7d(),
             return_exceptions=True,
@@ -178,10 +179,11 @@ class SentimentService:
 
         articles = results[0] if not isinstance(results[0], Exception) else []
         price_data = results[1] if not isinstance(results[1], Exception) else {}
-        social_24h = results[2] if not isinstance(results[2], Exception) else (0, 0)
-        social_7d = results[3] if not isinstance(results[3], Exception) else (0, 0)
+        hist_prices = results[2] if not isinstance(results[2], Exception) else []
+        social_24h = results[3] if not isinstance(results[3], Exception) else (0, 0)
+        social_7d = results[4] if not isinstance(results[4], Exception) else (0, 0)
 
-        for i, name in enumerate(["articles", "price", "social_24h", "social_7d"]):
+        for i, name in enumerate(["articles", "price", "historical", "social_24h", "social_7d"]):
             if isinstance(results[i], Exception):
                 logger.warning(f"Sentiment fetch '{name}' failed for {ticker}: {results[i]}")
 
@@ -194,8 +196,9 @@ class SentimentService:
             f"social_24h={social_cur_24h}, social_7d={social_cur_7d}"
         )
 
-        # ── Price momentum score (always available) ────────────
-        price_score = self._compute_price_sentiment(price_data)
+        # ── Price momentum scores ─────────────────────────────
+        price_score_24h = self._compute_price_sentiment(price_data)
+        price_score_7d = self._compute_price_sentiment_7d(hist_prices)
 
         # ── 24-hour window ────────────────────────────────────────
         news_score_24h, news_cur_24h, news_prev_24h = (
@@ -209,7 +212,7 @@ class SentimentService:
         has_social_24h = social_cur_24h > 0
         combined_24h = self._combine_scores(
             news_score_24h, social_score_24h,
-            has_social_24h, has_news_24h, price_score,
+            has_social_24h, has_news_24h, price_score_24h,
         )
 
         # ── 7-day window ──────────────────────────────────────────
@@ -224,12 +227,12 @@ class SentimentService:
         has_social_7d = social_cur_7d > 0
         combined_7d = self._combine_scores(
             news_score_7d, social_score_7d,
-            has_social_7d, has_news_7d, price_score,
+            has_social_7d, has_news_7d, price_score_7d,
         )
 
         logger.info(
             f"Sentiment scores for {ticker} — "
-            f"price={price_score} | "
+            f"price_24h={price_score_24h} price_7d={price_score_7d} | "
             f"24h: news={news_score_24h}({news_cur_24h} articles) "
             f"social={social_score_24h}({social_cur_24h} mentions) "
             f"combined={combined_24h} | "
@@ -469,6 +472,53 @@ class SentimentService:
         except Exception as e:
             logger.warning(f"Price data fetch failed for {ticker}: {e}")
             return {}
+
+    async def _fetch_historical_prices(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch ~10 days of historical prices for 7-day return calc."""
+        try:
+            now = datetime.now(timezone.utc)
+            from_date = (now - timedelta(days=12)).strftime("%Y-%m-%d")
+            to_date = now.strftime("%Y-%m-%d")
+            raw = await self.fmp.get_historical_prices(ticker, from_date, to_date)
+            if isinstance(raw, dict):
+                hist = raw.get("historical", [])
+            elif isinstance(raw, list):
+                hist = raw
+            else:
+                hist = []
+            hist.sort(key=lambda p: p.get("date", ""))
+            return hist
+        except Exception as e:
+            logger.warning(f"Historical prices fetch failed for {ticker}: {e}")
+            return []
+
+    @staticmethod
+    def _compute_price_sentiment_7d(hist_prices: List[Dict]) -> int:
+        """
+        Derive a 0-100 sentiment score from 7-day price momentum.
+
+        Computes the % change from ~7 days ago to latest close,
+        then maps it the same way as daily: -5% → ~15, 0% → 50, +5% → ~85.
+        Falls back to 50 (neutral) if insufficient data.
+        """
+        if not hist_prices or len(hist_prices) < 2:
+            return 50
+
+        latest_close = hist_prices[-1].get("close") or hist_prices[-1].get("adjClose")
+        # Find the price closest to 7 days ago
+        target_idx = max(0, len(hist_prices) - 8)  # ~7 trading days back
+        start_close = hist_prices[target_idx].get("close") or hist_prices[target_idx].get("adjClose")
+
+        if not latest_close or not start_close or start_close == 0:
+            return 50
+
+        pct_change_7d = ((latest_close - start_close) / start_close) * 100
+        # Use same mapping as daily but with gentler scaling (7d moves are larger)
+        # -10% → ~15, -5% → ~32, 0% → 50, +5% → ~68, +10% → ~85
+        scaled = 50 + (pct_change_7d * 3.5)
+        return max(0, min(100, round(scaled)))
 
     # ── Social buzz scoring ─────────────────────────────────────
 

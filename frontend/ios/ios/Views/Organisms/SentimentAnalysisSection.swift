@@ -35,6 +35,7 @@ struct SentimentAnalysisSection: View {
 
             // Metrics row
             SentimentMetricsRow(sentimentData: sentimentData, selectedTimeframe: selectedTimeframe)
+                .padding(.top, AppSpacing.md)
 
             // Disclaimer
             AnalysisDisclaimerText()

@@ -74,6 +74,8 @@ enum APIEndpoint: Sendable {
     case enrichCryptoNews(symbol: String, articleIds: [String])
     case getCryptoFearGreed
     case getCryptoSentiment(symbol: String)
+    case getCryptoTechnicalAnalysis(symbol: String)
+    case getCryptoTechnicalAnalysisDetail(symbol: String)
 
     // MARK: - ETFs
     case getETFDetail(symbol: String, range: String, interval: String? = nil)
@@ -208,6 +210,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/crypto/fear-greed"
         case .getCryptoSentiment(let symbol):
             return "/api/v1/crypto/\(symbol)/sentiment"
+        case .getCryptoTechnicalAnalysis(let symbol):
+            return "/api/v1/crypto/\(symbol)/technical-analysis"
+        case .getCryptoTechnicalAnalysisDetail(let symbol):
+            return "/api/v1/crypto/\(symbol)/technical-analysis/detail"
 
         // Indices
         case .getIndexDetail(let symbol, _, _):
@@ -464,7 +470,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
@@ -496,7 +502,8 @@ enum APIEndpoint: Sendable {
             return 120 // 2 minutes for AI generation
         case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
-        case .getTechnicalAnalysis, .getTechnicalAnalysisDetail:
+        case .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
+             .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail:
             return 45 // 45 seconds for technical indicator computation
         case .getStockOverview:
             return 60 // 1 minute for aggregated overview (many FMP calls)

@@ -865,6 +865,7 @@ class CryptoService:
                 bench_ytd = _compute_ytd_return(btc_hist)
                 bench_3y = _compute_return(btc_hist, 365 * 3) if len(btc_hist) > 365 * 3 else None
                 bench_5y = _compute_return(btc_hist, 365 * 5) if len(btc_hist) > 365 * 5 else None
+                bench_10y = _compute_return(btc_hist, 365 * 10) if len(btc_hist) > 365 * 10 else None
                 bench_all = _compute_all_time_return(btc_hist)
 
         # ── Step 4: Build chart data ──────────────────────────────
@@ -1211,11 +1212,9 @@ class CryptoService:
             ("3 Years", three_year, bench_3y),
             ("5 Years", five_year, bench_5y),
         ]
-        # BTC has enough history for 10 Years — use that instead of All Time
-        if symbol == "BTC" and ten_year is not None:
-            entries.append(("10 Years", ten_year, bench_10y))
-        else:
-            entries.append(("All Time", all_time, bench_all_time))
+        # Crypto: always show "10 Years" instead of "All Time"
+        # Gracefully skipped if ten_year is None (not enough history)
+        entries.append(("10 Years", ten_year, bench_10y))
         for label, asset_val, bench_val in entries:
             # Skip periods where the crypto doesn't have enough history
             if asset_val is None:

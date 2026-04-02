@@ -373,7 +373,7 @@ enum ETFKeyStatistic {
         KeyStatistic(label: "52W High", value: "$540.72"),
         KeyStatistic(label: "52W Low", value: "$432.18"),
         KeyStatistic(label: "Beta", value: "1.00"),
-        KeyStatistic(label: "P/E Ratio", value: "24.86"),
+        KeyStatistic(label: "50-Day Avg", value: "$515.32"),
         KeyStatistic(label: "Holdings", value: "503"),
         KeyStatistic(label: "Turnover", value: "2.0%"),
         KeyStatistic(label: "Inception", value: "01/22/1993")
@@ -396,7 +396,7 @@ enum ETFKeyStatisticsGroup {
             KeyStatistic(label: "Total Assets", value: "$562.3B"),
             KeyStatistic(label: "Expense Ratio", value: "0.0945%", isHighlighted: true),
             KeyStatistic(label: "Dividend Yield", value: "1.22%"),
-            KeyStatistic(label: "P/E Ratio", value: "24.86"),
+            KeyStatistic(label: "50-Day Avg", value: "$515.32"),
             KeyStatistic(label: "Turnover", value: "2.0%")
         ]),
         // Column 3: Structure

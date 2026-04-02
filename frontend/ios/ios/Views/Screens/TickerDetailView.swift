@@ -229,14 +229,7 @@ struct TickerDetailView: View {
             .preferredColorScheme(.dark)
         }
         .navigationDestination(item: $selectedSearchResult) { selection in
-            switch selection.type {
-            case "crypto":
-                CryptoDetailView(cryptoSymbol: selection.symbol)
-            case "etf":
-                ETFDetailView(etfSymbol: selection.symbol)
-            default:
-                TickerDetailView(tickerSymbol: selection.symbol)
-            }
+            AssetDetailRouter(selection: selection)
         }
         .sheet(isPresented: $showAIChat) {
             NavigationStack {

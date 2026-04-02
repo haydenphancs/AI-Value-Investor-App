@@ -19,7 +19,7 @@ class WhaleProfileViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     // Navigation
-    @Published var selectedTickerSymbol: String?
+    @Published var selectedAssetNavigation: SearchSelection?
     @Published var selectedTradeGroupId: String?
     @Published var showAllHoldings: Bool = false
     @Published var showRecentTradesInfo: Bool = false
@@ -210,7 +210,7 @@ class WhaleProfileViewModel: ObservableObject {
     }
 
     func viewHolding(_ holding: WhaleHolding) {
-        selectedTickerSymbol = holding.ticker
+        selectedAssetNavigation = SearchSelection(symbol: holding.ticker, type: holding.assetType)
     }
 
     func viewTradeGroup(_ group: WhaleTradeGroup) {

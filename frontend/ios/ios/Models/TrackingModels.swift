@@ -38,6 +38,7 @@ struct TrackedAsset: Identifiable {
     let price: Double
     let changePercent: Double
     let sparklineData: [Double]
+    let assetType: String  // "stock", "crypto", "etf", "index", "commodity"
 
     var isPositive: Bool {
         changePercent >= 0
@@ -243,6 +244,7 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let sector: String?
     let country: String?
     let marketCap: Double?
+    let assetType: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -253,6 +255,7 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case logoUrl = "logo_url"
         case sector, country
         case marketCap = "market_cap"
+        case assetType = "asset_type"
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -262,7 +265,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
             companyName: companyName,
             price: price,
             changePercent: changePercent,
-            sparklineData: sparklineData
+            sparklineData: sparklineData,
+            assetType: assetType ?? "stock"
         )
     }
 }
@@ -497,28 +501,32 @@ extension TrackedAsset {
             companyName: "Apple Inc.",
             price: 178.42,
             changePercent: 2.34,
-            sparklineData: [165, 168, 170, 172, 175, 173, 176, 178]
+            sparklineData: [165, 168, 170, 172, 175, 173, 176, 178],
+            assetType: "stock"
         ),
         TrackedAsset(
             ticker: "NVDA",
             companyName: "NVIDIA Corp.",
             price: 495.22,
             changePercent: 5.67,
-            sparklineData: [450, 460, 470, 465, 480, 490, 495]
+            sparklineData: [450, 460, 470, 465, 480, 490, 495],
+            assetType: "stock"
         ),
         TrackedAsset(
             ticker: "MSFT",
             companyName: "Microsoft Corp.",
             price: 378.91,
             changePercent: -1.23,
-            sparklineData: [390, 388, 385, 382, 380, 378, 379]
+            sparklineData: [390, 388, 385, 382, 380, 378, 379],
+            assetType: "stock"
         ),
         TrackedAsset(
             ticker: "GOOGL",
             companyName: "Alphabet Inc.",
             price: 139.67,
             changePercent: 1.89,
-            sparklineData: [135, 136, 137, 138, 137, 139, 140]
+            sparklineData: [135, 136, 137, 138, 137, 139, 140],
+            assetType: "stock"
         )
     ]
 }

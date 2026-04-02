@@ -6,7 +6,7 @@ explicit CodingKeys (snake_case raw values), so no aliases needed.
 """
 
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 
 # ── Shared models (same shape as index schemas) ─────────────────
@@ -147,7 +147,7 @@ class ETFDetailResponse(BaseModel):
     price_change: float
     price_change_percent: float
     market_status: MarketStatusResponse
-    chart_data: List[float]
+    chart_data: List[Dict[str, Any]]
     key_statistics: List[KeyStatisticItem]
     key_statistics_groups: List[KeyStatisticsGroupResponse]
     performance_periods: List[PerformancePeriodResponse]

@@ -89,18 +89,11 @@ struct TrackingContentView: View {
                     }
                 )
             }
-            .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
-                TickerDetailView(tickerSymbol: ticker)
+            .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
+                AssetDetailRouter(selection: selection)
             }
             .navigationDestination(item: $viewModel.selectedSearchResult) { selection in
-                switch selection.type {
-                case "crypto":
-                    CryptoDetailView(cryptoSymbol: selection.symbol)
-                case "etf":
-                    ETFDetailView(etfSymbol: selection.symbol)
-                default:
-                    TickerDetailView(tickerSymbol: selection.symbol)
-                }
+                AssetDetailRouter(selection: selection)
             }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)
@@ -209,21 +202,17 @@ struct TrackingContentViewWithBinding: View {
                     }
                 )
             }
-            .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
-                TickerDetailView(tickerSymbol: ticker, onNavigateToResearch: {
-                    researchTickerSymbol = ticker
+            .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
+                AssetDetailRouter(selection: selection, onNavigateToResearch: {
+                    researchTickerSymbol = selection.symbol
                     selectedTab = .research
                 })
             }
             .navigationDestination(item: $viewModel.selectedSearchResult) { selection in
-                switch selection.type {
-                case "crypto":
-                    CryptoDetailView(cryptoSymbol: selection.symbol)
-                case "etf":
-                    ETFDetailView(etfSymbol: selection.symbol)
-                default:
-                    TickerDetailView(tickerSymbol: selection.symbol)
-                }
+                AssetDetailRouter(selection: selection, onNavigateToResearch: {
+                    researchTickerSymbol = selection.symbol
+                    selectedTab = .research
+                })
             }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)

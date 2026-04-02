@@ -143,6 +143,7 @@ struct WhaleHolding: Identifiable, Codable {
     let logoURL: String?
     let allocation: Double
     let changePercent: Double
+    let assetType: String
 
     var formattedAllocation: String {
         String(format: "%.1f%%", allocation)
@@ -157,13 +158,14 @@ struct WhaleHolding: Identifiable, Codable {
         changePercent >= 0
     }
 
-    init(id: String = UUID().uuidString, ticker: String, companyName: String, logoURL: String? = nil, allocation: Double, changePercent: Double) {
+    init(id: String = UUID().uuidString, ticker: String, companyName: String, logoURL: String? = nil, allocation: Double, changePercent: Double, assetType: String = "stock") {
         self.id = id
         self.ticker = ticker
         self.companyName = companyName
         self.logoURL = logoURL
         self.allocation = allocation
         self.changePercent = changePercent
+        self.assetType = assetType
     }
 }
 
@@ -312,6 +314,7 @@ struct WhaleTrade: Identifiable, Codable {
     let previousAllocation: Double
     let newAllocation: Double
     let date: Date
+    let assetType: String
 
     var formattedAmount: String {
         formatTradeAmount(amount)
@@ -344,7 +347,8 @@ struct WhaleTrade: Identifiable, Codable {
         amount: Double,
         previousAllocation: Double = 0,
         newAllocation: Double = 0,
-        date: Date = Date()
+        date: Date = Date(),
+        assetType: String = "stock"
     ) {
         self.id = id
         self.ticker = ticker
@@ -355,6 +359,7 @@ struct WhaleTrade: Identifiable, Codable {
         self.previousAllocation = previousAllocation
         self.newAllocation = newAllocation
         self.date = date
+        self.assetType = assetType
     }
 }
 

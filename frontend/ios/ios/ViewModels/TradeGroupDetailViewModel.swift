@@ -14,7 +14,7 @@ class TradeGroupDetailViewModel: ObservableObject {
 
     @Published var tradeGroup: WhaleTradeGroup
     @Published var selectedFilter: TradeFilterTab = .all
-    @Published var selectedTickerSymbol: String?
+    @Published var selectedAssetNavigation: SearchSelection?
 
     let whaleName: String
 
@@ -61,6 +61,6 @@ class TradeGroupDetailViewModel: ObservableObject {
     }
 
     func viewTrade(_ trade: WhaleTrade) {
-        selectedTickerSymbol = trade.ticker
+        selectedAssetNavigation = SearchSelection(symbol: trade.ticker, type: trade.assetType)
     }
 }

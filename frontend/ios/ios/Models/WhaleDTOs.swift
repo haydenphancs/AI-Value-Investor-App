@@ -162,12 +162,14 @@ struct WhaleHoldingDTO: Codable {
     let logoUrl: String?
     let allocation: Double
     let changePercent: Double
+    let assetType: String?
 
     enum CodingKeys: String, CodingKey {
         case id, ticker, allocation
         case companyName = "company_name"
         case logoUrl = "logo_url"
         case changePercent = "change_percent"
+        case assetType = "asset_type"
     }
 
     func toWhaleHolding() -> WhaleHolding {
@@ -177,7 +179,8 @@ struct WhaleHoldingDTO: Codable {
             companyName: companyName,
             logoURL: logoUrl,
             allocation: allocation,
-            changePercent: changePercent
+            changePercent: changePercent,
+            assetType: assetType ?? "stock"
         )
     }
 }
@@ -227,6 +230,7 @@ struct WhaleTradeDTO: Codable {
     let previousAllocation: Double
     let newAllocation: Double
     let date: String
+    let assetType: String?
 
     enum CodingKeys: String, CodingKey {
         case id, ticker, action, amount, date
@@ -234,6 +238,7 @@ struct WhaleTradeDTO: Codable {
         case tradeType = "trade_type"
         case previousAllocation = "previous_allocation"
         case newAllocation = "new_allocation"
+        case assetType = "asset_type"
     }
 
     func toWhaleTrade() -> WhaleTrade {
@@ -246,7 +251,8 @@ struct WhaleTradeDTO: Codable {
             amount: amount,
             previousAllocation: previousAllocation,
             newAllocation: newAllocation,
-            date: DateParser.parseDate(date)
+            date: DateParser.parseDate(date),
+            assetType: assetType ?? "stock"
         )
     }
 }

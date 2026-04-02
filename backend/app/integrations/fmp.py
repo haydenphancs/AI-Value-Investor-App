@@ -593,11 +593,11 @@ class FMPClient:
         """
         Get ETF-specific info (expense ratio, AUM, holdings count, etc.).
 
-        NOTE: May not be available on all FMP plans.
+        Stable API uses slash-separated path: etf/info (not etf-info).
         """
         try:
             data = await self._make_request(
-                "etf-info", params={"symbol": ticker.upper()}
+                "etf/info", params={"symbol": ticker.upper()}
             )
             if isinstance(data, list) and data:
                 return data[0]
@@ -605,7 +605,7 @@ class FMPClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
                 logger.warning(
-                    f"ETF info endpoint unavailable for {ticker} (may require higher plan)"
+                    f"ETF info endpoint unavailable for {ticker}"
                 )
                 return {}
             raise
@@ -613,10 +613,10 @@ class FMPClient:
     async def get_etf_holders(
         self, ticker: str, limit: int = 20
     ) -> List[Dict[str, Any]]:
-        """Get ETF top holdings with weights."""
+        """Get ETF top holdings with weights. Stable path: etf/holdings."""
         try:
             data = await self._make_request(
-                "etf-holder", params={"symbol": ticker.upper()}
+                "etf/holdings", params={"symbol": ticker.upper()}
             )
             if isinstance(data, list):
                 return data[:limit]
@@ -628,10 +628,10 @@ class FMPClient:
     async def get_etf_sector_weightings(
         self, ticker: str
     ) -> List[Dict[str, Any]]:
-        """Get ETF sector weightings."""
+        """Get ETF sector weightings. Stable path: etf/sector-weightings."""
         try:
             data = await self._make_request(
-                "etf-sector-weightings", params={"symbol": ticker.upper()}
+                "etf/sector-weightings", params={"symbol": ticker.upper()}
             )
             return data if isinstance(data, list) else []
         except Exception as e:

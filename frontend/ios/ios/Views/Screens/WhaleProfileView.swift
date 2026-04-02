@@ -96,8 +96,8 @@ struct WhaleProfileView: View {
                 }
             }
         }
-        .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
-            TickerDetailView(tickerSymbol: ticker)
+        .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
+            AssetDetailRouter(selection: selection)
         }
         .navigationDestination(item: $viewModel.selectedTradeGroupId) { groupId in
             if let group = viewModel.tradeGroup(for: groupId) {

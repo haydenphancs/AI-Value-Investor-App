@@ -83,19 +83,51 @@ _RELATED_ETFS: Dict[str, List[str]] = {
 _DEFAULT_RELATED = ["SPY", "QQQ", "DIA", "IWM", "VTI", "SCHD"]
 
 
+# ── Static ETF reference data (fallback when FMP premium endpoints are unavailable) ──
+
+_ETF_REFERENCE: Dict[str, Dict[str, Any]] = {
+    "SPY":  {"expense_ratio": 0.0945, "holdings": 503, "turnover": 2.0, "index": "S&P 500"},
+    "VOO":  {"expense_ratio": 0.03,   "holdings": 504, "turnover": 2.4, "index": "S&P 500"},
+    "IVV":  {"expense_ratio": 0.03,   "holdings": 503, "turnover": 5.0, "index": "S&P 500"},
+    "QQQ":  {"expense_ratio": 0.20,   "holdings": 101, "turnover": 8.4, "index": "Nasdaq-100"},
+    "QQQM": {"expense_ratio": 0.15,   "holdings": 101, "turnover": 8.4, "index": "Nasdaq-100"},
+    "DIA":  {"expense_ratio": 0.16,   "holdings": 30,  "turnover": 14.0, "index": "Dow Jones Industrial"},
+    "IWM":  {"expense_ratio": 0.19,   "holdings": 1974, "turnover": 18.0, "index": "Russell 2000"},
+    "VTI":  {"expense_ratio": 0.03,   "holdings": 3636, "turnover": 2.2, "index": "CRSP US Total Market"},
+    "ARKK": {"expense_ratio": 0.75,   "holdings": 35,  "turnover": 60.0, "index": "Active (No Index)"},
+    "SCHD": {"expense_ratio": 0.06,   "holdings": 104, "turnover": 14.0, "index": "Dow Jones US Dividend 100"},
+    "VYM":  {"expense_ratio": 0.06,   "holdings": 462, "turnover": 8.0, "index": "FTSE High Dividend Yield"},
+    "XLK":  {"expense_ratio": 0.09,   "holdings": 69,  "turnover": 5.0, "index": "Technology Select Sector"},
+    "XLF":  {"expense_ratio": 0.09,   "holdings": 72,  "turnover": 5.0, "index": "Financial Select Sector"},
+    "XLE":  {"expense_ratio": 0.09,   "holdings": 23,  "turnover": 5.0, "index": "Energy Select Sector"},
+    "GLD":  {"expense_ratio": 0.40,   "holdings": 1,   "turnover": 0.0, "index": "Gold Spot Price"},
+    "TLT":  {"expense_ratio": 0.15,   "holdings": 36,  "turnover": 15.0, "index": "ICE US Treasury 20+ Year"},
+    "BND":  {"expense_ratio": 0.03,   "holdings": 17400, "turnover": 40.0, "index": "Bloomberg US Aggregate"},
+    "AGG":  {"expense_ratio": 0.03,   "holdings": 12200, "turnover": 40.0, "index": "Bloomberg US Aggregate"},
+    "VGT":  {"expense_ratio": 0.10,   "holdings": 316, "turnover": 3.0, "index": "MSCI US IMI Info Tech"},
+    "SPLG": {"expense_ratio": 0.02,   "holdings": 503, "turnover": 2.0, "index": "S&P 500"},
+    "ITOT": {"expense_ratio": 0.03,   "holdings": 3496, "turnover": 4.0, "index": "S&P Total Market"},
+    "IJR":  {"expense_ratio": 0.06,   "holdings": 602, "turnover": 16.0, "index": "S&P SmallCap 600"},
+    "VB":   {"expense_ratio": 0.05,   "holdings": 1381, "turnover": 11.0, "index": "CRSP US Small Cap"},
+    "SMH":  {"expense_ratio": 0.35,   "holdings": 26,  "turnover": 17.0, "index": "MVIS US Listed Semiconductor"},
+    "DGRO": {"expense_ratio": 0.08,   "holdings": 407, "turnover": 14.0, "index": "Morningstar US Dividend Growth"},
+    "VIG":  {"expense_ratio": 0.06,   "holdings": 315, "turnover": 10.0, "index": "S&P US Dividend Growers"},
+}
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 
-def _fmt(value: Optional[float], decimals: int = 2) -> str:
+def _fmt(value: Optional[float], decimals: int = 2, prefix: str = "$") -> str:
     """Format a number with commas and N decimal places."""
     if value is None:
         return "—"
     if abs(value) >= 1_000_000_000_000:
-        return f"${value / 1_000_000_000_000:.1f}T"
+        return f"{prefix}{value / 1_000_000_000_000:.1f}T"
     if abs(value) >= 1_000_000_000:
-        return f"${value / 1_000_000_000:.1f}B"
+        return f"{prefix}{value / 1_000_000_000:.1f}B"
     if abs(value) >= 1_000_000:
-        return f"${value / 1_000_000:.1f}M"
+        return f"{prefix}{value / 1_000_000:.1f}M"
     return f"{value:,.{decimals}f}"
 
 
@@ -184,11 +216,66 @@ def _format_date_readable(date_str: str) -> str:
 # ── Main service ─────────────────────────────────────────────────
 
 
+_ETF_DB_TTL_HOURS = 24  # 24 hours in Supabase for ETF fundamentals
+
+
 class ETFService:
     """Aggregates FMP data + Gemini AI for the ETF Detail screen."""
 
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
+        from app.database import get_supabase
+        self.supabase = get_supabase()
+
+    # ── Supabase cache-aside helpers ─────────────────────────────
+
+    def _check_etf_db_cache(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Check Supabase etf_detail_cache (24h TTL)."""
+        try:
+            row = (
+                self.supabase.table("etf_detail_cache")
+                .select("response_json, cached_at")
+                .eq("symbol", symbol)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=_ETF_DB_TTL_HOURS):
+                logger.info(f"ETF Supabase STALE (age={age}) for {symbol}")
+                return None
+
+            data = entry.get("response_json")
+            if data and isinstance(data, dict):
+                logger.info(f"ETF Supabase HIT for {symbol} (age={age})")
+                return data
+            return None
+        except Exception as e:
+            logger.warning(f"ETF Supabase check failed for {symbol}: {e}")
+            return None
+
+    def _upsert_etf_db_cache(self, symbol: str, data: Dict[str, Any]) -> None:
+        """Upsert ETF detail into Supabase cache."""
+        try:
+            self.supabase.table("etf_detail_cache").upsert(
+                {
+                    "symbol": symbol,
+                    "response_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="symbol",
+            ).execute()
+            logger.info(f"ETF detail cached in Supabase for {symbol}")
+        except Exception as e:
+            logger.warning(f"ETF Supabase upsert failed for {symbol}: {e}")
 
     async def get_etf_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -204,6 +291,22 @@ class ETFService:
           5. Assemble and return the response
         """
         symbol = symbol.upper()
+
+        # ── Cache check: in-memory (5 min) then Supabase (24h) ──
+        mem_key = f"etf_detail_{symbol}"
+        cached = _cache_get(mem_key, _CACHE_TTL_SECONDS)
+        if cached is not None:
+            logger.info(f"ETF in-memory HIT for {symbol}")
+            return cached
+
+        db_data = self._check_etf_db_cache(symbol)
+        if db_data is not None:
+            try:
+                response = ETFDetailResponse(**db_data)
+                _cache_set(mem_key, response)
+                return response
+            except Exception as e:
+                logger.warning(f"ETF Supabase data invalid for {symbol}: {e}")
 
         # ── Step 1: Parallel FMP fetches ──────────────────────────
         today = datetime.now(tz=timezone.utc).date()
@@ -265,21 +368,32 @@ class ETFService:
         change_pct = float(quote.get("changesPercentage") or 0)
         prev_close = float(quote.get("previousClose") or 0)
         volume = quote.get("volume") or 0
-        avg_volume = quote.get("avgVolume") or 0
+        avg_volume = (
+            quote.get("avgVolume")
+            or profile.get("averageVolume")
+            or etf_info.get("avgVolume")
+            or 0
+        )
         year_high = float(quote.get("yearHigh") or 0)
         year_low = float(quote.get("yearLow") or 0)
-        pe = float(quote.get("pe") or 0)
-        market_cap = quote.get("marketCap") or 0
+        price_avg_50 = float(quote.get("priceAvg50") or 0)
+        market_cap = quote.get("marketCap") or profile.get("marketCap") or 0
         beta = float(profile.get("beta") or quote.get("beta") or 0)
 
-        # ETF-specific data
-        expense_ratio = float(etf_info.get("expenseRatio") or 0)
+        # ETF-specific data (etf_info may be empty if FMP plan doesn't include it)
+        # Fall back to static reference table for popular ETFs
+        ref = _ETF_REFERENCE.get(symbol, {})
+
+        expense_ratio = float(etf_info.get("expenseRatio") or ref.get("expense_ratio") or 0)
         nav = float(etf_info.get("navPrice") or etf_info.get("nav") or price)
         total_assets = float(
-            etf_info.get("totalAssets") or etf_info.get("aum")
-            or etf_info.get("netAssets") or market_cap or 0
+            etf_info.get("assetsUnderManagement") or etf_info.get("totalAssets")
+            or etf_info.get("aum") or etf_info.get("netAssets") or market_cap or 0
         )
-        holdings_count = int(etf_info.get("holdingsCount") or etf_info.get("numberOfHoldings") or 0)
+        holdings_count = int(
+            etf_info.get("holdingsCount") or etf_info.get("numberOfHoldings")
+            or ref.get("holdings") or 0
+        )
         etf_company = (
             etf_info.get("etfCompany") or etf_info.get("companyName")
             or profile.get("companyName") or "—"
@@ -289,20 +403,23 @@ class ETFService:
             etf_info.get("inceptionDate") or profile.get("ipoDate") or ""
         )
         domicile = etf_info.get("domicile") or "United States"
-        index_tracked = etf_info.get("indexTracked") or etf_info.get("index") or "—"
-        website = profile.get("website") or ""
+        index_tracked = (
+            etf_info.get("indexTracked") or etf_info.get("index")
+            or ref.get("index") or "—"
+        )
+        website = etf_info.get("website") or profile.get("website") or ""
         if website.startswith("https://"):
             website = website[8:]
         elif website.startswith("http://"):
             website = website[7:]
-        description = profile.get("description") or etf_info.get("description") or ""
-        dividend_yield = float(
-            etf_info.get("dividendYield")
-            or quote.get("dividendYield")
-            or profile.get("lastDiv")
-            or 0
-        )
-        turnover = float(etf_info.get("turnover") or 0)
+        description = etf_info.get("description") or profile.get("description") or ""
+        turnover = float(etf_info.get("turnover") or ref.get("turnover") or 0)
+
+        # Dividend yield: prefer etf_info, then compute from lastDividend / price
+        last_div_dollar = float(profile.get("lastDividend") or profile.get("lastDiv") or 0)
+        dividend_yield = float(etf_info.get("dividendYield") or quote.get("dividendYield") or 0)
+        if not dividend_yield and last_div_dollar > 0 and price > 0:
+            dividend_yield = round((last_div_dollar / price) * 100, 2)
 
         # ── Step 3: Build chart data ──────────────────────────────
         from app.services.chart_helper import fetch_chart_data, resolve_interval
@@ -322,7 +439,7 @@ class ETFService:
             year_high=year_high,
             year_low=year_low,
             beta=beta,
-            pe=pe,
+            price_avg_50=price_avg_50,
             holdings_count=holdings_count,
             turnover=turnover,
             inception_date=inception_date_raw,
@@ -369,7 +486,7 @@ class ETFService:
             top_sectors=top_sectors,
             concentration_weight=concentration.weight,
             beta=beta,
-            pe=pe,
+            pe=0,
             asset_class=asset_class,
             index_tracked=index_tracked,
         )
@@ -451,7 +568,7 @@ class ETFService:
         )
 
         # ── Assemble response ─────────────────────────────────────
-        return ETFDetailResponse(
+        response = ETFDetailResponse(
             symbol=symbol,
             name=profile.get("companyName") or etf_company,
             current_price=price,
@@ -471,6 +588,15 @@ class ETFService:
             benchmark_summary=benchmark,
             news_articles=news_articles,
         )
+
+        # ── Cache in both tiers ──────────────────────────────────
+        _cache_set(mem_key, response)
+        try:
+            self._upsert_etf_db_cache(symbol, response.model_dump())
+        except Exception as e:
+            logger.warning(f"ETF Supabase background cache failed for {symbol}: {e}")
+
+        return response
 
     # ── Chart helpers ─────────────────────────────────────────────
 
@@ -507,7 +633,7 @@ class ETFService:
 
     def _build_key_statistics(
         self, *, nav, total_assets, expense_ratio, avg_volume,
-        dividend_yield, year_high, year_low, beta, pe,
+        dividend_yield, year_high, year_low, beta, price_avg_50,
         holdings_count, turnover, inception_date, asset_class,
         domicile, index_tracked,
     ) -> Tuple[List[KeyStatisticItem], List[KeyStatisticsGroupResponse]]:
@@ -521,12 +647,12 @@ class ETFService:
                 value=f"{expense_ratio}%" if expense_ratio else "—",
                 is_highlighted=True,
             ),
-            KeyStatisticItem(label="Avg. Volume", value=_fmt(avg_volume, 0)),
+            KeyStatisticItem(label="Avg. Volume", value=_fmt(avg_volume, 0, prefix="")),
             KeyStatisticItem(label="Dividend Yield", value=_pct(dividend_yield) if dividend_yield else "—"),
             KeyStatisticItem(label="52W High", value=_fmt_dollar(year_high)),
             KeyStatisticItem(label="52W Low", value=_fmt_dollar(year_low)),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
-            KeyStatisticItem(label="P/E Ratio", value=f"{pe:.2f}" if pe else "—"),
+            KeyStatisticItem(label="50-Day Avg", value=_fmt_dollar(price_avg_50) if price_avg_50 else "—"),
             KeyStatisticItem(label="Holdings", value=str(holdings_count) if holdings_count else "—"),
             KeyStatisticItem(label="Turnover", value=_pct(turnover) if turnover else "—"),
             KeyStatisticItem(label="Inception", value=_format_date_readable(inception_date)),
@@ -538,7 +664,7 @@ class ETFService:
                 KeyStatisticItem(label="NAV", value=_fmt_dollar(nav)),
                 KeyStatisticItem(label="52W High", value=_fmt_dollar(year_high)),
                 KeyStatisticItem(label="52W Low", value=_fmt_dollar(year_low)),
-                KeyStatisticItem(label="Avg. Volume", value=_fmt(avg_volume, 0)),
+                KeyStatisticItem(label="Avg. Volume", value=_fmt(avg_volume, 0, prefix="")),
                 KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
             ]),
             # Column 2: Fund Details
@@ -550,7 +676,7 @@ class ETFService:
                     is_highlighted=True,
                 ),
                 KeyStatisticItem(label="Dividend Yield", value=_pct(dividend_yield) if dividend_yield else "—"),
-                KeyStatisticItem(label="P/E Ratio", value=f"{pe:.2f}" if pe else "—"),
+                KeyStatisticItem(label="50-Day Avg", value=_fmt_dollar(price_avg_50) if price_avg_50 else "—"),
                 KeyStatisticItem(label="Turnover", value=_pct(turnover) if turnover else "—"),
             ]),
             # Column 3: Structure

@@ -43,6 +43,7 @@ protocol StockRepositoryProtocol {
     func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO
     func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO
     func getHolders(ticker: String) async throws -> HoldersResponseDTO
+    func getETFDetail(symbol: String, range: String, interval: String?) async throws -> ETFDetailResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -140,6 +141,25 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default"), extendedHours=\(extendedHours)")
+        return response
+    }
+
+    // MARK: - ETF Detail
+
+    func getETFDetail(symbol: String, range: String = "3M", interval: String? = nil) async throws -> ETFDetailResponseDTO {
+        let cacheKey = "etf_detail_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: ETFDetailResponseDTO = getCached(cacheKey, maxAge: CacheTTL.volatile) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFDetail(symbol: symbol, range: range, interval: interval),
+            responseType: ETFDetailResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got ETF detail for \(symbol), range=\(range), interval=\(interval ?? "default")")
         return response
     }
 
@@ -2295,6 +2315,10 @@ struct CongressActivityDTO: Codable {
 #if DEBUG
 @MainActor
 final class MockStockRepository: StockRepositoryProtocol {
+    func getETFDetail(symbol: String, range: String, interval: String?) async throws -> ETFDetailResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+    
 
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult] {
         [

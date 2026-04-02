@@ -55,7 +55,7 @@ class TrackingViewModel: ObservableObject {
     @Published var showSortSheet: Bool = false
 
     // Navigation States
-    @Published var selectedTickerSymbol: String?
+    @Published var selectedAssetNavigation: SearchSelection?
     @Published var selectedSearchResult: SearchSelection?
     @Published var selectedWhaleId: String?
     @Published var selectedTradeGroup: TradeGroupNavigation?
@@ -303,7 +303,7 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Navigation
 
     func viewAssetDetail(_ asset: TrackedAsset) {
-        selectedTickerSymbol = asset.ticker
+        selectedAssetNavigation = SearchSelection(symbol: asset.ticker, type: asset.assetType)
     }
 
     func viewAlertDetail(_ alert: AppAlert) {

@@ -94,8 +94,8 @@ struct TradeGroupDetailView: View {
                     .foregroundColor(AppColors.textSecondary)
             }
         }
-        .navigationDestination(item: $viewModel.selectedTickerSymbol) { ticker in
-            TickerDetailView(tickerSymbol: ticker)
+        .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
+            AssetDetailRouter(selection: selection)
         }
     }
 }

@@ -29,6 +29,7 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - Private Properties
 
     let etfSymbol: String
+    private let repository: StockRepository = .shared
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
@@ -80,13 +81,10 @@ class ETFDetailViewModel: ObservableObject {
         do {
             print("[ETFDetailVM] Fetching ETF detail for \(etfSymbol), range: \(selectedChartRange.rawValue)")
 
-            let response = try await APIClient.shared.request(
-                endpoint: .getETFDetail(
-                    symbol: etfSymbol,
-                    range: selectedChartRange.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: ETFDetailResponseDTO.self
+            let response = try await repository.getETFDetail(
+                symbol: etfSymbol,
+                range: selectedChartRange.rawValue,
+                interval: chartSettings.selectedInterval.rawValue
             )
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
@@ -124,13 +122,10 @@ class ETFDetailViewModel: ObservableObject {
         print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
 
         do {
-            let response = try await APIClient.shared.request(
-                endpoint: .getETFDetail(
-                    symbol: self.etfSymbol,
-                    range: range.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: ETFDetailResponseDTO.self
+            let response = try await repository.getETFDetail(
+                symbol: self.etfSymbol,
+                range: range.rawValue,
+                interval: chartSettings.selectedInterval.rawValue
             )
 
             print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")

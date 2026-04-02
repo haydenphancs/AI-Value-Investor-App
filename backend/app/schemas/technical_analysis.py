@@ -132,10 +132,17 @@ class TechnicalAnalysisDetailResponse(BaseModel):
     """Top-level response for GET /stocks/{ticker}/technical-analysis/detail."""
 
     symbol: str
+    # Daily timeframe indicators
     moving_averages: List[MovingAverageIndicator]
     moving_averages_summary: IndicatorSummary
     oscillators: List[OscillatorIndicator]
     oscillators_summary: IndicatorSummary
+    # Weekly timeframe indicators
+    weekly_moving_averages: List[MovingAverageIndicator] = []
+    weekly_moving_averages_summary: Optional[IndicatorSummary] = None
+    weekly_oscillators: List[OscillatorIndicator] = []
+    weekly_oscillators_summary: Optional[IndicatorSummary] = None
+    # Extras (computed from daily data)
     pivot_points: PivotPointsData
     volume_analysis: VolumeAnalysisData
     fibonacci_retracement: FibonacciRetracementData

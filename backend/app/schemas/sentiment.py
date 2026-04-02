@@ -24,6 +24,9 @@ class SentimentAnalysisResponse(BaseModel):
     social_mentions_change: float      # % change vs previous 24h
     news_articles: int                 # news articles in 24h
     news_articles_change: float        # % change vs previous 24h
+    news_bullish: int = 0              # bullish articles in 24h
+    news_bearish: int = 0              # bearish articles in 24h
+    news_neutral: int = 0              # neutral articles in 24h
     # 7d data
     mood_score_7d: int                 # 0-100 mood score for 7d window
     last_7d_mood: MarketMoodLevel
@@ -31,5 +34,8 @@ class SentimentAnalysisResponse(BaseModel):
     social_mentions_change_7d: float   # % change vs previous 7d
     news_articles_7d: int              # news articles in 7d
     news_articles_change_7d: float     # % change vs previous 7d
+    news_bullish_7d: int = 0           # bullish articles in 7d
+    news_bearish_7d: int = 0           # bearish articles in 7d
+    news_neutral_7d: int = 0           # neutral articles in 7d
     # Social data availability
     social_data_available: bool         # True if ApeWisdom has data for this ticker

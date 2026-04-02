@@ -117,6 +117,13 @@ class CryptoDetailViewModel: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
 
+            // Prefetch: Fire sentiment API call immediately so it warms the cache
+            // while the main crypto detail loads. fetchCryptoAnalysis will hit the cache.
+            Task { [weak self] in
+                guard let self else { return }
+                _ = try? await self.stockRepository.getCryptoSentiment(symbol: self.cryptoSymbol)
+            }
+
             do {
                 print("🪙 [CryptoDetail] Fetching data for \(self.cryptoSymbol) range=\(self.selectedChartRange.rawValue)")
 

@@ -101,6 +101,15 @@ struct FibonacciLevelRow: View {
     let value: String
     let isKeyLevel: Bool
 
+    private var fibKeyLabel: String? {
+        switch percentage {
+        case "0.0%": return "(High)"
+        case "100.0%": return "(Low)"
+        case "38.2%", "50.0%", "61.8%": return "(Key)"
+        default: return nil
+        }
+    }
+
     var body: some View {
         HStack {
             HStack(spacing: AppSpacing.xs) {
@@ -108,8 +117,8 @@ struct FibonacciLevelRow: View {
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
 
-                if isKeyLevel {
-                    Text(percentage == "0.0%" ? "(High)" : "(Low)")
+                if isKeyLevel, let label = fibKeyLabel {
+                    Text(label)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }

@@ -872,6 +872,9 @@ struct SentimentAnalysisDTO: Codable {
     let socialMentionsChange: Double
     let newsArticles: Int
     let newsArticlesChange: Double
+    let newsBullish: Int
+    let newsBearish: Int
+    let newsNeutral: Int
     // 7d
     let moodScore7d: Int
     let last7dMood: String
@@ -879,6 +882,9 @@ struct SentimentAnalysisDTO: Codable {
     let socialMentionsChange7d: Double
     let newsArticles7d: Int
     let newsArticlesChange7d: Double
+    let newsBullish7d: Int
+    let newsBearish7d: Int
+    let newsNeutral7d: Int
     // Social data availability
     let socialDataAvailable: Bool
 
@@ -890,12 +896,18 @@ struct SentimentAnalysisDTO: Codable {
         case socialMentionsChange = "social_mentions_change"
         case newsArticles = "news_articles"
         case newsArticlesChange = "news_articles_change"
+        case newsBullish = "news_bullish"
+        case newsBearish = "news_bearish"
+        case newsNeutral = "news_neutral"
         case moodScore7d = "mood_score_7d"
         case last7dMood = "last_7d_mood"
         case socialMentions7d = "social_mentions_7d"
         case socialMentionsChange7d = "social_mentions_change_7d"
         case newsArticles7d = "news_articles_7d"
         case newsArticlesChange7d = "news_articles_change_7d"
+        case newsBullish7d = "news_bullish_7d"
+        case newsBearish7d = "news_bearish_7d"
+        case newsNeutral7d = "news_neutral_7d"
         case socialDataAvailable = "social_data_available"
     }
 
@@ -907,12 +919,18 @@ struct SentimentAnalysisDTO: Codable {
             socialMentionsChange: socialMentionsChange,
             newsArticles: newsArticles,
             newsArticlesChange: newsArticlesChange,
+            newsBullish: newsBullish,
+            newsBearish: newsBearish,
+            newsNeutral: newsNeutral,
             moodScore7d: moodScore7d,
             last7dMood: MarketMoodLevel.fromScore(moodScore7d),
             socialMentions7d: socialMentions7d,
             socialMentionsChange7d: socialMentionsChange7d,
             newsArticles7d: newsArticles7d,
             newsArticlesChange7d: newsArticlesChange7d,
+            newsBullish7d: newsBullish7d,
+            newsBearish7d: newsBearish7d,
+            newsNeutral7d: newsNeutral7d,
             socialDataAvailable: socialDataAvailable
         )
     }
@@ -1154,10 +1172,17 @@ struct SupportResistanceDTO: Codable {
 
 struct TechnicalAnalysisDetailDTO: Codable {
     let symbol: String
+    // Daily
     let movingAverages: [MovingAverageIndicatorDTO]
     let movingAveragesSummary: IndicatorSummaryDTO
     let oscillators: [OscillatorIndicatorDTO]
     let oscillatorsSummary: IndicatorSummaryDTO
+    // Weekly
+    let weeklyMovingAverages: [MovingAverageIndicatorDTO]?
+    let weeklyMovingAveragesSummary: IndicatorSummaryDTO?
+    let weeklyOscillators: [OscillatorIndicatorDTO]?
+    let weeklyOscillatorsSummary: IndicatorSummaryDTO?
+    // Extras
     let pivotPoints: PivotPointsDTO
     let volumeAnalysis: VolumeAnalysisDTO
     let fibonacciRetracement: FibonacciRetracementDTO
@@ -1169,6 +1194,10 @@ struct TechnicalAnalysisDetailDTO: Codable {
         case movingAveragesSummary = "moving_averages_summary"
         case oscillators
         case oscillatorsSummary = "oscillators_summary"
+        case weeklyMovingAverages = "weekly_moving_averages"
+        case weeklyMovingAveragesSummary = "weekly_moving_averages_summary"
+        case weeklyOscillators = "weekly_oscillators"
+        case weeklyOscillatorsSummary = "weekly_oscillators_summary"
         case pivotPoints = "pivot_points"
         case volumeAnalysis = "volume_analysis"
         case fibonacciRetracement = "fibonacci_retracement"
@@ -1182,6 +1211,10 @@ struct TechnicalAnalysisDetailDTO: Codable {
             movingAveragesSummary: movingAveragesSummary.toDisplayModel(),
             oscillators: oscillators.map { $0.toDisplayModel() },
             oscillatorsSummary: oscillatorsSummary.toDisplayModel(),
+            weeklyMovingAverages: weeklyMovingAverages?.map { $0.toDisplayModel() } ?? [],
+            weeklyMovingAveragesSummary: weeklyMovingAveragesSummary?.toDisplayModel(),
+            weeklyOscillators: weeklyOscillators?.map { $0.toDisplayModel() } ?? [],
+            weeklyOscillatorsSummary: weeklyOscillatorsSummary?.toDisplayModel(),
             pivotPoints: pivotPoints.toDisplayModel(),
             volumeAnalysis: volumeAnalysis.toDisplayModel(),
             fibonacciRetracement: fibonacciRetracement.toDisplayModel(),

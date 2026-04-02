@@ -1169,6 +1169,9 @@ struct SentimentAnalysisData {
     let socialMentionsChange: Double
     let newsArticles: Int
     let newsArticlesChange: Double
+    let newsBullish: Int
+    let newsBearish: Int
+    let newsNeutral: Int
     // 7d data
     let moodScore7d: Int // 0-100
     let last7dMood: MarketMoodLevel
@@ -1176,6 +1179,9 @@ struct SentimentAnalysisData {
     let socialMentionsChange7d: Double
     let newsArticles7d: Int
     let newsArticlesChange7d: Double
+    let newsBullish7d: Int
+    let newsBearish7d: Int
+    let newsNeutral7d: Int
     // Social data availability
     let socialDataAvailable: Bool
 
@@ -1205,15 +1211,31 @@ struct SentimentAnalysisData {
     }
 
     func formattedNewsArticles(for timeframe: SentimentTimeframe) -> String {
-        let count = timeframe == .last24h ? newsArticles : newsArticles7d
-        return "\(count)"
+        let bullish = timeframe == .last24h ? newsBullish : newsBullish7d
+        let bearish = timeframe == .last24h ? newsBearish : newsBearish7d
+        let neutral = timeframe == .last24h ? newsNeutral : newsNeutral7d
+        let total = bullish + neutral + bearish
+        if total == 0 { return "N/A" }
+
+        let bullishRatio = Double(bullish) / Double(total)
+        let bearishRatio = Double(bearish) / Double(total)
+
+        // Neither bullish nor bearish dominates → "Mixed"
+        if bullishRatio < 0.30 && bearishRatio < 0.30 {
+            return "Mixed"
+        }
+        if bullishRatio >= bearishRatio {
+            return "\(Int(round(bullishRatio * 100)))% Positive"
+        } else {
+            return "\(Int(round(bearishRatio * 100)))% Negative"
+        }
     }
 
     func formattedNewsChange(for timeframe: SentimentTimeframe) -> String {
-        let change = timeframe == .last24h ? newsArticlesChange : newsArticlesChange7d
-        let sign = change >= 0 ? "+" : ""
-        let period = timeframe == .last24h ? "today" : "this week"
-        return "\(sign)\(String(format: "%.0f", change))% \(period)"
+        let bullish = timeframe == .last24h ? newsBullish : newsBullish7d
+        let bearish = timeframe == .last24h ? newsBearish : newsBearish7d
+        let neutral = timeframe == .last24h ? newsNeutral : newsNeutral7d
+        return "▲\(bullish)   =\(neutral)   ▼\(bearish)"
     }
 
     func socialChangeColor(for timeframe: SentimentTimeframe) -> Color {
@@ -1222,8 +1244,7 @@ struct SentimentAnalysisData {
     }
 
     func newsChangeColor(for timeframe: SentimentTimeframe) -> Color {
-        let change = timeframe == .last24h ? newsArticlesChange : newsArticlesChange7d
-        return change >= 0 ? AppColors.bullish : AppColors.bearish
+        return AppColors.textMuted
     }
 }
 
@@ -1235,12 +1256,18 @@ extension SentimentAnalysisData {
         socialMentionsChange: 24,
         newsArticles: 47,
         newsArticlesChange: 18,
+        newsBullish: 32,
+        newsBearish: 8,
+        newsNeutral: 7,
         moodScore7d: 55,
         last7dMood: .neutral,
         socialMentions7d: 12400,
         socialMentionsChange7d: 15,
         newsArticles7d: 847,
         newsArticlesChange7d: 12,
+        newsBullish7d: 420,
+        newsBearish7d: 180,
+        newsNeutral7d: 247,
         socialDataAvailable: true
     )
 }
@@ -1654,16 +1681,45 @@ extension SupportResistanceData {
 }
 
 // MARK: - Complete Technical Analysis Detail Data
+enum TechnicalTimeframe: String, CaseIterable {
+    case daily = "Daily"
+    case weekly = "Weekly"
+}
+
 struct TechnicalAnalysisDetailData {
     let symbol: String
+    // Daily
     let movingAverages: [MovingAverageIndicator]
     let movingAveragesSummary: IndicatorSummary
     let oscillators: [OscillatorIndicator]
     let oscillatorsSummary: IndicatorSummary
+    // Weekly
+    let weeklyMovingAverages: [MovingAverageIndicator]
+    let weeklyMovingAveragesSummary: IndicatorSummary?
+    let weeklyOscillators: [OscillatorIndicator]
+    let weeklyOscillatorsSummary: IndicatorSummary?
+    // Extras
     let pivotPoints: PivotPointsData
     let volumeAnalysis: VolumeAnalysisData
     let fibonacciRetracement: FibonacciRetracementData
     let supportResistance: SupportResistanceData
+
+    // Timeframe-aware accessors
+    func currentMovingAverages(for timeframe: TechnicalTimeframe) -> [MovingAverageIndicator] {
+        timeframe == .daily ? movingAverages : weeklyMovingAverages
+    }
+
+    func currentMovingAveragesSummary(for timeframe: TechnicalTimeframe) -> IndicatorSummary {
+        timeframe == .daily ? movingAveragesSummary : (weeklyMovingAveragesSummary ?? movingAveragesSummary)
+    }
+
+    func currentOscillators(for timeframe: TechnicalTimeframe) -> [OscillatorIndicator] {
+        timeframe == .daily ? oscillators : weeklyOscillators
+    }
+
+    func currentOscillatorsSummary(for timeframe: TechnicalTimeframe) -> IndicatorSummary {
+        timeframe == .daily ? oscillatorsSummary : (weeklyOscillatorsSummary ?? oscillatorsSummary)
+    }
 }
 
 extension TechnicalAnalysisDetailData {
@@ -1673,6 +1729,10 @@ extension TechnicalAnalysisDetailData {
         movingAveragesSummary: MovingAverageIndicator.sampleSummary,
         oscillators: OscillatorIndicator.sampleData,
         oscillatorsSummary: OscillatorIndicator.sampleSummary,
+        weeklyMovingAverages: MovingAverageIndicator.sampleData,
+        weeklyMovingAveragesSummary: MovingAverageIndicator.sampleSummary,
+        weeklyOscillators: OscillatorIndicator.sampleData,
+        weeklyOscillatorsSummary: OscillatorIndicator.sampleSummary,
         pivotPoints: PivotPointsData.sampleData,
         volumeAnalysis: VolumeAnalysisData.sampleData,
         fibonacciRetracement: FibonacciRetracementData.sampleData,

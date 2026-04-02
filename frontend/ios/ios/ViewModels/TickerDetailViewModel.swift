@@ -164,6 +164,13 @@ class TickerDetailViewModel: ObservableObject {
             let ticker = self.tickerSymbol
             print("📊 TickerDetailVM: Loading data for \(ticker) from API...")
 
+            // Prefetch: Fire sentiment API call immediately so it warms the cache
+            // while Phase 1 loads. Phase 2's fetchAnalystAnalysis will hit the cache.
+            Task { [weak self] in
+                guard let self else { return }
+                _ = try? await self.stockRepository.getSentimentAnalysis(ticker: ticker)
+            }
+
             // Phase 1: Get price/chart data — show UI as soon as this arrives
             do {
                 let useExtendedHours = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday

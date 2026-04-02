@@ -157,15 +157,24 @@ class TechnicalAnalysisService:
             return cached
 
         df_daily = await self._fetch_daily_ohlcv(ticker)
+        df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
 
         _, ma_list, osc_list = self._compute_timeframe_signal(df_daily)
+        _, weekly_ma_list, weekly_osc_list = self._compute_timeframe_signal(df_weekly)
 
         response = TechnicalAnalysisDetailResponse(
             symbol=ticker,
+            # Daily
             moving_averages=ma_list,
             moving_averages_summary=_count_summary(ma_list),
             oscillators=osc_list,
             oscillators_summary=_count_summary(osc_list),
+            # Weekly
+            weekly_moving_averages=weekly_ma_list,
+            weekly_moving_averages_summary=_count_summary(weekly_ma_list),
+            weekly_oscillators=weekly_osc_list,
+            weekly_oscillators_summary=_count_summary(weekly_osc_list),
+            # Extras
             pivot_points=self._compute_pivot_points(df_daily),
             volume_analysis=self._compute_volume_analysis(df_daily),
             fibonacci_retracement=self._compute_fibonacci(df_daily),
@@ -590,7 +599,7 @@ class TechnicalAnalysisService:
             FibonacciLevel(
                 percentage=label,
                 value=round(high - diff * ratio, 2),
-                is_key=(ratio == 0.0 or ratio == 1.0),
+                is_key=(ratio in (0.0, 0.382, 0.5, 0.618, 1.0)),
             )
             for ratio, label in zip(fib_ratios, fib_labels)
         ]

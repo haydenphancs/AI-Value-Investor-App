@@ -155,16 +155,17 @@ class SentimentService:
 
         social_svc = get_social_mentions_service()
 
-        # Wrap social calls with a 10s timeout to avoid blocking on
-        # ApeWisdom cold cache (full fetch can take 30+ seconds).
+        # Wrap social calls with a timeout. ApeWisdom cold cache can
+        # take 60+ seconds (paginated fetch with delays), so allow enough
+        # time for the initial cache build. Subsequent calls are instant.
         async def _social_24h():
             return await asyncio.wait_for(
-                social_svc.get_mentions_24h(social_key), timeout=10
+                social_svc.get_mentions_24h(social_key), timeout=45
             )
 
         async def _social_7d():
             return await asyncio.wait_for(
-                social_svc.get_mentions_7d(social_key), timeout=10
+                social_svc.get_mentions_7d(social_key), timeout=45
             )
 
         # Parallel fetch: news + price + historical + social (24h + 7d)
@@ -201,7 +202,8 @@ class SentimentService:
         price_score_7d = self._compute_price_sentiment_7d(hist_prices)
 
         # ── 24-hour window ────────────────────────────────────────
-        news_score_24h, news_cur_24h, news_prev_24h = (
+        (news_score_24h, news_cur_24h, news_prev_24h,
+         news_bull_24h, news_bear_24h, news_neut_24h) = (
             self._compute_news_score(articles, hours=24)
         )
         social_score_24h = self._compute_social_buzz_score(
@@ -216,7 +218,8 @@ class SentimentService:
         )
 
         # ── 7-day window ──────────────────────────────────────────
-        news_score_7d, news_cur_7d, news_prev_7d = (
+        (news_score_7d, news_cur_7d, news_prev_7d,
+         news_bull_7d, news_bear_7d, news_neut_7d) = (
             self._compute_news_score(articles, hours=168)
         )
         social_score_7d = self._compute_social_buzz_score(
@@ -254,6 +257,9 @@ class SentimentService:
             news_articles_change=self._pct_change(
                 float(news_cur_24h), float(news_prev_24h)
             ),
+            news_bullish=news_bull_24h,
+            news_bearish=news_bear_24h,
+            news_neutral=news_neut_24h,
             # 7d
             mood_score_7d=combined_7d,
             last_7d_mood=self._score_to_mood(combined_7d),
@@ -265,6 +271,9 @@ class SentimentService:
             news_articles_change_7d=self._pct_change(
                 float(news_cur_7d), float(news_prev_7d)
             ),
+            news_bullish_7d=news_bull_7d,
+            news_bearish_7d=news_bear_7d,
+            news_neutral_7d=news_neut_7d,
             social_data_available=has_social_24h or has_social_7d,
         )
 
@@ -561,11 +570,13 @@ class SentimentService:
 
     def _compute_news_score(
         self, articles: List[Dict], hours: int
-    ) -> Tuple[int, int, int]:
+    ) -> Tuple[int, int, int, int, int, int]:
         """
-        Returns (score_0_100, current_article_count, previous_article_count).
+        Returns (score_0_100, current_article_count, previous_article_count,
+                 bullish_count, bearish_count, neutral_count).
 
         Scores each article using keyword classification on title + text.
+        Classifies articles: score > 60 = bullish, < 40 = bearish, else neutral.
         """
         now = datetime.now(timezone.utc)
         current_cutoff = (now - timedelta(hours=hours)).isoformat()
@@ -587,16 +598,26 @@ class SentimentService:
         )
 
         if not current:
-            return 50, 0, len(previous)
+            return 50, 0, len(previous), 0, 0, 0
 
-        # Score every article
+        # Score every article and classify sentiment
         scores: List[float] = []
+        bullish = 0
+        bearish = 0
+        neutral = 0
         for a in current:
-            scores.append(self._resolve_article_sentiment(a))
+            score = self._resolve_article_sentiment(a)
+            scores.append(score)
+            if score > 60:
+                bullish += 1
+            elif score < 40:
+                bearish += 1
+            else:
+                neutral += 1
 
         avg_score = sum(scores) / len(scores)
         final = max(0, min(100, round(avg_score)))
-        return final, len(current), len(previous)
+        return final, len(current), len(previous), bullish, bearish, neutral
 
     @staticmethod
     def _resolve_article_sentiment(article: Dict) -> float:

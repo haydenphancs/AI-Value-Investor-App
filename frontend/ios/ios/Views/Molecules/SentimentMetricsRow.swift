@@ -29,17 +29,21 @@ struct SentimentMetricsRow: View {
                     value: "N/A",
                     change: "Not tracked on Reddit",
                     changeColor: AppColors.textMuted,
-                    isDimmed: true
+                    isDimmed: true,
+                    valueFont: AppTypography.bodyEmphasis,
+                    changeFont: AppTypography.captionSmall
                 )
             }
 
-            // News Articles
+            // News Sentiment
             SentimentMetricCard(
                 iconName: "newspaper.fill",
-                title: "News Articles",
+                title: "News Sentiment",
                 value: sentimentData.formattedNewsArticles(for: selectedTimeframe),
                 change: sentimentData.formattedNewsChange(for: selectedTimeframe),
-                changeColor: sentimentData.newsChangeColor(for: selectedTimeframe)
+                changeColor: sentimentData.newsChangeColor(for: selectedTimeframe),
+                valueFont: AppTypography.bodyEmphasis,
+                changeFont: AppTypography.captionSmall
             )
         }
     }
@@ -53,6 +57,8 @@ struct SentimentMetricCard: View {
     let change: String
     let changeColor: Color
     var isDimmed: Bool = false
+    var valueFont: Font = AppTypography.titleCompact
+    var changeFont: Font = AppTypography.caption
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
@@ -67,13 +73,15 @@ struct SentimentMetricCard: View {
             }
 
             Text(value)
-                .font(AppTypography.titleCompact)
+                .font(valueFont)
                 .fontWeight(.bold)
                 .foregroundColor(isDimmed ? AppColors.textMuted : AppColors.textPrimary)
 
             Text(change)
-                .font(AppTypography.caption)
+                .font(changeFont)
                 .foregroundColor(changeColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity)
         .padding(AppSpacing.md)

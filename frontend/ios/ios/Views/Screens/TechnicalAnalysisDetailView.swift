@@ -10,6 +10,7 @@ import SwiftUI
 struct TechnicalAnalysisDetailView: View {
     let detailData: TechnicalAnalysisDetailData
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedTimeframe: TechnicalTimeframe = .daily
 
     var body: some View {
         ZStack {
@@ -20,23 +21,30 @@ struct TechnicalAnalysisDetailView: View {
                 // Navigation Header
                 TechnicalDetailHeader(
                     symbol: detailData.symbol,
-                    onBackTapped: { dismiss() },
-                    onInfoTapped: { /* Info action */ }
+                    onBackTapped: { dismiss() }
                 )
 
                 // Scrollable content
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: AppSpacing.lg) {
+                        // Daily / Weekly picker
+                        Picker("Timeframe", selection: $selectedTimeframe) {
+                            ForEach(TechnicalTimeframe.allCases, id: \.self) { tf in
+                                Text(tf.rawValue).tag(tf)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
                         // Moving Averages
                         MovingAveragesSection(
-                            indicators: detailData.movingAverages,
-                            summary: detailData.movingAveragesSummary
+                            indicators: detailData.currentMovingAverages(for: selectedTimeframe),
+                            summary: detailData.currentMovingAveragesSummary(for: selectedTimeframe)
                         )
 
                         // Oscillators
                         OscillatorsSection(
-                            indicators: detailData.oscillators,
-                            summary: detailData.oscillatorsSummary
+                            indicators: detailData.currentOscillators(for: selectedTimeframe),
+                            summary: detailData.currentOscillatorsSummary(for: selectedTimeframe)
                         )
 
                         // Pivot Points
@@ -72,12 +80,11 @@ struct TechnicalAnalysisDetailView: View {
 struct TechnicalDetailHeader: View {
     let symbol: String
     let onBackTapped: () -> Void
-    let onInfoTapped: () -> Void
 
     var body: some View {
         HStack {
             Button(action: onBackTapped) {
-                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.down")
                     .font(AppTypography.iconMedium).fontWeight(.medium)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -91,12 +98,9 @@ struct TechnicalDetailHeader: View {
 
             Spacer()
 
-            Button(action: onInfoTapped) {
-                Image(systemName: "info.circle")
-                    .font(AppTypography.iconMedium)
-                    .foregroundColor(AppColors.textMuted)
-            }
-            .frame(width: 44, height: 44)
+            // Spacer to balance the back button
+            Spacer()
+                .frame(width: 44, height: 44)
         }
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, AppSpacing.sm)

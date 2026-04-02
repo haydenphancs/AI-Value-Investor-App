@@ -38,6 +38,9 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 
+    # Pre-warm ApeWisdom social mentions cache at startup
+    asyncio.create_task(_warm_social_cache())
+
     # Start background news pre-warmer for popular watchlist tickers
     asyncio.create_task(_run_news_pre_warmer())
 
@@ -53,6 +56,17 @@ async def lifespan(app: FastAPI):
     await close_fmp_client()
     await close_coingecko_client()
     logger.info("Shutting down")
+
+
+async def _warm_social_cache():
+    """Pre-warm ApeWisdom cache at startup so first sentiment requests have social data."""
+    await asyncio.sleep(5)  # let app start
+    try:
+        from app.integrations.apewisdom import refresh_cache
+        cache = await refresh_cache()
+        logger.info(f"ApeWisdom cache pre-warmed: {len(cache)} tickers")
+    except Exception as e:
+        logger.warning(f"ApeWisdom pre-warm failed: {e}")
 
 
 async def _run_news_pre_warmer():

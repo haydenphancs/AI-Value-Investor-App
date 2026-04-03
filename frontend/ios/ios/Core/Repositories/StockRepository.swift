@@ -163,6 +163,63 @@ final class StockRepository: StockRepositoryProtocol {
         return response
     }
 
+    // MARK: - ETF Dividend History
+
+    func getETFDividends(symbol: String) async throws -> ETFDividendHistoryResponseDTO {
+        let cacheKey = "etf_dividends_\(symbol)"
+
+        if let cached: ETFDividendHistoryResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFDividends(symbol: symbol),
+            responseType: ETFDividendHistoryResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got \(response.totalDividends) dividends for \(symbol)")
+        return response
+    }
+
+    // MARK: - ETF Holdings & Risk
+
+    func getETFHoldingsRisk(symbol: String) async throws -> ETFHoldingsRiskDTO {
+        let cacheKey = "etf_holdings_risk_\(symbol)"
+
+        if let cached: ETFHoldingsRiskDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFHoldingsRisk(symbol: symbol),
+            responseType: ETFHoldingsRiskDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got holdings risk for \(symbol)")
+        return response
+    }
+
+    // MARK: - ETF Profile
+
+    func getETFProfile(symbol: String) async throws -> ETFProfileDTO {
+        let cacheKey = "etf_profile_\(symbol)"
+
+        if let cached: ETFProfileDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFProfile(symbol: symbol),
+            responseType: ETFProfileDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got profile for \(symbol)")
+        return response
+    }
+
     // MARK: - Quote
 
     func getStockQuote(ticker: String) async throws -> StockQuote {

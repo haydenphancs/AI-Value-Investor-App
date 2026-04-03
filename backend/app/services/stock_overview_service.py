@@ -620,7 +620,12 @@ class StockOverviewService:
         # Price from volatile quote, fallback to profile
         price = _safe_float(quote, "price") or _safe_float(profile, "price")
         change = _safe_float(quote, "change") or _safe_float(profile, "changes")
-        change_pct = _safe_float(quote, "changesPercentage") or _safe_float(profile, "changesPercentage")
+        change_pct = (
+            _safe_float(quote, "changePercentage")
+            or _safe_float(quote, "changesPercentage")
+            or _safe_float(profile, "changePercentage")
+            or _safe_float(profile, "changesPercentage")
+        )
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
         # Chart data: use volatile if available, else slice from historical
@@ -1433,9 +1438,19 @@ class StockOverviewService:
             if sp_start and sp_end and sp_start > 0:
                 sp_annual = ((sp_end / sp_start) ** (1 / years) - 1) * 100
 
+        # Extract start dates for context
+        stock_start_date = stock_hist[-(days + 1)].get("date", "")
+        sp_start_date = ""
+        if spy_hist and len(spy_hist) > days:
+            sp_start_date = spy_hist[-(days + 1)].get("date", "")
+
         return BenchmarkSummaryResponse(
             avg_annual_return=round(stock_annual, 1),
             sp_benchmark=round(sp_annual, 1),
+            benchmark_name="S&P 500",
+            since_date=stock_start_date,
+            benchmark_since_date=sp_start_date,
+            badge_threshold=0.0,
         )
 
 

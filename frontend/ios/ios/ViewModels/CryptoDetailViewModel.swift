@@ -356,7 +356,7 @@ class CryptoDetailViewModel: ObservableObject {
             )
             let pricePoints = chartResponse.prices
             if !pricePoints.isEmpty, var data = self.cryptoData {
-                let previousCount = data.chartPricePoints.count
+                _ = data.chartPricePoints.count
                 data.chartPricePoints = pricePoints
                 // Update current price from latest candle
                 if let lastClose = pricePoints.last?.close {

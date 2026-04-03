@@ -23,8 +23,13 @@ class ETFDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var pendingAIQuery: String?
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
+
+    // MARK: - Live Price
+    let livePriceManager = LivePriceWebSocketManager()
+    private var chartRefreshTask: Task<Void, Never>?
 
     // MARK: - Private Properties
 
@@ -37,12 +42,21 @@ class ETFDetailViewModel: ObservableObject {
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
 
+        // Observe chart range changes: auto-set default interval and manage timer
         $selectedChartRange
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] newRange in
                 guard let self = self else { return }
                 self.chartSettings.selectedInterval = newRange.defaultInterval
+
+                // Restart or stop chart refresh timer based on new range
+                if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                    self.startChartRefreshTimer()
+                } else {
+                    self.stopChartRefreshTimer()
+                }
+
                 Task { await self.fetchChartForRange(newRange) }
             }
             .store(in: &cancellables)
@@ -54,6 +68,35 @@ class ETFDetailViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 Task { await self.fetchChartForRange(self.selectedChartRange) }
+            }
+            .store(in: &cancellables)
+
+        // Observe live price updates from WebSocket and apply to etfData + chart
+        livePriceManager.$livePrice
+            .compactMap { $0 }
+            .sink { [weak self] newPrice in
+                guard let self = self, var data = self.etfData else { return }
+                data.currentPrice = newPrice
+                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
+                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+
+                // Update last chart candle for intraday ranges
+                if self.chartSettings.selectedInterval.isIntraday,
+                   !data.chartPricePoints.isEmpty {
+                    let lastIndex = data.chartPricePoints.count - 1
+                    var lastPoint = data.chartPricePoints[lastIndex]
+                    lastPoint = StockPricePoint(
+                        date: lastPoint.date,
+                        close: newPrice,
+                        open: lastPoint.open,
+                        high: max(lastPoint.high ?? newPrice, newPrice),
+                        low: min(lastPoint.low ?? newPrice, newPrice),
+                        volume: lastPoint.volume
+                    )
+                    data.chartPricePoints[lastIndex] = lastPoint
+                }
+
+                self.etfData = data
             }
             .store(in: &cancellables)
     }
@@ -95,6 +138,13 @@ class ETFDetailViewModel: ObservableObject {
             self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
             self.isLoading = false
+
+            // Start live price streaming + chart refresh if market is active
+            if let status = self.etfData?.marketStatus,
+               MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                self.connectLivePrice()
+                self.startChartRefreshTimer()
+            }
 
         } catch {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
@@ -147,6 +197,42 @@ class ETFDetailViewModel: ObservableObject {
         self.newsArticles = TickerNewsArticle.sampleDataForTicker(etfSymbol)
     }
 
+    // MARK: - Live Price
+
+    func connectLivePrice() {
+        let token = KeychainService.shared.get("access_token") ?? ""
+        livePriceManager.connect(ticker: etfSymbol, authToken: token)
+    }
+
+    func disconnectLivePrice() {
+        livePriceManager.disconnect()
+        stopChartRefreshTimer()
+    }
+
+    // MARK: - Chart Refresh Timer
+
+    private func startChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                // Only refresh if market is active and we're on an intraday interval
+                guard self.chartSettings.selectedInterval.isIntraday,
+                      MarketHoursUtil.isMarketActive() else { continue }
+
+                await self.fetchChartForRange(self.selectedChartRange)
+            }
+        }
+    }
+
+    private func stopChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = nil
+    }
+
     // MARK: - User Actions
 
     func toggleFavorite() {
@@ -184,12 +270,15 @@ class ETFDetailViewModel: ObservableObject {
 
     func handleSuggestionTap(_ suggestion: ETFAISuggestion) {
         aiInputText = suggestion.text
+        handleAISend()
     }
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("[ETFDetailVM] AI Query: \(aiInputText)")
+        let query = aiInputText
         aiInputText = ""
+        print("[ETFDetailVM] AI Query for \(etfSymbol): \(query)")
+        pendingAIQuery = query
     }
 
     // MARK: - Computed Properties
@@ -220,5 +309,83 @@ class ETFDetailViewModel: ObservableObject {
 
     var aiSuggestions: [ETFAISuggestion] {
         ETFAISuggestion.defaultSuggestions
+    }
+
+    // MARK: - AI Context Builders
+
+    /// Core ETF facts — always included regardless of tab
+    private var baseETFContext: String? {
+        guard let data = etfData else { return nil }
+        var lines: [String] = []
+        lines.append("ETF: \(data.symbol) (\(data.name))")
+        lines.append("Price: \(data.formattedPrice) \(data.formattedChange) \(data.formattedChangePercent)")
+
+        if !data.keyStatisticsGroups.isEmpty {
+            lines.append("Key Statistics:")
+            for group in data.keyStatisticsGroups {
+                let groupStr = group.statistics.map { "\($0.label): \($0.value)" }.joined(separator: " | ")
+                lines.append("  \(groupStr)")
+            }
+        }
+
+        if !data.performancePeriods.isEmpty {
+            let perfStr = data.performancePeriods.map { p in
+                let sign = p.changePercent >= 0 ? "+" : ""
+                return "\(p.label): \(sign)\(String(format: "%.1f", p.changePercent))%"
+            }.joined(separator: ", ")
+            lines.append("Performance: \(perfStr)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Overview tab context — snapshot data, strategy, yield, holdings, benchmark
+    private var overviewContext: String? {
+        guard let data = etfData else { return nil }
+        var parts: [String] = []
+
+        parts.append("Identity Rating: \(data.identityRating.score)/\(data.identityRating.maxScore), \(data.identityRating.volatilityLabel)")
+        parts.append("Strategy: \(data.strategy.hook) Tags: \(data.strategy.tags.joined(separator: ", "))")
+        parts.append("Expense Ratio: \(data.netYield.formattedExpenseRatio), Dividend Yield: \(data.netYield.formattedDividendYield), \(data.netYield.payFrequency)")
+        parts.append("Verdict: \(data.netYield.verdict)")
+
+        let topHoldings = data.holdingsRisk.topHoldings.prefix(5).map { "\($0.symbol) \($0.formattedWeight)" }.joined(separator: ", ")
+        parts.append("Top Holdings: \(topHoldings)")
+        parts.append("Concentration: Top \(data.holdingsRisk.concentration.topN) = \(data.holdingsRisk.concentration.formattedWeight)")
+
+        if let bench = data.benchmarkSummary {
+            let sign = bench.avgAnnualReturn >= 0 ? "+" : ""
+            parts.append("Avg Annual Return: \(sign)\(String(format: "%.1f", bench.avgAnnualReturn))% vs \(bench.benchmarkName): \(String(format: "%.1f", bench.spBenchmark))%")
+        }
+
+        return parts.isEmpty ? nil : parts.joined(separator: ". ")
+    }
+
+    /// News tab context — recent headlines
+    private var newsContext: String? {
+        let recent = newsArticles.prefix(3)
+        guard !recent.isEmpty else { return nil }
+        let headlines = recent.map { "- \($0.headline) (\($0.source.name))" }.joined(separator: "\n")
+        return "Recent News:\n\(headlines)"
+    }
+
+    /// Build context string for the current tab to inject into AI chat
+    var contextForCurrentTab: String? {
+        var sections: [String] = []
+
+        if let base = baseETFContext {
+            sections.append(base)
+        }
+
+        switch selectedTab {
+        case .overview:
+            if let ctx = overviewContext { sections.append(ctx) }
+        case .news:
+            if let ctx = newsContext { sections.append(ctx) }
+        }
+
+        sections.append("User is viewing the \(selectedTab.rawValue) tab of ETF \(etfSymbol).")
+
+        return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
     }
 }

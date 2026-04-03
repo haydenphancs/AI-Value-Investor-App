@@ -38,7 +38,7 @@ struct ETFDetailSnapshotsSection: View {
                 ETFIdentityRatingCard(etfData: etfData)
                 ETFStrategyCard(strategy: etfData.strategy)
                 ETFNetYieldCard(netYield: etfData.netYield, symbol: etfData.symbol)
-                ETFHoldingsRiskCard(holdingsRisk: etfData.holdingsRisk)
+                ETFHoldingsRiskCard(holdingsRisk: etfData.holdingsRisk, symbol: etfData.symbol)
             }
 
             // AI Deep Research button
@@ -117,7 +117,7 @@ struct ETFIdentityRatingCard: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
-                    // Top row: Symbol + Name | Price + Change
+                    // Top row: Symbol + Name | Price
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(etfData.symbol)
@@ -131,39 +131,15 @@ struct ETFIdentityRatingCard: View {
 
                         Spacer()
 
-                        VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                            Text(etfData.formattedPrice)
-                                .font(AppTypography.title)
-                                .foregroundColor(AppColors.textPrimary)
-
-                            // Change pill
-                            Text(etfData.formattedChangePill)
-                                .font(AppTypography.caption)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, AppSpacing.sm)
-                                .padding(.vertical, AppSpacing.xxs)
-                                .background(
-                                    Capsule()
-                                        .fill(etfData.isPositive ? AppColors.bullish : AppColors.bearish)
-                                )
-                        }
+                        Text(etfData.formattedPrice)
+                            .font(AppTypography.title)
+                            .foregroundColor(AppColors.textPrimary)
                     }
 
-                    // Badges row
+                    // Tags row (same style as Strategy tags)
                     HStack(spacing: AppSpacing.sm) {
-                        ETFSnapshotBadge(
-                            text: "Score: \(etfData.identityRating.score)/\(etfData.identityRating.maxScore)",
-                            color: AppColors.primaryBlue
-                        )
-                        ETFSnapshotBadge(
-                            text: "ESG: \(etfData.identityRating.esgRating)",
-                            color: AppColors.bullish
-                        )
-                        ETFSnapshotBadge(
-                            text: etfData.identityRating.volatilityLabel,
-                            color: AppColors.accentCyan
-                        )
+                        ETFSnapshotTag(text: "Score: \(etfData.identityRating.score)/\(etfData.identityRating.maxScore)")
+                        ETFSnapshotTag(text: etfData.identityRating.volatilityLabel)
                     }
                 }
                 .padding(.bottom, AppSpacing.md)
@@ -308,7 +284,6 @@ struct ETFNetYieldCard: View {
                                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
                         )
                     }
-                    .fixedSize(horizontal: false, vertical: true)
 
                     // The verdict
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
@@ -430,7 +405,7 @@ struct ETFDividendHistoryRow: View {
         .sheet(isPresented: $showDividendHistory) {
             ETFDividendHistoryView(
                 symbol: symbol,
-                dividendHistory: dividendHistory
+                preloadedDividends: dividendHistory
             )
         }
     }
@@ -440,7 +415,17 @@ struct ETFDividendHistoryRow: View {
 
 struct ETFHoldingsRiskCard: View {
     let holdingsRisk: ETFHoldingsRisk
+    let symbol: String
     @State private var isExpanded: Bool = false
+    @State private var liveData: ETFHoldingsRisk?
+    @State private var isLoading: Bool = false
+
+    private let repository: StockRepository = .shared
+
+    /// Display whichever data we have — live from dedicated endpoint, or preloaded from parent
+    private var displayData: ETFHoldingsRisk {
+        liveData ?? holdingsRisk
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -451,30 +436,60 @@ struct ETFHoldingsRiskCard: View {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         isExpanded.toggle()
                     }
+                    if isExpanded && liveData == nil {
+                        fetchLiveData()
+                    }
                 }
             )
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     // Asset Allocation
-                    ETFAssetAllocationBar(allocation: holdingsRisk.assetAllocation)
+                    ETFAssetAllocationBar(allocation: displayData.assetAllocation)
 
                     // Top Sectors
-                    ETFSectorsView(sectors: holdingsRisk.topSectors)
+                    ETFSectorsView(sectors: displayData.topSectors)
 
                     // Top Holdings (scrollable row)
-                    ETFTopHoldingsRow(holdings: holdingsRisk.topHoldings)
+                    ETFTopHoldingsRow(holdings: displayData.topHoldings)
 
                     // Concentration Meter
-                    ETFConcentrationMeter(concentration: holdingsRisk.concentration)
+                    ETFConcentrationMeter(concentration: displayData.concentration)
                 }
                 .padding(.bottom, AppSpacing.md)
+                .overlay(alignment: .topTrailing) {
+                    if isLoading {
+                        ProgressView()
+                            .tint(AppColors.textMuted)
+                            .scaleEffect(0.7)
+                            .padding(AppSpacing.sm)
+                    }
+                }
             }
 
             // Divider
             Rectangle()
                 .fill(AppColors.cardBackgroundLight)
                 .frame(height: 1)
+        }
+    }
+
+    private func fetchLiveData() {
+        isLoading = true
+        Task {
+            do {
+                let dto = try await repository.getETFHoldingsRisk(symbol: symbol)
+                await MainActor.run {
+                    self.liveData = dto.toDisplayModel()
+                    self.isLoading = false
+                }
+                print("[HoldingsRisk] Live data loaded for \(symbol)")
+            } catch {
+                print("[HoldingsRisk] Failed for \(symbol): \(error)")
+                await MainActor.run {
+                    self.isLoading = false
+                }
+            }
         }
     }
 }
@@ -486,11 +501,11 @@ struct ETFAssetAllocationBar: View {
 
     private var segments: [(label: String, value: Double, color: Color)] {
         [
-            ("Stocks", allocation.equities, AppColors.bullish),
+            ("Equities", allocation.equities, AppColors.bullish),
             ("Bonds", allocation.bonds, AppColors.primaryBlue),
             ("Crypto", allocation.crypto, Color.purple),
             ("Cash", allocation.cash, AppColors.textMuted)
-        ].filter { $0.value > 0 }
+        ].filter { $0.value >= 0.1 }  // Hide segments below 0.1%
     }
 
     var body: some View {
@@ -810,7 +825,7 @@ struct ETFSnapshotsInfoSheet: View {
                             SnapshotBulletPoint(
                                 icon: "shield.checkered",
                                 title: "Identity & Rating",
-                                description: "Who is this fund? The issuer, quality score, ESG rating, and volatility classification at a glance."
+                                description: "Who is this fund? The issuer, quality score, and volatility classification at a glance."
                             )
 
                             SnapshotBulletPoint(

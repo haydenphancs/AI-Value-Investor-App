@@ -45,7 +45,6 @@ enum ETFSnapshotCategory: String, CaseIterable {
 struct ETFIdentityRating {
     let score: Int
     let maxScore: Int
-    let esgRating: String
     let volatilityLabel: String
 }
 
@@ -171,7 +170,6 @@ struct ETFProfile {
     let symbol: String
     let etfCompany: String
     let assetClass: String
-    let expenseRatio: String
     let inceptionDate: String
     let domicile: String
     let indexTracked: String
@@ -183,11 +181,11 @@ struct ETFDetailData: Identifiable {
     let id = UUID()
     let symbol: String
     let name: String
-    let currentPrice: Double
-    let priceChange: Double
-    let priceChangePercent: Double
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartPricePoints: [StockPricePoint]
+    var chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
@@ -263,7 +261,6 @@ extension ETFDetailData {
         identityRating: ETFIdentityRating(
             score: 5,
             maxScore: 5,
-            esgRating: "A",
             volatilityLabel: "Low Volatility"
         ),
         strategy: ETFStrategy(
@@ -339,7 +336,6 @@ extension ETFDetailData {
             symbol: "SPY",
             etfCompany: "State Street Global Advisors",
             assetClass: "Equity",
-            expenseRatio: "0.0945%",
             inceptionDate: "January 22, 1993",
             domicile: "United States",
             indexTracked: "S&P 500",
@@ -446,7 +442,6 @@ enum ETFSnapshotPrompts {
       "identityRating": {
         "score": <int 1-5>,           // Overall fund quality: AUM, tracking error, liquidity, longevity
         "maxScore": 5,
-        "esgRating": "<A-F>",         // ESG letter grade based on underlying holdings
         "volatilityLabel": "<string>" // "Low Volatility" | "Moderate Volatility" | "High Volatility"
       },
 

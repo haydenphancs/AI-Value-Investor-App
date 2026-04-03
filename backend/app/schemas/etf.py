@@ -40,6 +40,10 @@ class MarketStatusResponse(BaseModel):
 class BenchmarkSummaryResponse(BaseModel):
     avg_annual_return: float
     sp_benchmark: float
+    benchmark_name: Optional[str] = None
+    since_date: Optional[str] = None
+    benchmark_since_date: Optional[str] = None
+    badge_threshold: Optional[float] = None
 
 
 # ── ETF-specific snapshot models ─────────────────────────────────
@@ -48,7 +52,6 @@ class BenchmarkSummaryResponse(BaseModel):
 class ETFIdentityRatingResponse(BaseModel):
     score: int  # 1-5
     max_score: int  # always 5
-    esg_rating: str  # A-F
     volatility_label: str  # "Low Volatility", "Moderate Volatility", "High Volatility"
 
 
@@ -61,6 +64,13 @@ class ETFDividendPaymentResponse(BaseModel):
     dividend_per_share: str  # e.g. "$1.7742"
     ex_dividend_date: str  # e.g. "Dec 20, 2025"
     pay_date: str  # e.g. "Jan 31, 2026"
+
+
+class ETFDividendHistoryResponse(BaseModel):
+    symbol: str
+    pay_frequency: str  # Monthly | Quarterly | Semi-Annually | Annually
+    total_dividends: int
+    dividends: List[ETFDividendPaymentResponse]
 
 
 class ETFNetYieldResponse(BaseModel):
@@ -111,7 +121,6 @@ class ETFProfileResponse(BaseModel):
     symbol: str
     etf_company: str
     asset_class: str
-    expense_ratio: str  # formatted, e.g. "0.0945%"
     inception_date: str
     domicile: str
     index_tracked: str

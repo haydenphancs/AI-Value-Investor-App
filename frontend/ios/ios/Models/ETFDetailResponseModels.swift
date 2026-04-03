@@ -77,13 +77,11 @@ struct ETFDetailResponseDTO: Decodable {
 struct ETFIdentityRatingDTO: Decodable {
     let score: Int
     let maxScore: Int
-    let esgRating: String
     let volatilityLabel: String
 
     enum CodingKeys: String, CodingKey {
         case score
         case maxScore = "max_score"
-        case esgRating = "esg_rating"
         case volatilityLabel = "volatility_label"
     }
 }
@@ -199,7 +197,6 @@ struct ETFProfileDTO: Decodable {
     let symbol: String
     let etfCompany: String
     let assetClass: String
-    let expenseRatio: String
     let inceptionDate: String
     let domicile: String
     let indexTracked: String
@@ -209,7 +206,6 @@ struct ETFProfileDTO: Decodable {
         case description, symbol, website
         case etfCompany = "etf_company"
         case assetClass = "asset_class"
-        case expenseRatio = "expense_ratio"
         case inceptionDate = "inception_date"
         case domicile
         case indexTracked = "index_tracked"
@@ -256,6 +252,86 @@ struct ETFNewsArticleDTO: Decodable {
     }
 }
 
+// MARK: - ETF Dividend History Response (dedicated endpoint)
+
+struct ETFDividendHistoryResponseDTO: Decodable {
+    let symbol: String
+    let payFrequency: String
+    let totalDividends: Int
+    let dividends: [ETFDividendPaymentDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case payFrequency = "pay_frequency"
+        case totalDividends = "total_dividends"
+        case dividends
+    }
+
+    func toDisplayModels() -> [ETFDividendPayment] {
+        dividends.map { d in
+            ETFDividendPayment(
+                dividendPerShare: d.dividendPerShare,
+                exDividendDate: d.exDividendDate,
+                payDate: d.payDate
+            )
+        }
+    }
+}
+
+// MARK: - ETF Holdings & Risk Response (dedicated endpoint)
+
+/// Reuses the same nested DTOs as the embedded response.
+/// The dedicated endpoint returns this at the top level.
+extension ETFHoldingsRiskDTO {
+    func toDisplayModel() -> ETFHoldingsRisk {
+        let alloc = ETFAssetAllocation(
+            equities: assetAllocation.equities,
+            bonds: assetAllocation.bonds,
+            crypto: assetAllocation.crypto,
+            cash: assetAllocation.cash,
+            totalAssets: assetAllocation.totalAssets
+        )
+
+        let sectors = topSectors.map { s in
+            ETFSectorWeight(name: s.name, weight: s.weight)
+        }
+
+        let holdings = topHoldings.map { h in
+            ETFTopHolding(symbol: h.symbol, name: h.name, weight: h.weight)
+        }
+
+        let conc = ETFConcentration(
+            topN: concentration.topN,
+            weight: concentration.weight,
+            insight: concentration.insight
+        )
+
+        return ETFHoldingsRisk(
+            assetAllocation: alloc,
+            topSectors: sectors,
+            topHoldings: holdings,
+            concentration: conc
+        )
+    }
+}
+
+// MARK: - ETF Profile (dedicated endpoint)
+
+extension ETFProfileDTO {
+    func toDisplayModel() -> ETFProfile {
+        ETFProfile(
+            description: description,
+            symbol: symbol,
+            etfCompany: etfCompany,
+            assetClass: assetClass,
+            inceptionDate: inceptionDate,
+            domicile: domicile,
+            indexTracked: indexTracked,
+            website: website
+        )
+    }
+}
+
 // MARK: - ──────────────────────────────────────────────
 // MARK:   DTO → Display Model Mapping
 // MARK: - ──────────────────────────────────────────────
@@ -294,12 +370,13 @@ extension ETFDetailResponseDTO {
             })
         }
 
-        // Map performance periods
+        // Map performance periods (with S&P 500 comparison)
         let perfPeriods = performancePeriods.map { p in
             PerformancePeriod(
                 label: p.label,
                 changePercent: p.changePercent,
-                vsMarketPercent: p.vsMarketPercent
+                vsMarketPercent: p.vsMarketPercent,
+                spReturnPercent: p.spReturnPercent
             )
         }
 
@@ -307,7 +384,6 @@ extension ETFDetailResponseDTO {
         let identity = ETFIdentityRating(
             score: identityRating.score,
             maxScore: identityRating.maxScore,
-            esgRating: identityRating.esgRating,
             volatilityLabel: identityRating.volatilityLabel
         )
 
@@ -383,7 +459,6 @@ extension ETFDetailResponseDTO {
             symbol: etfProfile.symbol,
             etfCompany: etfProfile.etfCompany,
             assetClass: etfProfile.assetClass,
-            expenseRatio: etfProfile.expenseRatio,
             inceptionDate: etfProfile.inceptionDate,
             domicile: etfProfile.domicile,
             indexTracked: etfProfile.indexTracked,
@@ -395,12 +470,15 @@ extension ETFDetailResponseDTO {
             RelatedTicker(symbol: r.symbol, name: r.name, price: r.price, changePercent: r.changePercent)
         }
 
-        // Map benchmark
+        // Map benchmark (with dynamic S&P CAGR)
         let benchmark: PerformanceBenchmarkSummary?
         if let bs = benchmarkSummary {
             benchmark = PerformanceBenchmarkSummary(
                 avgAnnualReturn: bs.avgAnnualReturn,
-                spBenchmark: bs.spBenchmark
+                spBenchmark: bs.spBenchmark,
+                benchmarkName: bs.benchmarkName ?? "S&P 500 Benchmark",
+                sinceDate: bs.sinceDate ?? "",
+                benchmarkSinceDate: bs.benchmarkSinceDate ?? ""
             )
         } else {
             benchmark = nil

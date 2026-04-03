@@ -34,6 +34,7 @@ struct ETFDetailOverviewContent: View {
             // ETF Profile
             ETFProfileSection(
                 profile: etfData.etfProfile,
+                symbol: etfData.symbol,
                 onWebsiteTap: onWebsiteTap
             )
 

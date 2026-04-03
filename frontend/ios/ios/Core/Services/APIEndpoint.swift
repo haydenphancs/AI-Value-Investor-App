@@ -79,6 +79,9 @@ enum APIEndpoint: Sendable {
 
     // MARK: - ETFs
     case getETFDetail(symbol: String, range: String, interval: String? = nil)
+    case getETFDividends(symbol: String)
+    case getETFHoldingsRisk(symbol: String)
+    case getETFProfile(symbol: String)
 
     // MARK: - Commodities
     case getCommodityDetail(symbol: String, range: String, interval: String? = nil)
@@ -222,6 +225,12 @@ enum APIEndpoint: Sendable {
         // ETFs
         case .getETFDetail(let symbol, _, _):
             return "/api/v1/etfs/\(symbol)"
+        case .getETFDividends(let symbol):
+            return "/api/v1/etfs/\(symbol)/dividends"
+        case .getETFHoldingsRisk(let symbol):
+            return "/api/v1/etfs/\(symbol)/holdings-risk"
+        case .getETFProfile(let symbol):
+            return "/api/v1/etfs/\(symbol)/profile"
 
         // Commodities
         case .getCommodityDetail(let symbol, _, _):
@@ -470,7 +479,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

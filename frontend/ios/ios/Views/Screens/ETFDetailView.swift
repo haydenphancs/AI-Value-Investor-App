@@ -13,7 +13,9 @@ struct ETFDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
     @State private var showShareSheet = false
+    @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
+    @StateObject private var chatViewModel = ChatViewModel()
 
     let etfSymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -149,6 +151,18 @@ struct ETFDetailView: View {
         .task {
             viewModel.loadETFData()
         }
+        .onDisappear {
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if let status = viewModel.etfData?.marketStatus,
+               MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                viewModel.connectLivePrice()
+            }
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in
@@ -159,6 +173,27 @@ struct ETFDetailView: View {
         )
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
+        }
+        .sheet(isPresented: $showAIChat) {
+            NavigationStack {
+                ChatConversationView(viewModel: chatViewModel)
+                    .navigationTitle("Ask Cay AI")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { showAIChat = false }
+                        }
+                    }
+            }
+            .preferredColorScheme(.dark)
+        }
+        .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
+            if let query = newValue {
+                print("[ETFDetailView] Opening AI chat for \(etfSymbol) with query: \(query)")
+                chatViewModel.startNewConversation(firstMessage: query, stockId: etfSymbol, context: viewModel.contextForCurrentTab)
+                viewModel.pendingAIQuery = nil
+                showAIChat = true
+            }
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()

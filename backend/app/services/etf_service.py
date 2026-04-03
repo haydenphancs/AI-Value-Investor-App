@@ -19,6 +19,7 @@ from app.schemas.etf import (
     ETFAssetAllocationResponse,
     ETFConcentrationResponse,
     ETFDetailResponse,
+    ETFDividendHistoryResponse,
     ETFDividendPaymentResponse,
     ETFHoldingsRiskResponse,
     ETFIdentityRatingResponse,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes for market data
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated snapshots
+_SP_HIST_CACHE_TTL = 3600  # 1 hour for S&P 500 historical (shared across ETFs)
 
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
@@ -313,48 +315,46 @@ class ETFService:
         from_date = (today - timedelta(days=365 * 5)).isoformat()
         to_date = today.isoformat()
 
-        (
-            quote, profile, etf_info, holders, sector_weights,
-            dividends, hist_raw, news_raw,
-        ) = await asyncio.gather(
-            self.fmp.get_stock_price_quote(symbol),
-            self.fmp.get_company_profile(symbol),
-            self.fmp.get_etf_info(symbol),
-            self.fmp.get_etf_holders(symbol, limit=20),
-            self.fmp.get_etf_sector_weightings(symbol),
-            self.fmp.get_dividend_history(symbol, limit=20),
-            self.fmp.get_historical_prices(symbol, from_date, to_date),
-            self.fmp.get_stock_news(symbol, limit=10),
-            return_exceptions=True,
-        )
+        # Check SPY historical cache (shared across all ETF requests, 1h TTL)
+        sp_cache_key = f"spy_hist:{from_date}:{to_date}"
+        cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
 
-        # Handle exceptions gracefully — each source fails independently
-        if isinstance(quote, Exception):
-            logger.error(f"Quote fetch failed for {symbol}: {quote}")
-            quote = {}
-        if isinstance(profile, Exception):
-            logger.error(f"Profile fetch failed for {symbol}: {profile}")
-            profile = {}
-        if isinstance(etf_info, Exception):
-            logger.error(f"ETF info fetch failed for {symbol}: {etf_info}")
-            etf_info = {}
-        if isinstance(holders, Exception):
-            logger.error(f"Holders fetch failed for {symbol}: {holders}")
-            holders = []
-        if isinstance(sector_weights, Exception):
-            logger.error(f"Sector weights fetch failed for {symbol}: {sector_weights}")
-            sector_weights = []
-        if isinstance(dividends, Exception):
-            logger.error(f"Dividends fetch failed for {symbol}: {dividends}")
-            dividends = []
-        if isinstance(hist_raw, Exception):
-            logger.error(f"Historical prices fetch failed for {symbol}: {hist_raw}")
-            hist_raw = {}
-        if isinstance(news_raw, Exception):
-            logger.error(f"News fetch failed for {symbol}: {news_raw}")
-            news_raw = []
+        # Build tasks — add SPY fetch only if not cached
+        tasks = [
+            self.fmp.get_stock_price_quote(symbol),        # 0
+            self.fmp.get_company_profile(symbol),           # 1
+            self.fmp.get_etf_info(symbol),                  # 2
+            self.fmp.get_etf_holders(symbol, limit=20),     # 3
+            self.fmp.get_etf_sector_weightings(symbol),     # 4
+            self.fmp.get_dividend_history(symbol, limit=20), # 5
+            self.fmp.get_historical_prices(symbol, from_date, to_date),  # 6
+            self.fmp.get_stock_news(symbol, limit=10),      # 7
+        ]
+        spy_task_idx = None
+        if cached_spy is None:
+            spy_task_idx = len(tasks)
+            tasks.append(self.fmp.get_historical_prices("SPY", from_date, to_date))
 
-        # Parse historical prices (sorted oldest-first)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        def _safe(i, default={}):
+            r = results[i] if i < len(results) else default
+            return default if isinstance(r, Exception) else r
+
+        quote = _safe(0)
+        profile = _safe(1)
+        etf_info = _safe(2)
+        holders = _safe(3, [])
+        sector_weights = _safe(4, [])
+        dividends = _safe(5, [])
+        hist_raw = _safe(6)
+        news_raw = _safe(7, [])
+
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"ETF FMP call {i} failed for {symbol}: {r}")
+
+        # Parse ETF historical prices (sorted oldest-first)
         historical: List[Dict] = []
         if isinstance(hist_raw, dict):
             historical = hist_raw.get("historical", [])
@@ -362,11 +362,24 @@ class ETFService:
             historical = hist_raw
         historical.sort(key=lambda p: p.get("date", ""))
 
+        # Parse SPY historical prices
+        if cached_spy is not None:
+            spy_hist = cached_spy
+        else:
+            spy_raw = _safe(spy_task_idx) if spy_task_idx is not None else {}
+            spy_hist_raw = spy_raw.get("historical", []) if isinstance(spy_raw, dict) else (spy_raw if isinstance(spy_raw, list) else [])
+            spy_hist = sorted(spy_hist_raw, key=lambda p: p.get("date", ""))
+            if spy_hist:
+                _cache_set(sp_cache_key, spy_hist)
+
         # ── Step 2: Extract quote data ────────────────────────────
         price = float(quote.get("price") or 0)
         change = float(quote.get("change") or 0)
-        change_pct = float(quote.get("changesPercentage") or 0)
+        change_pct = float(quote.get("changePercentage") or quote.get("changesPercentage") or 0)
         prev_close = float(quote.get("previousClose") or 0)
+        # Safety net: compute from change/previousClose if FMP didn't return percentage
+        if not change_pct and change and prev_close > 0:
+            change_pct = round((change / prev_close) * 100, 4)
         volume = quote.get("volume") or 0
         avg_volume = (
             quote.get("avgVolume")
@@ -448,22 +461,8 @@ class ETFService:
             index_tracked=index_tracked,
         )
 
-        # ── Step 5: Build performance periods ─────────────────────
-        one_month = _compute_return(historical, 21)
-        ytd = _compute_ytd_return(historical)
-        one_year = _compute_return(historical, 252)
-        three_year = _compute_return(historical, 252 * 3) if len(historical) > 252 * 2 else None
-        five_year = _compute_return(historical, 252 * 5) if len(historical) > 252 * 3 else None
-        ten_year = _compute_return(historical, 252 * 10) if len(historical) > 252 * 5 else None
-
-        perf_periods = self._build_performance_periods(
-            one_month=one_month,
-            ytd=ytd,
-            one_year=one_year,
-            three_year=three_year,
-            five_year=five_year,
-            ten_year=ten_year,
-        )
+        # ── Step 5: Build performance periods (vs S&P 500) ─────────
+        perf_periods = self._build_performance_periods(historical, spy_hist)
 
         # ── Step 6: Build holdings & sector data ──────────────────
         top_holdings = self._build_top_holdings(holders)
@@ -473,22 +472,23 @@ class ETFService:
         # ── Step 7: Build dividend data ───────────────────────────
         dividend_payments = self._build_dividend_history(dividends)
 
-        # ── Step 8: Generate AI snapshots ─────────────────────────
-        ai_snapshot = await self._generate_ai_snapshot(
+        # ── Step 8: Build snapshots (FMP data + Gemini for hook text) ──
+        identity_rating = self._build_identity_rating(
+            total_assets=total_assets,
+            beta=beta,
+            expense_ratio=expense_ratio,
+            inception_date=inception_date_raw,
+            holdings_count=holdings_count,
+        )
+        strategy = await self._build_strategy(
             symbol=symbol,
             name=etf_company,
             description=description,
-            expense_ratio=expense_ratio,
-            dividend_yield=dividend_yield,
-            total_assets=total_assets,
+            asset_class=asset_class,
+            index_tracked=index_tracked,
             holdings_count=holdings_count,
             top_holdings=top_holdings,
             top_sectors=top_sectors,
-            concentration_weight=concentration.weight,
-            beta=beta,
-            pe=0,
-            asset_class=asset_class,
-            index_tracked=index_tracked,
         )
 
         # ── Step 9: Build net yield ───────────────────────────────
@@ -538,7 +538,6 @@ class ETFService:
             symbol=symbol,
             etf_company=etf_company,
             asset_class=asset_class,
-            expense_ratio=f"{expense_ratio}%" if expense_ratio else "—",
             inception_date=inception_display,
             domicile=domicile,
             index_tracked=index_tracked,
@@ -558,14 +557,8 @@ class ETFService:
             concentration=concentration,
         )
 
-        # ── Step 14: Benchmark summary ────────────────────────────
-        avg_annual = None
-        if one_year is not None:
-            avg_annual = round(one_year, 2)
-        benchmark = BenchmarkSummaryResponse(
-            avg_annual_return=avg_annual or 0,
-            sp_benchmark=10.5,  # S&P 500 long-term average
-        )
+        # ── Step 14: Benchmark summary (proper CAGR) ────────────────
+        benchmark = self._build_benchmark_summary(historical, spy_hist)
 
         # ── Assemble response ─────────────────────────────────────
         response = ETFDetailResponse(
@@ -579,8 +572,8 @@ class ETFService:
             key_statistics=key_statistics,
             key_statistics_groups=key_statistics_groups,
             performance_periods=perf_periods,
-            identity_rating=ai_snapshot["identity_rating"],
-            strategy=ai_snapshot["strategy"],
+            identity_rating=identity_rating,
+            strategy=strategy,
             net_yield=net_yield,
             holdings_risk=holdings_risk,
             etf_profile=etf_profile,
@@ -597,6 +590,391 @@ class ETFService:
             logger.warning(f"ETF Supabase background cache failed for {symbol}: {e}")
 
         return response
+
+    # ── Unified Snapshot Cache (etf_snapshot_cache) ────────────────
+    # Single table with (symbol, category) unique constraint.
+    # Categories: "dividend_history", "holdings_risk", etc.
+
+    _SNAPSHOT_DB_TTL_HOURS = 24
+    _SNAPSHOT_MEM_TTL = 3600  # 1 hour in-memory
+
+    def _check_snapshot_cache(self, symbol: str, category: str) -> Optional[Dict[str, Any]]:
+        """Check Supabase etf_snapshot_cache (24h TTL)."""
+        try:
+            row = (
+                self.supabase.table("etf_snapshot_cache")
+                .select("response_json, cached_at")
+                .eq("symbol", symbol)
+                .eq("category", category)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=self._SNAPSHOT_DB_TTL_HOURS):
+                logger.info(f"ETF snapshot STALE ({category}, age={age}) for {symbol}")
+                return None
+            data = entry.get("response_json")
+            if data and isinstance(data, dict):
+                logger.info(f"ETF snapshot HIT ({category}, age={age}) for {symbol}")
+                return data
+            return None
+        except Exception as e:
+            logger.warning(f"ETF snapshot check failed ({category}) for {symbol}: {e}")
+            return None
+
+    def _upsert_snapshot_cache(self, symbol: str, category: str, data: Dict[str, Any]) -> None:
+        """Upsert into etf_snapshot_cache."""
+        try:
+            self.supabase.table("etf_snapshot_cache").upsert(
+                {
+                    "symbol": symbol,
+                    "category": category,
+                    "response_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="symbol,category",
+            ).execute()
+            logger.info(f"ETF snapshot cached ({category}) for {symbol}")
+        except Exception as e:
+            logger.warning(f"ETF snapshot upsert failed ({category}) for {symbol}: {e}")
+
+    # ── Dividend History (dedicated endpoint) ─────────────────────
+
+    async def get_dividend_history(self, symbol: str) -> ETFDividendHistoryResponse:
+        """
+        Fetch full dividend history for an ETF.
+        Two-tier cache: in-memory (1h) + Supabase etf_snapshot_cache (24h).
+        """
+        symbol = symbol.upper()
+        category = "dividend_history"
+
+        # ── Cache check: in-memory then Supabase ────────────────
+        mem_key = f"etf_{category}_{symbol}"
+        cached = _cache_get(mem_key, self._SNAPSHOT_MEM_TTL)
+        if cached is not None:
+            logger.info(f"Dividend in-memory HIT for {symbol}")
+            return cached
+
+        db_data = self._check_snapshot_cache(symbol, category)
+        if db_data is not None:
+            try:
+                response = ETFDividendHistoryResponse(**db_data)
+                _cache_set(mem_key, response)
+                return response
+            except Exception as e:
+                logger.warning(f"Dividend snapshot data invalid for {symbol}: {e}")
+
+        # ── Fetch from FMP ──────────────────────────────────────
+        raw_dividends = await self.fmp.get_dividend_history(symbol, limit=100)
+        if not raw_dividends:
+            logger.warning(f"No dividend data from FMP for {symbol}")
+            return ETFDividendHistoryResponse(
+                symbol=symbol,
+                pay_frequency="—",
+                total_dividends=0,
+                dividends=[],
+            )
+
+        # Use FMP's frequency field directly (first non-empty value)
+        pay_frequency = "—"
+        for d in raw_dividends:
+            freq = d.get("frequency")
+            if freq and freq != "—":
+                pay_frequency = freq
+                break
+
+        # Format each dividend payment
+        dividends = []
+        for d in raw_dividends:
+            div_amount = d.get("dividend") or d.get("adjDividend") or d.get("amount") or 0
+            ex_date = d.get("date") or d.get("recordDate") or ""
+            pay_date = d.get("paymentDate") or d.get("payDate") or ""
+
+            dividends.append(ETFDividendPaymentResponse(
+                dividend_per_share=f"${float(div_amount):.4f}" if div_amount else "—",
+                ex_dividend_date=_format_date_readable(ex_date),
+                pay_date=_format_date_readable(pay_date),
+            ))
+
+        response = ETFDividendHistoryResponse(
+            symbol=symbol,
+            pay_frequency=pay_frequency,
+            total_dividends=len(dividends),
+            dividends=dividends,
+        )
+
+        # ── Cache in both tiers ─────────────────────────────────
+        _cache_set(mem_key, response)
+        try:
+            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+        except Exception as e:
+            logger.warning(f"Dividend snapshot cache failed for {symbol}: {e}")
+
+        return response
+
+    # ── ETF Profile (dedicated endpoint) ───────────────────────────
+
+    async def get_profile(self, symbol: str) -> ETFProfileResponse:
+        """
+        Fetch ETF profile data via dedicated endpoint.
+        Two-tier cache: in-memory (1h) + Supabase etf_snapshot_cache (24h).
+        """
+        symbol = symbol.upper()
+        category = "profile"
+
+        # ── Cache check ─────────────────────────────────────────
+        mem_key = f"etf_{category}_{symbol}"
+        cached = _cache_get(mem_key, self._SNAPSHOT_MEM_TTL)
+        if cached is not None:
+            logger.info(f"Profile in-memory HIT for {symbol}")
+            return cached
+
+        db_data = self._check_snapshot_cache(symbol, category)
+        if db_data is not None:
+            try:
+                response = ETFProfileResponse(**db_data)
+                _cache_set(mem_key, response)
+                return response
+            except Exception as e:
+                logger.warning(f"Profile snapshot data invalid for {symbol}: {e}")
+
+        # ── Fetch from FMP (2 parallel calls) ───────────────────
+        results = await asyncio.gather(
+            self.fmp.get_etf_info(symbol),
+            self.fmp.get_company_profile(symbol),
+            return_exceptions=True,
+        )
+
+        etf_info = results[0] if not isinstance(results[0], Exception) else {}
+        profile = results[1] if not isinstance(results[1], Exception) else {}
+
+        if isinstance(results[0], Exception):
+            logger.error(f"Profile etf/info failed for {symbol}: {results[0]}")
+        if isinstance(results[1], Exception):
+            logger.error(f"Profile company/profile failed for {symbol}: {results[1]}")
+
+        # ── Build profile ───────────────────────────────────────
+        description = etf_info.get("description") or profile.get("description") or ""
+        etf_company = (
+            etf_info.get("etfCompany") or etf_info.get("companyName")
+            or profile.get("companyName") or "—"
+        )
+        asset_class = etf_info.get("assetClass") or "Equity"
+        inception_date_raw = etf_info.get("inceptionDate") or profile.get("ipoDate") or ""
+        domicile = etf_info.get("domicile") or "United States"
+        ref = _ETF_REFERENCE.get(symbol, {})
+        index_tracked = (
+            etf_info.get("indexTracked") or etf_info.get("index")
+            or ref.get("index") or "—"
+        )
+        website = etf_info.get("website") or profile.get("website") or ""
+        if website.startswith("https://"):
+            website = website[8:]
+        elif website.startswith("http://"):
+            website = website[7:]
+
+        response = ETFProfileResponse(
+            description=description,
+            symbol=symbol,
+            etf_company=etf_company,
+            asset_class=asset_class,
+            inception_date=_format_date_readable(inception_date_raw),
+            domicile=domicile,
+            index_tracked=index_tracked,
+            website=website,
+        )
+
+        # ── Cache in both tiers ─────────────────────────────────
+        _cache_set(mem_key, response)
+        try:
+            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+        except Exception as e:
+            logger.warning(f"Profile snapshot cache failed for {symbol}: {e}")
+
+        return response
+
+    # ── Holdings & Risk (dedicated endpoint) ─────────────────────
+
+    async def get_holdings_risk(self, symbol: str) -> ETFHoldingsRiskResponse:
+        """
+        Fetch holdings & risk data for an ETF via dedicated endpoint.
+
+        Data sources (2 parallel FMP calls):
+          - etf/info → sectorsList (exposure), assetClass, AUM
+          - etf/holdings → top holdings with weightPercentage
+
+        Math:
+          - Asset allocation: extracts "Cash & Others" from sectorsList for real cash %
+          - Sectors: top 5 from sectorsList sorted by exposure desc
+          - Holdings: top 10 from etf/holdings
+          - Concentration: sum of top-10 weights with insight text
+        """
+        symbol = symbol.upper()
+        category = "holdings_risk"
+
+        # ── Cache check: in-memory then Supabase ────────────────
+        mem_key = f"etf_{category}_{symbol}"
+        cached = _cache_get(mem_key, self._SNAPSHOT_MEM_TTL)
+        if cached is not None:
+            logger.info(f"HoldingsRisk in-memory HIT for {symbol}")
+            return cached
+
+        db_data = self._check_snapshot_cache(symbol, category)
+        if db_data is not None:
+            try:
+                response = ETFHoldingsRiskResponse(**db_data)
+                _cache_set(mem_key, response)
+                return response
+            except Exception as e:
+                logger.warning(f"HoldingsRisk snapshot data invalid for {symbol}: {e}")
+
+        # ── Fetch from FMP (2 parallel calls) ───────────────────
+        etf_info_task = self.fmp.get_etf_info(symbol)
+        holders_task = self.fmp.get_etf_holders(symbol, limit=20)
+
+        results = await asyncio.gather(
+            etf_info_task, holders_task, return_exceptions=True
+        )
+
+        etf_info = results[0] if not isinstance(results[0], Exception) else {}
+        holders = results[1] if not isinstance(results[1], Exception) else []
+
+        if isinstance(results[0], Exception):
+            logger.error(f"HoldingsRisk etf/info failed for {symbol}: {results[0]}")
+        if isinstance(results[1], Exception):
+            logger.error(f"HoldingsRisk etf/holdings failed for {symbol}: {results[1]}")
+
+        # ── Build sectors from sectorsList ───────────────────────
+        sectors_list = etf_info.get("sectorsList") or []
+        top_sectors = self._build_sectors_from_info(sectors_list)
+
+        # ── Build top holdings ──────────────────────────────────
+        top_holdings = self._build_top_holdings(holders if isinstance(holders, list) else [])
+
+        # ── Build concentration ─────────────────────────────────
+        concentration = self._build_concentration(top_holdings)
+
+        # ── Build asset allocation (uses real cash from sectorsList) ──
+        asset_class = etf_info.get("assetClass") or "Equity"
+        total_assets = float(
+            etf_info.get("assetsUnderManagement")
+            or etf_info.get("totalAssets")
+            or etf_info.get("aum")
+            or etf_info.get("netAssets")
+            or 0
+        )
+        asset_alloc = self._build_asset_allocation(
+            sectors_list=sectors_list,
+            asset_class=asset_class,
+            total_assets=total_assets,
+        )
+
+        response = ETFHoldingsRiskResponse(
+            asset_allocation=asset_alloc,
+            top_sectors=top_sectors[:5],
+            top_holdings=top_holdings[:10],
+            concentration=concentration,
+        )
+
+        # ── Cache in both tiers ─────────────────────────────────
+        _cache_set(mem_key, response)
+        try:
+            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+        except Exception as e:
+            logger.warning(f"HoldingsRisk snapshot cache failed for {symbol}: {e}")
+
+        return response
+
+    def _build_sectors_from_info(
+        self, sectors_list: List[Dict]
+    ) -> List[ETFSectorWeightResponse]:
+        """Build sector weights from etf/info sectorsList field.
+
+        sectorsList uses 'industry' and 'exposure' keys (vs 'sector'/'weightPercentage'
+        from the separate etf/sector-weightings endpoint). Both return the same data.
+        """
+        results = []
+        for s in sectors_list:
+            name = s.get("industry") or s.get("sector") or s.get("name") or "—"
+            weight = s.get("exposure") or s.get("weightPercentage") or s.get("weight") or 0
+            if isinstance(weight, str):
+                try:
+                    weight = float(weight.replace("%", ""))
+                except (ValueError, TypeError):
+                    weight = 0
+
+            # Skip "Cash & Others" from sector display (used in asset allocation instead)
+            if "cash" in name.lower() and "other" in name.lower():
+                continue
+
+            results.append(ETFSectorWeightResponse(
+                name=name,
+                weight=round(float(weight), 2),
+            ))
+
+        results.sort(key=lambda x: x.weight, reverse=True)
+        return results
+
+    def _build_asset_allocation(
+        self, *, sectors_list: List[Dict], asset_class: str, total_assets: float,
+    ) -> ETFAssetAllocationResponse:
+        """Build asset allocation using real cash % from FMP sectorsList.
+
+        FMP's sectorsList includes a "Cash & Others" entry with the actual
+        cash allocation percentage. For the rest, we infer from asset_class.
+
+        Edge case: For bond ETFs, FMP often reports sectorsList as
+        [{"industry": "Cash & Others", "exposure": 100}] because it can't
+        break down bond sectors. In that case, 100% is actually bonds, not cash.
+        We detect this by checking if "Cash & Others" is the ONLY sector AND
+        the asset class indicates bonds.
+        """
+        ac = asset_class.lower()
+        is_bond_etf = "bond" in ac or "fixed" in ac or "income" in ac
+
+        # Extract real cash % from sectorsList
+        cash_pct = 0.0
+        has_only_cash_sector = False
+        for s in sectors_list:
+            name = (s.get("industry") or s.get("sector") or "").lower()
+            if "cash" in name and "other" in name:
+                raw_cash = round(float(s.get("exposure") or s.get("weightPercentage") or 0), 2)
+                # If "Cash & Others" is ~100% AND this is a bond ETF,
+                # FMP is lumping all bonds into "Cash & Others" — don't treat as cash
+                if raw_cash >= 95 and is_bond_etf:
+                    has_only_cash_sector = True
+                    cash_pct = 5.0  # Typical operational cash for bond ETFs
+                else:
+                    cash_pct = raw_cash
+                break
+
+        # Determine primary allocation from asset class
+        remaining = round(100.0 - cash_pct, 2)
+
+        if is_bond_etf:
+            equities, bonds, crypto = 0.0, remaining, 0.0
+        elif "crypto" in ac or "bitcoin" in ac or "digital" in ac:
+            equities, bonds, crypto = 0.0, 0.0, remaining
+        elif "commodity" in ac or "gold" in ac or "alternative" in ac:
+            equities, bonds, crypto = remaining, 0.0, 0.0
+        else:
+            # Default: equity
+            equities, bonds, crypto = remaining, 0.0, 0.0
+
+        return ETFAssetAllocationResponse(
+            equities=equities,
+            bonds=bonds,
+            crypto=crypto,
+            cash=cash_pct,
+            total_assets=_fmt(total_assets),
+        )
 
     # ── Chart helpers ─────────────────────────────────────────────
 
@@ -691,27 +1069,83 @@ class ETFService:
 
         return flat, groups
 
-    # ── Performance periods builder ───────────────────────────────
+    # ── Performance periods builder (with S&P 500 comparison) ─────
 
     def _build_performance_periods(
-        self, *, one_month, ytd, one_year, three_year, five_year, ten_year,
+        self, etf_hist: List[Dict], spy_hist: List[Dict]
     ) -> List[PerformancePeriodResponse]:
+        """Build performance periods with real S&P 500 comparison.
+        Follows same pattern as stock_overview_service._build_performance_periods."""
         periods = []
-        for label, val in [
-            ("1 Month", one_month),
-            ("YTD", ytd),
-            ("1 Year", one_year),
-            ("3 Years", three_year),
-            ("5 Years", five_year),
-            ("10 Years", ten_year),
-        ]:
-            if val is not None:
+        definitions = [
+            ("1 Month", 21),
+            ("YTD", None),
+            ("1 Year", 252),
+            ("3 Years", 756),
+            ("5 Years", 1260),
+            ("10 Years", 2520),
+        ]
+        for label, days in definitions:
+            if days is None:
+                etf_ret = _compute_ytd_return(etf_hist)
+                sp_ret = _compute_ytd_return(spy_hist)
+            else:
+                etf_ret = _compute_return(etf_hist, days)
+                sp_ret = _compute_return(spy_hist, days)
+
+            if etf_ret is not None:
+                vs_market = round(etf_ret - (sp_ret or 0), 2) if sp_ret is not None else None
                 periods.append(PerformancePeriodResponse(
                     label=label,
-                    change_percent=round(val, 2),
-                    vs_market_percent=round(val, 2),  # vs self (ETF is its own benchmark ref)
+                    change_percent=round(etf_ret, 2),
+                    vs_market_percent=vs_market,
+                    sp_return_percent=round(sp_ret, 2) if sp_ret is not None else None,
                 ))
         return periods
+
+    # ── Benchmark summary builder (proper CAGR) ──────────────────
+
+    def _build_benchmark_summary(
+        self, etf_hist: List[Dict], spy_hist: List[Dict]
+    ) -> Optional[BenchmarkSummaryResponse]:
+        """Compute annualized (CAGR) returns for ETF vs S&P 500.
+        Follows same pattern as stock_overview_service._build_benchmark_summary."""
+        if not etf_hist or len(etf_hist) < 252:
+            return None
+
+        # Use up to 5 years of data
+        days = min(len(etf_hist) - 1, 1260)
+        years = days / 252
+
+        etf_start = etf_hist[-(days + 1)].get("close") or etf_hist[-(days + 1)].get("adjClose")
+        etf_end = etf_hist[-1].get("close") or etf_hist[-1].get("adjClose")
+
+        if not etf_start or not etf_end or etf_start <= 0:
+            return None
+
+        etf_annual = ((etf_end / etf_start) ** (1 / years) - 1) * 100
+
+        sp_annual = 0.0
+        if spy_hist and len(spy_hist) > days:
+            sp_start = spy_hist[-(days + 1)].get("close") or spy_hist[-(days + 1)].get("adjClose")
+            sp_end = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
+            if sp_start and sp_end and sp_start > 0:
+                sp_annual = ((sp_end / sp_start) ** (1 / years) - 1) * 100
+
+        # Extract start dates for context
+        etf_start_date = etf_hist[-(days + 1)].get("date", "")
+        sp_start_date = ""
+        if spy_hist and len(spy_hist) > days:
+            sp_start_date = spy_hist[-(days + 1)].get("date", "")
+
+        return BenchmarkSummaryResponse(
+            avg_annual_return=round(etf_annual, 1),
+            sp_benchmark=round(sp_annual, 1),
+            benchmark_name="S&P 500",
+            since_date=etf_start_date,
+            benchmark_since_date=sp_start_date,
+            badge_threshold=0.0,
+        )
 
     # ── Holdings builder ──────────────────────────────────────────
 
@@ -764,12 +1198,16 @@ class ETFService:
         total_weight = sum(h.weight for h in top_10)
         n = len(top_10)
 
-        if total_weight > 35:
+        # Boundaries aligned with Swift ETFConcentrationLevel:
+        #   < 20% → low (Well Diversified)
+        #   20-35% → moderate (Moderate)
+        #   >= 35% → high (Concentrated)
+        if total_weight >= 35:
             insight = (
                 f"Over a third of your money is in just {n} companies. "
                 "If these big names stumble, this fund feels it."
             )
-        elif total_weight > 20:
+        elif total_weight >= 20:
             insight = (
                 f"The top {n} holdings make up {total_weight:.0f}% — "
                 "moderate concentration with reasonable diversification."
@@ -869,10 +1307,33 @@ class ETFService:
     async def _build_related_etfs(
         self, symbol: str
     ) -> List[RelatedTickerResponse]:
-        """Fetch quotes for related ETFs."""
-        related_symbols = _RELATED_ETFS.get(
-            symbol, _DEFAULT_RELATED
-        )
+        """Fetch related ETFs: curated table first, then FMP peers as fallback.
+
+        Strategy:
+          1. If symbol is in the curated _RELATED_ETFS table, use those (high quality).
+          2. Otherwise, try FMP's stock peers endpoint.
+          3. If FMP returns nothing, use _DEFAULT_RELATED.
+        """
+        if symbol in _RELATED_ETFS:
+            related_symbols = _RELATED_ETFS[symbol]
+        else:
+            # Try FMP peers endpoint
+            try:
+                fmp_peers = await self.fmp.get_stock_peers(symbol)
+                # Filter out mutual funds (5-char tickers ending in X) and non-alpha
+                related_symbols = [
+                    p for p in (fmp_peers or [])
+                    if p and 2 <= len(p) <= 5 and p.isalpha() and p.isupper()
+                    and not (len(p) == 5 and p.endswith("X"))
+                ][:6]
+                if related_symbols:
+                    logger.info(f"Related ETFs from FMP peers for {symbol}: {related_symbols}")
+                else:
+                    related_symbols = _DEFAULT_RELATED
+            except Exception as e:
+                logger.warning(f"FMP peers failed for {symbol}: {e}")
+                related_symbols = _DEFAULT_RELATED
+
         # Exclude self
         related_symbols = [s for s in related_symbols if s != symbol][:6]
 
@@ -890,7 +1351,9 @@ class ETFService:
                 symbol=sym,
                 name=res.get("name") or sym,
                 price=float(res.get("price") or 0),
-                change_percent=round(float(res.get("changesPercentage") or 0), 2),
+                change_percent=round(float(
+                    res.get("changePercentage") or res.get("changesPercentage") or 0
+                ), 2),
             ))
         return related
 
@@ -917,200 +1380,250 @@ class ETFService:
             ))
         return articles
 
-    # ── AI Snapshot Generation ────────────────────────────────────
+    # ── Identity Rating (100% FMP data) ────────────────────────────
 
-    async def _generate_ai_snapshot(
-        self, *, symbol, name, description, expense_ratio, dividend_yield,
-        total_assets, holdings_count, top_holdings, top_sectors,
-        concentration_weight, beta, pe, asset_class, index_tracked,
-    ) -> Dict[str, Any]:
+    def _build_identity_rating(
+        self, *, total_assets: float, beta: float, expense_ratio: float,
+        inception_date: str, holdings_count: int,
+    ) -> ETFIdentityRatingResponse:
         """
-        Generate AI-powered ETF snapshot using Gemini.
-        Cached for 1 hour. Falls back to computed defaults on failure.
+        Build identity rating from FMP data only.
+
+        Score (1-5): Composite of AUM, age, expense ratio, and diversification.
+        Volatility: Directly from beta.
         """
-        cache_key = f"etf_snapshot_{symbol}"
-        cached = _cache_get(cache_key, _AI_CACHE_TTL_SECONDS)
-        if cached:
-            return cached
-
-        # Build default (always works)
-        default = self._build_default_snapshot(
-            symbol=symbol,
-            name=name,
-            expense_ratio=expense_ratio,
-            dividend_yield=dividend_yield,
-            total_assets=total_assets,
-            holdings_count=holdings_count,
-            top_holdings=top_holdings,
-            concentration_weight=concentration_weight,
-            beta=beta,
-            asset_class=asset_class,
-            index_tracked=index_tracked,
-        )
-
-        # Try Gemini for richer analysis
-        try:
-            gemini = get_gemini_client()
-
-            holdings_text = ", ".join(
-                f"{h.symbol} ({h.weight}%)" for h in top_holdings[:10]
-            )
-            sectors_text = ", ".join(
-                f"{s.name} ({s.weight}%)" for s in top_sectors[:5]
-            )
-
-            prompt = f"""Analyze this ETF and generate a JSON snapshot.
-
-ETF: {symbol}
-Name: {name}
-Description: {description[:300] if description else 'N/A'}
-Asset Class: {asset_class}
-Index Tracked: {index_tracked}
-Expense Ratio: {expense_ratio}%
-Dividend Yield: {dividend_yield}%
-Total Assets: ${total_assets:,.0f}
-Holdings Count: {holdings_count}
-Beta: {beta:.2f}
-P/E Ratio: {pe:.2f}
-Top Holdings: {holdings_text}
-Top Sectors: {sectors_text}
-Top 10 Concentration: {concentration_weight:.1f}%
-
-Generate this JSON (output ONLY valid JSON, no markdown):
-{{
-  "identity_rating": {{
-    "score": <int 1-5 based on AUM, tracking error, liquidity, longevity>,
-    "esg_rating": "<A-F letter grade>",
-    "volatility_label": "<Low Volatility|Moderate Volatility|High Volatility>"
-  }},
-  "strategy": {{
-    "hook": "<max 120 chars, one punchy sentence in plain English about what this fund does>",
-    "tags": ["<2-4 tags from: Passive, Active, Index, Large Cap, Mid Cap, Small Cap, Blend, Growth, Value, Sector, Thematic, Bond, International, Dividend, ESG>"]
-  }}
-}}
-
-RULES:
-- score: 5=institutional-grade blue chip ETF, 4=strong, 3=average, 2=niche/risky, 1=speculative
-- hook must not exceed 120 characters
-- Be honest and direct. No marketing fluff."""
-
-            ai_response = await gemini.generate_text(
-                prompt=prompt,
-                system_instruction=(
-                    "You are an ETF analyst writing for novice investors. "
-                    "Output ONLY valid JSON. No markdown, no commentary."
-                ),
-                model_name="gemini-2.5-flash",
-            )
-
-            text = ai_response.get("text", "").strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1]
-            if text.endswith("```"):
-                text = text.rsplit("```", 1)[0]
-            text = text.strip()
-
-            parsed = json.loads(text)
-
-            ir = parsed.get("identity_rating", {})
-            st = parsed.get("strategy", {})
-
-            score = int(ir.get("score", 3))
-            score = max(1, min(5, score))
-
-            esg = ir.get("esg_rating", "B")
-            if esg not in ("A", "B", "C", "D", "F"):
-                esg = "B"
-
-            vol_label = ir.get("volatility_label", "Moderate Volatility")
-            if vol_label not in ("Low Volatility", "Moderate Volatility", "High Volatility"):
-                vol_label = "Moderate Volatility"
-
-            hook = st.get("hook", "")[:120]
-            tags = st.get("tags", [])
-            if not tags:
-                tags = ["Index", "Blend"]
-
-            result = {
-                "identity_rating": ETFIdentityRatingResponse(
-                    score=score,
-                    max_score=5,
-                    esg_rating=esg,
-                    volatility_label=vol_label,
-                ),
-                "strategy": ETFStrategyResponse(
-                    hook=hook or default["strategy"].hook,
-                    tags=tags,
-                ),
-            }
-            _cache_set(cache_key, result)
-            logger.info(f"Generated AI snapshot for ETF {symbol}")
-            return result
-
-        except Exception as e:
-            logger.warning(
-                f"Gemini ETF snapshot failed for {symbol}, using defaults: {e}"
-            )
-            return default
-
-    def _build_default_snapshot(
-        self, *, symbol, name, expense_ratio, dividend_yield,
-        total_assets, holdings_count, top_holdings, concentration_weight,
-        beta, asset_class, index_tracked,
-    ) -> Dict[str, Any]:
-        """Build reasonable defaults without AI."""
-        # Score based on AUM
+        # ── Score: weighted composite ────────────────────────────
+        # AUM component (0-2 points)
         if total_assets > 50_000_000_000:
-            score = 5
+            aum_pts = 2.0
         elif total_assets > 10_000_000_000:
-            score = 4
+            aum_pts = 1.5
         elif total_assets > 1_000_000_000:
-            score = 3
+            aum_pts = 1.0
         elif total_assets > 100_000_000:
-            score = 2
+            aum_pts = 0.5
         else:
-            score = 1
+            aum_pts = 0.0
 
-        # Volatility based on beta
-        if beta < 0.8:
+        # Age component (0-1 point) — older = more proven
+        age_years = 0
+        if inception_date:
+            try:
+                inception = datetime.strptime(inception_date, "%Y-%m-%d")
+                age_years = (datetime.now() - inception).days / 365.25
+            except (ValueError, TypeError):
+                pass
+        if age_years > 15:
+            age_pts = 1.0
+        elif age_years > 7:
+            age_pts = 0.7
+        elif age_years > 3:
+            age_pts = 0.4
+        else:
+            age_pts = 0.1
+
+        # Expense ratio component (0-1 point) — lower = better
+        if expense_ratio <= 0.05:
+            fee_pts = 1.0
+        elif expense_ratio <= 0.15:
+            fee_pts = 0.8
+        elif expense_ratio <= 0.40:
+            fee_pts = 0.5
+        elif expense_ratio <= 0.75:
+            fee_pts = 0.2
+        else:
+            fee_pts = 0.0
+
+        # Diversification component (0-1 point)
+        if holdings_count >= 500:
+            div_pts = 1.0
+        elif holdings_count >= 100:
+            div_pts = 0.7
+        elif holdings_count >= 30:
+            div_pts = 0.4
+        else:
+            div_pts = 0.1
+
+        raw_score = aum_pts + age_pts + fee_pts + div_pts  # 0-5
+        score = max(1, min(5, round(raw_score)))
+
+        # ── Volatility from beta ─────────────────────────────────
+        # Negative beta = inverse/leveraged ETF (moves opposite to market)
+        # Use abs(beta) for magnitude; negative beta is always high risk
+        if beta < 0:
+            vol_label = "High Volatility"
+        elif beta < 0.8:
             vol_label = "Low Volatility"
         elif beta < 1.2:
             vol_label = "Moderate Volatility"
         else:
             vol_label = "High Volatility"
 
-        # Strategy tags
+        return ETFIdentityRatingResponse(
+            score=score,
+            max_score=5,
+            volatility_label=vol_label,
+        )
+
+    # ── Strategy (FMP for tags, Gemini for hook text only) ───────
+
+    async def _build_strategy(
+        self, *, symbol: str, name: str, description: str,
+        asset_class: str, index_tracked: str, holdings_count: int,
+        top_holdings: List[ETFTopHoldingResponse],
+        top_sectors: List[ETFSectorWeightResponse],
+    ) -> ETFStrategyResponse:
+        """
+        Build strategy snapshot.
+        Tags: derived from FMP data (asset class, index, holdings).
+        Hook: Gemini generates a punchy one-liner; falls back to template.
+        """
+        # ── Tags from FMP data ───────────────────────────────────
         tags = []
         ac = asset_class.lower()
-        if "equity" in ac:
-            tags.append("Index")
-            tags.append("Blend")
-        elif "bond" in ac or "fixed" in ac:
-            tags.append("Bond")
+
+        # Passive vs Active
         if index_tracked and index_tracked != "—":
             tags.append("Passive")
+            tags.append("Index")
+        else:
+            tags.append("Active")
+
+        # Asset class tags
+        if "bond" in ac or "fixed" in ac:
+            tags.append("Bond")
+        elif "commodity" in ac or "gold" in ac:
+            tags.append("Thematic")
+        elif "real estate" in ac or "reit" in ac:
+            tags.append("Sector")
+        elif "equity" in ac or ac == "":
+            # Size classification from holdings count
+            if holdings_count >= 500:
+                tags.append("Large Cap")
+                tags.append("Blend")
+            elif holdings_count >= 100:
+                tags.append("Blend")
+            elif holdings_count < 50:
+                tags.append("Thematic")
+
+        # Check for dividend focus from name
+        name_lower = name.lower() + " " + (description or "").lower()
+        if "dividend" in name_lower or "yield" in name_lower:
+            tags.append("Dividend")
+        if "growth" in name_lower:
+            tags.append("Growth")
+        if "value" in name_lower:
+            tags.append("Value")
+        if "international" in name_lower or "global" in name_lower or "emerging" in name_lower:
+            tags.append("International")
+
+        # Deduplicate and limit
+        seen = set()
+        unique_tags = []
+        for t in tags:
+            if t not in seen:
+                seen.add(t)
+                unique_tags.append(t)
+        tags = unique_tags[:4]
+
         if not tags:
             tags = ["Index", "Blend"]
 
-        # Hook
-        if index_tracked and index_tracked != "—":
-            hook = f"Tracks the {index_tracked}. {holdings_count} holdings for broad market exposure."
-        else:
-            hook = f"A {asset_class.lower()} fund with {holdings_count} holdings."
+        # ── Hook: Gemini for creative text, fallback to template ──
+        fallback_hook = self._build_hook_fallback(
+            asset_class=asset_class,
+            index_tracked=index_tracked,
+            holdings_count=holdings_count,
+        )
 
-        return {
-            "identity_rating": ETFIdentityRatingResponse(
-                score=score,
-                max_score=5,
-                esg_rating="B",
-                volatility_label=vol_label,
-            ),
-            "strategy": ETFStrategyResponse(
-                hook=hook[:120],
-                tags=tags[:4],
-            ),
-        }
+        hook = await self._generate_hook_text(
+            symbol=symbol,
+            name=name,
+            description=description,
+            asset_class=asset_class,
+            index_tracked=index_tracked,
+            holdings_count=holdings_count,
+            top_holdings=top_holdings,
+            top_sectors=top_sectors,
+            fallback=fallback_hook,
+        )
+
+        return ETFStrategyResponse(hook=hook, tags=tags)
+
+    def _build_hook_fallback(
+        self, *, asset_class: str, index_tracked: str, holdings_count: int,
+    ) -> str:
+        """Template-based hook when Gemini is unavailable."""
+        if index_tracked and index_tracked != "—":
+            return f"Tracks the {index_tracked}. {holdings_count} holdings for broad market exposure."[:120]
+        return f"A {asset_class.lower()} fund with {holdings_count} holdings."[:120]
+
+    async def _generate_hook_text(
+        self, *, symbol: str, name: str, description: str,
+        asset_class: str, index_tracked: str, holdings_count: int,
+        top_holdings: List[ETFTopHoldingResponse],
+        top_sectors: List[ETFSectorWeightResponse],
+        fallback: str,
+    ) -> str:
+        """
+        Use Gemini to generate ONLY the hook text — one punchy sentence.
+        All structured data (score, tags) comes from FMP.
+        Cached for 1 hour. Returns fallback on any failure.
+        """
+        cache_key = f"etf_hook_{symbol}"
+        cached = _cache_get(cache_key, _AI_CACHE_TTL_SECONDS)
+        if cached:
+            return cached
+
+        try:
+            gemini = get_gemini_client()
+
+            holdings_text = ", ".join(
+                f"{h.symbol} ({h.weight}%)" for h in top_holdings[:5]
+            )
+            sectors_text = ", ".join(
+                f"{s.name} ({s.weight}%)" for s in top_sectors[:3]
+            )
+
+            prompt = f"""Write ONE sentence (max 120 characters) that explains what this ETF does in plain English for a beginner investor.
+
+ETF: {symbol} — {name}
+Asset Class: {asset_class}
+Index Tracked: {index_tracked or 'Actively managed'}
+Holdings: {holdings_count}
+Top Holdings: {holdings_text}
+Top Sectors: {sectors_text}
+Description: {(description or 'N/A')[:200]}
+
+RULES:
+- Max 120 characters total
+- Plain English, no jargon
+- Be direct and specific about what this fund actually does
+- Do NOT start with "This ETF" or "This fund"
+- Output ONLY the sentence, nothing else"""
+
+            ai_response = await gemini.generate_text(
+                prompt=prompt,
+                system_instruction="You are a concise financial writer. Output only the requested sentence.",
+                model_name="gemini-2.5-flash",
+            )
+
+            text = ai_response.get("text", "").strip().strip('"').strip("'")
+            # Remove any markdown or extra content
+            text = text.split("\n")[0].strip()
+
+            if text and len(text) <= 140:
+                hook = text[:120]
+                _cache_set(cache_key, hook)
+                logger.info(f"Generated Gemini hook for ETF {symbol}: {hook}")
+                return hook
+            else:
+                logger.warning(f"Gemini hook too long or empty for {symbol}, using fallback")
+                return fallback
+
+        except Exception as e:
+            logger.warning(f"Gemini hook failed for {symbol}, using fallback: {e}")
+            return fallback
 
 
 # ── Singleton ────────────────────────────────────────────────────

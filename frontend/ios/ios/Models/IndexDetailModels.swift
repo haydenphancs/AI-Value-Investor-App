@@ -434,29 +434,14 @@ extension KeyStatisticsGroup {
             KeyStatistic(label: "Day Low", value: "5,985.30"),
             KeyStatistic(label: "52-Week High", value: "6,128.18")
         ]),
-        // Column 2: Performance
+        // Column 2: Range & Volume
         KeyStatisticsGroup(statistics: [
             KeyStatistic(label: "52-Week Low", value: "4,835.04"),
             KeyStatistic(label: "50-Day Avg", value: "5,942.15"),
             KeyStatistic(label: "200-Day Avg", value: "5,654.38"),
-            KeyStatistic(label: "YTD Return", value: "+4.82%", isHighlighted: true),
-            KeyStatistic(label: "1-Year Return", value: "+24.31%", isHighlighted: true)
-        ]),
-        // Column 3: Fundamentals
-        KeyStatisticsGroup(statistics: [
-            KeyStatistic(label: "P/E (TTM)", value: "28.42"),
-            KeyStatistic(label: "P/E (FWD)", value: "22.15"),
-            KeyStatistic(label: "Dividend Yield", value: "1.28%"),
-            KeyStatistic(label: "Earnings Yield", value: "3.52%"),
-            KeyStatistic(label: "Total Market Cap", value: "48.6T")
-        ]),
-        // Column 4: Volume & Breadth
-        KeyStatisticsGroup(statistics: [
             KeyStatistic(label: "Volume", value: "3.82B"),
             KeyStatistic(label: "Avg. Volume (30D)", value: "4.15B"),
-            KeyStatistic(label: "Constituents", value: "503"),
-            KeyStatistic(label: "Advancers", value: "312"),
-            KeyStatistic(label: "Decliners", value: "191")
+            KeyStatistic(label: "Constituents", value: "503")
         ])
     ]
 }

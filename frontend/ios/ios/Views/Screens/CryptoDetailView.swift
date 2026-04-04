@@ -10,6 +10,7 @@ import SwiftUI
 
 struct CryptoDetailView: View {
     @StateObject private var viewModel: CryptoDetailViewModel
+    @StateObject private var chatViewModel = ChatViewModel()
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
     @State private var showTechnicalAnalysisDetail = false
@@ -195,25 +196,29 @@ struct CryptoDetailView: View {
             SearchView()
                 .preferredColorScheme(.dark)
         }
-        .fullScreenCover(isPresented: $showAIChat) {
-            NavigationView {
-                ZStack {
-                    AppColors.background
-                        .ignoresSafeArea()
-                    ChatTabView(initialPrompt: "Deep Analysis \(cryptoSymbol)", initialStockId: cryptoSymbol)
-                }
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") {
-                            showAIChat = false
+        .sheet(isPresented: $showAIChat) {
+            NavigationStack {
+                ChatConversationView(viewModel: chatViewModel)
+                    .navigationTitle("Ask Cay AI")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { showAIChat = false }
                         }
-                        .foregroundColor(AppColors.primaryBlue)
                     }
-                }
             }
-            .environmentObject(AudioManager.shared)
             .preferredColorScheme(.dark)
+        }
+        .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
+            if let query = newValue {
+                chatViewModel.startNewConversation(
+                    firstMessage: query,
+                    stockId: "\(cryptoSymbol)USD",
+                    context: viewModel.contextForCurrentTab
+                )
+                viewModel.pendingAIQuery = nil
+                showAIChat = true
+            }
         }
     }
 
@@ -296,6 +301,11 @@ struct CryptoDetailView: View {
     }
 
     private func handleDeepResearchTap() {
+        chatViewModel.startNewConversation(
+            firstMessage: "Give me a comprehensive Deep Analysis of \(cryptoSymbol). Analyze the current price action, market position, key risks, and outlook.",
+            stockId: "\(cryptoSymbol)USD",
+            context: viewModel.contextForCurrentTab
+        )
         showAIChat = true
     }
 

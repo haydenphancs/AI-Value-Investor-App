@@ -255,7 +255,7 @@ struct IndexDetailView: View {
                     indexData: indexData,
                     onAIAnalystTap: {
                         chatViewModel.startNewConversation(
-                            firstMessage: "Deep Analysis \(indexSymbol)",
+                            firstMessage: "Give me a comprehensive Market Deep Dive. Analyze the current market valuation, sector rotation patterns, and macroeconomic risks. Include actionable takeaways and what to watch this week.",
                             stockId: indexSymbol,
                             context: viewModel.contextForCurrentTab
                         )

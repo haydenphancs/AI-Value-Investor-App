@@ -20,6 +20,7 @@ enum RichContentType {
     case sentimentAnalysis(SentimentAnalysis)
     case stockPerformance(StockPerformance)
     case stockChart(StockChartWidgetData)
+    case marketOverview(MarketOverviewWidgetData)
     case riskFactors(RiskFactorsData)
     case tip(TipData)
     case bulletPoints([ChatBulletPoint])
@@ -138,6 +139,95 @@ struct HistoricalDataPointDTO: Codable, Identifiable {
     let low: Double
     let close: Double
     let volume: Int
+}
+
+// MARK: - Market Overview Widget Data
+
+struct MarketOverviewSectorEntry: Codable, Identifiable, Sendable {
+    var id: String { sector }
+    let sector: String
+    let changePercent: Double
+
+    var isPositive: Bool { changePercent >= 0 }
+    var formattedChange: String {
+        String(format: "%@%.1f%%", changePercent >= 0 ? "+" : "", changePercent)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sector
+        case changePercent = "change_percent"
+    }
+}
+
+struct MarketOverviewMacroEntry: Codable, Identifiable, Sendable {
+    var id: String { title }
+    let title: String
+    let signal: String  // "positive", "neutral", "cautious"
+
+    enum CodingKeys: String, CodingKey {
+        case title, signal
+    }
+}
+
+struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
+    var id: String { "market_overview_\(peRatio)" }
+
+    let widgetType: String
+    let peRatio: Double
+    let forwardPe: Double
+    let valuationLevel: String
+    let earningsYield: Double
+    let historicalAvgPe: Double
+    let sectors: [MarketOverviewSectorEntry]
+    let advancing: Int
+    let declining: Int
+    let macroIndicators: [MarketOverviewMacroEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case widgetType = "widget_type"
+        case peRatio = "pe_ratio"
+        case forwardPe = "forward_pe"
+        case valuationLevel = "valuation_level"
+        case earningsYield = "earnings_yield"
+        case historicalAvgPe = "historical_avg_pe"
+        case sectors, advancing, declining
+        case macroIndicators = "macro_indicators"
+    }
+}
+
+// MARK: - Polymorphic Widget Decoding
+
+enum ChatWidgetData: Codable, Sendable {
+    case stockChart(StockChartWidgetData)
+    case marketOverview(MarketOverviewWidgetData)
+
+    private enum TypeKey: String, CodingKey {
+        case widgetType = "widget_type"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: TypeKey.self)
+
+        // Try to read widget_type — if missing, fall back to stock_chart
+        let type = try container.decodeIfPresent(String.self, forKey: .widgetType) ?? "stock_chart"
+
+        switch type {
+        case "market_overview":
+            self = .marketOverview(try MarketOverviewWidgetData(from: decoder))
+        default:
+            // Default to stock chart for backward compatibility
+            self = .stockChart(try StockChartWidgetData(from: decoder))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .stockChart(let data):
+            try data.encode(to: encoder)
+        case .marketOverview(let data):
+            try data.encode(to: encoder)
+        }
+    }
 }
 
 // MARK: - Sentiment Analysis
@@ -336,7 +426,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let sessionId: String
     let role: String
     let content: String
-    let widget: StockChartWidgetData?
+    let widget: ChatWidgetData?
     let citations: [ChatCitationDTO]?
     let tokensUsed: Int?
     let createdAt: String
@@ -354,9 +444,14 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         let msgRole: ChatMessageRole = role == "user" ? .user : .assistant
         var richContent: [RichContentType] = []
 
-        // If there's a stock widget, add it first
+        // If there's a widget, add it first (polymorphic)
         if let widget = widget {
-            richContent.append(.stockChart(widget))
+            switch widget {
+            case .stockChart(let data):
+                richContent.append(.stockChart(data))
+            case .marketOverview(let data):
+                richContent.append(.marketOverview(data))
+            }
         }
 
         // Always add the text content

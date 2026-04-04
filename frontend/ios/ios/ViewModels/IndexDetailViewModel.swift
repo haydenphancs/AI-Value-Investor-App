@@ -462,13 +462,19 @@ class IndexDetailViewModel: ObservableObject {
             + "Historical Avg P/E (\(val.historicalPeriod))=\(String(format: "%.0f", val.historicalAvgPE))x"
         )
 
-        // Sector performance
-        let topSectors = snap.sectorPerformance.sectors.prefix(5)
+        // ALL sector performance (not just top 5)
+        let allSectors = snap.sectorPerformance.sectors
             .map { "\($0.sector): \($0.formattedChange)" }
             .joined(separator: ", ")
-        parts.append("TOP SECTORS: \(topSectors)")
+        parts.append("SECTOR PERFORMANCE (\(snap.sectorPerformance.advancingSectors) advancing, \(snap.sectorPerformance.decliningSectors) declining): \(allSectors)")
 
-        // Performance
+        // Macro forecast indicators
+        let macroText = snap.macroForecast.indicators
+            .map { "\($0.title) [\($0.signal.rawValue)]" }
+            .joined(separator: ", ")
+        parts.append("MACRO FORECAST: \(macroText)")
+
+        // Performance periods
         let perfText = data.performancePeriods
             .map { "\($0.label): \(String(format: "%+.2f", $0.changePercent))%" }
             .joined(separator: ", ")

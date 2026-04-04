@@ -22,6 +22,7 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var pendingAIQuery: String?
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
 
@@ -209,8 +210,36 @@ class CommodityDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("AI Query: \(aiInputText)")
+        pendingAIQuery = aiInputText
         aiInputText = ""
+    }
+
+    var contextForCurrentTab: String? {
+        guard let data = commodityData else { return nil }
+        var parts: [String] = []
+        parts.append("COMMODITY CONTEXT:")
+        parts.append("Symbol: \(commoditySymbol)")
+        parts.append("Name: \(data.name)")
+        parts.append("Price: $\(String(format: "%.2f", data.currentPrice))")
+        parts.append("Change: \(String(format: "%+.2f", data.priceChangePercent))%")
+
+        // Key stats
+        let allStats = data.keyStatisticsGroups.flatMap { $0.statistics }
+        if !allStats.isEmpty {
+            let statsText = allStats.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
+            parts.append("KEY STATISTICS: \(statsText)")
+        }
+
+        // Performance
+        let perfText = data.performancePeriods
+            .map { "\($0.label): \(String(format: "%+.2f", $0.changePercent))%" }
+            .joined(separator: ", ")
+        if !perfText.isEmpty {
+            parts.append("PERFORMANCE: \(perfText)")
+        }
+
+        parts.append("User is viewing the \(selectedTab.rawValue) tab.")
+        return parts.joined(separator: "\n")
     }
 
     // MARK: - Computed Properties

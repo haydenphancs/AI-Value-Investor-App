@@ -312,11 +312,11 @@ class ETFService:
 
         # ── Step 1: Parallel FMP fetches ──────────────────────────
         today = datetime.now(tz=timezone.utc).date()
-        from_date = (today - timedelta(days=365 * 5)).isoformat()
+        from_date = "1900-01-01"  # Fetch full history — FMP returns from actual inception
         to_date = today.isoformat()
 
         # Check SPY historical cache (shared across all ETF requests, 1h TTL)
-        sp_cache_key = f"spy_hist:{from_date}:{to_date}"
+        sp_cache_key = f"spy_hist_full:{to_date}"
         cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
 
         # Build tasks — add SPY fetch only if not cached
@@ -558,7 +558,7 @@ class ETFService:
         )
 
         # ── Step 14: Benchmark summary (proper CAGR) ────────────────
-        benchmark = self._build_benchmark_summary(historical, spy_hist)
+        benchmark = self._build_benchmark_summary(historical, spy_hist, symbol=symbol, index_tracked=index_tracked)
 
         # ── Assemble response ─────────────────────────────────────
         response = ETFDetailResponse(
@@ -1106,44 +1106,51 @@ class ETFService:
     # ── Benchmark summary builder (proper CAGR) ──────────────────
 
     def _build_benchmark_summary(
-        self, etf_hist: List[Dict], spy_hist: List[Dict]
+        self, etf_hist: List[Dict], spy_hist: List[Dict],
+        *, symbol: str = "", index_tracked: str = "",
     ) -> Optional[BenchmarkSummaryResponse]:
-        """Compute annualized (CAGR) returns for ETF vs S&P 500.
-        Follows same pattern as stock_overview_service._build_benchmark_summary."""
+        """Compute annualized (CAGR) returns since inception for ETF vs S&P 500.
+
+        Each uses its OWN full history independently:
+          - ETF CAGR: from ETF's first available date to today
+          - S&P CAGR: from S&P's first available date to today
+        The "Since" dates will differ (e.g. SPY since 2006, S&P since 1993).
+        """
         if not etf_hist or len(etf_hist) < 252:
             return None
 
-        # Use up to 5 years of data
-        days = min(len(etf_hist) - 1, 1260)
-        years = days / 252
+        # ── ETF: CAGR from its own first available date ──────────
+        etf_days = len(etf_hist) - 1
+        etf_years = etf_days / 252
 
-        etf_start = etf_hist[-(days + 1)].get("close") or etf_hist[-(days + 1)].get("adjClose")
+        etf_start = etf_hist[0].get("close") or etf_hist[0].get("adjClose")
         etf_end = etf_hist[-1].get("close") or etf_hist[-1].get("adjClose")
+        etf_start_date = etf_hist[0].get("date", "")
 
-        if not etf_start or not etf_end or etf_start <= 0:
+        if not etf_start or not etf_end or etf_start <= 0 or etf_years <= 0:
             return None
 
-        etf_annual = ((etf_end / etf_start) ** (1 / years) - 1) * 100
+        etf_annual = ((etf_end / etf_start) ** (1 / etf_years) - 1) * 100
 
+        # ── S&P 500: CAGR from its own first available date ─────
         sp_annual = 0.0
-        if spy_hist and len(spy_hist) > days:
-            sp_start = spy_hist[-(days + 1)].get("close") or spy_hist[-(days + 1)].get("adjClose")
-            sp_end = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
-            if sp_start and sp_end and sp_start > 0:
-                sp_annual = ((sp_end / sp_start) ** (1 / years) - 1) * 100
-
-        # Extract start dates for context
-        etf_start_date = etf_hist[-(days + 1)].get("date", "")
         sp_start_date = ""
-        if spy_hist and len(spy_hist) > days:
-            sp_start_date = spy_hist[-(days + 1)].get("date", "")
+        if spy_hist and len(spy_hist) >= 252:
+            sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
+            sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
+            sp_start_date = spy_hist[0].get("date", "")
+            sp_days = len(spy_hist) - 1
+            sp_years = sp_days / 252
+
+            if sp_start_price and sp_end_price and sp_start_price > 0 and sp_years > 0:
+                sp_annual = ((sp_end_price / sp_start_price) ** (1 / sp_years) - 1) * 100
 
         return BenchmarkSummaryResponse(
             avg_annual_return=round(etf_annual, 1),
             sp_benchmark=round(sp_annual, 1),
             benchmark_name="S&P 500",
-            since_date=etf_start_date,
-            benchmark_since_date=sp_start_date,
+            since_date=_format_date_readable(etf_start_date),
+            benchmark_since_date=None,
             badge_threshold=0.0,
         )
 

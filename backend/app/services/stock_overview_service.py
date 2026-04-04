@@ -400,11 +400,11 @@ class StockOverviewService:
     async def _fetch_fundamentals(self, ticker: str) -> Dict[str, Any]:
         """Parallel FMP calls for all fundamental/slow-moving data."""
         today = datetime.now(tz=timezone.utc).date()
-        from_date_10y = (today - timedelta(days=365 * 10 + 30)).isoformat()
+        from_date_full = "1900-01-01"  # Fetch full history — FMP returns from actual IPO
         to_date = today.isoformat()
 
         # SPY historical (separate 1h cache)
-        sp_cache_key = f"spy_hist:{from_date_10y}:{to_date}"
+        sp_cache_key = f"spy_hist_full:{to_date}"
         cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
 
         tasks = [
@@ -420,14 +420,14 @@ class StockOverviewService:
             self.fmp.get_income_statement(ticker, period="quarter", limit=4),    # 9
             get_short_interest(ticker),                                          # 10
             self.fmp.get_sector_performance(),                                   # 11
-            self.fmp.get_historical_prices(ticker, from_date_10y, to_date),     # 12
+            self.fmp.get_historical_prices(ticker, from_date_full, to_date),     # 12
             self.fmp.get_industry_performance(),                                 # 13
         ]
 
         spy_task_idx = None
         if cached_spy is None:
             spy_task_idx = len(tasks)
-            tasks.append(self.fmp.get_historical_prices("SPY", from_date_10y, to_date))
+            tasks.append(self.fmp.get_historical_prices("SPY", from_date_full, to_date))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1416,40 +1416,64 @@ class StockOverviewService:
     def _build_benchmark_summary(
         self, stock_hist: List[Dict], spy_hist: List[Dict]
     ) -> Optional[BenchmarkSummaryResponse]:
+        """Compute annualized (CAGR) returns since inception vs S&P 500."""
         if not stock_hist or len(stock_hist) < 252:
             return None
 
-        # Use 5-year data for annualized return if available
-        days = min(len(stock_hist) - 1, 1260)  # up to 5 years
+        # Use ALL available data (from IPO/inception)
+        days = len(stock_hist) - 1
         years = days / 252
 
-        stock_start = stock_hist[-(days + 1)].get("close") or stock_hist[-(days + 1)].get("adjClose")
+        stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
         stock_end = stock_hist[-1].get("close") or stock_hist[-1].get("adjClose")
 
-        if not stock_start or not stock_end or stock_start <= 0:
+        if not stock_start or not stock_end or stock_start <= 0 or years <= 0:
             return None
 
         stock_annual = ((stock_end / stock_start) ** (1 / years) - 1) * 100
 
+        # S&P 500: match the stock's start date
+        stock_start_date = stock_hist[0].get("date", "")
         sp_annual = 0.0
-        if spy_hist and len(spy_hist) > days:
-            sp_start = spy_hist[-(days + 1)].get("close") or spy_hist[-(days + 1)].get("adjClose")
-            sp_end = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
-            if sp_start and sp_end and sp_start > 0:
-                sp_annual = ((sp_end / sp_start) ** (1 / years) - 1) * 100
+        sp_start_date_display = ""
+        if spy_hist:
+            sp_start_price = None
+            sp_start_found_date = ""
+            for p in spy_hist:
+                if p.get("date", "") >= stock_start_date:
+                    sp_start_price = p.get("close") or p.get("adjClose")
+                    sp_start_found_date = p.get("date", "")
+                    break
+            sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
 
-        # Extract start dates for context
-        stock_start_date = stock_hist[-(days + 1)].get("date", "")
-        sp_start_date = ""
-        if spy_hist and len(spy_hist) > days:
-            sp_start_date = spy_hist[-(days + 1)].get("date", "")
+            if sp_start_price and sp_end_price and sp_start_price > 0:
+                sp_days = 0
+                for i, p in enumerate(spy_hist):
+                    if p.get("date", "") >= sp_start_found_date:
+                        sp_days = len(spy_hist) - 1 - i
+                        break
+                sp_years = sp_days / 252 if sp_days > 0 else years
+                sp_annual = ((sp_end_price / sp_start_price) ** (1 / sp_years) - 1) * 100
+
+                from datetime import datetime as _dt
+                try:
+                    sp_start_date_display = _dt.strptime(sp_start_found_date, "%Y-%m-%d").strftime("%b %d, %Y")
+                except (ValueError, TypeError):
+                    sp_start_date_display = sp_start_found_date
+
+        # Format start date
+        try:
+            from datetime import datetime as _dt
+            stock_start_display = _dt.strptime(stock_start_date, "%Y-%m-%d").strftime("%b %d, %Y")
+        except (ValueError, TypeError):
+            stock_start_display = stock_start_date
 
         return BenchmarkSummaryResponse(
             avg_annual_return=round(stock_annual, 1),
             sp_benchmark=round(sp_annual, 1),
             benchmark_name="S&P 500",
-            since_date=stock_start_date,
-            benchmark_since_date=sp_start_date,
+            since_date=stock_start_display,
+            benchmark_since_date=sp_start_date_display or stock_start_display,
             badge_threshold=0.0,
         )
 

@@ -122,14 +122,17 @@ async def send_chat_message(
 ):
     """Send a message and get AI response with RAG."""
     # Verify session ownership
-    session = (
-        supabase.table("chat_sessions")
-        .select("*")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    )
+    try:
+        session = (
+            supabase.table("chat_sessions")
+            .select("*")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Chat session not found")
 
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")

@@ -114,7 +114,7 @@ async def get_current_user_or_guest(
             except Exception:
                 pass
 
-    return {"id": str(uuid.uuid4()), "email": "guest@local", "tier": "free"}
+    return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 
 
 class RateLimitChecker:

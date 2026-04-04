@@ -7,6 +7,7 @@ Frontend: GET /indices/{symbol}?range=3M&interval=daily
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 import logging
+import traceback
 
 from app.services.index_service import get_index_service
 from app.schemas.index import IndexDetailResponse
@@ -28,6 +29,9 @@ async def get_index_detail(
 ):
     """
     Get comprehensive index detail data.
+
+    Cache-aside: Returns Supabase-cached data if fresh (< 24h),
+    otherwise fetches live from FMP + Gemini and caches.
     """
     # Normalize symbol
     if not symbol.startswith("^") and not symbol.startswith("%5E"):
@@ -44,8 +48,17 @@ async def get_index_detail(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Index detail failed for {symbol}: {e}", exc_info=True)
+        tb = traceback.format_exc()
+        logger.error(
+            f"Index detail failed for {symbol} "
+            f"(range={chart_range}, interval={interval}): {e}\n{tb}"
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Index data service unavailable for {symbol}",
+            detail={
+                "error": "index_data_unavailable",
+                "symbol": symbol,
+                "reason": str(e),
+                "hint": "Check FMP API key, network, or Supabase connectivity.",
+            },
         )

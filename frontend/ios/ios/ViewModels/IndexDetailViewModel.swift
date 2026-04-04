@@ -29,17 +29,30 @@ class IndexDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .threeMonths
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var pendingAIQuery: String?
 
     // Analysis tab state
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
+    @Published var chartEventDates: ChartEventDates?
+
+    // Live Price
+    let livePriceManager = LivePriceWebSocketManager()
+
+    // News pagination
+    @Published var isNewsLoading: Bool = false
+    @Published var hasMoreNews: Bool = false
+    private var allNewsArticles: [TickerNewsArticle] = []
+    private var newsDisplayCount: Int = 10
+    private let newsPageSize: Int = 10
 
     // MARK: - Private Properties
 
     private let indexSymbol: String
     private var cancellables = Set<AnyCancellable>()
+    private var chartRefreshTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -53,6 +66,13 @@ class IndexDetailViewModel: ObservableObject {
             .sink { [weak self] newRange in
                 guard let self = self else { return }
                 self.chartSettings.selectedInterval = newRange.defaultInterval
+
+                if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                    self.startChartRefreshTimer()
+                } else {
+                    self.stopChartRefreshTimer()
+                }
+
                 Task {
                     await self.loadChartData(range: newRange)
                 }
@@ -68,6 +88,35 @@ class IndexDetailViewModel: ObservableObject {
                 Task {
                     await self.loadChartData(range: self.selectedChartRange)
                 }
+            }
+            .store(in: &cancellables)
+
+        // Observe live price updates → update indexData in real-time
+        livePriceManager.$livePrice
+            .compactMap { $0 }
+            .sink { [weak self] newPrice in
+                guard let self = self, var data = self.indexData else { return }
+                data.currentPrice = newPrice
+                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
+                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+
+                // Update last chart candle for intraday ranges
+                if self.chartSettings.selectedInterval.isIntraday,
+                   !data.chartPricePoints.isEmpty {
+                    let lastIndex = data.chartPricePoints.count - 1
+                    let last = data.chartPricePoints[lastIndex]
+                    let updatedPoint = StockPricePoint(
+                        date: last.date,
+                        close: newPrice,
+                        open: last.open,
+                        high: max(last.high ?? newPrice, newPrice),
+                        low: min(last.low ?? newPrice, newPrice),
+                        volume: last.volume
+                    )
+                    data.chartPricePoints[lastIndex] = updatedPoint
+                }
+
+                self.indexData = data
             }
             .store(in: &cancellables)
     }
@@ -119,16 +168,63 @@ class IndexDetailViewModel: ObservableObject {
 
     func handleSuggestionTap(_ suggestion: IndexAISuggestion) {
         aiInputText = suggestion.text
+        handleAISend()
     }
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("🤖 [IndexDetailVM] AI Query for \(indexSymbol): \(aiInputText)")
+        let query = aiInputText
         aiInputText = ""
+        print("🤖 [IndexDetailVM] AI Query for \(indexSymbol): \(query)")
+        pendingAIQuery = query
     }
 
     func updateChartRange(_ range: ChartTimeRange) {
         selectedChartRange = range
+    }
+
+    // MARK: - Live Price
+
+    func connectLivePrice() {
+        guard let token = KeychainService.shared.get("access_token") else { return }
+        livePriceManager.connect(ticker: indexSymbol, authToken: token)
+    }
+
+    func disconnectLivePrice() {
+        livePriceManager.disconnect()
+        stopChartRefreshTimer()
+    }
+
+    // MARK: - Chart Refresh Timer
+
+    private func startChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                guard self.chartSettings.selectedInterval.isIntraday,
+                      MarketHoursUtil.isMarketActive() else { continue }
+
+                await self.loadChartData(range: self.selectedChartRange)
+            }
+        }
+    }
+
+    private func stopChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = nil
+    }
+
+    // MARK: - News Pagination
+
+    func loadMoreNews() {
+        guard !isNewsLoading, hasMoreNews else { return }
+        newsDisplayCount += newsPageSize
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        hasMoreNews = newsDisplayCount < allNewsArticles.count
     }
 
     // MARK: - Analysis Tab Handlers
@@ -218,7 +314,12 @@ class IndexDetailViewModel: ObservableObject {
             // Map DTOs → display models
             self.indexData = response.toDisplayModel()
             self.chartDataVersion += 1
-            self.newsArticles = response.toNewsArticles()
+
+            // News with pagination
+            self.allNewsArticles = response.toNewsArticles()
+            self.newsDisplayCount = newsPageSize
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
 
             // Analysis data is not yet served by the backend — use sample
             self.analystRatingsData = AnalystRatingsData.sampleData
@@ -226,6 +327,10 @@ class IndexDetailViewModel: ObservableObject {
             self.technicalAnalysisData = TechnicalAnalysisData.sampleData
 
             self.isLoading = false
+
+            // Connect live price after successful data load
+            self.connectLivePrice()
+            self.startChartRefreshTimer()
 
             print("✅ [IndexDetailVM] Index detail loaded in \(elapsed)s")
             print("   💰 Price: \(response.currentPrice) | Change: \(response.priceChange) (\(response.priceChangePercent)%)")
@@ -296,5 +401,101 @@ class IndexDetailViewModel: ObservableObject {
             technicalAnalysisData = TechnicalAnalysisData.sampleData
             print("🔄 [IndexDetailVM] Using fallback sample analysis")
         }
+    }
+
+    // MARK: - AI Context Builders
+
+    /// Contextual information injected into "Ask Cay AI" chat sessions.
+    var contextForCurrentTab: String? {
+        var sections: [String] = []
+
+        if let base = baseIndexContext {
+            sections.append(base)
+        }
+
+        switch selectedTab {
+        case .overview:
+            if let ctx = overviewContext { sections.append(ctx) }
+        case .news:
+            if let ctx = newsContext { sections.append(ctx) }
+        case .analysis:
+            if let ctx = analysisContext { sections.append(ctx) }
+        }
+
+        sections.append("User is viewing the \(selectedTab.rawValue) tab of the index detail screen.")
+
+        return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
+    }
+
+    private var baseIndexContext: String? {
+        guard let data = indexData else { return nil }
+        return """
+        INDEX CONTEXT:
+        Symbol: \(data.symbol)
+        Name: \(data.indexName)
+        Current Price: \(data.formattedPrice)
+        Change: \(data.formattedChange) \(data.formattedChangePercent)
+        Constituents: \(data.indexProfile.numberOfConstituents)
+        Weighting: \(data.indexProfile.weightingMethodology)
+        Provider: \(data.indexProfile.indexProvider)
+        """
+    }
+
+    private var overviewContext: String? {
+        guard let data = indexData else { return nil }
+        let snap = data.snapshotsData
+
+        var parts: [String] = []
+
+        // Key stats summary
+        let allStats = data.keyStatisticsGroups.flatMap { $0.statistics }
+        let statsText = allStats.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
+        parts.append("KEY STATISTICS: \(statsText)")
+
+        // Valuation
+        let val = snap.valuation
+        parts.append(
+            "VALUATION: P/E(TTM)=\(String(format: "%.1f", val.peRatio))x, "
+            + "Forward P/E=\(String(format: "%.1f", val.forwardPE))x, "
+            + "Earnings Yield=\(String(format: "%.2f", val.earningsYield))%, "
+            + "Level=\(val.level.rawValue), "
+            + "Historical Avg P/E (\(val.historicalPeriod))=\(String(format: "%.0f", val.historicalAvgPE))x"
+        )
+
+        // Sector performance
+        let topSectors = snap.sectorPerformance.sectors.prefix(5)
+            .map { "\($0.sector): \($0.formattedChange)" }
+            .joined(separator: ", ")
+        parts.append("TOP SECTORS: \(topSectors)")
+
+        // Performance
+        let perfText = data.performancePeriods
+            .map { "\($0.label): \(String(format: "%+.2f", $0.changePercent))%" }
+            .joined(separator: ", ")
+        parts.append("PERFORMANCE: \(perfText)")
+
+        return parts.joined(separator: "\n")
+    }
+
+    private var newsContext: String? {
+        guard !newsArticles.isEmpty else { return nil }
+        let headlines = newsArticles.prefix(5)
+            .map { "- \($0.headline) [\($0.sentiment.rawValue)]" }
+            .joined(separator: "\n")
+        return "RECENT NEWS:\n\(headlines)"
+    }
+
+    private var analysisContext: String? {
+        var parts: [String] = []
+        if let ratings = analystRatingsData {
+            parts.append("ANALYST CONSENSUS: \(ratings.consensus.rawValue), Target: \(ratings.formattedTargetPrice) (\(ratings.formattedUpside))")
+        }
+        if let sentiment = sentimentAnalysisData {
+            parts.append("SENTIMENT: Mood=\(sentiment.moodScore)/100 (\(sentiment.last24hMood.rawValue))")
+        }
+        if let tech = technicalAnalysisData {
+            parts.append("TECHNICAL: Signal=\(tech.overallSignal.rawValue)")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 }

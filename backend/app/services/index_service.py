@@ -15,6 +15,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
     BenchmarkSummaryResponse,
+    ChartDataPointResponse,
     IndexDetailResponse,
     IndexNewsArticleResponse,
     IndexProfileResponse,
@@ -29,6 +30,7 @@ from app.schemas.index import (
     SectorPerformanceSnapshotResponse,
     ValuationSnapshotResponse,
 )
+from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -222,11 +224,78 @@ def _get_market_status() -> MarketStatusResponse:
 # ── Main service ─────────────────────────────────────────────────
 
 
+_INDEX_DB_TTL_HOURS = 24
+
+
 class IndexService:
     """Aggregates FMP data + Gemini AI for the Index Detail screen."""
 
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
+        self.supabase = get_supabase()
+
+    # ── Supabase cache-aside ────────────────────────────────────
+
+    def _check_db_cache(self, symbol: str, chart_range: str) -> Optional[Dict]:
+        """Check Supabase index_detail_cache (24h TTL)."""
+        cache_key = f"{symbol}_{chart_range}"
+        try:
+            row = (
+                self.supabase.table("index_detail_cache")
+                .select("response_json, cached_at")
+                .eq("cache_key", cache_key)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                logger.info(f"Index cache MISS for {cache_key}")
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(
+                cached_at_str.replace("Z", "+00:00")
+            )
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=_INDEX_DB_TTL_HOURS):
+                logger.info(
+                    f"Index cache STALE (age={age}) for {cache_key}"
+                )
+                return None
+
+            data = entry.get("response_json")
+            if data and isinstance(data, dict):
+                logger.info(f"Index cache HIT for {cache_key} (age={age})")
+                return data
+            return None
+        except Exception as e:
+            logger.warning(f"Index cache check failed for {cache_key}: {e}")
+            return None
+
+    def _upsert_db_cache(
+        self, symbol: str, chart_range: str, data: Dict
+    ) -> None:
+        """Upsert index detail response into Supabase cache."""
+        cache_key = f"{symbol}_{chart_range}"
+        try:
+            self.supabase.table("index_detail_cache").upsert(
+                {
+                    "cache_key": cache_key,
+                    "symbol": symbol,
+                    "chart_range": chart_range,
+                    "response_json": data,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="cache_key",
+            ).execute()
+            logger.info(f"Index detail cached in Supabase for {cache_key}")
+        except Exception as e:
+            logger.warning(f"Index cache upsert failed for {cache_key}: {e}")
+
+    # ── Main entry point ────────────────────────────────────────
 
     async def get_index_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -234,13 +303,20 @@ class IndexService:
         """
         Fetch and assemble complete index detail data.
 
-        Steps:
-          1. Fetch FMP quote, historical prices, sector performance in parallel
-          2. Compute key statistics and performance periods
-          3. Build AI-enhanced snapshots (valuation, sector, macro)
-          4. Fetch news articles
-          5. Assemble and return the response
+        Cache-aside: Check Supabase first. If hit & fresh (< 24h), return
+        cached data. Otherwise fetch live, cache, and return.
         """
+        # ── Step 0: Check Supabase cache ─────────────────────────
+        cached = self._check_db_cache(symbol, chart_range)
+        if cached:
+            try:
+                return IndexDetailResponse(**cached)
+            except Exception as e:
+                logger.warning(
+                    f"Cached data deserialization failed for {symbol}: {e}"
+                )
+                # Fall through to live fetch
+
         profile_meta = _INDEX_PROFILES.get(
             symbol.upper(),
             _INDEX_PROFILES.get("^GSPC"),  # fallback to S&P 500
@@ -289,6 +365,12 @@ class IndexService:
         historical.sort(key=lambda p: p.get("date", ""))
 
         # ── Step 2: Extract quote data ────────────────────────────
+        if isinstance(quote, Exception) or not quote:
+            logger.error(
+                f"Quote data unavailable for {symbol}. "
+                f"FMP returned: {type(quote).__name__}={quote}. "
+                f"Check that FMP API key is valid and symbol '{symbol}' exists."
+            )
         price = quote.get("price") or 0
         change = quote.get("change") or 0
         change_pct = quote.get("changesPercentage") or 0
@@ -321,7 +403,19 @@ class IndexService:
         from app.services.chart_helper import fetch_chart_data, resolve_interval
         resolved = resolve_interval(chart_range, interval)
         if resolved != "daily" or chart_range == "ALL":
-            chart_data = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+            raw_chart = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+            chart_data = [
+                ChartDataPointResponse(
+                    date=p.get("date"),
+                    open=p.get("open"),
+                    high=p.get("high"),
+                    low=p.get("low"),
+                    close=round(float(p.get("close", 0)), 2),
+                    volume=p.get("volume"),
+                )
+                for p in raw_chart
+                if p.get("close") and float(p.get("close", 0)) > 0
+            ]
         else:
             chart_data = self._extract_chart_data(historical, chart_range)
 
@@ -387,7 +481,7 @@ class IndexService:
             sp_benchmark=profile_meta.get("avg_annual_return", 10.5),
         )
 
-        return IndexDetailResponse(
+        response = IndexDetailResponse(
             symbol=symbol.upper(),
             index_name=index_name,
             current_price=price,
@@ -402,6 +496,16 @@ class IndexService:
             benchmark_summary=benchmark,
             news_articles=news_articles,
         )
+
+        # ── Step 11: Cache in Supabase ───────────────────────────
+        try:
+            self._upsert_db_cache(
+                symbol.upper(), chart_range, response.model_dump()
+            )
+        except Exception as e:
+            logger.warning(f"Failed to cache index detail for {symbol}: {e}")
+
+        return response
 
     # ── Chart helpers ────────────────────────────────────────────
 
@@ -421,7 +525,7 @@ class IndexService:
 
     def _extract_chart_data(
         self, historical: List[Dict], chart_range: str
-    ) -> List[Dict]:
+    ) -> List[ChartDataPointResponse]:
         """Extract OHLCV data for chart, filtered by range."""
         if not historical:
             return []
@@ -439,14 +543,14 @@ class IndexService:
             if p.get("date", "") >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
-                    result.append({
-                        "date": p.get("date"),
-                        "open": p.get("open"),
-                        "high": p.get("high"),
-                        "low": p.get("low"),
-                        "close": round(float(close), 2),
-                        "volume": p.get("volume"),
-                    })
+                    result.append(ChartDataPointResponse(
+                        date=p.get("date"),
+                        open=p.get("open"),
+                        high=p.get("high"),
+                        low=p.get("low"),
+                        close=round(float(close), 2),
+                        volume=p.get("volume"),
+                    ))
         return result
 
     # ── Key statistics builder ───────────────────────────────────
@@ -475,11 +579,13 @@ class IndexService:
                     label="YTD Return",
                     value=_pct(ytd_return) if ytd_return else "—",
                     is_highlighted=True,
+                    color_state="bullish" if ytd_return and ytd_return >= 0 else "bearish" if ytd_return else None,
                 ),
                 KeyStatisticItem(
                     label="1-Year Return",
                     value=_pct(one_year_return) if one_year_return else "—",
                     is_highlighted=True,
+                    color_state="bullish" if one_year_return and one_year_return >= 0 else "bearish" if one_year_return else None,
                 ),
             ]),
             # Column 3: Fundamentals
@@ -606,7 +712,7 @@ class IndexService:
     async def _generate_ai_stories(
         self, *, symbol, index_name, pe, forward_pe, earnings_yield,
         val_label, historical_avg_pe, historical_period, sectors,
-    ) -> Tuple[str, str, List[MacroForecastItemResponse]]:
+    ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
         """
         Try Gemini for AI-generated stories. Fall back to templates on failure.
         Returns (valuation_story, sector_story, macro_story, macro_indicators).

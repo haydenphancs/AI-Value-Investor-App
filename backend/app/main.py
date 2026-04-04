@@ -38,14 +38,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 
-    # Pre-warm ApeWisdom social mentions cache at startup
-    asyncio.create_task(_warm_social_cache())
+    # Skip heavy background tasks in local dev — Railway handles them.
+    # Local server is a lightweight dev mirror that reads from the same
+    # Supabase caches that Railway populates.
+    is_local_dev = settings.ENVIRONMENT == "development"
+    if is_local_dev:
+        logger.info("Local dev mode — skipping background tasks (Railway handles them)")
+    else:
+        # Pre-warm ApeWisdom social mentions cache at startup
+        asyncio.create_task(_warm_social_cache())
 
-    # Start background news pre-warmer for popular watchlist tickers
-    asyncio.create_task(_run_news_pre_warmer())
+        # Start background news pre-warmer for popular watchlist tickers
+        asyncio.create_task(_run_news_pre_warmer())
 
-    # Start background sector benchmark computation (daily)
-    asyncio.create_task(_run_sector_benchmark_job())
+        # Start background sector benchmark computation (daily)
+        asyncio.create_task(_run_sector_benchmark_job())
 
     yield
 

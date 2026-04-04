@@ -45,6 +45,9 @@ struct iosApp: App {
                     guard !isConfigured else { return }
                     isConfigured = true
 
+                    // Resolve backend URL (local vs Railway) before APIClient initializes
+                    await ServerEnvironmentManager.shared.resolve()
+
                     // Get services (APIClient.shared is safe to access in async context)
                     let apiClient = APIClient.shared
                     let authService = AuthService(apiClient: apiClient)

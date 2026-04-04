@@ -457,6 +457,23 @@ class FMPClient:
             logger.warning(f"S&P 500 constituents fetch failed: {e}")
             return []
 
+    async def get_index_constituents(self, symbol: str) -> List[Dict[str, Any]]:
+        """Get constituent list for a given index symbol."""
+        endpoint_map = {
+            "^GSPC": "sp500-constituent",
+            "^DJI": "dowjones-constituent",
+            "^IXIC": "nasdaq-constituent",
+        }
+        endpoint = endpoint_map.get(symbol.upper())
+        if not endpoint:
+            return []
+        try:
+            data = await self._make_request(endpoint)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Index constituents fetch failed for {symbol}: {e}")
+            return []
+
     async def get_stock_news(
         self,
         ticker: Optional[str] = None,

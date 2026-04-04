@@ -2,7 +2,9 @@
 //  IndexDetailSnapshotsSection.swift
 //  ios
 //
-//  Organism: Snapshots section for Index Detail — Valuation, Sector Performance, Systemic Risk
+//  Organism: Unified Snapshots section for Index Detail
+//  Combines Valuation, Sector Performance, and Macro Forecast
+//  in a single container matching the Ticker Detail pattern.
 //
 
 import SwiftUI
@@ -10,24 +12,64 @@ import SwiftUI
 struct IndexDetailSnapshotsSection: View {
     let snapshotsData: IndexSnapshotsData
     var onAIAnalystTap: (() -> Void)?
+    @State private var showInfoSheet: Bool = false
+
+    private var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        formatter.timeZone = TimeZone(identifier: "America/New_York")
+        return formatter.string(from: snapshotsData.generatedDate)
+    }
 
     var body: some View {
-        LazyVStack(spacing: AppSpacing.lg) {
-            // 1. Valuation
-            ValuationSnapshotCard(valuation: snapshotsData.valuation)
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Section header
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                HStack {
+                    Text("Market Snapshots")
+                        .font(AppTypography.heading)
+                        .foregroundColor(AppColors.textPrimary)
 
-            // 2. Sector Performance
-            SectorPerformanceSnapshotCard(sectorPerformance: snapshotsData.sectorPerformance)
+                    Spacer()
 
-            // 3. Macro Forecast
-            MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
+                    Button(action: { showInfoSheet = true }) {
+                        Text("What's this?")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+
+                Text("For all indices")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+
+                Text("Updated on \(formattedDate) ET")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+
+            // Expandable snapshot cards
+            VStack(spacing: 0) {
+                ValuationSnapshotCard(valuation: snapshotsData.valuation)
+                SectorPerformanceSnapshotCard(sectorPerformance: snapshotsData.sectorPerformance)
+                MacroForecastSnapshotCard(macroForecast: snapshotsData.macroForecast)
+            }
 
             // AI Analyst button
             AIDeepResearchButton {
                 onAIAnalystTap?()
             }
-
-
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .fill(AppColors.cardBackground)
+        )
+        .sheet(isPresented: $showInfoSheet) {
+            IndexSnapshotsInfoSheet()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 }
@@ -38,13 +80,13 @@ struct IndexDetailSnapshotsSection: View {
 
 struct ValuationSnapshotCard: View {
     let valuation: IndexValuationSnapshot
-    @State private var isExpanded: Bool = true
+    @State private var isExpanded: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        VStack(alignment: .leading, spacing: 0) {
             // Header
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(.easeInOut(duration: 0.25)) {
                     isExpanded.toggle()
                 }
             }) {
@@ -59,21 +101,15 @@ struct ValuationSnapshotCard: View {
                             .foregroundColor(valuation.level.color)
                     }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Valuation")
-                            .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
-
-                        Text(valuation.level.rawValue)
-                            .font(AppTypography.caption)
-                            .foregroundColor(valuation.level.color)
-                    }
+                    Text("Valuation")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
 
-                    // P/E badge
-                    Text("\(String(format: "%.1f", valuation.peRatio))x P/E")
-                        .font(AppTypography.labelSmallEmphasis)
+                    // Valuation level badge
+                    Text(valuation.level.rawValue)
+                        .font(AppTypography.caption)
                         .foregroundColor(valuation.level.color)
                         .padding(.horizontal, AppSpacing.sm)
                         .padding(.vertical, AppSpacing.xxs)
@@ -84,35 +120,40 @@ struct ValuationSnapshotCard: View {
                         .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
+                .padding(.vertical, AppSpacing.md)
             }
             .buttonStyle(PlainButtonStyle())
 
             if isExpanded {
-                // Tier bar
-                ValuationTierBar(tiers: valuation.tiers, gaugePosition: valuation.gaugePosition)
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // Tier bar
+                    ValuationTierBar(tiers: valuation.tiers, gaugePosition: valuation.gaugePosition)
 
-                // Key metrics row
-                HStack(spacing: 0) {
-                    ValuationMetricPill(label: "P/E (TTM)", value: String(format: "%.1fx", valuation.peRatio))
-                    Spacer()
-                    ValuationMetricPill(label: "Fwd P/E", value: String(format: "%.1fx", valuation.forwardPE))
-                    Spacer()
-                    ValuationMetricPill(label: "10Y Avg", value: String(format: "%.0fx", valuation.historicalAvgPE))
+                    // Key metrics row
+                    HStack(spacing: 0) {
+                        ValuationMetricPill(label: "P/E (TTM)", value: String(format: "%.1fx", valuation.peRatio))
+                        Spacer()
+                        ValuationMetricPill(label: "Fwd P/E", value: String(format: "%.1fx", valuation.forwardPE))
+                        Spacer()
+                        ValuationMetricPill(label: "10Y Avg", value: String(format: "%.0fx", valuation.historicalAvgPE))
+                    }
+
+                    // Story
+                    Text(valuation.resolvedStory)
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                // Story
-                Text(valuation.resolvedStory)
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, AppSpacing.md)
+                .transition(.opacity)
             }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
     }
 }
 
@@ -123,11 +164,9 @@ struct ValuationTierBar: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
-            // Gauge bar
             GeometryReader { geometry in
                 let width = geometry.size.width
                 ZStack(alignment: .leading) {
-                    // Background segments
                     HStack(spacing: 2) {
                         ForEach(tiers) { tier in
                             RoundedRectangle(cornerRadius: 3)
@@ -136,7 +175,6 @@ struct ValuationTierBar: View {
                         }
                     }
 
-                    // Position indicator
                     Circle()
                         .fill(Color.white)
                         .frame(width: 14, height: 14)
@@ -146,7 +184,6 @@ struct ValuationTierBar: View {
             }
             .frame(height: 14)
 
-            // Labels below
             HStack(spacing: 2) {
                 ForEach(tiers) { tier in
                     VStack(spacing: 2) {
@@ -191,7 +228,7 @@ struct ValuationMetricPill: View {
 
 struct SectorPerformanceSnapshotCard: View {
     let sectorPerformance: IndexSectorPerformanceSnapshot
-    @State private var isExpanded: Bool = true
+    @State private var isExpanded: Bool = false
 
     private let columns = [
         GridItem(.flexible(), spacing: AppSpacing.sm),
@@ -199,10 +236,10 @@ struct SectorPerformanceSnapshotCard: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        VStack(alignment: .leading, spacing: 0) {
             // Header
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(.easeInOut(duration: 0.25)) {
                     isExpanded.toggle()
                 }
             }) {
@@ -217,54 +254,62 @@ struct SectorPerformanceSnapshotCard: View {
                             .foregroundColor(AppColors.primaryBlue)
                     }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Sector Performance")
-                            .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
-
-                        HStack(spacing: AppSpacing.xs) {
-                            Text("\(sectorPerformance.advancingSectors) up")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.bullish)
-                            Text("\u{00B7}")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-                            Text("\(sectorPerformance.decliningSectors) down")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.bearish)
-                        }
-                    }
+                    Text("Sector Performance")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
+
+                    // Advancing/declining badge
+                    HStack(spacing: AppSpacing.xs) {
+                        Text("\(sectorPerformance.advancingSectors) up")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.bullish)
+                        Text("\u{00B7}")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                        Text("\(sectorPerformance.decliningSectors) down")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.bearish)
+                    }
+                    .padding(.horizontal, AppSpacing.sm)
+                    .padding(.vertical, AppSpacing.xxs)
+                    .background(AppColors.primaryBlue.opacity(0.15))
+                    .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
+                .padding(.vertical, AppSpacing.md)
             }
             .buttonStyle(PlainButtonStyle())
 
             if isExpanded {
-                // Sector grid
-                LazyVGrid(columns: columns, spacing: AppSpacing.sm) {
-                    ForEach(sectorPerformance.sectors) { sector in
-                        SectorPerformanceBlock(sector: sector)
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // Sector grid
+                    LazyVGrid(columns: columns, spacing: AppSpacing.sm) {
+                        ForEach(sectorPerformance.sectors) { sector in
+                            SectorPerformanceBlock(sector: sector)
+                        }
                     }
-                }
 
-                // Story
-                Text(sectorPerformance.resolvedStory)
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                    // Story
+                    Text(sectorPerformance.resolvedStory)
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.bottom, AppSpacing.md)
+                .transition(.opacity)
             }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
     }
 }
 
@@ -298,13 +343,13 @@ struct SectorPerformanceBlock: View {
 
 struct MacroForecastSnapshotCard: View {
     let macroForecast: IndexMacroForecastSnapshot
-    @State private var isExpanded: Bool = true
+    @State private var isExpanded: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+        VStack(alignment: .leading, spacing: 0) {
             // Header
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(.easeInOut(duration: 0.25)) {
                     isExpanded.toggle()
                 }
             }) {
@@ -319,15 +364,9 @@ struct MacroForecastSnapshotCard: View {
                             .foregroundColor(AppColors.accentCyan)
                     }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Macro Forecast")
-                            .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
-
-                        Text("Economic Outlook")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
+                    Text("Economic Outlook")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
 
                     Spacer()
 
@@ -344,35 +383,35 @@ struct MacroForecastSnapshotCard: View {
                         .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
                 }
+                .padding(.vertical, AppSpacing.md)
             }
             .buttonStyle(PlainButtonStyle())
 
             if isExpanded {
-                // Updated date
-                Text("Updated on 02/17/2026 ET")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    // Story
+                    Text(macroForecast.resolvedStory)
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                // Story
-                Text(macroForecast.resolvedStory)
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // Indicator items
-                VStack(spacing: AppSpacing.sm) {
-                    ForEach(macroForecast.indicators) { indicator in
-                        MacroForecastItemCard(indicator: indicator)
+                    // Indicator items
+                    VStack(spacing: AppSpacing.sm) {
+                        ForEach(macroForecast.indicators) { indicator in
+                            MacroForecastItemCard(indicator: indicator)
+                        }
                     }
                 }
+                .padding(.bottom, AppSpacing.md)
+                .transition(.opacity)
             }
+
+            // Divider
+            Rectangle()
+                .fill(AppColors.cardBackgroundLight)
+                .frame(height: 1)
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-        )
     }
 }
 
@@ -411,6 +450,113 @@ struct MacroForecastItemCard: View {
         .padding(AppSpacing.md)
         .background(AppColors.cardBackgroundLight)
         .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
+// MARK: - ──────────────────────────────────────────────
+// MARK:   INDEX SNAPSHOTS INFO SHEET
+// MARK: - ──────────────────────────────────────────────
+
+struct IndexSnapshotsInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                    // What are Snapshots?
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "camera.viewfinder")
+                                .font(AppTypography.iconMedium)
+                                .foregroundColor(AppColors.neutral)
+                            Text("What are Index Snapshots?")
+                                .font(AppTypography.headingSmall)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        Text("Index Snapshots provide a quick, comprehensive view of the overall market health. Each snapshot evaluates a different dimension — from valuation levels and sector breadth to macroeconomic indicators — giving you an instant read on market conditions.")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    // Snapshot Categories
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "square.stack.3d.up.fill")
+                                .font(AppTypography.iconMedium)
+                                .foregroundColor(AppColors.neutral)
+                            Text("Snapshot Categories")
+                                .font(AppTypography.headingSmall)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            SnapshotBulletPoint(
+                                icon: "tag.fill",
+                                title: "Valuation",
+                                description: "Compares the index P/E ratio against historical averages to gauge whether the market is cheap or expensive."
+                            )
+
+                            SnapshotBulletPoint(
+                                icon: "chart.pie.fill",
+                                title: "Sector Performance",
+                                description: "Shows which sectors are leading or lagging, helping you spot rotation trends and opportunities."
+                            )
+
+                            SnapshotBulletPoint(
+                                icon: "globe.americas.fill",
+                                title: "Macro Forecast",
+                                description: "AI-analyzed macroeconomic indicators including GDP, inflation, labor markets, and geopolitical risks."
+                            )
+                        }
+                    }
+
+                    // Pro Tips
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "sparkles")
+                                .font(AppTypography.iconMedium)
+                                .foregroundColor(AppColors.neutral)
+                            Text("Pro Tips")
+                                .font(AppTypography.headingSmall)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            ProTipCard(
+                                icon: "arrow.triangle.2.circlepath",
+                                tip: "Use sector performance to identify rotation. Money flowing out of defensive sectors into growth sectors often signals bullish sentiment."
+                            )
+
+                            ProTipCard(
+                                icon: "calendar",
+                                tip: "Snapshots are refreshed with AI analysis. Check the updated date to ensure you're viewing the latest market read."
+                            )
+
+                            ProTipCard(
+                                icon: "chart.bar.fill",
+                                tip: "A market trading below its historical P/E average may present value opportunities, but always consider the macro backdrop."
+                            )
+                        }
+                    }
+                }
+                .padding(AppSpacing.lg)
+            }
+            .background(AppColors.background)
+            .navigationTitle("About Market Snapshots")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 }
 

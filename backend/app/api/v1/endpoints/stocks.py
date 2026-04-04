@@ -6,11 +6,12 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
           /stocks/{ticker}/news
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import re
 
 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
 from app.integrations.fmp import get_fmp_client, FMPClient
@@ -46,6 +47,18 @@ from app.services.holders_service import get_holders_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Ticker validation pattern: 1-10 uppercase letters, digits, dots, or hyphens
+_TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
+
+
+def _validate_ticker(ticker: str) -> str:
+    """Validate and normalise a ticker symbol. Raises 422 on bad input."""
+    t = ticker.strip().upper()
+    if not t or not _TICKER_RE.match(t):
+        raise HTTPException(status_code=422, detail="Invalid ticker symbol")
+    return t
+
 
 # Major US stock exchanges — used to filter search results.
 _US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
@@ -237,6 +250,7 @@ async def search_stocks(
 @router.get("/{ticker}")
 async def get_stock_details(ticker: str):
     """Get detailed company profile from FMP, enriched with ownership & valuation data."""
+    ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
     try:
         # Fetch profile, shares float, analyst estimates, institutional ownership, and short interest in parallel
@@ -348,6 +362,7 @@ async def get_stock_overview(
 @router.get("/{ticker}/quote")
 async def get_stock_quote(ticker: str):
     """Get real-time stock quote from FMP, enriched with PE/EPS/shares data."""
+    ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
     try:
         results = await asyncio.gather(
@@ -403,6 +418,7 @@ async def get_stock_quote(ticker: str):
 @router.get("/{ticker}/fundamentals")
 async def get_stock_fundamentals(ticker: str):
     """Get key financial metrics and ratios from FMP."""
+    ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
     try:
         metrics, ratios = await asyncio.gather(
@@ -470,9 +486,10 @@ async def get_stock_chart(
     """
     from app.services.chart_helper import fetch_chart_data
 
+    ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
     try:
-        prices = await fetch_chart_data(fmp, ticker.upper(), range, interval, extended_hours=extended_hours)
+        prices = await fetch_chart_data(fmp, ticker, range, interval, extended_hours=extended_hours)
         return {"symbol": ticker.upper(), "prices": prices}
     except HTTPException:
         raise
@@ -492,6 +509,7 @@ async def get_stock_financials_full(ticker: str):
     annual and quarterly periods), plus key metrics, financial ratios, and
     analyst estimates.  All FMP calls are made in parallel for performance.
     """
+    ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
 
     try:

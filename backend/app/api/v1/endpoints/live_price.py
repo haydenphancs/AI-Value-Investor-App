@@ -5,6 +5,8 @@ Streams real-time stock prices from FMP to iOS clients.
 
 import asyncio
 import logging
+import re
+from collections import defaultdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from app.core.security import decode_token, verify_supabase_token
@@ -14,6 +16,11 @@ from app.utils.market_hours import is_market_active
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# WebSocket connection limits
+_MAX_CONNECTIONS_PER_KEY = 10
+_active_connections: dict[str, int] = defaultdict(int)
+_TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
 
 def _validate_ws_token(token: str) -> str | None:
@@ -73,16 +80,27 @@ async def live_price_ws(
         support Authorization headers from iOS URLSessionWebSocketTask).
         Token is optional for crypto symbols (24/7 public data).
     """
+    # Validate ticker format
+    ticker_upper = ticker.strip().upper()
+    if not _TICKER_RE.match(ticker_upper):
+        await websocket.close(code=1008, reason="Invalid ticker")
+        return
+
     # Validate JWT (optional — allow guest access)
     if token:
         user_id = _validate_ws_token(token)
     else:
         user_id = None
 
+    # Enforce per-user/IP connection limit
+    conn_key = user_id or (websocket.client.host if websocket.client else "unknown")
+    if _active_connections[conn_key] >= _MAX_CONNECTIONS_PER_KEY:
+        await websocket.close(code=1008, reason="Too many connections")
+        return
+
     # Accept the connection
     await websocket.accept()
-
-    ticker_upper = ticker.upper()
+    _active_connections[conn_key] += 1
     is_crypto = ticker_upper.endswith("USD") and len(ticker_upper) >= 5
 
     # Check market hours for stocks — crypto trades 24/7
@@ -125,6 +143,7 @@ async def live_price_ws(
     except Exception as e:
         logger.error(f"WebSocket error for {ticker_upper}: {e}")
     finally:
+        _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
         await manager.unsubscribe(ticker_upper, websocket)
         logger.info(
             f"WebSocket closed for {ticker_upper} (user: {user_id})"

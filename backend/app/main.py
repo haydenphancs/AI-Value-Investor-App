@@ -164,9 +164,12 @@ async def add_process_time(request: Request, call_next):
 # Exception handlers
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
+    content = {"detail": "Invalid request data"}
+    if settings.DEBUG:
+        content["errors"] = exc.errors()
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": "Invalid request data", "errors": exc.errors()},
+        content=content,
     )
 
 
@@ -197,9 +200,6 @@ async def health():
     db_ok = await check_supabase_health()
     return {
         "status": "healthy" if db_ok else "degraded",
-        "version": settings.APP_VERSION,
-        "environment": settings.ENVIRONMENT,
-        "database": "connected" if db_ok else "disconnected",
     }
 
 

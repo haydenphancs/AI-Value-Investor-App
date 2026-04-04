@@ -3,13 +3,13 @@ Authentication Endpoints — Supabase Auth Proxy
 Frontend: POST /auth/login, /auth/register, /auth/refresh, /auth/logout
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from supabase import Client
 import logging
 
 from app.database import get_supabase
 from app.dependencies import get_current_user_id
-from app.core.security import create_access_token, create_refresh_token, decode_token
+from app.core.security import create_access_token, create_refresh_token, decode_token, rate_limiter
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
@@ -23,9 +23,17 @@ router = APIRouter()
 @router.post("/login", response_model=TokenResponse)
 async def sign_in(
     request: SignInRequest,
+    req: Request,
     supabase: Client = Depends(get_supabase),
 ):
     """Sign in via Supabase Auth, return app tokens."""
+    client_ip = req.client.host if req.client else "unknown"
+    if not rate_limiter.is_allowed(f"login:{client_ip}", max_requests=10, window_seconds=60):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": "60"},
+        )
     try:
         auth_response = supabase.auth.sign_in_with_password({
             "email": request.email,
@@ -61,9 +69,17 @@ async def sign_in(
 @router.post("/register", response_model=TokenResponse)
 async def sign_up(
     request: SignUpRequest,
+    req: Request,
     supabase: Client = Depends(get_supabase),
 ):
     """Register via Supabase Auth, return app tokens."""
+    client_ip = req.client.host if req.client else "unknown"
+    if not rate_limiter.is_allowed(f"register:{client_ip}", max_requests=5, window_seconds=60):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many registration attempts. Please try again later.",
+            headers={"Retry-After": "60"},
+        )
     try:
         auth_response = supabase.auth.sign_up({
             "email": request.email,

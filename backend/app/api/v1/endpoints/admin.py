@@ -5,15 +5,25 @@ Admin endpoints — operational triggers for background jobs.
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Emails authorised to call admin endpoints
+_ADMIN_EMAILS: set[str] = {"haiphan@caydex.com", "admin@caydex.com"}
+
 
 @router.post("/refresh-sector-benchmarks")
-async def refresh_sector_benchmarks(backfill: bool = False):
+async def refresh_sector_benchmarks(
+    backfill: bool = False,
+    user: dict = Depends(get_current_user),
+):
+    if user.get("email") not in _ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required")
     """Manually trigger sector benchmark recomputation. Returns immediately.
 
     Args:

@@ -39,15 +39,18 @@ enum APIConfig: Sendable {
     // MARK: - Base URLs
 
     nonisolated static var baseURL: URL {
+        // Toggle: In Xcode → Edit Scheme → Run → Arguments → Environment Variables
+        // Check USE_LOCAL = 1 to use local backend, uncheck to use Railway
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["USE_LOCAL"] == "1" {
+            return URL(string: "http://127.0.0.1:8000")!
+        }
+        #endif
+
         switch AppEnvironment.current {
-        case .development:
-            // Local development server (use 127.0.0.1 for reliable iOS Simulator connectivity)
+        case .development, .staging:
             return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
-        case .staging:
-            // Staging server
-            return URL(string: "https://staging-api.yourapp.com")!
         case .production:
-            // Production server
             return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
         }
     }

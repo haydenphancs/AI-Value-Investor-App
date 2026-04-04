@@ -429,12 +429,6 @@ class IndexService:
             year_low=year_low,
             avg_50=avg_50,
             avg_200=avg_200,
-            ytd_return=ytd_return,
-            one_year_return=one_year_return,
-            pe=pe,
-            forward_pe=forward_pe,
-            earnings_yield=earnings_yield,
-            market_cap=market_cap,
             volume=volume,
             avg_volume=avg_volume,
             constituents=profile_meta.get("number_of_constituents", 0),
@@ -572,9 +566,8 @@ class IndexService:
 
     def _build_key_statistics(
         self, *, open_price, prev_close, day_high, day_low,
-        year_high, year_low, avg_50, avg_200, ytd_return,
-        one_year_return, pe, forward_pe, earnings_yield,
-        market_cap, volume, avg_volume, constituents,
+        year_high, year_low, avg_50, avg_200,
+        volume, avg_volume, constituents,
     ) -> List[KeyStatisticsGroupResponse]:
         return [
             # Column 1: Price
@@ -585,42 +578,14 @@ class IndexService:
                 KeyStatisticItem(label="Day Low", value=_fmt(day_low)),
                 KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
             ]),
-            # Column 2: Performance
+            # Column 2: Range & Volume
             KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(label="52-Week Low", value=_fmt(year_low)),
                 KeyStatisticItem(label="50-Day Avg", value=_fmt(avg_50)),
                 KeyStatisticItem(label="200-Day Avg", value=_fmt(avg_200)),
-                KeyStatisticItem(
-                    label="YTD Return",
-                    value=_pct(ytd_return) if ytd_return else "—",
-                    is_highlighted=True,
-                    color_state="bullish" if ytd_return and ytd_return >= 0 else "bearish" if ytd_return else None,
-                ),
-                KeyStatisticItem(
-                    label="1-Year Return",
-                    value=_pct(one_year_return) if one_year_return else "—",
-                    is_highlighted=True,
-                    color_state="bullish" if one_year_return and one_year_return >= 0 else "bearish" if one_year_return else None,
-                ),
-            ]),
-            # Column 3: Fundamentals
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="P/E (TTM)", value=_fmt(pe) if pe else "—"),
-                KeyStatisticItem(label="P/E (FWD)", value=_fmt(forward_pe) if forward_pe else "—"),
-                KeyStatisticItem(label="Dividend Yield", value="—"),
-                KeyStatisticItem(
-                    label="Earnings Yield",
-                    value=f"{earnings_yield:.2f}%" if earnings_yield else "—",
-                ),
-                KeyStatisticItem(label="Total Market Cap", value=_fmt(market_cap)),
-            ]),
-            # Column 4: Volume & Breadth
-            KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(label="Volume", value=_fmt(volume, 0)),
                 KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt(avg_volume, 0)),
                 KeyStatisticItem(label="Constituents", value=str(constituents)),
-                KeyStatisticItem(label="Advancers", value="—"),
-                KeyStatisticItem(label="Decliners", value="—"),
             ]),
         ]
 

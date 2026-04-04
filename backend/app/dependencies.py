@@ -4,6 +4,7 @@ Auth, rate limiting, and utility dependencies.
 """
 
 from typing import Optional
+import uuid
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client
@@ -113,7 +114,7 @@ async def get_current_user_or_guest(
             except Exception:
                 pass
 
-    return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+    return {"id": str(uuid.uuid4()), "email": "guest@local", "tier": "free"}
 
 
 class RateLimitChecker:

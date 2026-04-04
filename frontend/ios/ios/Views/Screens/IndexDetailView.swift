@@ -9,6 +9,7 @@ import SwiftUI
 
 struct IndexDetailView: View {
     @StateObject private var viewModel: IndexDetailViewModel
+    @StateObject private var chatViewModel = ChatViewModel()
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
     @State private var showShareSheet = false
@@ -16,6 +17,7 @@ struct IndexDetailView: View {
     @State private var showTechnicalAnalysisDetail = false
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
+    @State private var selectedSearchResult: SearchSelection?
 
     let indexSymbol: String
 
@@ -98,7 +100,8 @@ struct IndexDetailView: View {
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .index,
-                                chartDataVersion: viewModel.chartDataVersion
+                                chartDataVersion: viewModel.chartDataVersion,
+                                chartEventDates: viewModel.chartEventDates
                             )
                             .padding(.top, AppSpacing.lg)
                         }
@@ -162,6 +165,18 @@ struct IndexDetailView: View {
         .task {
             viewModel.loadIndexData()
         }
+        .onDisappear {
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if let status = viewModel.indexData?.marketStatus,
+               MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                viewModel.connectLivePrice()
+            }
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in
@@ -170,6 +185,9 @@ struct IndexDetailView: View {
                     }
                 }
         )
+        .navigationDestination(item: $selectedSearchResult) { selection in
+            AssetDetailRouter(selection: selection)
+        }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
@@ -188,29 +206,41 @@ struct IndexDetailView: View {
                     .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
             }
         }
-        .fullScreenCover(isPresented: $showSearch) {
-            SearchView()
-                .preferredColorScheme(.dark)
+        .sheet(isPresented: $showSearch) {
+            TickerLiveSearchSheet(
+                onTickerSelected: { selection in
+                    showSearch = false
+                    selectedSearchResult = selection
+                },
+                onDismiss: {
+                    showSearch = false
+                }
+            )
         }
-        .fullScreenCover(isPresented: $showAIChat) {
-            NavigationView {
-                ZStack {
-                    AppColors.background
-                        .ignoresSafeArea()
-                    ChatTabView(initialPrompt: "Deep Analysis \(indexSymbol)")
-                }
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") {
-                            showAIChat = false
+        .sheet(isPresented: $showAIChat) {
+            NavigationStack {
+                ChatConversationView(viewModel: chatViewModel)
+                    .navigationTitle("Ask Cay AI")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { showAIChat = false }
                         }
-                        .foregroundColor(AppColors.primaryBlue)
                     }
-                }
             }
-            .environmentObject(AudioManager.shared)
             .preferredColorScheme(.dark)
+        }
+        .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
+            if let query = newValue {
+                print("🤖 IndexDetailView: Opening AI chat for \(indexSymbol) with query: \(query)")
+                chatViewModel.startNewConversation(
+                    firstMessage: query,
+                    stockId: indexSymbol,
+                    context: viewModel.contextForCurrentTab
+                )
+                viewModel.pendingAIQuery = nil
+                showAIChat = true
+            }
         }
     }
 
@@ -223,7 +253,14 @@ struct IndexDetailView: View {
             if let indexData = viewModel.indexData {
                 IndexDetailOverviewContent(
                     indexData: indexData,
-                    onAIAnalystTap: { showAIChat = true },
+                    onAIAnalystTap: {
+                        chatViewModel.startNewConversation(
+                            firstMessage: "Deep Analysis \(indexSymbol)",
+                            stockId: indexSymbol,
+                            context: viewModel.contextForCurrentTab
+                        )
+                        showAIChat = true
+                    },
                     onWebsiteTap: viewModel.handleWebsiteTap
                 )
             }
@@ -231,9 +268,12 @@ struct IndexDetailView: View {
             TickerNewsContent(
                 articles: viewModel.newsArticles,
                 currentTicker: indexSymbol,
+                isLoading: viewModel.isNewsLoading,
+                hasMoreNews: viewModel.hasMoreNews,
                 onArticleTap: viewModel.handleNewsArticleTap,
                 onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap
+                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onLoadMore: viewModel.loadMoreNews
             )
         case .analysis:
             TickerAnalysisContent(

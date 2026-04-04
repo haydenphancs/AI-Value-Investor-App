@@ -9,10 +9,20 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 
+class ChartDataPointResponse(BaseModel):
+    date: Optional[str] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: float
+    volume: Optional[float] = None
+
+
 class KeyStatisticItem(BaseModel):
     label: str
     value: str
     is_highlighted: bool = False
+    color_state: Optional[str] = None  # "bullish", "bearish", or None
 
 
 class KeyStatisticsGroupResponse(BaseModel):
@@ -117,7 +127,7 @@ class IndexDetailResponse(BaseModel):
     price_change: float
     price_change_percent: float
     market_status: MarketStatusResponse
-    chart_data: List[float]
+    chart_data: List[ChartDataPointResponse]
     key_statistics_groups: List[KeyStatisticsGroupResponse]
     performance_periods: List[PerformancePeriodResponse]
     snapshots_data: IndexSnapshotsDataResponse

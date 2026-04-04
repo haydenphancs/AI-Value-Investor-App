@@ -274,11 +274,11 @@ struct IndexDetailData: Identifiable {
     let id = UUID()
     let symbol: String
     let indexName: String
-    let currentPrice: Double
-    let priceChange: Double
-    let priceChangePercent: Double
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
     let marketStatus: MarketStatus
-    let chartPricePoints: [StockPricePoint]
+    var chartPricePoints: [StockPricePoint]
     let keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let snapshotsData: IndexSnapshotsData

@@ -99,21 +99,22 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes for market data
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated stories
+_MACRO_CACHE_TTL_DAYS = 7  # 7 days for macro forecast (changes weekly)
 
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
         return None
-    ts, value = entry
-    if time.time() - ts > _CACHE_TTL_SECONDS:
+    ts, value, entry_ttl = entry
+    if time.time() - ts > entry_ttl:
         del _cache[key]
         return None
     return value
 
 
 def _cache_set(key: str, value: Any, ttl: Optional[float] = None):
-    _cache[key] = (time.time(), value)
+    _cache[key] = (time.time(), value, ttl or _CACHE_TTL_SECONDS)
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -189,6 +190,59 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
                 return ((end_price - start_price) / start_price) * 100
             break
     return None
+
+
+def _compute_index_pe_from_sectors() -> Optional[float]:
+    """
+    Compute aggregate index P/E from sector benchmark medians.
+
+    Queries the sector_benchmarks table for pe_ratio entries,
+    picks the most recent quarterly period that has >= 8 sectors,
+    and returns the simple average across all sectors.
+    """
+    try:
+        supabase = get_supabase()
+        result = (
+            supabase.table("sector_benchmarks")
+            .select("sector, period_type, period_label, median_value")
+            .eq("metric_name", "pe_ratio")
+            .eq("period_type", "quarterly")
+            .execute()
+        )
+        if not result.data:
+            return None
+
+        # Group by period_label
+        from collections import defaultdict
+        periods: Dict[str, List[float]] = defaultdict(list)
+        for row in result.data:
+            val = row.get("median_value")
+            if val and val > 0:
+                periods[row["period_label"]].append(val)
+
+        # Sort periods descending (Q1'26 > Q4'25 > Q3'25 ...) and pick
+        # the most recent one with >= 8 sectors
+        def period_sort_key(label: str) -> str:
+            # Convert Q1'25 → 2025-1, Q4'24 → 2024-4 for proper sorting
+            try:
+                q, y = label.replace("'", "").replace("Q", "").split()
+                return f"20{y}-{q}"
+            except Exception:
+                return label
+
+        for label in sorted(periods.keys(), key=period_sort_key, reverse=True):
+            pes = periods[label]
+            if len(pes) >= 8:
+                avg_pe = sum(pes) / len(pes)
+                logger.info(
+                    f"Index PE computed from {len(pes)} sectors ({label}): {avg_pe:.2f}"
+                )
+                return round(avg_pe, 2)
+
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to compute index PE from sectors: {e}")
+        return None
 
 
 def _get_market_status() -> MarketStatusResponse:
@@ -295,6 +349,78 @@ class IndexService:
         except Exception as e:
             logger.warning(f"Index cache upsert failed for {cache_key}: {e}")
 
+    # ── Macro forecast Supabase cache (7-day TTL) ────────────────
+
+    def _check_macro_cache(self, symbol: str):
+        """Check Supabase index_macro_forecast_cache (7-day TTL)."""
+        try:
+            row = (
+                self.supabase.table("index_macro_forecast_cache")
+                .select("story_template, indicators_json, cached_at")
+                .eq("symbol", symbol.upper())
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                logger.info(f"Macro cache MISS for {symbol}")
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(
+                cached_at_str.replace("Z", "+00:00")
+            )
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(days=_MACRO_CACHE_TTL_DAYS):
+                logger.info(f"Macro cache STALE (age={age}) for {symbol}")
+                return None
+
+            story = entry.get("story_template", "")
+            indicators_raw = entry.get("indicators_json", [])
+            if story and indicators_raw:
+                indicators = []
+                for item in indicators_raw:
+                    signal = item.get("signal", "neutral").lower()
+                    if signal not in ("positive", "neutral", "cautious"):
+                        signal = "neutral"
+                    indicators.append(MacroForecastItemResponse(
+                        title=item.get("title", ""),
+                        description=item.get("description", ""),
+                        signal=signal,
+                    ))
+                logger.info(f"Macro cache HIT for {symbol} (age={age})")
+                return story, indicators
+
+            return None
+        except Exception as e:
+            logger.warning(f"Macro cache check failed for {symbol}: {e}")
+            return None
+
+    def _upsert_macro_cache(
+        self, symbol: str, story: str, indicators: list
+    ) -> None:
+        """Save macro forecast to Supabase (7-day TTL)."""
+        try:
+            indicators_json = [
+                {"title": i.title, "description": i.description, "signal": i.signal}
+                for i in indicators
+            ]
+            self.supabase.table("index_macro_forecast_cache").upsert(
+                {
+                    "symbol": symbol.upper(),
+                    "story_template": story,
+                    "indicators_json": indicators_json,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="symbol",
+            ).execute()
+            logger.info(f"Macro forecast cached in Supabase for {symbol} (7-day TTL)")
+        except Exception as e:
+            logger.warning(f"Macro cache upsert failed for {symbol}: {e}")
+
     # ── Main entry point ────────────────────────────────────────
 
     async def get_index_detail(
@@ -325,8 +451,8 @@ class IndexService:
 
         # ── Step 1: Parallel FMP fetches ──────────────────────────
         today = datetime.now(tz=timezone.utc).date()
-        # Fetch 2 years of history for computing various returns
-        from_date = (today - timedelta(days=365 * 2)).isoformat()
+        # Fetch 11 years of history for computing up to 10-year returns
+        from_date = (today - timedelta(days=365 * 11)).isoformat()
         to_date = today.isoformat()
 
         # Chart-specific date range
@@ -336,9 +462,10 @@ class IndexService:
         hist_task = self.fmp.get_historical_prices(symbol, from_date, to_date)
         sector_task = self.fmp.get_sector_performance()
         news_task = self.fmp.get_stock_news(symbol, limit=10)
+        constituents_task = self.fmp.get_index_constituents(symbol)
 
-        quote, hist_raw, sector_raw, news_raw = await asyncio.gather(
-            quote_task, hist_task, sector_task, news_task,
+        quote, hist_raw, sector_raw, news_raw, constituents_raw = await asyncio.gather(
+            quote_task, hist_task, sector_task, news_task, constituents_task,
             return_exceptions=True,
         )
 
@@ -355,6 +482,15 @@ class IndexService:
         if isinstance(news_raw, Exception):
             logger.error(f"News fetch failed for {symbol}: {news_raw}")
             news_raw = []
+        if isinstance(constituents_raw, Exception):
+            logger.warning(f"Constituents fetch failed for {symbol}: {constituents_raw}")
+            constituents_raw = []
+
+        # Live constituent count (fall back to profile metadata)
+        live_constituents = (
+            len(constituents_raw) if isinstance(constituents_raw, list) and constituents_raw
+            else profile_meta.get("number_of_constituents", 0)
+        )
 
         # Parse historical prices (sorted oldest-first)
         historical = []
@@ -374,7 +510,8 @@ class IndexService:
         price = quote.get("price") or 0
         change = quote.get("change") or 0
         change_pct = quote.get("changesPercentage") or 0
-        pe = quote.get("pe") or 0
+        # FMP doesn't return PE for indices — compute from sector benchmarks
+        pe = quote.get("pe") or _compute_index_pe_from_sectors() or 0
         eps = quote.get("eps") or 0
         prev_close = quote.get("previousClose") or 0
         open_price = quote.get("open") or 0
@@ -389,11 +526,18 @@ class IndexService:
         # ── Step 3: Compute derived stats ─────────────────────────
         avg_50 = _compute_average(historical, 50)
         avg_200 = _compute_average(historical, 200)
+
+        # Compute avg volume from historical if FMP doesn't provide it for indices
+        if not avg_volume and historical:
+            recent = historical[-30:]  # most recent 30 trading days
+            vols = [d.get("volume", 0) for d in recent if d.get("volume")]
+            avg_volume = int(sum(vols) / len(vols)) if vols else 0
         ytd_return = _compute_ytd_return(historical)
-        one_year_return = _compute_return(historical, 252)
         one_month_return = _compute_return(historical, 21)
-        three_year_return = _compute_return(historical, 252 * 3) if len(historical) > 252 * 2 else None
-        five_year_return = _compute_return(historical, 252 * 5) if len(historical) > 252 * 2 else None
+        one_year_return = _compute_return(historical, 252)
+        three_year_return = _compute_return(historical, 252 * 3) if len(historical) > 252 * 3 else None
+        five_year_return = _compute_return(historical, 252 * 5) if len(historical) > 252 * 5 else None
+        ten_year_return = _compute_return(historical, 252 * 10) if len(historical) > 252 * 10 else None
 
         # Forward P/E estimate (simple: if PE is known, forward = PE * 0.85)
         forward_pe = pe * 0.85 if pe and pe > 0 else 0
@@ -431,7 +575,7 @@ class IndexService:
             avg_200=avg_200,
             volume=volume,
             avg_volume=avg_volume,
-            constituents=profile_meta.get("number_of_constituents", 0),
+            constituents=live_constituents,
         )
 
         # ── Step 6: Build performance periods ─────────────────────
@@ -441,6 +585,7 @@ class IndexService:
             one_year=one_year_return,
             three_year=three_year_return,
             five_year=five_year_return,
+            ten_year=ten_year_return,
         )
 
         # ── Step 7: Build snapshots (AI-enhanced) ─────────────────
@@ -459,7 +604,7 @@ class IndexService:
         profile = IndexProfileResponse(
             description=profile_meta.get("description", ""),
             exchange=profile_meta.get("exchange", ""),
-            number_of_constituents=profile_meta.get("number_of_constituents", 0),
+            number_of_constituents=live_constituents,
             weighting_methodology=profile_meta.get("weighting_methodology", ""),
             inception_date=profile_meta.get("inception_date", ""),
             index_provider=profile_meta.get("index_provider", ""),
@@ -570,29 +715,28 @@ class IndexService:
         volume, avg_volume, constituents,
     ) -> List[KeyStatisticsGroupResponse]:
         return [
-            # Column 1: Price
+            # Column 1: Price & Breadth
             KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="Constituents", value=str(constituents)),
                 KeyStatisticItem(label="Open", value=_fmt(open_price)),
                 KeyStatisticItem(label="Previous Close", value=_fmt(prev_close)),
                 KeyStatisticItem(label="Day High", value=_fmt(day_high)),
                 KeyStatisticItem(label="Day Low", value=_fmt(day_low)),
-                KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
             ]),
             # Column 2: Range & Volume
             KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
                 KeyStatisticItem(label="52-Week Low", value=_fmt(year_low)),
-                KeyStatisticItem(label="50-Day Avg", value=_fmt(avg_50)),
                 KeyStatisticItem(label="200-Day Avg", value=_fmt(avg_200)),
                 KeyStatisticItem(label="Volume", value=_fmt(volume, 0)),
                 KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt(avg_volume, 0)),
-                KeyStatisticItem(label="Constituents", value=str(constituents)),
             ]),
         ]
 
     # ── Performance periods builder ──────────────────────────────
 
     def _build_performance_periods(
-        self, *, one_month, ytd, one_year, three_year, five_year,
+        self, *, one_month, ytd, one_year, three_year, five_year, ten_year,
     ) -> List[PerformancePeriodResponse]:
         periods = []
         for label, val in [
@@ -601,11 +745,15 @@ class IndexService:
             ("1 Year", one_year),
             ("3 Years", three_year),
             ("5 Years", five_year),
+            ("10 Years", ten_year),
         ]:
+            # Skip periods where data isn't available
+            if val is None:
+                continue
             periods.append(PerformancePeriodResponse(
                 label=label,
-                change_percent=round(val, 2) if val is not None else 0,
-                vs_market_percent=round(val, 2) if val is not None else 0,
+                change_percent=round(val, 2),
+                vs_market_percent=round(val, 2),
             ))
         return periods
 
@@ -695,6 +843,8 @@ class IndexService:
     ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
         """
         Try Gemini for AI-generated stories. Fall back to templates on failure.
+        Macro forecast is cached in Supabase for 7 days (changes weekly).
+        Valuation + Sector stories refresh on every cache miss (data-driven).
         Returns (valuation_story, sector_story, macro_story, macro_indicators).
         """
         cache_key = f"ai_stories_{symbol}"
@@ -702,9 +852,13 @@ class IndexService:
         if cached:
             return cached
 
+        # ── Check macro cache (7-day TTL in Supabase) ────────────
+        macro_cached = self._check_macro_cache(symbol)
+        has_macro = macro_cached is not None
+
         # ── Build default templates (always work) ─────────────────
         valuation_template = (
-            f"The {index_name} is trading at {{PE_RATIO}} earnings, "
+            f"The market is trading at {{PE_RATIO}} earnings, "
             f"which is considered {{VALUATION_LABEL}}. "
             f"That's {'a premium to' if pe and pe > historical_avg_pe else 'below'} "
             f"the {{HISTORICAL_PERIOD}} average of {{HISTORICAL_AVG_PE}} — "
@@ -715,21 +869,16 @@ class IndexService:
             f"{'catch up' if forward_pe and forward_pe < pe else 'remain steady'}."
         )
 
-        top = sectors[0] if sectors else None
-        bottom = sectors[-1] if sectors else None
         advancing = sum(1 for s in sectors if s.change_percent >= 0)
-
         sector_template = (
-            f"{'The rally is broad' if advancing > 7 else 'The rally is narrow'} — "
-            f"{{TOP_SECTOR}} ({{TOP_SECTOR_CHANGE}}) "
-            f"{'is' if advancing <= 6 else 'and its peers are'} doing the heavy lifting, "
-            f"while {{BOTTOM_SECTOR}} ({{BOTTOM_SECTOR_CHANGE}}) "
-            f"{'is' if advancing <= 6 else 'and other defensives are'} lagging. "
-            f"{{ADVANCING_COUNT}} of {len(sectors)} sectors are green"
-            f"{', and the breadth is convincing.' if advancing > 7 else ', but the breadth is not convincing.'}"
+            f"{{TOP_SECTOR}} led the way at {{TOP_SECTOR_CHANGE}}, "
+            f"while {{BOTTOM_SECTOR}} lagged at {{BOTTOM_SECTOR_CHANGE}}. "
+            f"{{ADVANCING_COUNT}} of {len(sectors)} sectors finished in the green "
+            f"and {{DECLINING_COUNT}} declined"
+            f"{' — breadth is solid.' if advancing > 7 else ' — breadth is narrow.'}"
         )
 
-        # Default macro indicators
+        # Default macro (used only if Gemini + Supabase both miss)
         default_macro_indicators = [
             MacroForecastItemResponse(
                 title="GDP Growth",
@@ -759,9 +908,13 @@ class IndexService:
             "Growth is solid, but the Fed's next move and trade policy are the swing factors."
         )
 
+        # Use cached macro if available
+        if has_macro:
+            macro_template, default_macro_indicators = macro_cached
+
         result = (valuation_template, sector_template, macro_template, default_macro_indicators)
 
-        # ── Try Gemini for better stories ─────────────────────────
+        # ── Try Gemini for stories ────────────────────────────────
         try:
             gemini = get_gemini_client()
 
@@ -770,7 +923,41 @@ class IndexService:
                 for s in sectors[:6]
             )
 
-            prompt = f"""You are a financial analyst writing brief market commentary for the {index_name} index.
+            # Build prompt — skip macro section if already cached
+            if has_macro:
+                prompt = f"""You are a financial analyst writing brief market commentary for the overall U.S. equity market.
+IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", or "Nasdaq". Use "the market" instead.
+
+Current data:
+- P/E Ratio (TTM): {pe:.1f}x
+- Forward P/E: {forward_pe:.1f}x
+- Earnings Yield: {earnings_yield:.2f}%
+- Historical Avg P/E ({historical_period}): {historical_avg_pe}x
+- Valuation Level: {val_label}
+- Top sectors today: {sector_text}
+- Advancing sectors: {advancing} of {len(sectors)}
+
+Generate exactly 2 items separated by "---":
+
+1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio, how it compares to historical average, and forward outlook. Use these placeholders in your text: {{PE_RATIO}}, {{FORWARD_PE}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
+
+---
+
+2. SECTOR STORY (2-3 sentences about sector performance.
+CRITICAL: You MUST use these exact placeholder tokens — do NOT replace them with actual sector names or numbers:
+  {{TOP_SECTOR}} = best performing sector name
+  {{TOP_SECTOR_CHANGE}} = its % change (e.g. "+1.6%")
+  {{BOTTOM_SECTOR}} = worst performing sector name
+  {{BOTTOM_SECTOR_CHANGE}} = its % change (e.g. "-1.5%")
+  {{ADVANCING_COUNT}} = number of sectors in the green
+  {{DECLINING_COUNT}} = number of sectors in the red
+CORRECT example: "{{TOP_SECTOR}} led at {{TOP_SECTOR_CHANGE}}, while {{BOTTOM_SECTOR}} lagged."
+WRONG example: "Technology led at +0.8%." — NEVER hardcode names or values!)
+
+Write in a conversational, confident tone. Be specific and data-driven."""
+            else:
+                prompt = f"""You are a financial analyst writing brief market commentary for the overall U.S. equity market.
+IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", or "Nasdaq". Use "the market" instead.
 
 Current data:
 - P/E Ratio (TTM): {pe:.1f}x
@@ -783,15 +970,24 @@ Current data:
 
 Generate exactly 3 items separated by "---":
 
-1. VALUATION STORY (2-3 sentences about the index valuation, mentioning the P/E ratio, how it compares to historical average, and forward outlook. Use these placeholders in your text: {{PE_RATIO}}, {{FORWARD_PE}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
+1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio, how it compares to historical average, and forward outlook. Use these placeholders in your text: {{PE_RATIO}}, {{FORWARD_PE}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
 
 ---
 
-2. SECTOR STORY (2-3 sentences about sector performance. Use these placeholders: {{TOP_SECTOR}}, {{TOP_SECTOR_CHANGE}}, {{BOTTOM_SECTOR}}, {{BOTTOM_SECTOR_CHANGE}}, {{ADVANCING_COUNT}}, {{DECLINING_COUNT}})
+2. SECTOR STORY (2-3 sentences about sector performance.
+CRITICAL: You MUST use these exact placeholder tokens — do NOT replace them with actual sector names or numbers:
+  {{TOP_SECTOR}} = best performing sector name
+  {{TOP_SECTOR_CHANGE}} = its % change (e.g. "+1.6%")
+  {{BOTTOM_SECTOR}} = worst performing sector name
+  {{BOTTOM_SECTOR_CHANGE}} = its % change (e.g. "-1.5%")
+  {{ADVANCING_COUNT}} = number of sectors in the green
+  {{DECLINING_COUNT}} = number of sectors in the red
+CORRECT example: "{{TOP_SECTOR}} led at {{TOP_SECTOR_CHANGE}}, while {{BOTTOM_SECTOR}} lagged."
+WRONG example: "Technology led at +0.8%." — NEVER hardcode names or values!)
 
 ---
 
-3. MACRO ITEMS (provide 4 economic indicators as JSON array):
+3. MACRO ITEMS (provide 4 current economic indicators as a JSON array. Each indicator should have a 1-2 sentence analysis based on the latest economic data):
 [{{"title": "indicator name", "description": "1-2 sentence analysis", "signal": "positive|neutral|cautious"}}]
 
 Write in a conversational, confident tone. Be specific and data-driven."""
@@ -808,49 +1004,67 @@ Write in a conversational, confident tone. Be specific and data-driven."""
             text = ai_response.get("text", "")
             parts = text.split("---")
 
-            if len(parts) >= 3:
+            min_parts = 2 if has_macro else 3
+            if len(parts) >= min_parts:
                 ai_valuation = parts[0].strip()
                 ai_sector = parts[1].strip()
-                ai_macro_raw = parts[2].strip()
 
                 # Clean up section headers
                 for header in ["1.", "2.", "3.", "VALUATION STORY", "SECTOR STORY", "MACRO ITEMS"]:
                     ai_valuation = ai_valuation.replace(header, "").strip()
                     ai_sector = ai_sector.replace(header, "").strip()
-                    ai_macro_raw = ai_macro_raw.replace(header, "").strip()
 
                 if ai_valuation and len(ai_valuation) > 20:
-                    valuation_template = ai_valuation
-                if ai_sector and len(ai_sector) > 20:
-                    sector_template = ai_sector
+                    if "{PE_RATIO}" in ai_valuation and "{VALUATION_LABEL}" in ai_valuation:
+                        valuation_template = ai_valuation
+                    else:
+                        logger.warning("Gemini valuation story missing placeholders, using default")
 
-                # Try parsing macro indicators
-                import json
-                try:
-                    # Find JSON array in the text
-                    json_start = ai_macro_raw.find("[")
-                    json_end = ai_macro_raw.rfind("]") + 1
-                    if json_start >= 0 and json_end > json_start:
-                        macro_json = json.loads(ai_macro_raw[json_start:json_end])
-                        if isinstance(macro_json, list) and len(macro_json) >= 3:
-                            parsed_indicators = []
-                            for item in macro_json[:4]:
-                                signal = item.get("signal", "neutral").lower()
-                                if signal not in ("positive", "neutral", "cautious"):
-                                    signal = "neutral"
-                                parsed_indicators.append(MacroForecastItemResponse(
-                                    title=item.get("title", ""),
-                                    description=item.get("description", ""),
-                                    signal=signal,
-                                ))
-                            if parsed_indicators:
-                                default_macro_indicators = parsed_indicators
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    logger.warning(f"Failed to parse Gemini macro indicators: {e}")
+                if ai_sector and len(ai_sector) > 20:
+                    has_placeholders = (
+                        "{TOP_SECTOR}" in ai_sector
+                        and "{ADVANCING_COUNT}" in ai_sector
+                    )
+                    if has_placeholders:
+                        sector_template = ai_sector
+                    else:
+                        logger.warning("Gemini sector story missing placeholders, using default")
+
+                # Parse macro from Gemini only if NOT cached
+                if not has_macro and len(parts) >= 3:
+                    ai_macro_raw = parts[2].strip()
+                    for header in ["3.", "MACRO ITEMS"]:
+                        ai_macro_raw = ai_macro_raw.replace(header, "").strip()
+
+                    import json
+                    try:
+                        json_start = ai_macro_raw.find("[")
+                        json_end = ai_macro_raw.rfind("]") + 1
+                        if json_start >= 0 and json_end > json_start:
+                            macro_json = json.loads(ai_macro_raw[json_start:json_end])
+                            if isinstance(macro_json, list) and len(macro_json) >= 3:
+                                parsed_indicators = []
+                                for item in macro_json[:4]:
+                                    signal = item.get("signal", "neutral").lower()
+                                    if signal not in ("positive", "neutral", "cautious"):
+                                        signal = "neutral"
+                                    parsed_indicators.append(MacroForecastItemResponse(
+                                        title=item.get("title", ""),
+                                        description=item.get("description", ""),
+                                        signal=signal,
+                                    ))
+                                if parsed_indicators:
+                                    default_macro_indicators = parsed_indicators
+                                    # Cache macro in Supabase for 7 days
+                                    self._upsert_macro_cache(
+                                        symbol, macro_template, parsed_indicators
+                                    )
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        logger.warning(f"Failed to parse Gemini macro indicators: {e}")
 
                 result = (valuation_template, sector_template, macro_template, default_macro_indicators)
                 _cache_set(cache_key, result, _AI_CACHE_TTL_SECONDS)
-                logger.info(f"Generated AI stories for {symbol}")
+                logger.info(f"Generated AI stories for {symbol} (macro={'cached' if has_macro else 'fresh'})")
 
         except Exception as e:
             logger.warning(f"Gemini story generation failed for {symbol}, using templates: {e}")

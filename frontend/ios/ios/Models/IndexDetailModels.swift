@@ -426,22 +426,21 @@ extension IndexDetailData {
 
 extension KeyStatisticsGroup {
     static let indexSampleData: [KeyStatisticsGroup] = [
-        // Column 1: Price
+        // Column 1: Price & Breadth
         KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "Constituents", value: "503"),
             KeyStatistic(label: "Open", value: "5,998.12"),
             KeyStatistic(label: "Previous Close", value: "5,967.55"),
             KeyStatistic(label: "Day High", value: "6,032.48"),
-            KeyStatistic(label: "Day Low", value: "5,985.30"),
-            KeyStatistic(label: "52-Week High", value: "6,128.18")
+            KeyStatistic(label: "Day Low", value: "5,985.30")
         ]),
         // Column 2: Range & Volume
         KeyStatisticsGroup(statistics: [
+            KeyStatistic(label: "52-Week High", value: "6,128.18"),
             KeyStatistic(label: "52-Week Low", value: "4,835.04"),
-            KeyStatistic(label: "50-Day Avg", value: "5,942.15"),
             KeyStatistic(label: "200-Day Avg", value: "5,654.38"),
             KeyStatistic(label: "Volume", value: "3.82B"),
-            KeyStatistic(label: "Avg. Volume (30D)", value: "4.15B"),
-            KeyStatistic(label: "Constituents", value: "503")
+            KeyStatistic(label: "Avg. Volume (30D)", value: "4.15B")
         ])
     ]
 }

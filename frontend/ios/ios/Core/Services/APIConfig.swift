@@ -39,20 +39,20 @@ enum APIConfig: Sendable {
     // MARK: - Base URLs
 
     nonisolated static var baseURL: URL {
-        // Toggle: In Xcode → Edit Scheme → Run → Arguments → Environment Variables
-        // Check USE_LOCAL = 1 to use local backend, uncheck to use Railway
+        // Auto-detection: ServerEnvironmentManager probes localhost on app launch
+        // and caches the result. Manual overrides (USE_LOCAL=1, USE_RAILWAY=1)
+        // are still supported via environment variables.
         #if DEBUG
+        if let resolved = ServerEnvironmentManager.shared.resolvedBaseURL {
+            return resolved
+        }
+        // Fallback if resolve() hasn't been called yet (e.g. unit tests)
         if ProcessInfo.processInfo.environment["USE_LOCAL"] == "1" {
             return URL(string: "http://127.0.0.1:8000")!
         }
         #endif
 
-        switch AppEnvironment.current {
-        case .development, .staging:
-            return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
-        case .production:
-            return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
-        }
+        return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
     }
 
     // MARK: - Timeouts

@@ -1,7 +1,7 @@
 """Chat schemas matching DB chat_sessions + chat_messages tables."""
 
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 
 # ── Request Schemas ─────────────────────────────────────────────────
@@ -51,6 +51,32 @@ class StockChartWidget(BaseModel):
     historical_data: List[HistoricalDataPoint] = []
 
 
+class MarketOverviewSector(BaseModel):
+    """Sector entry for the market overview widget."""
+    sector: str
+    change_percent: float
+
+
+class MarketOverviewMacroItem(BaseModel):
+    """Macro indicator for the market overview widget."""
+    title: str
+    signal: str  # "positive", "neutral", "cautious"
+
+
+class MarketOverviewWidget(BaseModel):
+    """Structured payload the frontend uses to render a market overview card."""
+    widget_type: str = "market_overview"
+    pe_ratio: float
+    forward_pe: float
+    valuation_level: str  # "Bargain", "Fair Value", "Expensive", "Overheated"
+    earnings_yield: float
+    historical_avg_pe: float
+    sectors: List[MarketOverviewSector] = []
+    advancing: int = 0
+    declining: int = 0
+    macro_indicators: List[MarketOverviewMacroItem] = []
+
+
 # ── Chat Message / Session Response Schemas ─────────────────────────
 
 class ChatMessageResponse(BaseModel):
@@ -58,7 +84,7 @@ class ChatMessageResponse(BaseModel):
     session_id: str
     role: str
     content: str
-    widget: Optional[StockChartWidget] = None
+    widget: Optional[Any] = None  # StockChartWidget or MarketOverviewWidget (discriminated by widget_type)
     rich_content: Optional[Any] = None
     citations: Optional[List[Any]] = None
     tokens_used: Optional[int] = None

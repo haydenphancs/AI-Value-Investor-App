@@ -31,6 +31,7 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
+    @Published var pendingAIQuery: String?
 
     // Analysis tab state
     @Published var selectedFearGreedTimeframe: FearGreedTimeframe = .today
@@ -301,7 +302,7 @@ class CryptoDetailViewModel: ObservableObject {
 
     func handleAISend() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        print("AI Query: \(aiInputText)")
+        pendingAIQuery = aiInputText
         aiInputText = ""
     }
 

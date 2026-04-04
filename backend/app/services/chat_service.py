@@ -9,9 +9,10 @@ analysis so the SwiftUI frontend can render a native chart widget.
 """
 
 import asyncio
+import hashlib
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Tuple
 
 import google.generativeai as genai
 
@@ -100,6 +101,32 @@ _SENTIMENT_ANALYSIS_TOOL = genai.protos.Tool(
 )
 
 
+_MARKET_OVERVIEW_TOOL = genai.protos.Tool(
+    function_declarations=[
+        genai.protos.FunctionDeclaration(
+            name="get_market_overview",
+            description=(
+                "Fetch current market valuation (P/E ratio, forward P/E, earnings yield), "
+                "sector performance (all 11 sectors with daily change), and macroeconomic "
+                "indicators. Call this tool when the user asks about the overall market, "
+                "market deep dive, sector rotation, market valuation, or macro outlook. "
+                "This is for INDEX analysis only, not individual stocks."
+            ),
+            parameters=genai.protos.Schema(
+                type=genai.protos.Type.OBJECT,
+                properties={
+                    "symbol": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="The index symbol (e.g. ^GSPC, ^DJI, ^IXIC).",
+                    ),
+                },
+                required=["symbol"],
+            ),
+        )
+    ]
+)
+
+
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -145,21 +172,39 @@ class ChatService:
             logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
 
         # Step 3: Build prompt (includes RAG context + history)
-        # Enrich with live margin data + profitability snapshot + company profile for stock sessions
+        # Detect asset type from stock_id
+        asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
+
+        # Enrich with live data — only for stocks (other types use client_context)
         profit_summary = None
         snapshot_summary = None
         company_profile_summary = None
-        if stock_id:
+        is_stock = asset_type == "STOCK"
+        if stock_id and is_stock:
             profit_summary, snapshot_summary, company_profile_summary = await asyncio.gather(
                 self._get_profit_summary(stock_id),
                 self._get_snapshot_summary(stock_id),
                 self._get_company_profile_summary(stock_id),
             )
+
+        # Check Market Deep Dive cache for index/ETF/crypto/commodity
+        cached_report = None
+        is_deep_dive = (
+            not is_stock
+            and stock_id
+            and "deep dive" in user_message.lower()
+            or "deep analysis" in user_message.lower()
+            or "market deep dive" in user_message.lower()
+        )
+        if is_deep_dive and context:
+            cached_report = self._check_deep_dive_cache(stock_id, context)
+
         system_instruction = self._build_system_instruction(
             session_type, stock_id, profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context,
+            asset_type=asset_type,
         )
         prompt = self._build_prompt(user_message, history, chunks)
 
@@ -181,15 +226,36 @@ class ChatService:
             ticker = args.get("ticker", "").upper()
             return await self._fetch_sentiment_data(ticker)
 
+        async def _handle_market_overview_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Called when Gemini decides it needs market overview data."""
+            symbol = args.get("symbol", "^GSPC").upper()
+            return await self._fetch_market_overview_data(symbol)
+
+        # Return cached deep dive if available (zero Gemini cost)
+        if cached_report:
+            logger.info(f"Deep dive cache HIT for {stock_id}")
+            return {
+                "content": cached_report,
+                "citations": citations if citations else None,
+                "tokens_used": 0,
+            }
+
+        # Select tools based on asset type
+        tools = [_STOCK_CHART_TOOL, _ANALYST_ANALYSIS_TOOL, _SENTIMENT_ANALYSIS_TOOL]
+        handlers = {
+            "get_stock_chart_data": _handle_stock_tool,
+            "get_analyst_analysis": _handle_analyst_tool,
+            "get_sentiment_analysis": _handle_sentiment_tool,
+        }
+        if asset_type == "INDEX":
+            tools.append(_MARKET_OVERVIEW_TOOL)
+            handlers["get_market_overview"] = _handle_market_overview_tool
+
         try:
             response = await self.gemini.generate_with_tools(
                 prompt=prompt,
-                tools=[_STOCK_CHART_TOOL, _ANALYST_ANALYSIS_TOOL, _SENTIMENT_ANALYSIS_TOOL],
-                tool_handlers={
-                    "get_stock_chart_data": _handle_stock_tool,
-                    "get_analyst_analysis": _handle_analyst_tool,
-                    "get_sentiment_analysis": _handle_sentiment_tool,
-                },
+                tools=tools,
+                tool_handlers=handlers,
                 system_instruction=system_instruction,
             )
 
@@ -197,7 +263,7 @@ class ChatService:
             tool_results = response.get("tool_results", [])
             if tool_results:
                 raw = tool_results[0]
-                if raw and raw.get("widget_type") == "stock_chart":
+                if raw and raw.get("widget_type") in ("stock_chart", "market_overview"):
                     widget = raw
 
         except Exception as e:
@@ -210,8 +276,14 @@ class ChatService:
                 system_instruction=system_instruction,
             )
 
+        ai_text = response["text"]
+
+        # Cache deep dive reports for 24 hours
+        if is_deep_dive and context and stock_id and len(ai_text) > 100:
+            self._upsert_deep_dive_cache(stock_id, context, ai_text)
+
         result: Dict[str, Any] = {
-            "content": response["text"],
+            "content": ai_text,
             "citations": citations if citations else None,
             "tokens_used": response.get("tokens_used"),
         }
@@ -308,6 +380,60 @@ class ChatService:
         except Exception as e:
             logger.error(f"Sentiment data fetch failed for {ticker}: {e}")
             return {"error": str(e)}
+
+    async def _fetch_market_overview_data(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch market valuation, sector performance, and macro indicators
+        for the market overview widget. Uses cached index detail data.
+        """
+        try:
+            from app.services.index_service import get_index_service
+            from app.schemas.chat import MarketOverviewWidget, MarketOverviewSector, MarketOverviewMacroItem
+
+            service = get_index_service()
+            # Fetch the full index detail (will use Supabase cache if available)
+            detail = await service.get_index_detail(symbol)
+
+            val = detail.snapshots_data.valuation
+            sp = detail.snapshots_data.sector_performance
+            macro = detail.snapshots_data.macro_forecast
+
+            sectors = [
+                MarketOverviewSector(sector=s.sector, change_percent=s.change_percent)
+                for s in sp.sectors
+            ]
+            advancing = sum(1 for s in sp.sectors if s.change_percent >= 0)
+            macro_items = [
+                MarketOverviewMacroItem(title=m.title, signal=m.signal)
+                for m in macro.indicators
+            ]
+
+            widget = MarketOverviewWidget(
+                pe_ratio=val.pe_ratio,
+                forward_pe=val.forward_pe,
+                valuation_level=self._get_valuation_level(val.pe_ratio),
+                earnings_yield=val.earnings_yield,
+                historical_avg_pe=val.historical_avg_pe,
+                sectors=sectors,
+                advancing=advancing,
+                declining=len(sectors) - advancing,
+                macro_indicators=macro_items,
+            )
+            return widget.model_dump()
+        except Exception as e:
+            logger.error(f"Market overview fetch failed for {symbol}: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
+    def _get_valuation_level(pe: float) -> str:
+        if pe < 18:
+            return "Bargain"
+        elif pe < 24:
+            return "Fair Value"
+        elif pe < 30:
+            return "Expensive"
+        else:
+            return "Overheated"
 
     # ── Helpers (unchanged) ─────────────────────────────────────────
 
@@ -459,12 +585,132 @@ class ChatService:
             logger.warning(f"Company profile summary failed for {ticker}: {e}")
             return None
 
+    # ── Asset type detection ─────────────────────────────────────────
+
+    @staticmethod
+    def _detect_asset_type(stock_id: str) -> str:
+        """Detect asset type from the symbol format."""
+        if not stock_id:
+            return "NORMAL"
+        sid = stock_id.upper()
+        if sid.startswith("^"):
+            return "INDEX"
+        # Common crypto suffixes
+        if sid.endswith("USD") or sid.endswith("USDT") or sid in {
+            "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
+            "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
+        }:
+            return "CRYPTO"
+        # Common commodity symbols
+        if sid in {
+            "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
+            "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
+            "SBUSD", "CTUSD", "CCUSD",
+            "GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER",
+        }:
+            return "COMMODITY"
+        return "STOCK"
+
+    # ── Deep dive cache ───────────────────────────────────────────
+
+    _DEEP_DIVE_TTL_HOURS = 24
+
+    def _check_deep_dive_cache(self, symbol: str, context: str) -> Optional[str]:
+        """Check Supabase market_deep_dive_cache (24h TTL)."""
+        ctx_hash = hashlib.md5(context.encode()).hexdigest()[:16]
+        try:
+            row = (
+                self.supabase.table("market_deep_dive_cache")
+                .select("report_markdown, cached_at")
+                .eq("symbol", symbol.upper())
+                .eq("context_hash", ctx_hash)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+            entry = row.data[0]
+            cached_at = datetime.fromisoformat(
+                entry["cached_at"].replace("Z", "+00:00")
+            )
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=self._DEEP_DIVE_TTL_HOURS):
+                return None
+            logger.info(f"Deep dive cache HIT for {symbol} (age={age})")
+            return entry["report_markdown"]
+        except Exception as e:
+            logger.warning(f"Deep dive cache check failed: {e}")
+            return None
+
+    def _upsert_deep_dive_cache(self, symbol: str, context: str, report: str) -> None:
+        """Cache deep dive report in Supabase (24h TTL)."""
+        ctx_hash = hashlib.md5(context.encode()).hexdigest()[:16]
+        try:
+            self.supabase.table("market_deep_dive_cache").upsert(
+                {
+                    "symbol": symbol.upper(),
+                    "context_hash": ctx_hash,
+                    "report_markdown": report,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="symbol,context_hash",
+            ).execute()
+            logger.info(f"Deep dive cached for {symbol} (24h TTL)")
+        except Exception as e:
+            logger.warning(f"Deep dive cache upsert failed: {e}")
+
+    # ── System instruction builder ────────────────────────────────
+
+    # Asset-specific persona extensions
+    _ASSET_PERSONAS = {
+        "INDEX": (
+            "\nYou are a senior market strategist. Focus on broad market conditions, "
+            "valuations, sector rotation, and macroeconomic factors. "
+            "When generating a Market Deep Dive, structure your response with these sections:\n"
+            "## Market Assessment\n"
+            "## Sector Rotation Signals\n"
+            "## Macro Risk & Reward\n"
+            "## What to Watch This Week\n"
+            "## Bottom Line\n"
+            "Be specific with numbers from the provided data. Do NOT mention any specific index names "
+            "like 'S&P 500', 'Dow Jones', or 'Nasdaq' — use 'the market' instead."
+        ),
+        "CRYPTO": (
+            "\nYou are a crypto analyst. Focus on adoption trends, regulatory landscape, "
+            "on-chain metrics, tokenomics, and market cycles. Compare to major crypto benchmarks. "
+            "When generating a Deep Analysis, structure your response with:\n"
+            "## Token Overview\n"
+            "## Market Position & Trend\n"
+            "## Key Risks\n"
+            "## Outlook\n"
+        ),
+        "ETF": (
+            "\nYou are an ETF analyst. Focus on expense ratios, tracking error, holdings, "
+            "sector allocation, and how the ETF compares to its benchmark. "
+            "When generating a Deep Analysis, structure your response with:\n"
+            "## Fund Overview\n"
+            "## Holdings & Sector Analysis\n"
+            "## Performance vs Benchmark\n"
+            "## Key Considerations\n"
+        ),
+        "COMMODITY": (
+            "\nYou are a commodity analyst. Focus on supply/demand dynamics, seasonal patterns, "
+            "geopolitical factors, and correlation with inflation/interest rates. "
+            "When generating a Deep Analysis, structure your response with:\n"
+            "## Market Overview\n"
+            "## Supply & Demand\n"
+            "## Price Drivers\n"
+            "## Outlook\n"
+        ),
+    }
+
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
         profit_summary: Optional[str] = None,
         snapshot_summary: Optional[str] = None,
         company_profile_summary: Optional[str] = None,
         client_context: Optional[str] = None,
+        asset_type: str = "STOCK",
     ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
@@ -486,17 +732,25 @@ class ChatService:
             "Explain what the sentiment means in plain language. "
             "Write your response in clean markdown."
         )
-        if stock_id:
+
+        # Add asset-specific persona
+        if asset_type in self._ASSET_PERSONAS:
+            base += self._ASSET_PERSONAS[asset_type]
+        elif stock_id:
             base += (
                 f"\nYou are currently helping analyze {stock_id}. "
                 "Use the provided financial data and filings context."
             )
+
+        # Stock-specific enrichment
+        if stock_id and asset_type == "STOCK":
             if company_profile_summary:
                 base += f"\n{company_profile_summary}"
             if profit_summary:
                 base += f"\n{profit_summary}"
             if snapshot_summary:
                 base += f"\n{snapshot_summary}"
+
         if client_context:
             base += (
                 f"\n\nCLIENT CONTEXT (current data visible to the user):\n"

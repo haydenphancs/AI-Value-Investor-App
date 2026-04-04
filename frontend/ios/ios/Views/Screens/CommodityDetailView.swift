@@ -10,6 +10,7 @@ import SwiftUI
 
 struct CommodityDetailView: View {
     @StateObject private var viewModel: CommodityDetailViewModel
+    @StateObject private var chatViewModel = ChatViewModel()
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
     @State private var showShareSheet = false
@@ -165,25 +166,29 @@ struct CommodityDetailView: View {
             SearchView()
                 .preferredColorScheme(.dark)
         }
-        .fullScreenCover(isPresented: $showAIChat) {
-            NavigationView {
-                ZStack {
-                    AppColors.background
-                        .ignoresSafeArea()
-                    ChatTabView(initialPrompt: "Tell me about \(commoditySymbol)")
-                }
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") {
-                            showAIChat = false
+        .sheet(isPresented: $showAIChat) {
+            NavigationStack {
+                ChatConversationView(viewModel: chatViewModel)
+                    .navigationTitle("Ask Cay AI")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { showAIChat = false }
                         }
-                        .foregroundColor(AppColors.primaryBlue)
                     }
-                }
             }
-            .environmentObject(AudioManager.shared)
             .preferredColorScheme(.dark)
+        }
+        .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
+            if let query = newValue {
+                chatViewModel.startNewConversation(
+                    firstMessage: query,
+                    stockId: commoditySymbol,
+                    context: viewModel.contextForCurrentTab
+                )
+                viewModel.pendingAIQuery = nil
+                showAIChat = true
+            }
         }
     }
 

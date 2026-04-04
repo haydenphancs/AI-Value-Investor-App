@@ -526,16 +526,31 @@ class IndexService:
     def _extract_chart_data(
         self, historical: List[Dict], chart_range: str
     ) -> List[ChartDataPointResponse]:
-        """Extract OHLCV data for chart, filtered by range."""
+        """Extract OHLCV data for chart, filtered by range.
+
+        Includes ~320 extra calendar days (~200 trading days) before the
+        visible start so the frontend can compute MA(200) and other
+        technical indicators during warm-up.  The frontend's
+        ``TickerChartView.warmupCount`` hides these extra points from
+        the displayed chart.
+        """
         if not historical:
             return []
 
+        # 320 calendar days ≈ 210 trading days — enough for MA(200)
+        _WARMUP_CALENDAR_DAYS = 320
+
         today = datetime.now(tz=timezone.utc).date()
         range_days = {
-            "1D": 2, "1W": 7, "3M": 90, "6M": 180,
-            "1Y": 365, "5Y": 365 * 5, "ALL": 99999,
+            "1D": 2 + 7,
+            "1W": 7 + 14,
+            "3M": 90 + _WARMUP_CALENDAR_DAYS,
+            "6M": 180 + _WARMUP_CALENDAR_DAYS,
+            "1Y": 365 + _WARMUP_CALENDAR_DAYS,
+            "5Y": 365 * 5 + _WARMUP_CALENDAR_DAYS,
+            "ALL": 99999,
         }
-        days = range_days.get(chart_range, 90)
+        days = range_days.get(chart_range, 90 + _WARMUP_CALENDAR_DAYS)
         cutoff = (today - timedelta(days=days)).isoformat()
 
         result = []

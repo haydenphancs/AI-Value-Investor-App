@@ -42,13 +42,13 @@ enum APIConfig: Sendable {
         switch AppEnvironment.current {
         case .development:
             // Local development server (use 127.0.0.1 for reliable iOS Simulator connectivity)
-            return URL(string: "http://127.0.0.1:8000")!
+            return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
         case .staging:
             // Staging server
             return URL(string: "https://staging-api.yourapp.com")!
         case .production:
             // Production server
-            return URL(string: "https://api.yourapp.com")!
+            return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
         }
     }
 

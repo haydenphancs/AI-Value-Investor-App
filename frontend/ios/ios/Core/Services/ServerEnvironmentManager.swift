@@ -2,14 +2,14 @@
 //  ServerEnvironmentManager.swift
 //  ios
 //
-//  Auto-detects whether a local backend is running and resolves
-//  the base URL accordingly. In DEBUG builds, probes localhost:8000/health
-//  with a 0.5s timeout — if it responds, all API traffic routes locally.
-//  Otherwise, falls back to the Railway production server.
+//  Auto-detects whether a local backend is running and dynamically
+//  routes API traffic to localhost or Railway.
 //
-//  Usage:
-//    await ServerEnvironmentManager.shared.resolve()   // call once at app launch
-//    APIConfig.baseURL  // automatically returns the resolved URL
+//  Behavior:
+//    - Probes localhost:8000/health on app launch and each foreground event
+//    - If localhost responds, all traffic routes locally
+//    - If localhost goes down mid-session, automatically falls back to Railway
+//    - When localhost comes back, next re-probe picks it up
 //
 //  Manual overrides (Xcode scheme → Environment Variables):
 //    USE_LOCAL=1    → always use localhost (skip probe)
@@ -32,10 +32,13 @@ final class ServerEnvironmentManager: @unchecked Sendable {
     /// Whether the resolved URL points to localhost.
     private(set) var isLocal: Bool = false
 
+    /// Whether a manual override is active (skips probing).
+    private(set) var isManualOverride: Bool = false
+
     // MARK: - Constants
 
-    private let localURL = URL(string: "http://127.0.0.1:8000")!
-    private let railwayURL = URL(string: "https://ai-value-investor-app-production.up.railway.app")!
+    let localURL = URL(string: "http://127.0.0.1:8000")!
+    let railwayURL = URL(string: "https://ai-value-investor-app-production.up.railway.app")!
 
     /// Timeout for the localhost health probe (seconds).
     private let probeTimeout: TimeInterval = 0.5
@@ -47,25 +50,27 @@ final class ServerEnvironmentManager: @unchecked Sendable {
     // MARK: - Resolution
 
     /// Probes the local backend and sets `resolvedBaseURL`.
-    /// Must be called **before** `APIClient.shared` is first accessed
-    /// so the singleton picks up the correct URL.
+    /// Called at app launch and on each foreground event.
     func resolve() async {
         #if DEBUG
         // ── Manual overrides ────────────────────────────────────────
         if ProcessInfo.processInfo.environment["USE_LOCAL"] == "1" {
             resolvedBaseURL = localURL
             isLocal = true
+            isManualOverride = true
             print("🟡 [ServerEnv] USE_LOCAL override — using localhost:8000")
             return
         }
         if ProcessInfo.processInfo.environment["USE_RAILWAY"] == "1" {
             resolvedBaseURL = railwayURL
             isLocal = false
+            isManualOverride = true
             print("🟡 [ServerEnv] USE_RAILWAY override — using Railway")
             return
         }
 
         // ── Auto-detect: probe localhost ────────────────────────────
+        let wasLocal = isLocal
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = probeTimeout
         config.timeoutIntervalForResource = probeTimeout
@@ -77,20 +82,46 @@ final class ServerEnvironmentManager: @unchecked Sendable {
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 resolvedBaseURL = localURL
                 isLocal = true
-                print("🟢 [ServerEnv] Local backend detected — using localhost:8000")
+                if !wasLocal {
+                    print("🟢 [ServerEnv] Local backend detected — switching to localhost:8000")
+                }
                 return
             }
         } catch {
-            // Timeout or connection refused — expected when local isn't running
+            // Timeout or connection refused — localhost not running
         }
 
         resolvedBaseURL = railwayURL
         isLocal = false
-        print("🔵 [ServerEnv] Using Railway backend")
+        if wasLocal {
+            print("🔵 [ServerEnv] Local backend unavailable — switching to Railway")
+        } else if resolvedBaseURL == nil {
+            print("🔵 [ServerEnv] Using Railway backend")
+        }
         #else
         // Production builds always use Railway — zero overhead.
         resolvedBaseURL = railwayURL
         isLocal = false
         #endif
+    }
+
+    // MARK: - Localhost Health Check (lightweight)
+
+    /// Quick probe to check if localhost is still alive.
+    /// Used by APIClient for failover decisions.
+    func isLocalhostAvailable() async -> Bool {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = probeTimeout
+        config.timeoutIntervalForResource = probeTimeout
+        let session = URLSession(configuration: config)
+
+        do {
+            let healthURL = localURL.appendingPathComponent("health")
+            let (_, response) = try await session.data(from: healthURL)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                return true
+            }
+        } catch {}
+        return false
     }
 }

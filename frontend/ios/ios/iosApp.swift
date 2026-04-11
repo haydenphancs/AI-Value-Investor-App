@@ -59,6 +59,11 @@ struct iosApp: App {
                         authService: authService
                     )
                 }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    // Re-probe localhost vs Railway each time app comes to foreground.
+                    // Handles: started/stopped localhost while app was backgrounded.
+                    Task { await ServerEnvironmentManager.shared.resolve() }
+                }
         }
     }
 

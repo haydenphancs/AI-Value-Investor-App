@@ -10,6 +10,7 @@
 //  - Auth token injection
 //  - Retry with exponential backoff
 //  - Request/response logging (debug mode)
+//  - Dynamic server switching: localhost ↔ Railway with auto-failover
 //
 
 import Foundation
@@ -22,7 +23,6 @@ actor APIClient {
 
     // MARK: - Configuration
 
-    private let baseURL: URL
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
@@ -35,13 +35,17 @@ actor APIClient {
 
     static let shared = APIClient()
 
+    // MARK: - Dynamic Base URL
+
+    /// Returns the current base URL from ServerEnvironmentManager.
+    /// This is read on every request so server switches take effect immediately.
+    private var currentBaseURL: URL {
+        ServerEnvironmentManager.shared.resolvedBaseURL ?? APIConfig.baseURL
+    }
+
     // MARK: - Initialization
 
-    init(
-        baseURL: URL = APIConfig.baseURL,
-        session: URLSession = .shared
-    ) {
-        self.baseURL = baseURL
+    init(session: URLSession = .shared) {
         self.session = session
 
         // Configure decoder
@@ -103,6 +107,12 @@ actor APIClient {
         } catch let error as DecodingError {
             throw APIError.decodingError(error)
         } catch {
+            // Connection failed — try failover to the other server
+            #if DEBUG
+            if let failoverResult: T = try? await attemptFailover(endpoint: endpoint, originalError: error) {
+                return failoverResult
+            }
+            #endif
             throw APIError.networkError(error)
         }
     }
@@ -113,6 +123,58 @@ actor APIClient {
 
         logRequest(request, endpoint: endpoint)
 
+        do {
+            let (data, response) = try await session.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.unknown(message: "Invalid response type")
+            }
+
+            logResponse(httpResponse, data: data)
+
+            try validateResponse(httpResponse, data: data)
+
+        } catch let apiError as APIError {
+            throw apiError
+        } catch {
+            // Connection failed — try failover
+            #if DEBUG
+            do {
+                try await attemptFailoverVoid(endpoint: endpoint, originalError: error)
+                return
+            } catch {}
+            #endif
+            throw APIError.networkError(error)
+        }
+    }
+
+    // MARK: - Failover
+
+    #if DEBUG
+    /// When a connection error occurs (localhost died), switch to the other server and retry once.
+    private func attemptFailover<T: Decodable>(
+        endpoint: APIEndpoint,
+        originalError: Error
+    ) async throws -> T {
+        let env = ServerEnvironmentManager.shared
+
+        // Don't failover if manual override is set
+        guard !env.isManualOverride else { throw originalError }
+
+        let failoverURL: URL
+        if env.isLocal {
+            // Localhost failed → try Railway
+            failoverURL = env.railwayURL
+            print("⚡ [APIClient] Localhost unreachable — failing over to Railway")
+        } else {
+            // Railway failed → try localhost (maybe user just started it)
+            guard await env.isLocalhostAvailable() else { throw originalError }
+            failoverURL = env.localURL
+            print("⚡ [APIClient] Railway unreachable — failing over to localhost")
+        }
+
+        // Build request against the failover URL
+        let request = try buildRequest(for: endpoint, baseURL: failoverURL)
         let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -120,14 +182,52 @@ actor APIClient {
         }
 
         logResponse(httpResponse, data: data)
-
         try validateResponse(httpResponse, data: data)
+
+        let result = try decoder.decode(T.self, from: data)
+
+        // Failover succeeded — update the resolved URL so future requests use it directly
+        await env.resolve()
+        return result
     }
+
+    /// Void version of failover for requests without response body.
+    private func attemptFailoverVoid(
+        endpoint: APIEndpoint,
+        originalError: Error
+    ) async throws {
+        let env = ServerEnvironmentManager.shared
+        guard !env.isManualOverride else { throw originalError }
+
+        let failoverURL: URL
+        if env.isLocal {
+            failoverURL = env.railwayURL
+            print("⚡ [APIClient] Localhost unreachable — failing over to Railway")
+        } else {
+            guard await env.isLocalhostAvailable() else { throw originalError }
+            failoverURL = env.localURL
+            print("⚡ [APIClient] Railway unreachable — failing over to localhost")
+        }
+
+        let request = try buildRequest(for: endpoint, baseURL: failoverURL)
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.unknown(message: "Invalid response type")
+        }
+
+        logResponse(httpResponse, data: data)
+        try validateResponse(httpResponse, data: data)
+
+        await env.resolve()
+    }
+    #endif
 
     // MARK: - Request Building
 
-    private func buildRequest(for endpoint: APIEndpoint) throws -> URLRequest {
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: true)!
+    private func buildRequest(for endpoint: APIEndpoint, baseURL: URL? = nil) throws -> URLRequest {
+        let base = baseURL ?? currentBaseURL
+        var components = URLComponents(url: base, resolvingAgainstBaseURL: true)!
         components.path = endpoint.path
 
         // Add query parameters

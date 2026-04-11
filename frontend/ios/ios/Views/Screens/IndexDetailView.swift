@@ -13,7 +13,6 @@ struct IndexDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
     @State private var showShareSheet = false
-    @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
@@ -191,11 +190,6 @@ struct IndexDetailView: View {
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
-        .sheet(isPresented: $showUpgradesDowngrades) {
-            if let ratingsData = viewModel.analystRatingsData {
-                UpgradesDowngradesView(actions: ratingsData.actions)
-            }
-        }
         .sheet(isPresented: $showTechnicalAnalysisDetail) {
             if let detailData = viewModel.technicalAnalysisDetailData {
                 TechnicalAnalysisDetailView(detailData: detailData)
@@ -282,24 +276,26 @@ struct IndexDetailView: View {
                 onLoadMore: viewModel.loadMoreNews
             )
         case .analysis:
-            TickerAnalysisContent(
-                analystRatingsData: viewModel.analystRatingsData,
-                sentimentAnalysisData: viewModel.sentimentAnalysisData,
-                technicalAnalysisData: viewModel.technicalAnalysisData,
-                isAnalystLoaded: viewModel.isAnalystLoaded,
-                isSentimentLoaded: viewModel.isSentimentLoaded,
-                isTechnicalLoaded: viewModel.isTechnicalLoaded,
-                selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
-                selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
-                onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
-                onAnalystActionsTap: {
-                    showUpgradesDowngrades = true
-                },
-                onSentimentMoreTap: viewModel.handleSentimentMore,
-                onTechnicalDetailTap: {
-                    showTechnicalAnalysisDetail = true
+            VStack(spacing: AppSpacing.lg) {
+                if let technicalData = viewModel.technicalAnalysisData {
+                    TechnicalAnalysisSection(
+                        technicalData: technicalData,
+                        onDetailTapped: {
+                            showTechnicalAnalysisDetail = true
+                        }
+                    )
+                } else if !viewModel.isTechnicalLoaded {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(AppColors.cardBackground)
+                        .frame(height: 180)
+                        .shimmer()
                 }
-            )
+
+                Spacer()
+                    .frame(height: 120)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.lg)
         }
     }
 

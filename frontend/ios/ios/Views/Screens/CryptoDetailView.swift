@@ -18,6 +18,7 @@ struct CryptoDetailView: View {
     @State private var showShareSheet = false
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
+    @State private var selectedSearchResult: SearchSelection?
 
     let cryptoSymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -209,6 +210,9 @@ struct CryptoDetailView: View {
             }
             .preferredColorScheme(.dark)
         }
+        .navigationDestination(item: $selectedSearchResult) { selection in
+            AssetDetailRouter(selection: selection)
+        }
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 chatViewModel.startNewConversation(
@@ -218,6 +222,12 @@ struct CryptoDetailView: View {
                 )
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
+            }
+        }
+        .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
+            if let ticker = newValue {
+                selectedSearchResult = SearchSelection(symbol: ticker, type: "crypto")
+                viewModel.pendingTickerNavigation = nil
             }
         }
     }
@@ -318,11 +328,11 @@ struct CryptoDetailView: View {
     }
 
     private func handleShare() {
-        print("Share \(cryptoSymbol)")
+        showShareSheet = true
     }
 
     private func handleAddToWatchlist() {
-        print("Add \(cryptoSymbol) to watchlist")
+        viewModel.toggleFavorite()
     }
 
     private func handleSetPriceAlert() {

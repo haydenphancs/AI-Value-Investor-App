@@ -367,7 +367,7 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     func handleRelatedCommodityTap(_ commodity: RelatedTicker) {
-        print("Navigate to \(commodity.symbol)")
+        pendingTickerNavigation = commodity.symbol
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {

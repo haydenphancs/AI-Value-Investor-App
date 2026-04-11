@@ -92,6 +92,13 @@ struct SearchView: View {
             NewsDetailView(article: article)
                 .preferredColorScheme(.dark)
         }
+        .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
+            NavigationStack {
+                AssetDetailRouter(selection: selection)
+                    .navigationBarHidden(true)
+            }
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Error Banner
@@ -290,6 +297,13 @@ struct SearchContentView: View {
         .fullScreenCover(item: $selectedNewsArticle) { article in
             NewsDetailView(article: article)
                 .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
+            NavigationStack {
+                AssetDetailRouter(selection: selection)
+                    .navigationBarHidden(true)
+            }
+            .preferredColorScheme(.dark)
         }
     }
 }

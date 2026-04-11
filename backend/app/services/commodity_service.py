@@ -303,7 +303,7 @@ class CommodityService:
         # ── Step 2: Extract quote data ────────────────────────────
         price = quote.get("price") or 0
         change = quote.get("change") or 0
-        change_pct = quote.get("changesPercentage") or 0
+        change_pct = quote.get("changePercentage") or 0
         day_high = quote.get("dayHigh") or 0
         day_low = quote.get("dayLow") or 0
         year_high = quote.get("yearHigh") or 0
@@ -438,7 +438,7 @@ class CommodityService:
         for sym, rq in related_quotes:
             rel_name = _resolve_name(sym.replace("USD", ""))
             rel_price = rq.get("price") or 0
-            rel_change = rq.get("changesPercentage") or 0
+            rel_change = rq.get("changePercentage") or 0
             related_commodities.append(RelatedCommodityResponse(
                 symbol=sym,
                 name=rel_name,

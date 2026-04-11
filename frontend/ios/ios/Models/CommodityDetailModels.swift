@@ -16,6 +16,7 @@ import SwiftUI
 enum CommodityDetailTab: String, CaseIterable {
     case overview = "Overview"
     case news = "News"
+    case analysis = "Analysis"
 }
 
 // MARK: - Commodity Category

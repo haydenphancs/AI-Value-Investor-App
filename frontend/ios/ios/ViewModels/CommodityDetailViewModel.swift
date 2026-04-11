@@ -3,7 +3,12 @@
 //  ios
 //
 //  ViewModel for the Commodity Detail screen.
-//  Fetches real data from GET /api/v1/commodities/{symbol}?range=3M&interval=daily
+//  Fetches real data from:
+//    GET  /api/v1/commodities/{symbol}?range=3M&interval=daily
+//    GET  /api/v1/commodities/{symbol}/news?limit=50
+//    POST /api/v1/commodities/{symbol}/news/enrich
+//    GET  /api/v1/stocks/{fmpSymbol}/technical-analysis
+//    GET  /api/v1/stocks/{fmpSymbol}/technical-analysis/detail
 //
 
 import Foundation
@@ -16,6 +21,9 @@ class CommodityDetailViewModel: ObservableObject {
 
     @Published var commodityData: CommodityDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
+    @Published var technicalAnalysisData: TechnicalAnalysisData?
+    @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
+    @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: CommodityDetailTab = .overview
@@ -23,14 +31,26 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
+    @Published var pendingTickerNavigation: String?
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
 
+    // Analysis tab state
+    @Published var isTechnicalLoaded: Bool = false
+
+    // News state
+    @Published var isNewsLoading: Bool = false
+    @Published var hasMoreNews: Bool = false
+    private var allNewsArticles: [TickerNewsArticle] = []
+    private var newsDisplayCount: Int = 10
+    private let newsPageSize: Int = 10
+
     // MARK: - Private Properties
 
-    private let commoditySymbol: String
+    let commoditySymbol: String
     private let apiClient = APIClient.shared
     private var cancellables = Set<AnyCancellable>()
+    private var chartRefreshTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -47,7 +67,6 @@ class CommodityDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe interval changes and re-fetch chart data
         chartSettings.$selectedInterval
             .dropFirst()
             .removeDuplicates()
@@ -66,69 +85,25 @@ class CommodityDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
-
-            do {
-                print("🏗️ [CommodityDetail] Fetching data for \(self.commoditySymbol) range=\(self.selectedChartRange.rawValue)")
-
-                let response = try await self.apiClient.request(
-                    endpoint: .getCommodityDetail(
-                        symbol: self.commoditySymbol,
-                        range: self.selectedChartRange.rawValue,
-                        interval: self.chartSettings.selectedInterval.rawValue
-                    ),
-                    responseType: CommodityDetailResponseDTO.self
-                )
-
-                print("✅ [CommodityDetail] Loaded \(response.name) — $\(response.currentPrice)")
-                print("   📊 Chart points: \(response.chartData.count)")
-                print("   📰 News articles: \(response.newsArticles.count)")
-
-                self.commodityData = response.toDisplayModel()
-                self.chartDataVersion += 1
-                self.newsArticles = response.toNewsArticles()
-                self.isLoading = false
-                self.errorMessage = nil
-
-            } catch {
-                print("❌ [CommodityDetail] Failed to load \(self.commoditySymbol): \(error)")
-                self.handleLoadError(error)
-            }
+            async let detailTask: () = self.fetchCommodityDetail()
+            async let newsTask: () = self.fetchCommodityNews()
+            async let technicalTask: () = self.fetchTechnicalAnalysis()
+            async let watchlistTask: () = self.checkWatchlistStatus()
+            _ = await (detailTask, newsTask, technicalTask, watchlistTask)
         }
     }
 
     func refresh() async {
-        isLoading = true
         errorMessage = nil
-
-        do {
-            let response = try await apiClient.request(
-                endpoint: .getCommodityDetail(
-                    symbol: commoditySymbol,
-                    range: selectedChartRange.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: CommodityDetailResponseDTO.self
-            )
-            print("✅ [CommodityDetail] Refreshed \(response.name)")
-            self.commodityData = response.toDisplayModel()
-            self.chartDataVersion += 1
-            self.newsArticles = response.toNewsArticles()
-            self.isLoading = false
-        } catch {
-            print("❌ [CommodityDetail] Refresh failed: \(error)")
-            handleLoadError(error)
-        }
+        await fetchCommodityDetail()
+        await fetchCommodityNews()
     }
 
-    // MARK: - Chart Range Change
+    // MARK: - Detail Fetch
 
-    func updateChartRange(_ range: ChartTimeRange) {
-        selectedChartRange = range
-    }
-
-    private func fetchChartForRange() async {
+    private func fetchCommodityDetail() async {
         let range = selectedChartRange
-        print("🏗️ [CommodityDetail] Updating chart range to \(range.rawValue)")
+        let startTime = CFAbsoluteTimeGetCurrent()
 
         do {
             let response = try await apiClient.request(
@@ -140,48 +115,252 @@ class CommodityDetailViewModel: ObservableObject {
                 responseType: CommodityDetailResponseDTO.self
             )
 
+            let elapsed = String(format: "%.1f", CFAbsoluteTimeGetCurrent() - startTime)
             self.commodityData = response.toDisplayModel()
             self.chartDataVersion += 1
-            self.newsArticles = response.toNewsArticles()
-            print("✅ [CommodityDetail] Chart range updated — \(response.chartData.count) data points")
+            self.isLoading = false
+            self.errorMessage = nil
+
+            print("✅ [CommodityDetailVM] Loaded \(response.name) in \(elapsed)s — \(response.chartData.count) chart points")
+
         } catch {
-            print("⚠️ [CommodityDetail] Chart range update failed — \(error)")
+            print("❌ [CommodityDetailVM] Failed to load \(commoditySymbol): \(error)")
+            self.isLoading = false
+
+            if let apiError = error as? APIError {
+                switch apiError {
+                case .networkError:
+                    self.errorMessage = "Unable to connect. Check your internet connection."
+                case .serverError(let code):
+                    self.errorMessage = "Server error (\(code)). Please try again."
+                case .notFound:
+                    self.errorMessage = "Commodity data not found for \(commoditySymbol)."
+                default:
+                    self.errorMessage = "Something went wrong. Please try again."
+                }
+            } else {
+                self.errorMessage = "Unexpected error. Please try again."
+            }
+
+            // Fallback
+            self.commodityData = CommodityDetailData.sampleGold
         }
     }
 
-    // MARK: - Error Handling
+    // MARK: - Chart Range Change
 
-    private func handleLoadError(_ error: Error) {
-        self.isLoading = false
-
-        if let apiError = error as? APIError {
-            switch apiError {
-            case .networkError:
-                self.errorMessage = "Unable to connect. Check your internet connection."
-            case .serverError(let code):
-                self.errorMessage = "Server error (\(code)). Please try again."
-            case .notFound:
-                self.errorMessage = "Commodity data not found for \(commoditySymbol)."
-            case .decodingError:
-                self.errorMessage = "Failed to parse commodity data."
-            default:
-                self.errorMessage = "Something went wrong. Please try again."
-            }
-        } else {
-            self.errorMessage = "Unexpected error. Please try again."
+    private func fetchChartForRange() async {
+        let range = selectedChartRange
+        do {
+            let response = try await apiClient.request(
+                endpoint: .getCommodityDetail(
+                    symbol: commoditySymbol,
+                    range: range.rawValue,
+                    interval: chartSettings.selectedInterval.rawValue
+                ),
+                responseType: CommodityDetailResponseDTO.self
+            )
+            self.commodityData = response.toDisplayModel()
+            self.chartDataVersion += 1
+            print("✅ [CommodityDetailVM] Chart updated — \(response.chartData.count) data points")
+        } catch {
+            print("⚠️ [CommodityDetailVM] Chart update failed: \(error)")
         }
+    }
 
-        // Fallback to sample data
-        print("   🔄 Falling back to sample data for \(commoditySymbol)")
-        self.commodityData = CommodityDetailData.sampleGold
-        self.newsArticles = TickerNewsArticle.sampleDataForTicker(commoditySymbol)
+    // MARK: - News Fetching & Enrichment
+
+    private func fetchCommodityNews() async {
+        self.isNewsLoading = true
+        print("📡 [CommodityDetailVM] Fetching news for \(commoditySymbol)")
+
+        do {
+            let response = try await apiClient.request(
+                endpoint: .getCommodityNews(symbol: commoditySymbol, limit: 50),
+                responseType: TickerNewsFeedResponse.self
+            )
+            print("✅ [CommodityDetailVM] Got \(response.articles.count) news articles (cached: \(response.cached ?? false))")
+
+            self.allNewsArticles = response.articles.map { mapApiToUiArticle($0) }
+            self.newsDisplayCount = newsPageSize
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.isNewsLoading = false
+
+            // Enrich unenriched articles in background
+            let unenrichedIds = self.allNewsArticles
+                .filter { !$0.aiProcessed }
+                .map { $0.apiId }
+                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+
+            if !unenrichedIds.isEmpty {
+                await attemptEnrichment(articleIds: unenrichedIds)
+                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            }
+        } catch {
+            print("❌ [CommodityDetailVM] Failed to fetch news: \(error)")
+        }
+        self.isNewsLoading = false
+    }
+
+    private func attemptEnrichment(articleIds: [String], maxAttempts: Int = 2) async {
+        for attempt in 1...maxAttempts {
+            do {
+                let enrichResponse = try await apiClient.request(
+                    endpoint: .enrichCommodityNews(symbol: commoditySymbol, articleIds: articleIds),
+                    responseType: EnrichStockNewsResponse.self
+                )
+                mergeEnrichment(enrichResponse.articles)
+
+                let enrichedCount = allNewsArticles.prefix(newsDisplayCount)
+                    .filter { $0.aiProcessed }.count
+                if enrichedCount > 0 {
+                    print("✅ [CommodityDetailVM] Attempt \(attempt) enriched \(enrichedCount) articles")
+                    return
+                } else if attempt < maxAttempts {
+                    print("⚠️ [CommodityDetailVM] Attempt \(attempt) returned 0 enriched, retrying in 3s...")
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [CommodityDetailVM] Enrichment returned 0 enriched after \(maxAttempts) attempts")
+                }
+            } catch {
+                if attempt < maxAttempts {
+                    print("⚠️ [CommodityDetailVM] Enrichment attempt \(attempt) failed: \(error), retrying...")
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [CommodityDetailVM] Enrichment failed after \(maxAttempts) attempts: \(error)")
+                }
+            }
+        }
+    }
+
+    private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
+        let enrichedById = Dictionary(
+            enrichedArticles.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var actuallyEnriched = 0
+        for i in allNewsArticles.indices {
+            if let enriched = enrichedById[allNewsArticles[i].apiId] {
+                let wasProcessed = enriched.aiProcessed ?? false
+                let hasBullets = enriched.summaryBullets?.isEmpty == false
+
+                if wasProcessed || hasBullets {
+                    let bullets: [String] = {
+                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                        if let s = enriched.summary, !s.isEmpty { return [s] }
+                        return allNewsArticles[i].summaryBullets
+                    }()
+                    allNewsArticles[i].summaryBullets = bullets
+                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                    allNewsArticles[i].aiProcessed = true
+                    actuallyEnriched += 1
+                }
+            }
+        }
+        print("📰 [CommodityDetailVM] Merged \(actuallyEnriched)/\(enrichedArticles.count) enriched articles")
+    }
+
+    func loadMoreNews() {
+        newsDisplayCount += newsPageSize
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        hasMoreNews = newsDisplayCount < allNewsArticles.count
+
+        // Enrich newly visible articles
+        Task {
+            let unenriched = newsArticles.filter { !$0.aiProcessed }
+            guard !unenriched.isEmpty else { return }
+            let ids = unenriched.map { $0.apiId }
+                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+            guard !ids.isEmpty else { return }
+            await attemptEnrichment(articleIds: ids)
+            newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        }
+    }
+
+    // MARK: - Technical Analysis
+
+    private func fetchTechnicalAnalysis() async {
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .getTechnicalAnalysis(ticker: commoditySymbol),
+                responseType: TechnicalAnalysisDTO.self
+            )
+            self.technicalAnalysisData = dto.toDisplayModel()
+            self.isTechnicalLoaded = true
+            print("✅ [CommodityDetailVM] Got technical analysis — gauge: \(dto.gaugeValue)")
+        } catch {
+            print("⚠️ [CommodityDetailVM] Technical analysis failed: \(error)")
+            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
+            self.isTechnicalLoaded = true
+        }
+    }
+
+    func fetchTechnicalAnalysisDetail() {
+        guard technicalAnalysisDetailData == nil, !isTechnicalDetailLoading else { return }
+        isTechnicalDetailLoading = true
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let dto = try await self.apiClient.request(
+                    endpoint: .getTechnicalAnalysisDetail(ticker: self.commoditySymbol),
+                    responseType: TechnicalAnalysisDetailDTO.self
+                )
+                self.technicalAnalysisDetailData = dto.toDisplayModel()
+                print("✅ [CommodityDetailVM] Got technical analysis detail for \(self.commoditySymbol)")
+            } catch {
+                print("⚠️ [CommodityDetailVM] Technical analysis detail failed: \(error)")
+                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+            }
+            self.isTechnicalDetailLoading = false
+        }
+    }
+
+    // MARK: - Watchlist
+
+    func toggleFavorite() {
+        let wasInWatchlist = isFavorite
+        isFavorite.toggle()
+
+        Task { @MainActor in
+            do {
+                if wasInWatchlist {
+                    try await apiClient.request(
+                        endpoint: .removeFromWatchlist(stockId: commoditySymbol)
+                    )
+                    print("✅ [CommodityDetailVM] Removed \(commoditySymbol) from watchlist")
+                } else {
+                    try await apiClient.request(
+                        endpoint: .addToWatchlist(stockId: commoditySymbol)
+                    )
+                    print("✅ [CommodityDetailVM] Added \(commoditySymbol) to watchlist")
+                }
+            } catch {
+                print("⚠️ [CommodityDetailVM] Watchlist toggle failed: \(error)")
+                isFavorite = wasInWatchlist
+            }
+        }
+    }
+
+    private func checkWatchlistStatus() async {
+        do {
+            let watchlist: [WatchlistItemDTO] = try await apiClient.request(
+                endpoint: .getWatchlist,
+                responseType: [WatchlistItemDTO].self
+            )
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == commoditySymbol.uppercased() }
+        } catch {
+            print("⚠️ [CommodityDetailVM] Watchlist check failed: \(error)")
+        }
+    }
+
+    private struct WatchlistItemDTO: Codable {
+        let ticker: String
     }
 
     // MARK: - User Actions
-
-    func toggleFavorite() {
-        isFavorite.toggle()
-    }
 
     func handleNotificationTap() {
         print("Notification settings for \(commoditySymbol)")
@@ -192,7 +371,8 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("Open news article: \(article.headline)")
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -201,7 +381,7 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
+        pendingTickerNavigation = ticker
     }
 
     func handleSuggestionTap(_ suggestion: CommodityAISuggestion) {
@@ -214,6 +394,8 @@ class CommodityDetailViewModel: ObservableObject {
         aiInputText = ""
     }
 
+    // MARK: - AI Context
+
     var contextForCurrentTab: String? {
         guard let data = commodityData else { return nil }
         var parts: [String] = []
@@ -223,19 +405,33 @@ class CommodityDetailViewModel: ObservableObject {
         parts.append("Price: $\(String(format: "%.2f", data.currentPrice))")
         parts.append("Change: \(String(format: "%+.2f", data.priceChangePercent))%")
 
-        // Key stats
         let allStats = data.keyStatisticsGroups.flatMap { $0.statistics }
         if !allStats.isEmpty {
             let statsText = allStats.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
             parts.append("KEY STATISTICS: \(statsText)")
         }
 
-        // Performance
         let perfText = data.performancePeriods
             .map { "\($0.label): \(String(format: "%+.2f", $0.changePercent))%" }
             .joined(separator: ", ")
         if !perfText.isEmpty {
             parts.append("PERFORMANCE: \(perfText)")
+        }
+
+        switch selectedTab {
+        case .overview:
+            break
+        case .news:
+            if !newsArticles.isEmpty {
+                let headlines = newsArticles.prefix(5)
+                    .map { "- \($0.headline) [\($0.sentiment.rawValue)]" }
+                    .joined(separator: "\n")
+                parts.append("RECENT NEWS:\n\(headlines)")
+            }
+        case .analysis:
+            if let tech = technicalAnalysisData {
+                parts.append("TECHNICAL: Signal=\(tech.overallSignal.rawValue), Gauge=\(tech.gaugeValue)")
+            }
         }
 
         parts.append("User is viewing the \(selectedTab.rawValue) tab.")
@@ -270,5 +466,53 @@ class CommodityDetailViewModel: ObservableObject {
 
     var aiSuggestions: [CommodityAISuggestion] {
         CommodityAISuggestion.defaultSuggestions
+    }
+
+    // MARK: - News Helpers
+
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
+        let bullets: [String] = {
+            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty { return aiBullets }
+            if let summary = article.summary, !summary.isEmpty { return [summary] }
+            return []
+        }()
+
+        return TickerNewsArticle(
+            apiId: article.id,
+            headline: article.title,
+            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            sentiment: mapSentiment(article.sentiment),
+            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            thumbnailName: nil,
+            imageURL: article.imageUrl.flatMap { URL(string: $0) },
+            relatedTickers: article.relatedTickers ?? [],
+            summaryBullets: bullets,
+            articleURL: article.url.flatMap { URL(string: $0) },
+            aiProcessed: article.aiProcessed ?? false
+        )
+    }
+
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
+        switch sentiment?.lowercased() {
+        case "positive", "bullish": return .positive
+        case "negative", "bearish": return .negative
+        default: return .neutral
+        }
+    }
+
+    private func parseDate(_ dateString: String) -> Date? {
+        let formatters: [DateFormatter] = {
+            let iso = DateFormatter()
+            iso.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+            let simple = DateFormatter()
+            simple.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let dateOnly = DateFormatter()
+            dateOnly.dateFormat = "yyyy-MM-dd"
+            return [iso, simple, dateOnly]
+        }()
+        for formatter in formatters {
+            if let date = formatter.date(from: dateString) { return date }
+        }
+        return ISO8601DateFormatter().date(from: dateString)
     }
 }

@@ -205,6 +205,12 @@ struct CommodityDetailView: View {
                 showAIChat = true
             }
         }
+        .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
+            if let ticker = newValue {
+                selectedSearchResult = SearchSelection(symbol: ticker, type: "commodity")
+                viewModel.pendingTickerNavigation = nil
+            }
+        }
     }
 
     // MARK: - Tab Content

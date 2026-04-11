@@ -32,6 +32,7 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
+    @Published var pendingTickerNavigation: String?
 
     // Analysis tab state
     @Published var selectedFearGreedTimeframe: FearGreedTimeframe = .today
@@ -154,9 +155,11 @@ class CryptoDetailViewModel: ObservableObject {
                 self.connectLivePrice()
                 self.startChartRefreshTimer()
 
-                // Fetch news + analysis data in parallel
-                await self.fetchCryptoNews()
-                await self.fetchCryptoAnalysis()
+                // Fetch news, analysis, and watchlist status in parallel
+                async let newsTask: () = self.fetchCryptoNews()
+                async let analysisTask: () = self.fetchCryptoAnalysis()
+                async let watchlistTask: () = self.checkWatchlistStatus()
+                _ = await (newsTask, analysisTask, watchlistTask)
 
             } catch {
                 print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
@@ -260,7 +263,43 @@ class CryptoDetailViewModel: ObservableObject {
     // MARK: - User Actions
 
     func toggleFavorite() {
+        let wasInWatchlist = isFavorite
         isFavorite.toggle()
+
+        Task { @MainActor in
+            do {
+                if wasInWatchlist {
+                    try await apiClient.request(
+                        endpoint: .removeFromWatchlist(stockId: cryptoSymbol)
+                    )
+                    print("✅ [CryptoDetailVM] Removed \(cryptoSymbol) from watchlist")
+                } else {
+                    try await apiClient.request(
+                        endpoint: .addToWatchlist(stockId: cryptoSymbol)
+                    )
+                    print("✅ [CryptoDetailVM] Added \(cryptoSymbol) to watchlist")
+                }
+            } catch {
+                print("⚠️ [CryptoDetailVM] Watchlist toggle failed: \(error)")
+                isFavorite = wasInWatchlist
+            }
+        }
+    }
+
+    private func checkWatchlistStatus() async {
+        do {
+            let watchlist: [WatchlistItemDTO] = try await apiClient.request(
+                endpoint: .getWatchlist,
+                responseType: [WatchlistItemDTO].self
+            )
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == cryptoSymbol.uppercased() }
+        } catch {
+            print("⚠️ [CryptoDetailVM] Watchlist check failed: \(error)")
+        }
+    }
+
+    private struct WatchlistItemDTO: Codable {
+        let ticker: String
     }
 
     func handleNotificationTap() {
@@ -280,11 +319,12 @@ class CryptoDetailViewModel: ObservableObject {
     }
 
     func handleRelatedCryptoTap(_ ticker: RelatedTicker) {
-        print("Navigate to \(ticker.symbol)")
+        pendingTickerNavigation = ticker.symbol
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("Open news article: \(article.headline)")
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -293,7 +333,7 @@ class CryptoDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
+        pendingTickerNavigation = ticker
     }
 
     func handleSuggestionTap(_ suggestion: CryptoAISuggestion) {

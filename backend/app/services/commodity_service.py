@@ -264,7 +264,7 @@ class CommodityService:
 
         # ── Step 1: Parallel FMP fetches ──────────────────────────
         today = datetime.now(tz=timezone.utc).date()
-        from_date = (today - timedelta(days=365 * 4)).isoformat()
+        from_date = "2010-01-01"  # Fetch max history for performance & benchmark
         to_date = today.isoformat()
 
         quote_task = self.fmp.get_stock_price_quote(fmp_symbol)
@@ -361,8 +361,19 @@ class CommodityService:
         if yr_ago_close and yr_ago_close > 0 and price:
             yr_change = ((price - yr_ago_close) / yr_ago_close) * 100
 
-        # Unit of measure (top-left, like Constituents in Index)
-        unit_label = "per " + meta.get("unit", "unit").replace("_", " ").title() if meta.get("unit") else "—"
+        # Price per unit (top-left, like Constituents in Index)
+        _UNIT_ABBREV = {
+            "troy_ounce": "/oz",
+            "barrel": "/bbl",
+            "pound": "/lb",
+            "mmbtu": "/MMBtu",
+            "gallon": "/gal",
+            "bushel": "/bu",
+            "ton": "/ton",
+            "contract": "",
+        }
+        unit_abbrev = _UNIT_ABBREV.get(meta.get("unit", ""), "")
+        price_per_unit = _fmt(price) + unit_abbrev if price else "—"
 
         # Avg volume: compute from historical if FMP quote returns 0
         if not avg_volume and len(closes) >= 30:
@@ -373,7 +384,7 @@ class CommodityService:
         key_statistics_groups = [
             # Left column (matches Index layout)
             KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="Unit", value=unit_label),
+                KeyStatisticItem(label="Price/Unit", value=price_per_unit),
                 KeyStatisticItem(label="Open", value=_fmt(open_price)),
                 KeyStatisticItem(label="Previous Close", value=_fmt(prev_close)),
                 KeyStatisticItem(label="Day High", value=_fmt(day_high)),
@@ -436,20 +447,28 @@ class CommodityService:
             ))
 
         # ── Step 9: Build benchmark summary ───────────────────────
-        # ~252 trading days/year, need ~2.5 years of data for a 3Y benchmark
+        # Use the earliest available data point for longest history
         benchmark = None
-        if len(closes) >= 630:  # ~2.5 years of trading days
-            three_yr_idx = max(0, len(closes) - 756)  # ~3 years of trading days
-            three_yr_ago_close = closes[three_yr_idx]
-            if three_yr_ago_close and three_yr_ago_close > 0 and price:
-                total_return = ((price - three_yr_ago_close) / three_yr_ago_close) * 100
-                avg_annual = total_return / 3
-                benchmark = BenchmarkSummaryResponse(
-                    avg_annual_return=round(avg_annual, 1),
-                    sp_benchmark=10.5,
-                    benchmark_name="S&P 500",
-                    since_date="3 Years",
-                )
+        if historical and len(historical) >= 252 and price:
+            earliest = historical[0]
+            earliest_close = earliest.get("close") or 0
+            earliest_date = earliest.get("date", "")
+            if earliest_close and earliest_close > 0:
+                total_return = ((price - earliest_close) / earliest_close) * 100
+                # Compute years from earliest date
+                try:
+                    start = datetime.strptime(earliest_date, "%Y-%m-%d")
+                    years = max(1, (datetime.now() - start).days / 365.25)
+                    avg_annual = total_return / years
+                    since_year = earliest_date[:4]  # e.g. "2010"
+                    benchmark = BenchmarkSummaryResponse(
+                        avg_annual_return=round(avg_annual, 1),
+                        sp_benchmark=10.5,
+                        benchmark_name="S&P 500",
+                        since_date=since_year,
+                    )
+                except Exception:
+                    pass
 
         return CommodityDetailResponse(
             symbol=fmp_symbol,
@@ -499,7 +518,7 @@ class CommodityService:
     def _build_performance(self, historical: List[Dict]) -> List[PerformancePeriodResponse]:
         periods = [
             ("1M", 21), ("3M", 63), ("6M", 126), ("YTD", None),
-            ("1Y", 252), ("3Y", 756),
+            ("1Y", 252), ("3Y", 756), ("5Y", 1260), ("10Y", 2520),
         ]
         result = []
         if not historical:

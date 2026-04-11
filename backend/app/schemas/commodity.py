@@ -48,6 +48,33 @@ class CommodityNewsArticleResponse(BaseModel):
     article_url: Optional[str] = None
 
 
+class CommodityProfileResponse(BaseModel):
+    description: str = ""
+    category: str = ""
+    exchange: str = ""
+    trading_hours: str = ""
+    contract_size: str = ""
+    unit: str = ""
+    currency: str = "USD"
+    tick_size: str = ""
+    major_producers: str = ""
+    major_consumers: str = ""
+
+
+class RelatedCommodityResponse(BaseModel):
+    symbol: str
+    name: str
+    price: float = 0
+    change_percent: float = 0
+
+
+class BenchmarkSummaryResponse(BaseModel):
+    avg_annual_return: float
+    sp_benchmark: float
+    benchmark_name: str = "S&P 500"
+    since_date: Optional[str] = None
+
+
 class CommodityDetailResponse(BaseModel):
     symbol: str
     name: str
@@ -59,3 +86,6 @@ class CommodityDetailResponse(BaseModel):
     key_statistics_groups: List[KeyStatisticsGroupResponse]
     performance_periods: List[PerformancePeriodResponse]
     news_articles: List[CommodityNewsArticleResponse] = []
+    commodity_profile: Optional[CommodityProfileResponse] = None
+    related_commodities: List[RelatedCommodityResponse] = []
+    benchmark_summary: Optional[BenchmarkSummaryResponse] = None

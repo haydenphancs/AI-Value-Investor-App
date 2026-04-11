@@ -84,6 +84,146 @@ class NewsCacheService:
             logger.error(f"News fetch failed for {ticker}: {e}", exc_info=True)
             return await self._fallback_raw_news(ticker, limit)
 
+    # ── Public: Get index news (constituent-based) ─────────────────────
+
+    async def get_index_news(
+        self, symbol: str, limit: int = 50, news_tickers: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Get news for an index. Uses the index symbol as the cache key
+        but fetches news for its top constituent tickers from FMP.
+
+        Args:
+            symbol: Index symbol (e.g., "^GSPC") — used as cache key
+            limit: Max articles
+            news_tickers: Comma-separated constituent tickers for FMP query
+        """
+        symbol = symbol.upper()
+
+        # 1. Check cache (keyed by index symbol)
+        cached_articles = self._get_cached(symbol, limit)
+        if cached_articles:
+            oldest = min(
+                (a.get("cached_at") or datetime.now(timezone.utc).isoformat())
+                for a in cached_articles
+            )
+            try:
+                cached_time = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+                age = int((datetime.now(timezone.utc) - cached_time).total_seconds())
+            except Exception:
+                age = 0
+
+            logger.info(f"Index news cache HIT for {symbol}: {len(cached_articles)} articles")
+            return {
+                "articles": self._format_response(cached_articles),
+                "ticker": symbol,
+                "cached": True,
+                "cache_age_seconds": age,
+            }
+
+        # 2. Cache miss → fetch from FMP using constituent tickers
+        logger.info(f"Index news cache MISS for {symbol}: fetching via tickers={news_tickers}")
+        try:
+            articles = await self._fetch_and_cache_index_news(
+                symbol, news_tickers, limit
+            )
+            return {
+                "articles": articles,
+                "ticker": symbol,
+                "cached": False,
+                "cache_age_seconds": 0,
+            }
+        except Exception as e:
+            logger.error(f"Index news fetch failed for {symbol}: {e}", exc_info=True)
+            return {
+                "articles": [],
+                "ticker": symbol,
+                "cached": False,
+                "cache_age_seconds": None,
+            }
+
+    async def _fetch_and_cache_index_news(
+        self, symbol: str, news_tickers: str, limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Fetch news for constituent tickers, cache under the index symbol."""
+        raw_articles = await self.fmp.get_stock_news(
+            news_tickers if news_tickers else None, limit=limit
+        )
+        if not raw_articles:
+            logger.info(f"No FMP news found for index {symbol} (tickers={news_tickers})")
+            return []
+
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=CACHE_TTL_HOURS)
+
+        cache_rows = []
+        response_articles = []
+        seen_external_ids: set = set()
+
+        for i, raw in enumerate(raw_articles[:limit]):
+            external_id = raw.get("url") or raw.get("title", f"unknown_{i}")
+            ext_key = external_id[:500]
+            if ext_key in seen_external_ids:
+                continue
+            seen_external_ids.add(ext_key)
+
+            row = {
+                "ticker": symbol,  # Cache key = index symbol
+                "external_id": external_id[:500],
+                "headline": raw.get("title", ""),
+                "summary": raw.get("text", ""),
+                "summary_bullets": json.dumps([]),
+                "sentiment": None,
+                "sentiment_confidence": 0,
+                "source_name": raw.get("publisher") or raw.get("site", ""),
+                "source_logo_url": None,
+                "published_at": raw.get("publishedDate"),
+                "thumbnail_url": raw.get("image"),
+                "article_url": raw.get("url"),
+                "related_tickers": self._parse_tickers(raw, symbol),
+                "ai_processed": False,
+                "ai_model": None,
+                "cached_at": now.isoformat(),
+                "expires_at": expires.isoformat(),
+            }
+            cache_rows.append(row)
+
+            response_articles.append({
+                "id": "",
+                "headline": row["headline"],
+                "summary": row["summary"],
+                "summary_bullets": [],
+                "sentiment": None,
+                "sentiment_confidence": 0,
+                "source_name": row["source_name"],
+                "source_logo_url": None,
+                "published_at": row["published_at"],
+                "thumbnail_url": row["thumbnail_url"],
+                "article_url": row["article_url"],
+                "related_tickers": self._parse_tickers(raw, symbol),
+                "ai_processed": False,
+            })
+
+        # Upsert into cache
+        try:
+            result = (
+                self.supabase.table("ticker_news_cache")
+                .upsert(cache_rows, on_conflict="ticker,external_id")
+                .execute()
+            )
+            if result.data:
+                for i, inserted in enumerate(result.data):
+                    if i < len(response_articles):
+                        response_articles[i]["id"] = inserted.get("id", "")
+            logger.info(f"Cached {len(cache_rows)} index news articles for {symbol}")
+        except Exception as e:
+            logger.error(f"Index news cache insert failed for {symbol}: {e}")
+            for i, art in enumerate(response_articles):
+                if not art["id"]:
+                    art["id"] = f"temp_{i}"
+
+        return response_articles
+
     # ── Public: Enrich specific articles on demand ────────────────────
 
     async def enrich_articles(

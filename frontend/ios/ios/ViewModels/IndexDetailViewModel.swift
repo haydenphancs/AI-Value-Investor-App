@@ -30,8 +30,12 @@ class IndexDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
+    @Published var pendingTickerNavigation: String?
 
     // Analysis tab state
+    @Published var isAnalystLoaded: Bool = false
+    @Published var isSentimentLoaded: Bool = false
+    @Published var isTechnicalLoaded: Bool = false
     @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
     @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
@@ -129,7 +133,10 @@ class IndexDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
-            await self.fetchIndexDetail()
+            async let fetchTask: () = self.fetchIndexDetail()
+            async let newsTask: () = self.fetchIndexNews()
+            async let watchlistTask: () = self.checkWatchlistStatus()
+            _ = await (fetchTask, newsTask, watchlistTask)
         }
     }
 
@@ -139,7 +146,43 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func toggleFavorite() {
-        isFavorite.toggle()
+        let wasInWatchlist = isFavorite
+        isFavorite.toggle() // optimistic UI update
+
+        Task { @MainActor in
+            do {
+                if wasInWatchlist {
+                    try await APIClient.shared.request(
+                        endpoint: .removeFromWatchlist(stockId: indexSymbol)
+                    )
+                    print("✅ [IndexDetailVM] Removed \(indexSymbol) from watchlist")
+                } else {
+                    try await APIClient.shared.request(
+                        endpoint: .addToWatchlist(stockId: indexSymbol)
+                    )
+                    print("✅ [IndexDetailVM] Added \(indexSymbol) to watchlist")
+                }
+            } catch {
+                print("⚠️ [IndexDetailVM] Watchlist toggle failed for \(indexSymbol): \(error)")
+                isFavorite = wasInWatchlist // revert on failure
+            }
+        }
+    }
+
+    private func checkWatchlistStatus() async {
+        do {
+            let watchlist: [WatchlistItemDTO] = try await APIClient.shared.request(
+                endpoint: .getWatchlist,
+                responseType: [WatchlistItemDTO].self
+            )
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == indexSymbol.uppercased() }
+        } catch {
+            print("⚠️ [IndexDetailVM] Watchlist check failed: \(error)")
+        }
+    }
+
+    private struct WatchlistItemDTO: Codable {
+        let ticker: String
     }
 
     func handleNotificationTap() {
@@ -154,7 +197,8 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("📰 [IndexDetailVM] Open news article: \(article.headline)")
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -163,7 +207,7 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("🔗 [IndexDetailVM] Navigate to ticker: \(ticker)")
+        pendingTickerNavigation = ticker
     }
 
     func handleSuggestionTap(_ suggestion: IndexAISuggestion) {
@@ -225,6 +269,11 @@ class IndexDetailViewModel: ObservableObject {
         newsDisplayCount += newsPageSize
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         hasMoreNews = newsDisplayCount < allNewsArticles.count
+
+        // Enrich newly visible articles in the background
+        Task {
+            await enrichVisibleArticles()
+        }
     }
 
     // MARK: - Analysis Tab Handlers
@@ -315,16 +364,15 @@ class IndexDetailViewModel: ObservableObject {
             self.indexData = response.toDisplayModel()
             self.chartDataVersion += 1
 
-            // News with pagination
-            self.allNewsArticles = response.toNewsArticles()
-            self.newsDisplayCount = newsPageSize
-            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
-            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+            // News is fetched separately via GET /indices/{symbol}/news
 
             // Analysis data is not yet served by the backend — use sample
             self.analystRatingsData = AnalystRatingsData.sampleData
             self.sentimentAnalysisData = SentimentAnalysisData.sampleData
             self.technicalAnalysisData = TechnicalAnalysisData.sampleData
+            self.isAnalystLoaded = true
+            self.isSentimentLoaded = true
+            self.isTechnicalLoaded = true
 
             self.isLoading = false
 
@@ -335,7 +383,6 @@ class IndexDetailViewModel: ObservableObject {
             print("✅ [IndexDetailVM] Index detail loaded in \(elapsed)s")
             print("   💰 Price: \(response.currentPrice) | Change: \(response.priceChange) (\(response.priceChangePercent)%)")
             print("   📊 Chart points: \(response.chartData.count)")
-            print("   📰 News: \(response.newsArticles.count) articles")
             print("   🏢 Profile: \(response.indexName) (\(response.indexProfile.numberOfConstituents) constituents)")
             if let snap = indexData?.snapshotsData {
                 print("   📈 Valuation: P/E \(snap.valuation.peRatio)x | Level: \(snap.valuation.level.rawValue)")
@@ -372,9 +419,6 @@ class IndexDetailViewModel: ObservableObject {
             // Update all data — the backend returns a fresh snapshot
             self.indexData = response.toDisplayModel()
             self.chartDataVersion += 1
-            if !response.newsArticles.isEmpty {
-                self.newsArticles = response.toNewsArticles()
-            }
 
             print("✅ [IndexDetailVM] Chart reloaded in \(elapsed)s — \(response.chartData.count) data points")
 
@@ -384,6 +428,166 @@ class IndexDetailViewModel: ObservableObject {
         }
     }
 
+    // MARK: - News Fetching & Enrichment
+
+    private func fetchIndexNews() async {
+        self.isNewsLoading = true
+        print("📡 [IndexDetailVM] fetchIndexNews() CALLED for \(indexSymbol) — requesting GET /indices/\(indexSymbol)/news")
+        do {
+            let response = try await APIClient.shared.request(
+                endpoint: .getIndexNews(symbol: indexSymbol, limit: 50),
+                responseType: TickerNewsFeedResponse.self
+            )
+            let cached = response.cached ?? false
+            print("✅ [IndexDetailVM] Got \(response.articles.count) news articles for \(indexSymbol) (cached: \(cached))")
+
+            // Convert API articles to UI models
+            self.allNewsArticles = response.articles.map { mapApiToUiArticle($0) }
+            self.newsDisplayCount = newsPageSize
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+
+            // Show articles immediately with raw data
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.isNewsLoading = false
+
+            // Enrich ALL articles in background (not just visible ones)
+            let unenrichedIds = self.allNewsArticles
+                .filter { !$0.aiProcessed }
+                .map { $0.apiId }
+                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+
+            if !unenrichedIds.isEmpty {
+                await attemptEnrichment(articleIds: unenrichedIds)
+                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            }
+        } catch {
+            print("❌ [IndexDetailVM] Failed to fetch news for \(indexSymbol): \(error)")
+            if let apiError = error as? APIError {
+                print("   🔍 API Error: \(apiError)")
+            }
+        }
+        self.isNewsLoading = false
+    }
+
+    private func attemptEnrichment(articleIds: [String], maxAttempts: Int = 2) async {
+        for attempt in 1...maxAttempts {
+            do {
+                let enrichResponse = try await APIClient.shared.request(
+                    endpoint: .enrichIndexNews(symbol: indexSymbol, articleIds: articleIds),
+                    responseType: EnrichStockNewsResponse.self
+                )
+                mergeEnrichment(enrichResponse.articles)
+
+                let enrichedCount = allNewsArticles.prefix(newsDisplayCount)
+                    .filter { $0.aiProcessed }.count
+                if enrichedCount > 0 {
+                    print("✅ [IndexDetailVM] Attempt \(attempt) enriched \(enrichedCount) articles")
+                    return
+                } else if attempt < maxAttempts {
+                    print("⚠️ [IndexDetailVM] Attempt \(attempt) returned 0 enriched, retrying in 3s...")
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [IndexDetailVM] Enrichment returned 0 enriched after \(maxAttempts) attempts")
+                }
+            } catch {
+                if attempt < maxAttempts {
+                    print("⚠️ [IndexDetailVM] Enrichment attempt \(attempt) failed: \(error), retrying...")
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [IndexDetailVM] Enrichment failed after \(maxAttempts) attempts: \(error)")
+                }
+            }
+        }
+    }
+
+    private func enrichVisibleArticles() async {
+        let unenriched = newsArticles.filter { !$0.aiProcessed }
+        guard !unenriched.isEmpty else { return }
+
+        let ids = unenriched.map { $0.apiId }
+            .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+        guard !ids.isEmpty else { return }
+
+        await attemptEnrichment(articleIds: ids)
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+    }
+
+    private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
+        let enrichedById = Dictionary(
+            enrichedArticles.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var actuallyEnriched = 0
+        for i in allNewsArticles.indices {
+            if let enriched = enrichedById[allNewsArticles[i].apiId] {
+                let wasProcessed = enriched.aiProcessed ?? false
+                let hasBullets = enriched.summaryBullets?.isEmpty == false
+
+                if wasProcessed || hasBullets {
+                    let bullets: [String] = {
+                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                        if let s = enriched.summary, !s.isEmpty { return [s] }
+                        return allNewsArticles[i].summaryBullets
+                    }()
+                    allNewsArticles[i].summaryBullets = bullets
+                    allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+                    allNewsArticles[i].aiProcessed = true
+                    actuallyEnriched += 1
+                }
+            }
+        }
+        print("📰 [IndexDetailVM] Merged \(actuallyEnriched)/\(enrichedArticles.count) enriched articles")
+    }
+
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
+        let bullets: [String] = {
+            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
+                return aiBullets
+            }
+            if let summary = article.summary, !summary.isEmpty {
+                return [summary]
+            }
+            return []
+        }()
+
+        return TickerNewsArticle(
+            apiId: article.id,
+            headline: article.title,
+            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            sentiment: mapSentiment(article.sentiment),
+            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            thumbnailName: nil,
+            imageURL: article.imageUrl.flatMap { URL(string: $0) },
+            relatedTickers: article.relatedTickers ?? [],
+            summaryBullets: bullets,
+            articleURL: article.url.flatMap { URL(string: $0) },
+            aiProcessed: article.aiProcessed ?? false
+        )
+    }
+
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
+        switch sentiment?.lowercased() {
+        case "positive", "bullish": return .positive
+        case "negative", "bearish": return .negative
+        default: return .neutral
+        }
+    }
+
+    private func parseDate(_ dateString: String) -> Date? {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: dateString) { return date }
+
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateString) { return date }
+
+        let fallback = DateFormatter()
+        fallback.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        fallback.locale = Locale(identifier: "en_US_POSIX")
+        return fallback.date(from: dateString)
+    }
+
     // MARK: - Fallback
 
     private func loadFallbackData() {
@@ -391,14 +595,14 @@ class IndexDetailViewModel: ObservableObject {
             indexData = IndexDetailData.sampleSP500
             print("🔄 [IndexDetailVM] Using fallback sample data for index")
         }
-        if newsArticles.isEmpty {
-            newsArticles = TickerNewsArticle.sampleDataForTicker(indexSymbol)
-            print("🔄 [IndexDetailVM] Using fallback sample news")
-        }
+        // News is fetched separately — no sample fallback needed
         if analystRatingsData == nil {
             analystRatingsData = AnalystRatingsData.sampleData
             sentimentAnalysisData = SentimentAnalysisData.sampleData
             technicalAnalysisData = TechnicalAnalysisData.sampleData
+            isAnalystLoaded = true
+            isSentimentLoaded = true
+            isTechnicalLoaded = true
             print("🔄 [IndexDetailVM] Using fallback sample analysis")
         }
     }

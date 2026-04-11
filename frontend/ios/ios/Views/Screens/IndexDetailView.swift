@@ -242,6 +242,12 @@ struct IndexDetailView: View {
                 showAIChat = true
             }
         }
+        .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
+            if let ticker = newValue {
+                selectedSearchResult = SearchSelection(symbol: ticker, type: "stock")
+                viewModel.pendingTickerNavigation = nil
+            }
+        }
     }
 
     // MARK: - Tab Content
@@ -280,9 +286,9 @@ struct IndexDetailView: View {
                 analystRatingsData: viewModel.analystRatingsData,
                 sentimentAnalysisData: viewModel.sentimentAnalysisData,
                 technicalAnalysisData: viewModel.technicalAnalysisData,
-                isAnalystLoaded: true,
-                isSentimentLoaded: true,
-                isTechnicalLoaded: true,
+                isAnalystLoaded: viewModel.isAnalystLoaded,
+                isSentimentLoaded: viewModel.isSentimentLoaded,
+                isTechnicalLoaded: viewModel.isTechnicalLoaded,
                 selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
                 selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
                 onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,

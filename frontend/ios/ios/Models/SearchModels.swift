@@ -14,6 +14,8 @@ enum SearchResultType: String, CaseIterable {
     case person = "Person"
     case etf = "ETF"
     case crypto = "Crypto"
+    case index = "Index"
+    case commodity = "Commodity"
 
     var iconName: String {
         switch self {
@@ -21,6 +23,8 @@ enum SearchResultType: String, CaseIterable {
         case .person: return "person.fill"
         case .etf: return "chart.pie.fill"
         case .crypto: return "bitcoinsign.circle.fill"
+        case .index: return "chart.bar.fill"
+        case .commodity: return "cube.fill"
         }
     }
 }
@@ -29,6 +33,7 @@ enum SearchResultType: String, CaseIterable {
 struct SearchResultItem: Identifiable {
     let id = UUID()
     let type: SearchResultType
+    let rawType: String
     let ticker: String?
     let name: String
     let subtitle: String
@@ -208,6 +213,7 @@ extension SearchResultItem {
     static let sampleData: [SearchResultItem] = [
         SearchResultItem(
             type: .stock,
+            rawType: "stock",
             ticker: "AAPL",
             name: "Apple Inc.",
             subtitle: "Technology",
@@ -217,6 +223,7 @@ extension SearchResultItem {
         ),
         SearchResultItem(
             type: .stock,
+            rawType: "stock",
             ticker: "TSLA",
             name: "Tesla Inc.",
             subtitle: "Automotive",
@@ -226,6 +233,7 @@ extension SearchResultItem {
         ),
         SearchResultItem(
             type: .person,
+            rawType: "person",
             ticker: nil,
             name: "Nancy Pelosi",
             subtitle: "U.S. Representative",
@@ -235,6 +243,7 @@ extension SearchResultItem {
         ),
         SearchResultItem(
             type: .stock,
+            rawType: "stock",
             ticker: "MSFT",
             name: "Microsoft Corp.",
             subtitle: "Technology",
@@ -244,6 +253,7 @@ extension SearchResultItem {
         ),
         SearchResultItem(
             type: .person,
+            rawType: "person",
             ticker: nil,
             name: "Michael Burry",
             subtitle: "Scion Asset Management",

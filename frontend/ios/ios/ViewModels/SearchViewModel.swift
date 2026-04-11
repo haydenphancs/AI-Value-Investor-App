@@ -22,6 +22,9 @@ class SearchViewModel: ObservableObject {
     // MARK: - Live search results from API
     @Published var searchResults: [StockSearchResult] = []
 
+    // MARK: - Navigation
+    @Published var selectedSearchSelection: SearchSelection?
+
     // MARK: - Dependencies
     private let stockRepository: StockRepository
     private let apiClient: APIClient
@@ -178,6 +181,7 @@ class SearchViewModel: ObservableObject {
                 }
                 return SearchResultItem(
                     type: resultType,
+                    rawType: stock.type ?? "stock",
                     ticker: stock.ticker,
                     name: stock.companyName,
                     subtitle: subtitle,
@@ -206,14 +210,19 @@ class SearchViewModel: ObservableObject {
     }
 
     func selectSearchResult(_ item: SearchResultItem) {
-        print("➡️ SearchViewModel: Selected \(item.name) (\(item.ticker ?? "no ticker"))")
-        // Navigation to detail view is handled by the View layer
+        guard let ticker = item.ticker, !ticker.isEmpty else {
+            print("⚠️ SearchViewModel: Cannot navigate — no ticker for \(item.name)")
+            return
+        }
+        print("➡️ SearchViewModel: Selected \(item.name) (\(ticker)) type=\(item.rawType)")
+        selectedSearchSelection = SearchSelection(symbol: ticker, type: item.rawType)
     }
 
     func toggleFollow(for item: SearchResultItem) {
         if let index = recentSearches.firstIndex(where: { $0.id == item.id }) {
             let updatedItem = SearchResultItem(
                 type: item.type,
+                rawType: item.rawType,
                 ticker: item.ticker,
                 name: item.name,
                 subtitle: item.subtitle,

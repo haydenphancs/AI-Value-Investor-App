@@ -18,8 +18,6 @@ class IndexDetailViewModel: ObservableObject {
 
     @Published var indexData: IndexDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
-    @Published var analystRatingsData: AnalystRatingsData?
-    @Published var sentimentAnalysisData: SentimentAnalysisData?
     @Published var technicalAnalysisData: TechnicalAnalysisData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
@@ -33,11 +31,7 @@ class IndexDetailViewModel: ObservableObject {
     @Published var pendingTickerNavigation: String?
 
     // Analysis tab state
-    @Published var isAnalystLoaded: Bool = false
-    @Published var isSentimentLoaded: Bool = false
     @Published var isTechnicalLoaded: Bool = false
-    @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
-    @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
@@ -136,7 +130,8 @@ class IndexDetailViewModel: ObservableObject {
             async let fetchTask: () = self.fetchIndexDetail()
             async let newsTask: () = self.fetchIndexNews()
             async let watchlistTask: () = self.checkWatchlistStatus()
-            _ = await (fetchTask, newsTask, watchlistTask)
+            async let technicalTask: () = self.fetchTechnicalAnalysis()
+            _ = await (fetchTask, newsTask, watchlistTask, technicalTask)
         }
     }
 
@@ -276,18 +271,22 @@ class IndexDetailViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Analysis Tab Handlers
+    // MARK: - Technical Analysis
 
-    func handleAnalystRatingsMore() {
-        print("📊 [IndexDetailVM] Analyst ratings more options for \(indexSymbol)")
-    }
-
-    func handleSentimentMore() {
-        print("💬 [IndexDetailVM] Sentiment analysis more options for \(indexSymbol)")
-    }
-
-    func handleTechnicalDetail() {
-        print("📈 [IndexDetailVM] Technical analysis detail for \(indexSymbol)")
+    private func fetchTechnicalAnalysis() async {
+        do {
+            let dto = try await APIClient.shared.request(
+                endpoint: .getTechnicalAnalysis(ticker: indexSymbol),
+                responseType: TechnicalAnalysisDTO.self
+            )
+            self.technicalAnalysisData = dto.toDisplayModel()
+            self.isTechnicalLoaded = true
+            print("✅ [IndexDetailVM] Got technical analysis for \(indexSymbol) — gauge: \(dto.gaugeValue)")
+        } catch {
+            print("⚠️ [IndexDetailVM] Technical analysis failed: \(error)")
+            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
+            self.isTechnicalLoaded = true
+        }
     }
 
     func fetchTechnicalAnalysisDetail() {
@@ -364,15 +363,7 @@ class IndexDetailViewModel: ObservableObject {
             self.indexData = response.toDisplayModel()
             self.chartDataVersion += 1
 
-            // News is fetched separately via GET /indices/{symbol}/news
-
-            // Analysis data is not yet served by the backend — use sample
-            self.analystRatingsData = AnalystRatingsData.sampleData
-            self.sentimentAnalysisData = SentimentAnalysisData.sampleData
-            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
-            self.isAnalystLoaded = true
-            self.isSentimentLoaded = true
-            self.isTechnicalLoaded = true
+            // News and technical analysis are fetched via separate concurrent tasks
 
             self.isLoading = false
 
@@ -595,16 +586,7 @@ class IndexDetailViewModel: ObservableObject {
             indexData = IndexDetailData.sampleSP500
             print("🔄 [IndexDetailVM] Using fallback sample data for index")
         }
-        // News is fetched separately — no sample fallback needed
-        if analystRatingsData == nil {
-            analystRatingsData = AnalystRatingsData.sampleData
-            sentimentAnalysisData = SentimentAnalysisData.sampleData
-            technicalAnalysisData = TechnicalAnalysisData.sampleData
-            isAnalystLoaded = true
-            isSentimentLoaded = true
-            isTechnicalLoaded = true
-            print("🔄 [IndexDetailVM] Using fallback sample analysis")
-        }
+        // Technical analysis is fetched separately — fallback handled in fetchTechnicalAnalysis()
     }
 
     // MARK: - AI Context Builders
@@ -696,16 +678,7 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     private var analysisContext: String? {
-        var parts: [String] = []
-        if let ratings = analystRatingsData {
-            parts.append("ANALYST CONSENSUS: \(ratings.consensus.rawValue), Target: \(ratings.formattedTargetPrice) (\(ratings.formattedUpside))")
-        }
-        if let sentiment = sentimentAnalysisData {
-            parts.append("SENTIMENT: Mood=\(sentiment.moodScore)/100 (\(sentiment.last24hMood.rawValue))")
-        }
-        if let tech = technicalAnalysisData {
-            parts.append("TECHNICAL: Signal=\(tech.overallSignal.rawValue)")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+        guard let tech = technicalAnalysisData else { return nil }
+        return "TECHNICAL: Signal=\(tech.overallSignal.rawValue), Gauge=\(tech.gaugeValue)"
     }
 }

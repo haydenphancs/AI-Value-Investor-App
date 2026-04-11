@@ -498,7 +498,7 @@ class FMPClient:
         """
         params: Dict[str, Any] = {"limit": limit, "page": page}
         if ticker:
-            params["tickers"] = ticker.upper()
+            params["symbols"] = ticker.upper()
         if from_date:
             params["from"] = from_date
         if to_date:
@@ -524,7 +524,7 @@ class FMPClient:
         """
         params: Dict[str, Any] = {"limit": limit, "page": page}
         if ticker:
-            params["tickers"] = ticker.upper()
+            params["symbols"] = ticker.upper()
 
         try:
             return await self._make_request("news/crypto", params=params)

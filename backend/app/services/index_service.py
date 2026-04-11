@@ -461,11 +461,10 @@ class IndexService:
         quote_task = self.fmp.get_stock_price_quote(symbol)
         hist_task = self.fmp.get_historical_prices(symbol, from_date, to_date)
         sector_task = self.fmp.get_sector_performance()
-        news_task = self.fmp.get_stock_news(symbol, limit=10)
         constituents_task = self.fmp.get_index_constituents(symbol)
 
-        quote, hist_raw, sector_raw, news_raw, constituents_raw = await asyncio.gather(
-            quote_task, hist_task, sector_task, news_task, constituents_task,
+        quote, hist_raw, sector_raw, constituents_raw = await asyncio.gather(
+            quote_task, hist_task, sector_task, constituents_task,
             return_exceptions=True,
         )
 
@@ -479,12 +478,12 @@ class IndexService:
         if isinstance(sector_raw, Exception):
             logger.error(f"Sector performance fetch failed: {sector_raw}")
             sector_raw = []
-        if isinstance(news_raw, Exception):
-            logger.error(f"News fetch failed for {symbol}: {news_raw}")
-            news_raw = []
         if isinstance(constituents_raw, Exception):
             logger.warning(f"Constituents fetch failed for {symbol}: {constituents_raw}")
             constituents_raw = []
+
+        # News is now fetched via separate GET /indices/{symbol}/news endpoint
+        news_raw = []
 
         # Live constituent count (fall back to profile metadata)
         live_constituents = (

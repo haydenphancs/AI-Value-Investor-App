@@ -67,6 +67,8 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Indices
     case getIndexDetail(symbol: String, range: String, interval: String? = nil)
+    case getIndexNews(symbol: String, limit: Int)
+    case enrichIndexNews(symbol: String, articleIds: [String])
 
     // MARK: - Crypto
     case getCryptoDetail(symbol: String, range: String, interval: String? = nil)
@@ -221,6 +223,10 @@ enum APIEndpoint: Sendable {
         // Indices
         case .getIndexDetail(let symbol, _, _):
             return "/api/v1/indices/\(symbol)"
+        case .getIndexNews(let symbol, _):
+            return "/api/v1/indices/\(symbol)/news"
+        case .enrichIndexNews(let symbol, _):
+            return "/api/v1/indices/\(symbol)/news/enrich"
 
         // ETFs
         case .getETFDetail(let symbol, _, _):
@@ -326,7 +332,7 @@ enum APIEndpoint: Sendable {
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport, .addHolding,
-             .followWhale, .enrichStockNews, .enrichCryptoNews:
+             .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -355,6 +361,9 @@ enum APIEndpoint: Sendable {
             return ["limit": String(limit)]
 
         case .getCryptoNews(_, let limit):
+            return ["limit": String(limit)]
+
+        case .getIndexNews(_, let limit):
             return ["limit": String(limit)]
 
         case .getStockOverview(_, let range, let interval, let extendedHours):
@@ -464,6 +473,9 @@ enum APIEndpoint: Sendable {
         case .enrichCryptoNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
 
+        case .enrichIndexNews(_, let articleIds):
+            return EnrichStockNewsRequest(articleIds: articleIds)
+
         default:
             return nil
         }
@@ -479,7 +491,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

@@ -33,7 +33,7 @@ actor APIClient {
 
     // MARK: - Singleton
 
-    static let shared = APIClient()
+    nonisolated static let shared = APIClient()
 
     // MARK: - Dynamic Base URL
 

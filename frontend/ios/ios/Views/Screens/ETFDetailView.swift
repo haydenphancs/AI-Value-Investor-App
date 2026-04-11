@@ -15,6 +15,7 @@ struct ETFDetailView: View {
     @State private var showShareSheet = false
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
+    @State private var selectedSearchResult: SearchSelection?
     @StateObject private var chatViewModel = ChatViewModel()
 
     let etfSymbol: String
@@ -187,12 +188,21 @@ struct ETFDetailView: View {
             }
             .preferredColorScheme(.dark)
         }
+        .navigationDestination(item: $selectedSearchResult) { selection in
+            AssetDetailRouter(selection: selection)
+        }
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 print("[ETFDetailView] Opening AI chat for \(etfSymbol) with query: \(query)")
                 chatViewModel.startNewConversation(firstMessage: query, stockId: etfSymbol, context: viewModel.contextForCurrentTab)
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
+            }
+        }
+        .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
+            if let ticker = newValue {
+                selectedSearchResult = SearchSelection(symbol: ticker, type: "etf")
+                viewModel.pendingTickerNavigation = nil
             }
         }
         .fullScreenCover(isPresented: $showSearch) {

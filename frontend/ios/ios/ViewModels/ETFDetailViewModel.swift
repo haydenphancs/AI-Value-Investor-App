@@ -24,6 +24,7 @@ class ETFDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
+    @Published var pendingTickerNavigation: String?
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
 
@@ -109,7 +110,9 @@ class ETFDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
-            await self.fetchETFDetail()
+            async let detailTask: () = self.fetchETFDetail()
+            async let watchlistTask: () = self.checkWatchlistStatus()
+            _ = await (detailTask, watchlistTask)
         }
     }
 
@@ -236,8 +239,43 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - User Actions
 
     func toggleFavorite() {
+        let wasInWatchlist = isFavorite
         isFavorite.toggle()
-        print("[ETFDetailVM] Favorite toggled: \(isFavorite) for \(etfSymbol)")
+
+        Task { @MainActor in
+            do {
+                if wasInWatchlist {
+                    try await APIClient.shared.request(
+                        endpoint: .removeFromWatchlist(stockId: etfSymbol)
+                    )
+                    print("✅ [ETFDetailVM] Removed \(etfSymbol) from watchlist")
+                } else {
+                    try await APIClient.shared.request(
+                        endpoint: .addToWatchlist(stockId: etfSymbol)
+                    )
+                    print("✅ [ETFDetailVM] Added \(etfSymbol) to watchlist")
+                }
+            } catch {
+                print("⚠️ [ETFDetailVM] Watchlist toggle failed: \(error)")
+                isFavorite = wasInWatchlist
+            }
+        }
+    }
+
+    private func checkWatchlistStatus() async {
+        do {
+            let watchlist: [WatchlistItemDTO] = try await APIClient.shared.request(
+                endpoint: .getWatchlist,
+                responseType: [WatchlistItemDTO].self
+            )
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == etfSymbol.uppercased() }
+        } catch {
+            print("⚠️ [ETFDetailVM] Watchlist check failed: \(error)")
+        }
+    }
+
+    private struct WatchlistItemDTO: Codable {
+        let ticker: String
     }
 
     func handleNotificationTap() {
@@ -252,11 +290,12 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func handleRelatedETFTap(_ ticker: RelatedTicker) {
-        print("[ETFDetailVM] Navigate to related ETF: \(ticker.symbol)")
+        pendingTickerNavigation = ticker.symbol
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("[ETFDetailVM] Open news article: \(article.headline)")
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -265,7 +304,7 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("[ETFDetailVM] Navigate to ticker: \(ticker)")
+        pendingTickerNavigation = ticker
     }
 
     func handleSuggestionTap(_ suggestion: ETFAISuggestion) {

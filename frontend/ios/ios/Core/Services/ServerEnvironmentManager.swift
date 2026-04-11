@@ -22,23 +22,23 @@ final class ServerEnvironmentManager: @unchecked Sendable {
 
     // MARK: - Singleton
 
-    static let shared = ServerEnvironmentManager()
+    nonisolated(unsafe) static let shared = ServerEnvironmentManager()
 
-    // MARK: - State
+    // MARK: - State (nonisolated for cross-actor access from APIClient)
 
     /// The resolved backend URL. `nil` until `resolve()` completes.
-    private(set) var resolvedBaseURL: URL?
+    nonisolated(unsafe) private(set) var resolvedBaseURL: URL?
 
     /// Whether the resolved URL points to localhost.
-    private(set) var isLocal: Bool = false
+    nonisolated(unsafe) private(set) var isLocal: Bool = false
 
     /// Whether a manual override is active (skips probing).
-    private(set) var isManualOverride: Bool = false
+    nonisolated(unsafe) private(set) var isManualOverride: Bool = false
 
     // MARK: - Constants
 
-    let localURL = URL(string: "http://127.0.0.1:8000")!
-    let railwayURL = URL(string: "https://ai-value-investor-app-production.up.railway.app")!
+    nonisolated(unsafe) let localURL = URL(string: "http://127.0.0.1:8000")!
+    nonisolated(unsafe) let railwayURL = URL(string: "https://ai-value-investor-app-production.up.railway.app")!
 
     /// Timeout for the localhost health probe (seconds).
     private let probeTimeout: TimeInterval = 0.5

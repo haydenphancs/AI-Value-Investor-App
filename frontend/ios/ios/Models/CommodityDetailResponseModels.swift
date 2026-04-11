@@ -21,6 +21,9 @@ struct CommodityDetailResponseDTO: Decodable {
     let keyStatisticsGroups: [KeyStatisticsGroupDTO]
     let performancePeriods: [PerformancePeriodDTO]
     let newsArticles: [CommodityNewsArticleDTO]
+    let commodityProfile: CommodityProfileDTO?
+    let relatedCommodities: [RelatedCommodityDTO]?
+    let benchmarkSummary: BenchmarkSummaryDTO?
 
     enum CodingKeys: String, CodingKey {
         case symbol, name
@@ -32,6 +35,9 @@ struct CommodityDetailResponseDTO: Decodable {
         case keyStatisticsGroups = "key_statistics_groups"
         case performancePeriods = "performance_periods"
         case newsArticles = "news_articles"
+        case commodityProfile = "commodity_profile"
+        case relatedCommodities = "related_commodities"
+        case benchmarkSummary = "benchmark_summary"
     }
 }
 
@@ -45,6 +51,94 @@ struct CommodityChartPointDTO: Decodable {
     let close: Double
     let volume: Double?
 }
+
+// MARK: - Commodity Profile DTO
+
+struct CommodityProfileDTO: Decodable {
+    let description: String?
+    let category: String?
+    let exchange: String?
+    let tradingHours: String?
+    let contractSize: String?
+    let unit: String?
+    let currency: String?
+    let tickSize: String?
+    let majorProducers: String?
+    let majorConsumers: String?
+
+    enum CodingKeys: String, CodingKey {
+        case description, category, exchange, currency, unit
+        case tradingHours = "trading_hours"
+        case contractSize = "contract_size"
+        case tickSize = "tick_size"
+        case majorProducers = "major_producers"
+        case majorConsumers = "major_consumers"
+    }
+
+    func toModel() -> CommodityProfile {
+        let resolvedCategory: CommodityCategory = {
+            switch (category ?? "").lowercased() {
+            case "metals": return .metals
+            case "energy": return .energy
+            case "agriculture": return .agriculture
+            case "consumables": return .consumables
+            default: return .metals
+            }
+        }()
+
+        let resolvedUnit: CommodityUnit = {
+            switch (unit ?? "").lowercased().replacingOccurrences(of: "_", with: "") {
+            case "troyounce": return .troyOunce
+            case "barrel": return .barrel
+            case "pound": return .pound
+            case "mmbtu": return .mmbtu
+            case "gallon": return .gallon
+            case "bushel": return .bushel
+            case "ton": return .ton
+            default: return .contract
+            }
+        }()
+
+        return CommodityProfile(
+            description: description ?? "",
+            category: resolvedCategory,
+            exchange: exchange ?? "",
+            tradingHours: tradingHours ?? "",
+            contractSize: contractSize ?? "",
+            unit: resolvedUnit,
+            currency: currency ?? "USD",
+            tickSize: tickSize ?? "",
+            majorProducers: majorProducers ?? "",
+            majorConsumers: majorConsumers ?? "",
+            website: nil
+        )
+    }
+}
+
+// MARK: - Related Commodity DTO
+
+struct RelatedCommodityDTO: Decodable {
+    let symbol: String
+    let name: String
+    let price: Double
+    let changePercent: Double
+
+    enum CodingKeys: String, CodingKey {
+        case symbol, name, price
+        case changePercent = "change_percent"
+    }
+
+    func toModel() -> RelatedTicker {
+        RelatedTicker(
+            symbol: symbol,
+            name: name,
+            price: price,
+            changePercent: changePercent
+        )
+    }
+}
+
+// BenchmarkSummaryDTO is defined in CryptoAPIModels.swift and shared across asset types
 
 // MARK: - News Article DTO
 
@@ -122,7 +216,7 @@ extension CommodityDetailResponseDTO {
     func toDisplayModel() -> CommodityDetailData {
         let resolvedMarketStatus: CommodityMarketStatus
         switch marketStatus.lowercased() {
-        case "open":
+        case "open", "market open":
             resolvedMarketStatus = .open
         case "pre-market", "premarket":
             resolvedMarketStatus = .preMarket
@@ -131,6 +225,20 @@ extension CommodityDetailResponseDTO {
         default:
             resolvedMarketStatus = .closed(date: Date(), time: "", timezone: "ET")
         }
+
+        let profile = commodityProfile?.toModel() ?? CommodityProfile(
+            description: "",
+            category: .metals,
+            exchange: "",
+            tradingHours: "",
+            contractSize: "",
+            unit: .contract,
+            currency: "USD",
+            tickSize: "",
+            majorProducers: "",
+            majorConsumers: "",
+            website: nil
+        )
 
         return CommodityDetailData(
             symbol: symbol,
@@ -144,21 +252,9 @@ extension CommodityDetailResponseDTO {
             },
             keyStatisticsGroups: keyStatisticsGroups.map { $0.toModel() },
             performancePeriods: performancePeriods.map { $0.toModel() },
-            commodityProfile: CommodityProfile(
-                description: "",
-                category: .metals,
-                exchange: "",
-                tradingHours: "",
-                contractSize: "",
-                unit: .troyOunce,
-                currency: "USD",
-                tickSize: "",
-                majorProducers: "",
-                majorConsumers: "",
-                website: nil
-            ),
-            relatedCommodities: [],
-            benchmarkSummary: nil
+            commodityProfile: profile,
+            relatedCommodities: relatedCommodities?.map { $0.toModel() } ?? [],
+            benchmarkSummary: benchmarkSummary?.toModel()
         )
     }
 

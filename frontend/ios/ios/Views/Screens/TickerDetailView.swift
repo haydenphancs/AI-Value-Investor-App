@@ -10,7 +10,6 @@ import SwiftUI
 struct TickerDetailView: View {
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var showMoreOptions = false
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
     @State private var showSearch = false
@@ -183,21 +182,6 @@ struct TickerDetailView: View {
                     }
                 }
         )
-        .confirmationDialog("Options", isPresented: $showMoreOptions) {
-            Button("Share") {
-                handleShare()
-            }
-            Button("Add to Watchlist") {
-                handleAddToWatchlist()
-            }
-            Button("Set Price Alert") {
-                handleSetPriceAlert()
-            }
-            Button("Compare") {
-                handleCompare()
-            }
-            Button("Cancel", role: .cancel) {}
-        }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
@@ -246,10 +230,15 @@ struct TickerDetailView: View {
         }
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
-                print("🤖 TickerDetailView: Opening AI chat for \(tickerSymbol) with query: \(query)")
                 chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab)
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
+            }
+        }
+        .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
+            if let ticker = newValue {
+                selectedSearchResult = SearchSelection(symbol: ticker, type: "stock")
+                viewModel.pendingTickerNavigation = nil
             }
         }
     }
@@ -359,6 +348,14 @@ struct TickerDetailView: View {
         if let onNavigateToResearch = onNavigateToResearch {
             dismiss()
             onNavigateToResearch()
+        } else {
+            // Fallback: open AI chat with deep research prompt
+            chatViewModel.startNewConversation(
+                firstMessage: "Give me a comprehensive Deep Analysis of \(tickerSymbol). Analyze the fundamentals, valuation, competitive moat, key risks, and outlook.",
+                stockId: tickerSymbol,
+                context: viewModel.contextForCurrentTab
+            )
+            showAIChat = true
         }
     }
 
@@ -368,22 +365,6 @@ struct TickerDetailView: View {
 
     private func handleShareTapped() {
         showShareSheet = true
-    }
-
-    private func handleShare() {
-        print("Share \(tickerSymbol)")
-    }
-
-    private func handleAddToWatchlist() {
-        print("Add \(tickerSymbol) to watchlist")
-    }
-
-    private func handleSetPriceAlert() {
-        print("Set price alert for \(tickerSymbol)")
-    }
-
-    private func handleCompare() {
-        print("Compare \(tickerSymbol)")
     }
 }
 

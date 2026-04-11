@@ -40,6 +40,7 @@ class TickerDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
+    @Published var pendingTickerNavigation: String?
 
     // Chart settings
     @Published var chartSettings = ChartSettings()
@@ -687,14 +688,6 @@ class TickerDetailViewModel: ObservableObject {
         print("Notification settings for \(tickerSymbol)")
     }
 
-    func handleMoreOptions() {
-        print("More options for \(tickerSymbol)")
-    }
-
-    func handleDeepResearch() {
-        print("AI Deep Research for \(tickerSymbol)")
-    }
-
     func handleWebsiteTap() {
         // Prefer API data for website
         let website = stockDetail?.website ?? tickerData?.companyProfile.website
@@ -704,11 +697,12 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     func handleRelatedTickerTap(_ ticker: RelatedTicker) {
-        print("Navigate to \(ticker.symbol)")
+        pendingTickerNavigation = ticker.symbol
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
-        print("Open news article: \(article.headline)")
+        guard let url = article.articleURL else { return }
+        UIApplication.shared.open(url)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
@@ -717,7 +711,7 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
+        pendingTickerNavigation = ticker
     }
 
     func handleSuggestionTap(_ suggestion: TickerAISuggestion) {

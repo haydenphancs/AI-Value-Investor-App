@@ -3,7 +3,7 @@
 //  ios
 //
 //  Main Commodity Detail screen displaying commodity information
-//  Tabs: Overview, News
+//  Tabs: Overview, News, Analysis
 //
 
 import SwiftUI
@@ -14,8 +14,10 @@ struct CommodityDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
     @State private var showShareSheet = false
+    @State private var showTechnicalAnalysisDetail = false
     @State private var showAIChat = false
     @State private var isTabBarPinned: Bool = false
+    @State private var selectedSearchResult: SearchSelection?
 
     let commoditySymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -162,6 +164,16 @@ struct CommodityDetailView: View {
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
+        .sheet(isPresented: $showTechnicalAnalysisDetail) {
+            if let detailData = viewModel.technicalAnalysisDetailData {
+                TechnicalAnalysisDetailView(detailData: detailData)
+            } else {
+                ProgressView("Loading technical analysis...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.background)
+                    .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
+            }
+        }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
                 .preferredColorScheme(.dark)
@@ -178,6 +190,9 @@ struct CommodityDetailView: View {
                     }
             }
             .preferredColorScheme(.dark)
+        }
+        .navigationDestination(item: $selectedSearchResult) { selection in
+            AssetDetailRouter(selection: selection)
         }
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
@@ -204,14 +219,40 @@ struct CommodityDetailView: View {
                     onRelatedCommodityTap: viewModel.handleRelatedCommodityTap
                 )
             }
+
         case .news:
             TickerNewsContent(
                 articles: viewModel.newsArticles,
                 currentTicker: commoditySymbol,
+                isLoading: viewModel.isNewsLoading,
+                hasMoreNews: viewModel.hasMoreNews,
                 onArticleTap: viewModel.handleNewsArticleTap,
                 onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap
+                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onLoadMore: viewModel.loadMoreNews
             )
+
+        case .analysis:
+            VStack(spacing: AppSpacing.lg) {
+                if let technicalData = viewModel.technicalAnalysisData {
+                    TechnicalAnalysisSection(
+                        technicalData: technicalData,
+                        onDetailTapped: {
+                            showTechnicalAnalysisDetail = true
+                        }
+                    )
+                } else if !viewModel.isTechnicalLoaded {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(AppColors.cardBackground)
+                        .frame(height: 180)
+                        .shimmer()
+                }
+
+                Spacer()
+                    .frame(height: 120)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.lg)
         }
     }
 

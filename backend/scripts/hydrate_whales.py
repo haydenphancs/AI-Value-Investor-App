@@ -221,9 +221,12 @@ class WhaleHydrator:
             name, holdings, trade_group, sectors
         )
 
-        # Step 7: Compute ytd_return
+        # Step 7: Compute ytd_return + risk profile
         ytd_return = self._compute_ytd_return(
             whale_id, total_value, perf_data
+        )
+        risk_profile = self._compute_risk_profile(
+            holdings, sectors, trade_group
         )
 
         # Step 8: Persist
@@ -242,7 +245,7 @@ class WhaleHydrator:
         }
 
         if not self.dry_run:
-            await self._persist(whale_id, snapshot, ytd_return)
+            await self._persist(whale_id, snapshot, ytd_return, risk_profile)
 
         self.stats["processed"] += 1
 
@@ -967,6 +970,60 @@ class WhaleHydrator:
 
     # ── ytd_return ───────────────────────────────────────────────────
 
+    def _compute_risk_profile(
+        self,
+        holdings: List[Dict],
+        sectors: List[Dict],
+        trade_group: Optional[Dict],
+    ) -> str:
+        """Compute risk profile from holdings concentration, sector diversity, and turnover."""
+        score = 50  # Start at moderate
+
+        # 1. Concentration: top 5 holdings as % of total
+        top5_alloc = sum(h.get("allocation", 0) for h in holdings[:5])
+        if top5_alloc > 80:
+            score += 20  # Very concentrated
+        elif top5_alloc > 60:
+            score += 10
+        elif top5_alloc < 30:
+            score -= 15  # Well diversified
+
+        # 2. Sector diversity
+        num_sectors = len(sectors)
+        if num_sectors <= 2:
+            score += 15  # Concentrated in few sectors
+        elif num_sectors >= 6:
+            score -= 10  # Well diversified
+
+        # 3. Turnover rate
+        if trade_group:
+            trade_count = trade_group.get("trade_count", 0)
+            holdings_count = len(holdings) or 1
+            turnover = trade_count / holdings_count
+            if turnover > 0.5:
+                score += 15  # High turnover = more aggressive
+            elif turnover < 0.1:
+                score -= 10  # Low turnover = more conservative
+
+        # 4. Growth vs value tilt from sectors
+        growth_sectors = {"Technology", "Consumer Cyclical", "Communication Services"}
+        growth_weight = sum(
+            s.get("allocation", 0) for s in sectors
+            if s.get("name") in growth_sectors
+        )
+        if growth_weight > 50:
+            score += 10  # Growth-tilted
+
+        # Map score to label
+        if score <= 30:
+            return "conservative"
+        elif score <= 55:
+            return "moderate"
+        elif score <= 75:
+            return "aggressive"
+        else:
+            return "very_aggressive"
+
     def _compute_ytd_return(
         self,
         whale_id: str,
@@ -1008,6 +1065,7 @@ class WhaleHydrator:
         whale_id: str,
         snapshot: Dict[str, Any],
         ytd_return: Optional[float],
+        risk_profile: Optional[str] = None,
     ):
         """Write to snapshot cache + denormalized tables."""
         sb = self.sb
@@ -1030,6 +1088,8 @@ class WhaleHydrator:
             }
             if ytd_return is not None:
                 whale_update["ytd_return"] = ytd_return
+            if risk_profile:
+                whale_update["risk_profile"] = risk_profile
             sb.table("whales").update(whale_update).eq(
                 "id", whale_id
             ).execute()
@@ -1112,6 +1172,78 @@ class WhaleHydrator:
                             }).execute()
             except Exception as e:
                 logger.error("  Failed to sync trade group: %s", e)
+
+        # 6. Generate alert if significant activity detected
+        self._maybe_generate_alert(whale_id, snapshot)
+
+    def _maybe_generate_alert(
+        self, whale_id: str, snapshot: Dict[str, Any]
+    ):
+        """Create a whale alert if the latest trade group has significant activity."""
+        tg = snapshot.get("trade_group")
+        if not tg:
+            return
+
+        trades = tg.get("trades", [])
+        net_amount = abs(tg.get("net_amount", 0))
+        trade_count = tg.get("trade_count", 0)
+        net_action = tg.get("net_action", "BOUGHT")
+
+        # Thresholds for alert generation
+        # Institutional: >$500M move or 5+ new positions
+        # Congressional: >$1M move
+        new_positions = sum(1 for t in trades if t.get("trade_type") == "New")
+        should_alert = (
+            net_amount >= 500_000_000
+            or new_positions >= 5
+            or (net_amount >= 1_000_000 and trade_count >= 3)
+        )
+        if not should_alert:
+            return
+
+        # Find the biggest trade for ticker reference
+        biggest = max(trades, key=lambda t: abs(t.get("amount", 0)), default=None)
+        ticker = biggest.get("ticker") if biggest else None
+
+        # Build alert text
+        action_word = "bought" if net_action == "BOUGHT" else "sold"
+        if net_amount >= 1_000_000_000:
+            amount_str = f"${net_amount / 1_000_000_000:.1f}B"
+        elif net_amount >= 1_000_000:
+            amount_str = f"${net_amount / 1_000_000:.0f}M"
+        else:
+            amount_str = f"${net_amount / 1_000:,.0f}K"
+
+        title = f"Large whale move detected"
+        if new_positions >= 5:
+            description = (
+                f"Opened {new_positions} new positions worth {amount_str} total"
+            )
+        else:
+            ticker_text = f" in {ticker}" if ticker else ""
+            description = f"Just {action_word} {amount_str}{ticker_text}"
+
+        try:
+            # Expire old alerts for this whale
+            self.sb.table("whale_alerts").update(
+                {"is_active": False}
+            ).eq("whale_id", whale_id).eq("is_active", True).execute()
+
+            # Insert new alert with 7-day expiry
+            from datetime import timezone
+            self.sb.table("whale_alerts").insert({
+                "whale_id": whale_id,
+                "title": title,
+                "description": description,
+                "ticker": ticker,
+                "action_title": "View Full Alert",
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(days=7)
+                ).isoformat(),
+            }).execute()
+            logger.info("  Created alert for whale %s: %s", whale_id, description)
+        except Exception as e:
+            logger.error("  Failed to create alert: %s", e)
 
 
 # ── Module-Level Helpers ─────────────────────────────────────────────

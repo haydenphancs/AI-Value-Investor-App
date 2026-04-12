@@ -1,0 +1,200 @@
+[
+  {
+    "name": "Warren Buffett",
+    "title": "Berkshire Hathaway CEO",
+    "description": "The Oracle of Omaha. Value investing legend with a focus on long-term compounding.",
+    "category": "investors",
+    "cik": "0001067983",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Bill Ackman",
+    "title": "Pershing Square Capital",
+    "description": "Activist investor focused on large-cap value opportunities.",
+    "category": "institutions",
+    "cik": "0001336528",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Michael Burry",
+    "title": "Scion Asset Management",
+    "description": "The Big Short. Contrarian deep value investor.",
+    "category": "investors",
+    "cik": "0001649339",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Ray Dalio",
+    "title": "Bridgewater Associates",
+    "description": "Macro investing pioneer and founder of the world's largest hedge fund.",
+    "category": "institutions",
+    "cik": "0001350694",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Cathie Wood",
+    "title": "ARK Invest CEO",
+    "description": "Disruptive innovation focused. High-conviction growth investor.",
+    "category": "institutions",
+    "cik": "0001603466",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "David Tepper",
+    "title": "Appaloosa Management",
+    "description": "Distressed debt and equity investor known for contrarian macro bets.",
+    "category": "institutions",
+    "cik": "0001656456",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "George Soros",
+    "title": "Soros Fund Management",
+    "description": "Legendary macro investor. Broke the Bank of England.",
+    "category": "institutions",
+    "cik": "0001029160",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Carl Icahn",
+    "title": "Icahn Enterprises",
+    "description": "Legendary activist investor known for hostile takeovers and corporate restructuring.",
+    "category": "investors",
+    "cik": "0000921669",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Stanley Druckenmiller",
+    "title": "Duquesne Family Office",
+    "description": "Former Quantum Fund manager. Macro-focused with one of the best long-term track records.",
+    "category": "investors",
+    "cik": "0001536411",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Seth Klarman",
+    "title": "Baupost Group",
+    "description": "Value investing disciple and author of Margin of Safety. Conservative, patient approach.",
+    "category": "institutions",
+    "cik": "0001061768",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Renaissance Technologies",
+    "title": "Quantitative Hedge Fund",
+    "description": "The most successful quant fund in history. Founded by Jim Simons.",
+    "category": "institutions",
+    "cik": "0001037389",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Citadel Advisors",
+    "title": "Multi-Strategy Hedge Fund",
+    "description": "Ken Griffin's global multi-strategy fund. One of the largest hedge funds by AUM.",
+    "category": "institutions",
+    "cik": "0001423053",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Two Sigma Investments",
+    "title": "Quantitative Hedge Fund",
+    "description": "Technology-driven systematic investment management firm.",
+    "category": "institutions",
+    "cik": "0001179392",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Tiger Global Management",
+    "title": "Technology-Focused Hedge Fund",
+    "description": "Chase Coleman's fund known for high-conviction tech and growth bets.",
+    "category": "institutions",
+    "cik": "0001167483",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Dan Loeb",
+    "title": "Third Point LLC",
+    "description": "Activist investor known for event-driven strategies and shareholder campaigns.",
+    "category": "investors",
+    "cik": "0001040273",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Nancy Pelosi",
+    "title": "U.S. Representative (CA-11)",
+    "description": "Former Speaker of the House. Active tech-focused portfolio.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_house",
+    "fmp_name": "Nancy Pelosi"
+  },
+  {
+    "name": "Dan Crenshaw",
+    "title": "U.S. Representative (TX-2)",
+    "description": "House member with an active and diversified portfolio.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_house",
+    "fmp_name": "Dan Crenshaw"
+  },
+  {
+    "name": "Tommy Tuberville",
+    "title": "U.S. Senator (AL)",
+    "description": "Senator with frequent stock trades across multiple sectors.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Tommy Tuberville"
+  },
+  {
+    "name": "Ted Cruz",
+    "title": "U.S. Senator (TX)",
+    "description": "Senator with investments in energy and technology sectors.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Ted Cruz"
+  },
+  {
+    "name": "Mark Kelly",
+    "title": "U.S. Senator (AZ)",
+    "description": "Senator and former astronaut with diversified investment holdings.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Mark Kelly"
+  },
+  {
+    "name": "Ro Khanna",
+    "title": "U.S. Representative (CA-17)",
+    "description": "Silicon Valley representative with tech-sector focused holdings.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_house",
+    "fmp_name": "Ro Khanna"
+  },
+  {
+    "name": "Michael Saylor",
+    "title": "MicroStrategy Executive Chairman",
+    "description": "Bitcoin maximalist. Transformed MicroStrategy into the largest corporate BTC holder.",
+    "category": "crypto",
+    "cik": "0001050446",
+    "data_source": "13f",
+    "fmp_name": null
+  }
+]

@@ -21,6 +21,7 @@ from app.schemas.whale import (
     WhaleProfileResponse,
     WhaleTradeGroupResponse,
     WhaleTradeGroupActivityResponse,
+    WhaleAlertBannerResponse,
     FollowResponse,
 )
 from app.services.whale_service import WhaleService
@@ -56,6 +57,18 @@ async def get_whale_activity(
     """Get recent trade activity from user's followed whales."""
     service = WhaleService()
     return await service.get_whale_activity_feed(user["id"])
+
+
+# ── Alerts ──────────────────────────────────────────────────────────
+
+
+@router.get("/alerts", response_model=Optional[WhaleAlertBannerResponse])
+async def get_whale_alerts(
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """Get the most recent active whale alert banner."""
+    service = WhaleService()
+    return await service.get_whale_alerts(user_id=user_id)
 
 
 # ── Whale Profile ────────────────────────────────────────────────────

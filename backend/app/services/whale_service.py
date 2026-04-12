@@ -253,6 +253,9 @@ WHALE_PROFILE_CACHE_TTL = 3600  # 1 hour
 _whale_activity_cache: Dict[str, Tuple[float, Any]] = {}
 WHALE_ACTIVITY_CACHE_TTL = 600  # 10 minutes
 
+_filing_dates_cache: Dict[str, Tuple[float, Any]] = {}
+FILING_DATES_CACHE_TTL = 86400  # 24 hours — filing dates change quarterly
+
 
 def _cache_get(cache: Dict, key: str, ttl: int) -> Optional[Any]:
     entry = cache.get(key)
@@ -956,8 +959,15 @@ class WhaleService:
         """Fetch and aggregate 13F institutional data."""
         sb = get_supabase()
 
-        # Step 1: Get available filing dates
-        filing_dates = await self.fmp.get_institutional_filing_dates(cik)
+        # Step 1: Get available filing dates (cached 24h — changes quarterly)
+        fd_key = f"filing_dates:{cik}"
+        filing_dates = _cache_get(
+            _filing_dates_cache, fd_key, FILING_DATES_CACHE_TTL
+        )
+        if filing_dates is None:
+            filing_dates = await self.fmp.get_institutional_filing_dates(cik)
+            if filing_dates:
+                _cache_set(_filing_dates_cache, fd_key, filing_dates)
         if not filing_dates:
             logger.warning("No 13F filing dates for CIK %s", cik)
             return await self._read_from_supabase(whale_id)
@@ -1021,14 +1031,16 @@ class WhaleService:
         if prev_raw:
             holdings_data = self._apply_change_percent(holdings_data, prev_raw)
 
-        # Apply logo cache from prior hydration, then enrich remaining from FMP
-        holdings_data = await self._apply_logo_cache(whale_id, holdings_data)
-        holdings_data = await self._enrich_holdings_from_profiles(holdings_data)
-
+        # Build sectors from FMP industry breakdown
         sector_data = self._build_sectors_from_industry(industry_data)
-        # If industry breakdown returned empty, compute from profiles
-        if not sector_data and holdings_data:
-            sector_data = await self._enrich_sectors_from_profiles(holdings_data)
+
+        # Single enrichment pass: logos + names + sectors (if missing)
+        # Uses company_profile_cache table (7-day TTL) to avoid redundant FMP calls
+        holdings_data, fallback_sectors = await self._enrich_from_profiles(
+            holdings_data, need_sectors=(not sector_data),
+        )
+        if not sector_data and fallback_sectors:
+            sector_data = fallback_sectors
         trade_group = self._diff_quarters(
             current_raw, prev_raw, filing_date, total_value
         )
@@ -1108,12 +1120,12 @@ class WhaleService:
         )
         total_value = sum(h.get("value", 0) for h in holdings_data)
 
-        # Apply logo cache from prior hydration snapshot
-        holdings_data = await self._apply_logo_cache(whale_id, holdings_data)
-
-        # Enrich sectors from company profiles if empty
-        if not sector_data and holdings_data:
-            sector_data = await self._enrich_sectors_from_profiles(holdings_data)
+        # Single enrichment pass: logos + names + sectors
+        holdings_data, enriched_sectors = await self._enrich_from_profiles(
+            holdings_data, need_sectors=(not sector_data),
+        )
+        if not sector_data and enriched_sectors:
+            sector_data = enriched_sectors
 
         behavior = self._generate_behavior_summary(trade_group, sector_data)
         sentiment = self._generate_sentiment_summary(
@@ -1540,113 +1552,122 @@ class WhaleService:
 
         return holdings
 
-    async def _apply_logo_cache(
-        self, whale_id: str, holdings: List[Dict]
-    ) -> List[Dict]:
-        """Apply logos from prior hydration snapshot's logo_cache."""
+    async def _enrich_from_profiles(
+        self,
+        holdings: List[Dict],
+        need_sectors: bool = False,
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """One-stop enrichment: logos, company names, and sectors.
+
+        Uses the existing company_profile_cache table (24h TTL) to avoid
+        redundant FMP API calls. Only fetches from FMP for tickers not
+        in the Supabase cache.
+
+        Returns: (enriched_holdings, sectors_list)
+        """
+        sb = get_supabase()
+        tickers = [h["ticker"] for h in holdings[:30] if h.get("ticker")]
+        if not tickers:
+            return holdings, []
+
+        # ── Step 1: Batch-read from company_profile_cache ──────────
+        profile_map: Dict[str, Dict] = {}
+        uncached_tickers: List[str] = []
         try:
-            sb = get_supabase()
-            result = (
-                sb.table("whale_filing_snapshots")
-                .select("logo_cache")
-                .eq("whale_id", whale_id)
-                .order("processed_at", desc=True)
-                .limit(1)
+            cache_result = (
+                sb.table("company_profile_cache")
+                .select("ticker, profile_json, cached_at")
+                .in_("ticker", tickers)
                 .execute()
             )
-            if result.data and result.data[0].get("logo_cache"):
-                logo_cache = result.data[0]["logo_cache"]
-                for h in holdings:
-                    if not h.get("logo_url") and h["ticker"] in logo_cache:
-                        h["logo_url"] = logo_cache[h["ticker"]]
+            now = datetime.now(datetime.now().astimezone().tzinfo)
+            for row in cache_result.data or []:
+                cached_at = datetime.fromisoformat(
+                    row["cached_at"].replace("Z", "+00:00")
+                )
+                age_hours = (now - cached_at).total_seconds() / 3600
+                if age_hours < 168:  # 7 days for static data like logos/names
+                    profile_map[row["ticker"]] = row["profile_json"]
+
+            uncached_tickers = [t for t in tickers if t not in profile_map]
         except Exception as e:
-            logger.warning("Failed to apply logo cache: %s", e)
-        return holdings
+            logger.warning("company_profile_cache batch read failed: %s", e)
+            uncached_tickers = tickers
 
-    async def _enrich_holdings_from_profiles(
-        self, holdings: List[Dict]
-    ) -> List[Dict]:
-        """Enrich holdings with company names and logos from FMP profiles.
-
-        Only fetches profiles for holdings missing logo_url or where
-        company_name equals the ticker (indicates missing enrichment).
-        """
-        needs_enrichment = [
-            h["ticker"] for h in holdings[:30]
-            if not h.get("logo_url")
-            or h.get("company_name", "") == h.get("ticker", "")
-        ]
-        if not needs_enrichment:
-            return holdings
-
-        try:
-            profiles = await self.fmp.get_company_profiles_batch(
-                needs_enrichment[:30]
+        # ── Step 2: Fetch only missing profiles from FMP ───────────
+        if uncached_tickers:
+            logger.info(
+                "Fetching %d/%d company profiles from FMP (rest from cache)",
+                len(uncached_tickers), len(tickers),
             )
-            profile_map = {
-                (p.get("symbol") or "").upper(): p for p in profiles
-            }
-            for h in holdings:
-                p = profile_map.get(h["ticker"])
-                if p:
-                    if not h.get("logo_url") and p.get("image"):
-                        h["logo_url"] = p["image"]
-                    # Upgrade company name from SEC filing name
-                    if p.get("companyName") and (
-                        h.get("company_name", "") == h.get("ticker", "")
-                        or not h.get("company_name")
-                    ):
-                        h["company_name"] = p["companyName"]
-        except Exception as e:
-            logger.warning("Failed to enrich holdings from profiles: %s", e)
-        return holdings
+            try:
+                fmp_profiles = await self.fmp.get_company_profiles_batch(
+                    uncached_tickers[:30]
+                )
+                for p in fmp_profiles:
+                    sym = (p.get("symbol") or "").upper()
+                    if sym:
+                        profile_map[sym] = p
+                        # Persist to cache for next time
+                        try:
+                            sb.table("company_profile_cache").upsert(
+                                {
+                                    "ticker": sym,
+                                    "profile_json": p,
+                                    "cached_at": datetime.now().isoformat(),
+                                },
+                                on_conflict="ticker",
+                            ).execute()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning("FMP batch profiles failed: %s", e)
 
-    async def _enrich_sectors_from_profiles(
-        self, holdings: List[Dict]
-    ) -> List[Dict]:
-        """Enrich sector data for congressional whales by fetching company profiles."""
-        sector_accum: Dict[str, float] = {}
-        tickers = [h["ticker"] for h in holdings[:20]]
+        # ── Step 3: Apply logos + company names to holdings ─────────
+        for h in holdings:
+            p = profile_map.get(h["ticker"])
+            if not p:
+                continue
+            if not h.get("logo_url") and p.get("image"):
+                h["logo_url"] = p["image"]
+            if p.get("companyName") and (
+                h.get("company_name", "") == h.get("ticker", "")
+                or h.get("company_name", "").isupper()
+            ):
+                h["company_name"] = p["companyName"]
 
-        try:
-            # Batch fetch profiles
-            profiles = await self.fmp.get_company_profiles_batch(tickers)
-            if not profiles:
-                return []
-
-            profile_map = {}
-            for p in profiles:
-                sym = (p.get("symbol") or "").upper()
-                if sym:
-                    profile_map[sym] = p
-
-            total_alloc = sum(h.get("allocation", 0) for h in holdings[:20])
-            if total_alloc <= 0:
-                return []
-
+        # ── Step 4: Build sectors from profiles (if needed) ────────
+        sectors: List[Dict] = []
+        if need_sectors:
+            sector_accum: Dict[str, float] = {}
             for h in holdings[:20]:
                 p = profile_map.get(h["ticker"])
                 if p:
                     sector = p.get("sector") or "Other"
-                    sector_accum[sector] = sector_accum.get(sector, 0) + h.get("allocation", 0)
-                    # Also apply logo while we have the profile
-                    if not h.get("logo_url") and p.get("image"):
-                        h["logo_url"] = p["image"]
-        except Exception as e:
-            logger.warning("Failed to enrich sectors from profiles: %s", e)
-            return []
+                    sector_accum[sector] = (
+                        sector_accum.get(sector, 0) + h.get("allocation", 0)
+                    )
+            named = []
+            other_weight = 0.0
+            for name, weight in sector_accum.items():
+                if name == "Other":
+                    other_weight += weight
+                else:
+                    named.append({
+                        "name": name,
+                        "allocation": round(weight, 1),
+                        "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
+                    })
+            named.sort(key=lambda x: x["allocation"], reverse=True)
+            if other_weight > 0:
+                named.append({
+                    "name": "Other",
+                    "allocation": round(other_weight, 1),
+                    "color_hex": DEFAULT_SECTOR_COLOR,
+                })
+            sectors = named[:11]
 
-        sectors = [
-            {
-                "name": name,
-                "allocation": round(alloc, 1),
-                "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
-            }
-            for name, alloc in sector_accum.items()
-            if alloc > 0
-        ]
-        sectors.sort(key=lambda x: x["allocation"], reverse=True)
-        return sectors[:8]
+        return holdings, sectors
 
     def _build_trade_responses(
         self, trades: List[Dict]

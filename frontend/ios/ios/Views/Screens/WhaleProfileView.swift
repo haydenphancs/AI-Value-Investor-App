@@ -659,7 +659,7 @@ struct WhaleHoldingRow: View {
         } label: {
             HStack(spacing: AppSpacing.md) {
                 // Logo/Ticker Icon
-                WhaleTickerIcon(ticker: holding.ticker)
+                WhaleTickerIcon(ticker: holding.ticker, logoURL: holding.logoURL)
 
                 // Company Info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
@@ -699,9 +699,9 @@ struct WhaleHoldingRow: View {
 // MARK: - Whale Ticker Icon
 struct WhaleTickerIcon: View {
     let ticker: String
+    var logoURL: String? = nil
 
     private var backgroundColor: Color {
-        // Generate consistent color based on ticker
         let colors: [Color] = [
             AppColors.primaryBlue,
             AppColors.bullish,
@@ -714,6 +714,25 @@ struct WhaleTickerIcon: View {
     }
 
     var body: some View {
+        if let urlString = logoURL, let url = URL(string: urlString) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 40, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+                default:
+                    letterFallback
+                }
+            }
+        } else {
+            letterFallback
+        }
+    }
+
+    private var letterFallback: some View {
         ZStack {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(backgroundColor.opacity(0.2))

@@ -253,7 +253,7 @@ struct WhalePortfolioStats: View {
                     .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
-                Text("Portfolio Value")
+                Text("13F Equity Portfolio")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }

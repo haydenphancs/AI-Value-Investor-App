@@ -287,15 +287,39 @@ struct TradeTickerLogo: View {
         return colors[index]
     }
 
+    private var logoURL: URL? {
+        URL(string: "https://images.financialmodelingprep.com/symbol/\(ticker.uppercased()).png")
+    }
+
     var body: some View {
-        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-            .fill(backgroundColor.opacity(0.15))
-            .frame(width: 48, height: 48)
-            .overlay(
-                Text("Logo")
-                    .font(AppTypography.captionEmphasis)
-                    .foregroundColor(AppColors.textMuted)
-            )
+        if let url = logoURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+                default:
+                    letterFallback
+                }
+            }
+        } else {
+            letterFallback
+        }
+    }
+
+    private var letterFallback: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(backgroundColor.opacity(0.15))
+                .frame(width: 48, height: 48)
+
+            Text(String(ticker.prefix(1)))
+                .font(AppTypography.bodyEmphasis).fontWeight(.bold)
+                .foregroundColor(backgroundColor)
+        }
     }
 }
 

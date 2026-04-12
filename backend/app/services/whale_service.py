@@ -56,6 +56,159 @@ SECTOR_COLORS: Dict[str, str] = {
 }
 DEFAULT_SECTOR_COLOR = "6B7280"
 
+# ── SIC Industry Code → GICS Sector Mapping ────────────────────────
+# FMP returns granular SEC SIC industry codes (e.g. "ELECTRONIC COMPUTERS").
+# We map them to the 11 standard GICS sectors for clean display.
+# Keys MUST be lowercase for case-insensitive lookup.
+
+SIC_TO_SECTOR: Dict[str, str] = {
+    # Technology
+    "electronic computers": "Technology",
+    "services-prepackaged software": "Technology",
+    "services-computer programming, data processing, etc.": "Technology",
+    "computer peripheral equipment, nec": "Technology",
+    "computer communications equipment": "Technology",
+    "electronic components, nec": "Technology",
+    "printed circuit boards": "Technology",
+    "services-computer integrated systems design": "Technology",
+    "services-computer processing & data preparation": "Technology",
+    "services-computer rental & leasing": "Technology",
+    "calculating & accounting machines": "Technology",
+    "computer storage devices": "Technology",
+    "semiconductors & related devices": "Technology",
+    "electronic connectors": "Technology",
+    "search, detection, navigation, guidance systems": "Technology",
+    "measuring & controlling devices, nec": "Technology",
+    # Financial Services
+    "finance services": "Financial Services",
+    "finance-services": "Financial Services",
+    "national commercial banks": "Financial Services",
+    "state chartered banks": "Financial Services",
+    "state commercial banks-federal reserve members": "Financial Services",
+    "security brokers, dealers & flotation companies": "Financial Services",
+    "insurance carriers, nec": "Financial Services",
+    "fire, marine & casualty insurance": "Financial Services",
+    "life insurance": "Financial Services",
+    "accident & health insurance": "Financial Services",
+    "investment advice": "Financial Services",
+    "services-management consulting services": "Financial Services",
+    "security & commodity services": "Financial Services",
+    "savings institutions, federally chartered": "Financial Services",
+    "savings institution, federally chartered-no": "Financial Services",
+    "short-term business credit institutions": "Financial Services",
+    "functions related to depository banking": "Financial Services",
+    "blank checks": "Financial Services",
+    "investors, nec": "Financial Services",
+    "services-misc business services nec": "Financial Services",
+    # Healthcare
+    "pharmaceutical preparations": "Healthcare",
+    "surgical & medical instruments & apparatus": "Healthcare",
+    "biological products, (no diagnostic substances)": "Healthcare",
+    "services-health services": "Healthcare",
+    "services-medical laboratories": "Healthcare",
+    "electromedical & electrotherapeutic apparatus": "Healthcare",
+    "in vitro & in vivo diagnostic substances": "Healthcare",
+    "hospital & medical service plans": "Healthcare",
+    "orthopedic, prosthetic & surgical appliances": "Healthcare",
+    "medicinal chemicals & botanical products": "Healthcare",
+    "medical instruments & supplies": "Healthcare",
+    # Energy
+    "petroleum refining": "Energy",
+    "crude petroleum & natural gas": "Energy",
+    "natural gas distribution": "Energy",
+    "electric & other services combined": "Energy",
+    "electric services": "Energy",
+    "natural gas transmission & distribution": "Energy",
+    "pipeline companies": "Energy",
+    "petroleum & petroleum products wholesalers": "Energy",
+    # Consumer Cyclical
+    "retail-catalog & mail-order houses": "Consumer Cyclical",
+    "retail-eating places": "Consumer Cyclical",
+    "retail-auto dealers & gas stations": "Consumer Cyclical",
+    "retail-variety stores": "Consumer Cyclical",
+    "retail-department stores": "Consumer Cyclical",
+    "retail-building materials, hardware": "Consumer Cyclical",
+    "retail-home furniture, furnishings & equipment": "Consumer Cyclical",
+    "motor vehicles & passenger car bodies": "Consumer Cyclical",
+    "services-miscellaneous amusement & recreation": "Consumer Cyclical",
+    "services-hotels, rooming houses, camps": "Consumer Cyclical",
+    "motor vehicle parts & accessories": "Consumer Cyclical",
+    "footwear, (no rubber)": "Consumer Cyclical",
+    "apparel & other finished prods of fabrics": "Consumer Cyclical",
+    "retail-family clothing stores": "Consumer Cyclical",
+    "retail-drug stores and proprietary stores": "Consumer Cyclical",
+    "retail-retail stores, nec": "Consumer Cyclical",
+    "retail-lumber & other building materials dealers": "Consumer Cyclical",
+    "retail-nonstore retailers": "Consumer Cyclical",
+    # Industrials
+    "railroads, line-haul operating": "Industrials",
+    "air transportation, scheduled": "Industrials",
+    "trucking & courier services (no air)": "Industrials",
+    "construction-special trade contractors": "Industrials",
+    "industrial & commercial machinery, nec": "Industrials",
+    "general industrial machinery & equipment": "Industrials",
+    "farm machinery & equipment": "Industrials",
+    "misc industrial & commercial machinery": "Industrials",
+    "aerospace product & parts": "Industrials",
+    "services-engineering services": "Industrials",
+    "services-detective, guard & armored car services": "Industrials",
+    "services-equipment rental & leasing": "Industrials",
+    "services-staffing services": "Industrials",
+    "special industry machinery, nec": "Industrials",
+    "heavy construction other than bldg const-contractors": "Industrials",
+    "general bldg contractors-residential bldgs": "Industrials",
+    "construction machinery & equip": "Industrials",
+    "transportation services": "Industrials",
+    # Communication Services
+    "services-advertising": "Communication Services",
+    "cable & other pay television services": "Communication Services",
+    "telephone & telegraph apparatus": "Communication Services",
+    "telephone communications (no radiotelephone)": "Communication Services",
+    "radio broadcasting": "Communication Services",
+    "services-motion picture & tape distribution": "Communication Services",
+    "television broadcasting stations": "Communication Services",
+    "radio & tv broadcasting & communications equipment": "Communication Services",
+    "services-computer & computer software stores": "Communication Services",
+    "services-educational services": "Communication Services",
+    # Consumer Defensive
+    "beverages": "Consumer Defensive",
+    "retail-grocery stores": "Consumer Defensive",
+    "food and kindred products": "Consumer Defensive",
+    "tobacco products": "Consumer Defensive",
+    "soap, detergent, cleaning preparations": "Consumer Defensive",
+    "perfumes, cosmetics & other toilet preparations": "Consumer Defensive",
+    "grain mill products": "Consumer Defensive",
+    "canned, frozen & preserved fruit, veg & food": "Consumer Defensive",
+    "fats & oils": "Consumer Defensive",
+    # Real Estate
+    "real estate investment trusts": "Real Estate",
+    "real estate": "Real Estate",
+    "land subdividers & developers (no cemeteries)": "Real Estate",
+    "operators of apartment buildings": "Real Estate",
+    # Utilities
+    "water supply": "Utilities",
+    "sanitary services": "Utilities",
+    "gas & other services combined": "Utilities",
+    # Basic Materials
+    "gold mining": "Basic Materials",
+    "steel works, blast furnaces": "Basic Materials",
+    "plastic materials, synth resins & nonvulcan elastomers": "Basic Materials",
+    "industrial chemicals": "Basic Materials",
+    "agricultural chemicals": "Basic Materials",
+    "mining & quarrying of nonmetallic minerals": "Basic Materials",
+    "miscellaneous metal ores": "Basic Materials",
+    "paper mills": "Basic Materials",
+    "chemicals & allied products": "Basic Materials",
+    "metal mining": "Basic Materials",
+}
+
+
+def _map_sic_to_sector(industry_title: str) -> str:
+    """Map an FMP SIC industry title to a GICS sector name."""
+    if not industry_title:
+        return "Other"
+    return SIC_TO_SECTOR.get(industry_title.lower().strip(), "Other")
+
 RISK_PROFILE_LABELS: Dict[str, str] = {
     "conservative": "Safe, Long-term Value",
     "moderate": "Moderate",
@@ -1316,36 +1469,52 @@ class WhaleService:
     ) -> List[Dict[str, Any]]:
         """Build sector allocation from FMP industry breakdown.
 
-        The stable API returns fields: industryTitle, weight.
-        Legacy API used: industry, weightPercentage.
-        We handle both for compatibility.
+        Maps ~100 granular SIC industry codes (e.g. "ELECTRONIC COMPUTERS")
+        to the 11 clean GICS sectors (e.g. "Technology") using SIC_TO_SECTOR.
+        Aggregates weights by sector, sorts descending with "Other" last.
         """
         if not industry_data:
             return []
 
-        sectors = []
+        sector_accum: Dict[str, float] = {}
         for item in industry_data:
-            name = (
+            raw_name = (
                 item.get("industryTitle")
                 or item.get("industry")
                 or item.get("sector")
-                or "Other"
+                or ""
             )
-            # Normalize industry titles to cleaner names
-            name = name.title()
+            sector = _map_sic_to_sector(raw_name)
             weight = float(
                 item.get("weight")
                 or item.get("weightPercentage")
                 or 0
             )
             if weight > 0:
-                sectors.append({
+                sector_accum[sector] = sector_accum.get(sector, 0) + weight
+
+        # Build list: named sectors first (desc), "Other" last
+        named = []
+        other_weight = 0.0
+        for name, weight in sector_accum.items():
+            if name == "Other":
+                other_weight += weight
+            else:
+                named.append({
                     "name": name,
                     "allocation": round(weight, 1),
                     "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                 })
-        sectors.sort(key=lambda x: x["allocation"], reverse=True)
-        return sectors[:8]
+        named.sort(key=lambda x: x["allocation"], reverse=True)
+
+        if other_weight > 0:
+            named.append({
+                "name": "Other",
+                "allocation": round(other_weight, 1),
+                "color_hex": DEFAULT_SECTOR_COLOR,
+            })
+
+        return named[:11]
 
     def _apply_change_percent(
         self,

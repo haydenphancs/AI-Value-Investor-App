@@ -40,6 +40,9 @@ from app.config import settings  # noqa: E402
 from app.database import get_supabase  # noqa: E402
 from app.integrations.fmp import FMPClient  # noqa: E402
 from app.integrations.gemini import GeminiClient  # noqa: E402
+from app.services.whale_service import (  # noqa: E402
+    SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
+)
 
 logger = logging.getLogger("hydrate_whales")
 
@@ -49,22 +52,9 @@ FMP_SEMAPHORE = asyncio.Semaphore(5)
 GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 FMP_BATCH_SIZE = 30
 
-# ── Sector Color Map (mirrors whale_service.py) ─────────────────────
+# SECTOR_COLORS, DEFAULT_SECTOR_COLOR, SIC_TO_SECTOR, _map_sic_to_sector
+# are imported from app.services.whale_service (single source of truth).
 
-SECTOR_COLORS: Dict[str, str] = {
-    "Technology": "3B82F6",
-    "Financial Services": "22C55E",
-    "Healthcare": "EF4444",
-    "Energy": "F97316",
-    "Consumer Cyclical": "8B5CF6",
-    "Industrials": "6366F1",
-    "Communication Services": "EC4899",
-    "Consumer Defensive": "14B8A6",
-    "Real Estate": "F59E0B",
-    "Utilities": "6B7280",
-    "Basic Materials": "A78BFA",
-}
-DEFAULT_SECTOR_COLOR = "6B7280"
 
 # Congressional amount range → midpoint
 AMOUNT_RANGES: Dict[str, float] = {
@@ -678,32 +668,48 @@ class WhaleHydrator:
     ) -> List[Dict[str, Any]]:
         """Build sectors from FMP institutional industry breakdown.
 
-        Stable API uses: industryTitle, weight
-        Legacy API used: industry, weightPercentage
+        Maps granular SIC codes → 11 GICS sectors via _map_sic_to_sector.
+        Aggregates weights, sorts descending, "Other" always last.
         """
         if not industry_data:
             return []
 
-        sectors = []
+        sector_accum: Dict[str, float] = {}
         for item in industry_data:
-            name = (
+            raw_name = (
                 item.get("industryTitle")
                 or item.get("industry")
                 or item.get("sector")
-                or "Other"
+                or ""
             )
-            name = name.title()
+            sector = _map_sic_to_sector(raw_name)
             weight = float(
                 item.get("weight") or item.get("weightPercentage") or 0
             )
             if weight > 0:
-                sectors.append({
+                sector_accum[sector] = sector_accum.get(sector, 0) + weight
+
+        named = []
+        other_weight = 0.0
+        for name, weight in sector_accum.items():
+            if name == "Other":
+                other_weight += weight
+            else:
+                named.append({
                     "name": name,
                     "allocation": round(weight, 1),
                     "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                 })
-        sectors.sort(key=lambda x: x["allocation"], reverse=True)
-        return sectors[:8]
+        named.sort(key=lambda x: x["allocation"], reverse=True)
+
+        if other_weight > 0:
+            named.append({
+                "name": "Other",
+                "allocation": round(other_weight, 1),
+                "color_hex": DEFAULT_SECTOR_COLOR,
+            })
+
+        return named[:11]
 
     # ── Enrichment: change_percent ───────────────────────────────────
 
@@ -1123,6 +1129,14 @@ class WhaleHydrator:
     ):
         """Write to snapshot cache + denormalized tables."""
         sb = self.sb
+
+        # 0. Invalidate whale_profile_cache so stale assembled JSON is cleared
+        try:
+            sb.table("whale_profile_cache").delete().eq(
+                "whale_id", whale_id
+            ).execute()
+        except Exception:
+            pass  # Table may not exist yet
 
         # 1. Upsert snapshot
         try:

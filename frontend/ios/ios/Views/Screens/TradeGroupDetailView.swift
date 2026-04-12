@@ -46,6 +46,14 @@ struct TradeGroupDetailView: View {
                         TradeGroupInsightsCard(insights: viewModel.tradeGroup.insights)
                     }
 
+                    // Top N label when trades are capped
+                    if viewModel.tradeGroup.tradeCount > viewModel.tradeGroup.trades.count {
+                        Text("Showing top \(viewModel.tradeGroup.trades.count) of \(viewModel.tradeGroup.tradeCount) trades by value")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
                     // Trade Cards
                     VStack(spacing: AppSpacing.md) {
                         ForEach(viewModel.filteredTrades) { trade in

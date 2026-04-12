@@ -226,7 +226,7 @@ class WhaleHydrator:
             whale_id, total_value, perf_data
         )
         risk_profile = self._compute_risk_profile(
-            holdings, sectors, trade_group
+            holdings, sectors, trade_group, perf_data
         )
 
         # Step 8: Persist
@@ -286,7 +286,9 @@ class WhaleHydrator:
                 prev_task = _noop_list()
 
         async with FMP_SEMAPHORE:
-            industry_task = self.fmp.get_institutional_industry_breakdown(cik)
+            industry_task = self.fmp.get_institutional_industry_breakdown(
+                cik, year=year, quarter=quarter
+            )
         async with FMP_SEMAPHORE:
             perf_task = self.fmp.get_institutional_performance(cik)
 
@@ -674,13 +676,23 @@ class WhaleHydrator:
     def _build_sectors_from_industry(
         self, industry_data: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Build sectors from FMP institutional industry breakdown."""
+        """Build sectors from FMP institutional industry breakdown.
+
+        Stable API uses: industryTitle, weight
+        Legacy API used: industry, weightPercentage
+        """
         if not industry_data:
             return []
 
         sectors = []
         for item in industry_data:
-            name = item.get("industry") or item.get("sector") or "Other"
+            name = (
+                item.get("industryTitle")
+                or item.get("industry")
+                or item.get("sector")
+                or "Other"
+            )
+            name = name.title()
             weight = float(
                 item.get("weight") or item.get("weightPercentage") or 0
             )
@@ -741,9 +753,18 @@ class WhaleHydrator:
             except Exception as e:
                 logger.warning("  Logo batch fetch failed: %s", e)
 
-        # Apply logos
+        # Apply logos + company names from fetched profiles
         for h in holdings:
             h["logo_url"] = logo_cache.get(h["ticker"])
+            profile = self._profile_cache.get(h["ticker"])
+            if profile:
+                fmp_name = profile.get("companyName")
+                # Upgrade SEC filing names to proper company names
+                if fmp_name and (
+                    h.get("company_name", "") == h.get("ticker", "")
+                    or h.get("company_name", "").isupper()
+                ):
+                    h["company_name"] = fmp_name
 
         return holdings, logo_cache
 
@@ -975,44 +996,64 @@ class WhaleHydrator:
         holdings: List[Dict],
         sectors: List[Dict],
         trade_group: Optional[Dict],
+        perf_data: Optional[Dict] = None,
     ) -> str:
-        """Compute risk profile from holdings concentration, sector diversity, and turnover."""
+        """Compute risk profile from holdings patterns and FMP performance data.
+
+        Uses turnover rate, holding period, and sector tilt to classify
+        investors. Concentration alone does not equal risk — Buffett is
+        concentrated but very conservative.
+        """
         score = 50  # Start at moderate
+        perf = perf_data or {}
 
-        # 1. Concentration: top 5 holdings as % of total
-        top5_alloc = sum(h.get("allocation", 0) for h in holdings[:5])
-        if top5_alloc > 80:
-            score += 20  # Very concentrated
-        elif top5_alloc > 60:
-            score += 10
-        elif top5_alloc < 30:
-            score -= 15  # Well diversified
-
-        # 2. Sector diversity
-        num_sectors = len(sectors)
-        if num_sectors <= 2:
-            score += 15  # Concentrated in few sectors
-        elif num_sectors >= 6:
-            score -= 10  # Well diversified
-
-        # 3. Turnover rate
-        if trade_group:
+        # 1. Turnover rate — key risk signal
+        # FMP provides `turnover` directly (0-1 range, 0 = buy-and-hold)
+        turnover = perf.get("turnover", None)
+        if turnover is not None:
+            if turnover < 0.10:
+                score -= 20  # Very low turnover = conservative buy-and-hold
+            elif turnover < 0.25:
+                score -= 10
+            elif turnover > 0.50:
+                score += 15  # High turnover = aggressive
+            elif turnover > 0.75:
+                score += 25
+        elif trade_group:
+            # Fallback: estimate turnover from trade count
             trade_count = trade_group.get("trade_count", 0)
             holdings_count = len(holdings) or 1
-            turnover = trade_count / holdings_count
-            if turnover > 0.5:
-                score += 15  # High turnover = more aggressive
-            elif turnover < 0.1:
-                score -= 10  # Low turnover = more conservative
+            est_turnover = trade_count / holdings_count
+            if est_turnover > 0.5:
+                score += 15
+            elif est_turnover < 0.1:
+                score -= 10
 
-        # 4. Growth vs value tilt from sectors
-        growth_sectors = {"Technology", "Consumer Cyclical", "Communication Services"}
-        growth_weight = sum(
-            s.get("allocation", 0) for s in sectors
-            if s.get("name") in growth_sectors
-        )
-        if growth_weight > 50:
-            score += 10  # Growth-tilted
+        # 2. Average holding period — long hold = conservative
+        avg_hold = perf.get("averageHoldingPeriod", 0)
+        if avg_hold > 20:
+            score -= 15  # Very long-term holder
+        elif avg_hold > 10:
+            score -= 5
+        elif avg_hold < 3:
+            score += 10  # Short-term trader
+
+        # 3. Sector diversity (only if we have data)
+        if sectors:
+            num_sectors = len(sectors)
+            if num_sectors <= 2:
+                score += 10
+            elif num_sectors >= 6:
+                score -= 5
+
+            # Growth vs value tilt
+            growth_sectors = {"Technology", "Consumer Cyclical", "Communication Services"}
+            growth_weight = sum(
+                s.get("allocation", 0) for s in sectors
+                if s.get("name") in growth_sectors
+            )
+            if growth_weight > 60:
+                score += 10
 
         # Map score to label
         if score <= 30:
@@ -1030,9 +1071,22 @@ class WhaleHydrator:
         total_value: float,
         perf_data: Dict,
     ) -> Optional[float]:
-        """Compute ytd_return with multiple fallback strategies."""
+        """Compute ytd_return with multiple fallback strategies.
+
+        FMP performance data fields (in priority order):
+        - ytdReturn (not always present in stable API)
+        - performancePercentage (quarter-over-quarter % change)
+        - changeInMarketValuePercentage (same as above, different key)
+        - performancePercentage1year (1-year return)
+        - Fallback: compare vs previous year Q4 snapshot
+        """
         if perf_data.get("ytdReturn"):
             return float(perf_data["ytdReturn"])
+        # Use quarter-over-quarter performance as proxy
+        if perf_data.get("performancePercentage"):
+            return round(float(perf_data["performancePercentage"]), 2)
+        if perf_data.get("changeInMarketValuePercentage"):
+            return round(float(perf_data["changeInMarketValuePercentage"]), 2)
         if perf_data.get("oneYearReturn"):
             return float(perf_data["oneYearReturn"])
 

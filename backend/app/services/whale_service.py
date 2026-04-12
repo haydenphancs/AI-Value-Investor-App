@@ -193,43 +193,151 @@ class WhaleService:
         _cache_set(_whale_list_cache, cache_key, response)
         return response
 
+    # ── Cache-Aside Constants ───────────────────────────────────────
+    PROFILE_CACHE_TTL_HOURS = 24
+
     async def get_whale_profile(
         self,
         whale_id: str,
         user_id: Optional[str] = None,
     ) -> Optional[WhaleProfileResponse]:
-        """Get full whale profile with holdings, trades, and summaries."""
-        cache_key = f"profile:{whale_id}:{user_id or 'anon'}"
-        cached = _cache_get(
-            _whale_profile_cache, cache_key, WHALE_PROFILE_CACHE_TTL
-        )
-        if cached is not None:
-            return cached
+        """Get full whale profile — 3-tier cache-aside pattern.
 
+        Tier 1: In-memory dict (1 hr TTL, lost on restart)
+        Tier 2: Supabase whale_profile_cache (24 hr TTL, survives restart)
+        Tier 3: Live FMP processing → cache result in both tiers
+
+        Follow state is ALWAYS read fresh (not cached) since it's per-user.
+        """
         sb = get_supabase()
 
-        # Fetch whale record
+        # ── Tier 1: In-memory cache (fast, per-process) ────────────
+        mem_key = f"profile:{whale_id}"
+        cached = _cache_get(_whale_profile_cache, mem_key, WHALE_PROFILE_CACHE_TTL)
+        if cached is not None:
+            # Overlay fresh follow state
+            return self._overlay_follow_state(cached, user_id, sb)
+
+        # ── Tier 2: Supabase profile cache (24h TTL) ───────────────
+        try:
+            cache_row = (
+                sb.table("whale_profile_cache")
+                .select("profile_json, cached_at")
+                .eq("whale_id", whale_id)
+                .execute()
+            )
+            if cache_row.data:
+                row = cache_row.data[0]
+                cached_at = datetime.fromisoformat(
+                    row["cached_at"].replace("Z", "+00:00")
+                )
+                age_hours = (
+                    datetime.now(cached_at.tzinfo) - cached_at
+                ).total_seconds() / 3600
+                if age_hours < self.PROFILE_CACHE_TTL_HOURS:
+                    profile = WhaleProfileResponse(**row["profile_json"])
+                    _cache_set(_whale_profile_cache, mem_key, profile)
+                    logger.info(
+                        "Whale profile %s served from Supabase cache (%.1fh old)",
+                        whale_id, age_hours,
+                    )
+                    return self._overlay_follow_state(profile, user_id, sb)
+                else:
+                    logger.info(
+                        "Whale profile cache expired for %s (%.1fh old)",
+                        whale_id, age_hours,
+                    )
+        except Exception as e:
+            logger.warning(
+                "whale_profile_cache read failed for %s: %s", whale_id, e
+            )
+
+        # ── Tier 3: Build from FMP + DB (slow, authoritative) ──────
+        profile = await self._build_whale_profile(whale_id, user_id)
+        if profile is None:
+            return None
+
+        # Persist to both caches (without follow state — that's per-user)
+        profile_no_follow = profile.model_copy(update={"is_following": False})
+        _cache_set(_whale_profile_cache, mem_key, profile_no_follow)
+        try:
+            sb.table("whale_profile_cache").upsert(
+                {
+                    "whale_id": whale_id,
+                    "profile_json": profile_no_follow.model_dump(),
+                    "cached_at": datetime.now().isoformat(),
+                },
+                on_conflict="whale_id",
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "whale_profile_cache write failed for %s: %s", whale_id, e
+            )
+
+        return profile
+
+    def _overlay_follow_state(
+        self,
+        profile: WhaleProfileResponse,
+        user_id: Optional[str],
+        sb,
+    ) -> WhaleProfileResponse:
+        """Merge fresh follow state onto a cached profile."""
+        if not user_id:
+            return profile
+        try:
+            follow_result = (
+                sb.table("whale_follows")
+                .select("id")
+                .eq("user_id", user_id)
+                .eq("whale_id", profile.id)
+                .execute()
+            )
+            is_following = bool(follow_result.data)
+            if is_following != profile.is_following:
+                return profile.model_copy(update={"is_following": is_following})
+        except Exception as e:
+            logger.warning("Follow state check failed: %s", e)
+        return profile
+
+    async def _build_whale_profile(
+        self,
+        whale_id: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[WhaleProfileResponse]:
+        """Build a complete WhaleProfileResponse from FMP + DB data.
+
+        This is the expensive path — called only on cache miss.
+        """
+        sb = get_supabase()
+
+        # Step 1: Fetch whale record
         try:
             result = (
                 sb.table("whales").select("*").eq("id", whale_id).execute()
             )
         except Exception as e:
-            logger.error("Failed to fetch whale record %s: %s", whale_id, e)
+            logger.error(
+                "[whale_profile] DB read failed for whale_id=%s: %s",
+                whale_id, e,
+            )
             return None
         if not result.data:
+            logger.warning("[whale_profile] Whale not found: %s", whale_id)
             return None
         whale = result.data[0]
 
-        # Route to correct source and process
+        # Step 2: Route to data source → get snapshot
         snapshot: Optional[Dict[str, Any]] = None
         try:
             snapshot = await self._get_or_process_latest(whale_id, whale)
         except Exception as e:
             logger.error(
-                "All data sources failed for whale %s: %s", whale_id, e
+                "[whale_profile] All data sources failed for %s (%s): %s",
+                whale["name"], whale.get("data_source"), e,
             )
 
-        # Fetch follow state
+        # Step 3: Fetch follow state
         is_following = False
         if user_id:
             try:
@@ -242,14 +350,14 @@ class WhaleService:
                 )
                 is_following = bool(follow_result.data)
             except Exception as e:
-                logger.warning("Failed to fetch follow state: %s", e)
+                logger.warning("[whale_profile] Follow state failed: %s", e)
 
-        # Build profile response
+        # Step 4: Build response from snapshot + whale record
         risk_label = RISK_PROFILE_LABELS.get(
             whale.get("risk_profile") or "", whale.get("risk_profile") or ""
         )
 
-        # Build sectors
+        # Sectors
         sectors: List[WhaleSectorAllocationResponse] = []
         if snapshot and snapshot.get("sector_data"):
             for s in snapshot["sector_data"]:
@@ -267,7 +375,7 @@ class WhaleService:
                     )
                 )
 
-        # Build holdings
+        # Holdings
         holdings: List[WhaleHoldingResponse] = []
         if snapshot and snapshot.get("holdings_data"):
             for h in snapshot["holdings_data"][:30]:
@@ -282,11 +390,10 @@ class WhaleService:
                     )
                 )
 
-        # Build trade groups from snapshot + existing DB records
+        # Trade groups from snapshot + DB
         trade_groups: List[WhaleTradeGroupResponse] = []
         all_trades: List[WhaleTradeResponse] = []
 
-        # Current snapshot trade group
         if snapshot and snapshot.get("trade_group"):
             tg = snapshot["trade_group"]
             trades_for_group = self._build_trade_responses(
@@ -317,12 +424,8 @@ class WhaleService:
                 .execute()
             )
             for tg in db_groups.data or []:
-                # Skip if we already have this date from the snapshot
-                if any(
-                    g.date == tg.get("date", "") for g in trade_groups
-                ):
+                if any(g.date == tg.get("date", "") for g in trade_groups):
                     continue
-                # Fetch trades for this group
                 db_trades = (
                     sb.table("whale_trades")
                     .select("*")
@@ -347,7 +450,10 @@ class WhaleService:
                 )
                 all_trades.extend(trades_for_group)
         except Exception as e:
-            logger.warning("Failed to fetch DB trade groups: %s", e)
+            logger.warning(
+                "[whale_profile] DB trade groups failed for %s: %s",
+                whale_id, e,
+            )
 
         # Behavior summary
         behavior_raw = (
@@ -395,8 +501,6 @@ class WhaleService:
             is_following=is_following,
         )
 
-        if snapshot:
-            _cache_set(_whale_profile_cache, cache_key, profile)
         return profile
 
     async def get_whale_activity_feed(
@@ -734,7 +838,9 @@ class WhaleService:
             if prev
             else _noop_list()
         )
-        industry_task = self.fmp.get_institutional_industry_breakdown(cik)
+        industry_task = self.fmp.get_institutional_industry_breakdown(
+            cik, year=year, quarter=quarter
+        )
         perf_task = self.fmp.get_institutional_performance(cik)
 
         results = await asyncio.gather(
@@ -762,10 +868,14 @@ class WhaleService:
         if prev_raw:
             holdings_data = self._apply_change_percent(holdings_data, prev_raw)
 
-        # Apply logo cache from prior hydration snapshot
+        # Apply logo cache from prior hydration, then enrich remaining from FMP
         holdings_data = await self._apply_logo_cache(whale_id, holdings_data)
+        holdings_data = await self._enrich_holdings_from_profiles(holdings_data)
 
         sector_data = self._build_sectors_from_industry(industry_data)
+        # If industry breakdown returned empty, compute from profiles
+        if not sector_data and holdings_data:
+            sector_data = await self._enrich_sectors_from_profiles(holdings_data)
         trade_group = self._diff_quarters(
             current_raw, prev_raw, filing_date, total_value
         )
@@ -1204,14 +1314,30 @@ class WhaleService:
     def _build_sectors_from_industry(
         self, industry_data: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Build sector allocation from FMP industry breakdown."""
+        """Build sector allocation from FMP industry breakdown.
+
+        The stable API returns fields: industryTitle, weight.
+        Legacy API used: industry, weightPercentage.
+        We handle both for compatibility.
+        """
         if not industry_data:
             return []
 
         sectors = []
         for item in industry_data:
-            name = item.get("industry") or item.get("sector") or "Other"
-            weight = float(item.get("weight") or item.get("weightPercentage") or 0)
+            name = (
+                item.get("industryTitle")
+                or item.get("industry")
+                or item.get("sector")
+                or "Other"
+            )
+            # Normalize industry titles to cleaner names
+            name = name.title()
+            weight = float(
+                item.get("weight")
+                or item.get("weightPercentage")
+                or 0
+            )
             if weight > 0:
                 sectors.append({
                     "name": name,
@@ -1266,6 +1392,44 @@ class WhaleService:
                         h["logo_url"] = logo_cache[h["ticker"]]
         except Exception as e:
             logger.warning("Failed to apply logo cache: %s", e)
+        return holdings
+
+    async def _enrich_holdings_from_profiles(
+        self, holdings: List[Dict]
+    ) -> List[Dict]:
+        """Enrich holdings with company names and logos from FMP profiles.
+
+        Only fetches profiles for holdings missing logo_url or where
+        company_name equals the ticker (indicates missing enrichment).
+        """
+        needs_enrichment = [
+            h["ticker"] for h in holdings[:30]
+            if not h.get("logo_url")
+            or h.get("company_name", "") == h.get("ticker", "")
+        ]
+        if not needs_enrichment:
+            return holdings
+
+        try:
+            profiles = await self.fmp.get_company_profiles_batch(
+                needs_enrichment[:30]
+            )
+            profile_map = {
+                (p.get("symbol") or "").upper(): p for p in profiles
+            }
+            for h in holdings:
+                p = profile_map.get(h["ticker"])
+                if p:
+                    if not h.get("logo_url") and p.get("image"):
+                        h["logo_url"] = p["image"]
+                    # Upgrade company name from SEC filing name
+                    if p.get("companyName") and (
+                        h.get("company_name", "") == h.get("ticker", "")
+                        or not h.get("company_name")
+                    ):
+                        h["company_name"] = p["companyName"]
+        except Exception as e:
+            logger.warning("Failed to enrich holdings from profiles: %s", e)
         return holdings
 
     async def _enrich_sectors_from_profiles(
@@ -1537,8 +1701,13 @@ class WhaleService:
                 "behavior_summary": behavior,
                 "sentiment_summary": sentiment,
             }
-            if perf_data.get("ytdReturn"):
-                whale_update["ytd_return"] = perf_data["ytdReturn"]
+            ytd = (
+                perf_data.get("ytdReturn")
+                or perf_data.get("performancePercentage")
+                or perf_data.get("changeInMarketValuePercentage")
+            )
+            if ytd:
+                whale_update["ytd_return"] = round(float(ytd), 2)
             sb.table("whales").update(whale_update).eq("id", whale_id).execute()
 
             # Upsert holdings

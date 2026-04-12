@@ -79,17 +79,24 @@ async def get_whale_profile(
     whale_id: str,
     user_id: Optional[str] = Depends(get_optional_user_id),
 ):
-    """Get full whale profile with holdings, trades, and summaries."""
+    """Get full whale profile with holdings, trades, and summaries.
+
+    Uses 3-tier cache-aside: in-memory (1h) → Supabase (24h) → FMP live.
+    Follow state is always fresh (not cached).
+    """
     service = WhaleService()
     try:
         profile = await service.get_whale_profile(
             whale_id=whale_id, user_id=user_id
         )
     except Exception as e:
-        logger.error("Unexpected error in whale profile %s: %s", whale_id, e)
+        logger.error(
+            "[whale_profile] Unhandled error for whale_id=%s, user=%s: %s",
+            whale_id, user_id, e, exc_info=True,
+        )
         raise HTTPException(
             status_code=503,
-            detail="Whale profile temporarily unavailable",
+            detail=f"Whale profile temporarily unavailable: {type(e).__name__}: {e}",
         )
     if not profile:
         raise HTTPException(status_code=404, detail="Whale not found")

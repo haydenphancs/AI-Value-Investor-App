@@ -818,7 +818,9 @@ struct WhaleTradeGroupCard: View {
                                 .font(AppTypography.bodyEmphasis)
                                 .foregroundColor(AppColors.textSecondary)
                             
-                            Text(group.formattedTradeCount)
+                            Text(group.tradeCount > group.trades.count
+                                 ? "Top \(group.trades.count) of \(group.formattedTradeCount)"
+                                 : group.formattedTradeCount)
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textSecondary)
                         }

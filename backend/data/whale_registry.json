@@ -2,7 +2,7 @@
   {
     "name": "Warren Buffett",
     "title": "Berkshire Hathaway CEO",
-    "description": "The Oracle of Omaha. Value investing legend with a focus on long-term compounding.",
+    "description": "The Oracle of Omaha and chairman of Berkshire Hathaway. Known for his long-term buy-and-hold value investing philosophy, he built one of the largest conglomerates in the world by acquiring undervalued companies with strong competitive moats. His annual shareholder letters are considered essential reading for investors worldwide.",
     "category": "investors",
     "cik": "0001067983",
     "data_source": "13f",
@@ -11,7 +11,7 @@
   {
     "name": "Bill Ackman",
     "title": "Pershing Square Capital",
-    "description": "Activist investor focused on large-cap value opportunities.",
+    "description": "Billionaire activist investor and founder of Pershing Square Capital Management. Known for taking concentrated positions in large-cap companies and pushing for operational changes to unlock shareholder value. Made headlines with his $2.6B profit on a COVID market hedge and high-profile battles with companies like Herbalife and Valeant.",
     "category": "institutions",
     "cik": "0001336528",
     "data_source": "13f",
@@ -20,7 +20,7 @@
   {
     "name": "Michael Burry",
     "title": "Scion Asset Management",
-    "description": "The Big Short. Contrarian deep value investor.",
+    "description": "The investor who predicted and profited from the 2008 subprime mortgage crisis, famously portrayed in The Big Short. Runs Scion Asset Management with a deep-value, contrarian approach. Known for making large concentrated bets against market consensus and frequently rotating his entire portfolio between quarters.",
     "category": "investors",
     "cik": "0001649339",
     "data_source": "13f",
@@ -29,7 +29,7 @@
   {
     "name": "Ray Dalio",
     "title": "Bridgewater Associates",
-    "description": "Macro investing pioneer and founder of the world's largest hedge fund.",
+    "description": "Founder of Bridgewater Associates, the world's largest hedge fund managing approximately $100B in total assets. Pioneer of the 'All Weather' and 'Pure Alpha' strategies that combine systematic macro investing with risk parity allocation. The 13F portfolio shown here represents Bridgewater's US public equity holdings only — a fraction of their total assets under management.",
     "category": "institutions",
     "cik": "0001350694",
     "data_source": "13f",
@@ -38,7 +38,7 @@
   {
     "name": "Cathie Wood",
     "title": "ARK Invest CEO",
-    "description": "Disruptive innovation focused. High-conviction growth investor.",
+    "description": "Founder and CEO of ARK Invest, known for her high-conviction bets on disruptive innovation including AI, genomics, robotics, and blockchain. Her flagship ARK Innovation ETF (ARKK) became one of the most popular actively managed ETFs. Takes bold positions in early-stage technology companies and publishes her trades daily for full transparency.",
     "category": "institutions",
     "cik": "0001603466",
     "data_source": "13f",
@@ -47,7 +47,7 @@
   {
     "name": "David Tepper",
     "title": "Appaloosa Management",
-    "description": "Distressed debt and equity investor known for contrarian macro bets.",
+    "description": "Founder of Appaloosa Management, one of the most successful hedge fund managers in history. Specializes in distressed debt and equity investing with a contrarian macro approach. Known for making massive bets during market crises — his fund returned 132% in 2009 by buying beaten-down bank stocks. Consistently ranks among the highest-earning hedge fund managers.",
     "category": "institutions",
     "cik": "0001656456",
     "data_source": "13f",
@@ -56,7 +56,7 @@
   {
     "name": "George Soros",
     "title": "Soros Fund Management",
-    "description": "Legendary macro investor. Broke the Bank of England.",
+    "description": "Legendary macro investor and founder of Soros Fund Management. Most famous for 'breaking the Bank of England' in 1992 by shorting the British pound, netting over $1 billion in a single day. His reflexivity theory of markets influenced a generation of traders. Now manages capital through his family office after returning outside investor capital in 2011.",
     "category": "institutions",
     "cik": "0001029160",
     "data_source": "13f",
@@ -65,7 +65,7 @@
   {
     "name": "Carl Icahn",
     "title": "Icahn Enterprises",
-    "description": "Legendary activist investor known for hostile takeovers and corporate restructuring.",
+    "description": "One of Wall Street's most feared activist investors for over four decades. Built his fortune through hostile takeovers and corporate restructuring, pushing companies to unlock shareholder value through management changes, spin-offs, and buybacks. His investment philosophy centers on finding undervalued companies with poor management that can be improved.",
     "category": "investors",
     "cik": "0000921669",
     "data_source": "13f",
@@ -74,7 +74,7 @@
   {
     "name": "Stanley Druckenmiller",
     "title": "Duquesne Family Office",
-    "description": "Former Quantum Fund manager. Macro-focused with one of the best long-term track records.",
+    "description": "Former lead portfolio manager for George Soros's Quantum Fund, where he co-executed the famous British pound trade. Later ran Duquesne Capital Management with one of the best long-term track records in hedge fund history — averaging 30% annual returns over 30 years with no losing year. Now manages his personal fortune through Duquesne Family Office with a flexible macro approach.",
     "category": "investors",
     "cik": "0001536411",
     "data_source": "13f",
@@ -83,7 +83,7 @@
   {
     "name": "Seth Klarman",
     "title": "Baupost Group",
-    "description": "Value investing disciple and author of Margin of Safety. Conservative, patient approach.",
+    "description": "Founder of The Baupost Group and author of 'Margin of Safety,' one of the most sought-after investing books ever written. A disciple of Benjamin Graham's value investing philosophy, he focuses on finding deeply undervalued securities with a significant margin of safety. Known for holding large cash positions when he can't find bargains, patience is central to his strategy.",
     "category": "institutions",
     "cik": "0001061768",
     "data_source": "13f",
@@ -92,7 +92,7 @@
   {
     "name": "Renaissance Technologies",
     "title": "Quantitative Hedge Fund",
-    "description": "The most successful quant fund in history. Founded by Jim Simons.",
+    "description": "Founded by mathematician Jim Simons, Renaissance Technologies is widely considered the most successful quantitative trading firm in history. Their flagship Medallion Fund reportedly generated 66% average annual returns before fees from 1988 to 2018. The firm employs scientists and mathematicians rather than traditional Wall Street analysts, using complex mathematical models to find market patterns.",
     "category": "institutions",
     "cik": "0001037389",
     "data_source": "13f",
@@ -101,7 +101,7 @@
   {
     "name": "Citadel Advisors",
     "title": "Multi-Strategy Hedge Fund",
-    "description": "Ken Griffin's global multi-strategy fund. One of the largest hedge funds by AUM.",
+    "description": "Founded by Ken Griffin, Citadel is one of the world's largest and most profitable hedge funds with over $60B in AUM. Operates across multiple strategies including equities, fixed income, commodities, and quantitative trading. Also runs Citadel Securities, one of the largest market makers on Wall Street, handling roughly 25% of all US equity volume.",
     "category": "institutions",
     "cik": "0001423053",
     "data_source": "13f",
@@ -110,7 +110,7 @@
   {
     "name": "Two Sigma Investments",
     "title": "Quantitative Hedge Fund",
-    "description": "Technology-driven systematic investment management firm.",
+    "description": "A technology-driven systematic investment manager founded by David Siegel and John Overdeck. Uses machine learning, distributed computing, and massive datasets to build predictive models for financial markets. Manages over $60B in assets and employs more engineers and data scientists than traditional portfolio managers.",
     "category": "institutions",
     "cik": "0001179392",
     "data_source": "13f",
@@ -119,7 +119,7 @@
   {
     "name": "Tiger Global Management",
     "title": "Technology-Focused Hedge Fund",
-    "description": "Chase Coleman's fund known for high-conviction tech and growth bets.",
+    "description": "Founded by Chase Coleman III, a protege of legendary investor Julian Robertson at Tiger Management. Became one of the most influential technology investors globally with early bets on companies like Facebook, LinkedIn, and JD.com. Their public equity portfolio focuses on high-growth technology and internet companies.",
     "category": "institutions",
     "cik": "0001167483",
     "data_source": "13f",
@@ -128,7 +128,7 @@
   {
     "name": "Dan Loeb",
     "title": "Third Point LLC",
-    "description": "Activist investor known for event-driven strategies and shareholder campaigns.",
+    "description": "Founder of Third Point LLC, an activist hedge fund that combines deep fundamental research with shareholder activism. Known for writing forceful public letters to company boards demanding strategic changes. Has driven major corporate actions at companies like Yahoo, Sony, and Nestlé. Invests across equities, credit, and structured products.",
     "category": "investors",
     "cik": "0001040273",
     "data_source": "13f",
@@ -137,7 +137,7 @@
   {
     "name": "Nancy Pelosi",
     "title": "U.S. Representative (CA-11)",
-    "description": "Former Speaker of the House. Active tech-focused portfolio.",
+    "description": "Former Speaker of the U.S. House of Representatives, serving California's 11th district since 1987. Her household's stock trades — primarily executed by her husband Paul Pelosi — have drawn significant public attention due to their timing relative to major legislation and regulatory decisions, particularly in the technology sector.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",
@@ -146,7 +146,7 @@
   {
     "name": "Josh Gottheimer",
     "title": "U.S. Representative (NJ-5)",
-    "description": "One of the most active stock traders in Congress with a diversified portfolio.",
+    "description": "U.S. Representative for New Jersey's 5th district and one of the most active stock traders in Congress. A moderate Democrat who sits on the Financial Services Committee, his frequent and diversified trading activity across multiple sectors has made him one of the most closely watched congressional traders.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",
@@ -155,7 +155,7 @@
   {
     "name": "Tommy Tuberville",
     "title": "U.S. Senator (AL)",
-    "description": "Senator with frequent stock trades across multiple sectors.",
+    "description": "U.S. Senator from Alabama and former college football coach. One of the most active stock traders in the Senate, frequently trading across technology, energy, and defense sectors. His trading volume and frequency have made him a focal point in debates about congressional stock trading regulations.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -164,7 +164,7 @@
   {
     "name": "John Boozman",
     "title": "U.S. Senator (AR)",
-    "description": "The most active stock trader in the Senate with hundreds of transactions.",
+    "description": "U.S. Senator from Arkansas and the most prolific stock trader in the current Senate by transaction count. A senior member of the Appropriations Committee, his portfolio spans hundreds of positions across virtually every sector of the market, making his trading patterns especially noteworthy for market watchers.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -173,7 +173,7 @@
   {
     "name": "Markwayne Mullin",
     "title": "U.S. Senator (OK)",
-    "description": "Senator with a very active trading portfolio across diverse sectors.",
+    "description": "U.S. Senator from Oklahoma and former professional MMA fighter. Maintains one of the largest and most actively traded portfolios in Congress with positions spanning energy, technology, and industrials. His trading frequency and the diversity of his holdings make him a closely tracked congressional investor.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -182,7 +182,7 @@
   {
     "name": "Sheldon Whitehouse",
     "title": "U.S. Senator (RI)",
-    "description": "Senator with frequent stock trades and a focus on diverse market sectors.",
+    "description": "U.S. Senator from Rhode Island known for his advocacy on climate change and dark money in politics. Despite his reformist stance, maintains an active stock portfolio with frequent trades. Serves on the Senate Budget Committee and Judiciary Committee, both of which influence corporate regulation.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -191,7 +191,7 @@
   {
     "name": "Ro Khanna",
     "title": "U.S. Representative (CA-17)",
-    "description": "Silicon Valley representative with tech-sector focused holdings.",
+    "description": "U.S. Representative for California's 17th district, which encompasses much of Silicon Valley. A progressive Democrat on the Armed Services and Oversight committees. His portfolio reflects his district's tech-centric economy with significant exposure to semiconductor and software companies.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",
@@ -200,7 +200,7 @@
   {
     "name": "Gilbert Cisneros",
     "title": "U.S. Representative (CA-38)",
-    "description": "One of the most active stock traders in the House with hundreds of transactions.",
+    "description": "U.S. Representative for California's 38th district and a former lottery winner who became a philanthropist and politician. One of the most active stock traders in the House by transaction volume, with hundreds of trades spanning diverse sectors including technology, healthcare, and financial services.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",

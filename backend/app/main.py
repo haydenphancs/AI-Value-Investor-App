@@ -54,6 +54,9 @@ async def lifespan(app: FastAPI):
         # Start background sector benchmark computation (daily)
         asyncio.create_task(_run_sector_benchmark_job())
 
+        # Start background whale hydration jobs
+        asyncio.create_task(_run_whale_hydration_job())
+
     yield
 
     # Graceful shutdown: close live price WebSocket connections
@@ -123,6 +126,77 @@ async def _run_sector_benchmark_job():
             logger.info(f"Sector benchmark job completed: {result}")
         except Exception as e:
             logger.error(f"Sector benchmark job failed: {e}", exc_info=True)
+
+
+async def _run_whale_hydration_job():
+    """Background task: hydrate whale profiles.
+
+    - Runs full hydration daily at 2 AM UTC.
+    - Runs politician-only hydration every 6 hours.
+    """
+    from datetime import datetime, timedelta
+
+    await asyncio.sleep(120)  # let app fully start
+
+    politician_interval = 6 * 3600  # 6 hours
+    last_politician_run = 0.0
+
+    while True:
+        now = datetime.now()
+        import time as _time
+        current_time = _time.monotonic()
+
+        # Politicians: every 6 hours
+        if current_time - last_politician_run >= politician_interval:
+            try:
+                from scripts.hydrate_whales import WhaleHydrator
+                from app.integrations.fmp import FMPClient
+                from app.integrations.gemini import GeminiClient
+
+                fmp = FMPClient()
+                gemini = GeminiClient()
+                hydrator = WhaleHydrator(fmp, gemini)
+
+                # Hydrate politicians only
+                from app.database import get_supabase
+                sb = get_supabase()
+                politicians = (
+                    sb.table("whales")
+                    .select("*")
+                    .in_("data_source", ["congressional_house", "congressional_senate"])
+                    .execute()
+                )
+                for whale in (politicians.data or []):
+                    try:
+                        await hydrator._hydrate_one(whale)
+                    except Exception as e:
+                        logger.error(f"Politician hydration failed for {whale['name']}: {e}")
+
+                await fmp.close()
+                last_politician_run = current_time
+                logger.info("Politician whale hydration completed")
+            except Exception as e:
+                logger.error(f"Politician whale hydration job failed: {e}", exc_info=True)
+
+        # Full hydration: daily at 2 AM UTC
+        hours_until_2am = (26 - now.hour) % 24  # hours until next 2 AM
+        if hours_until_2am == 0:
+            try:
+                from scripts.hydrate_whales import WhaleHydrator
+                from app.integrations.fmp import FMPClient
+                from app.integrations.gemini import GeminiClient
+
+                fmp = FMPClient()
+                gemini = GeminiClient()
+                hydrator = WhaleHydrator(fmp, gemini)
+                await hydrator.run()
+                await fmp.close()
+                logger.info("Full whale hydration completed")
+            except Exception as e:
+                logger.error(f"Full whale hydration job failed: {e}", exc_info=True)
+
+        # Check every hour
+        await asyncio.sleep(3600)
 
 
 app = FastAPI(

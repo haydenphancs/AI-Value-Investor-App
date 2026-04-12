@@ -32,6 +32,7 @@ from app.schemas.whale import (
     WhaleSectorAllocationResponse,
     WhaleBehaviorSummaryResponse,
     WhaleTradeGroupActivityResponse,
+    WhaleAlertBannerResponse,
     FollowResponse,
 )
 
@@ -572,8 +573,77 @@ class WhaleService:
         # Invalidate caches
         _whale_list_cache.clear()
         _whale_activity_cache.clear()
+        _whale_profile_cache.clear()
 
         return FollowResponse(is_following=follow, followers_count=count)
+
+    async def get_whale_alerts(
+        self, user_id: Optional[str] = None
+    ) -> Optional[WhaleAlertBannerResponse]:
+        """Get most recent active whale alert, optionally scoped to followed whales."""
+        sb = get_supabase()
+
+        try:
+            query = (
+                sb.table("whale_alerts")
+                .select("*")
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(1)
+            )
+
+            # If user is logged in, prefer alerts from followed whales
+            if user_id:
+                follows = (
+                    sb.table("whale_follows")
+                    .select("whale_id")
+                    .eq("user_id", user_id)
+                    .execute()
+                )
+                whale_ids = [f["whale_id"] for f in (follows.data or [])]
+                if whale_ids:
+                    # Try followed whales first
+                    followed_result = (
+                        sb.table("whale_alerts")
+                        .select("*")
+                        .eq("is_active", True)
+                        .in_("whale_id", whale_ids)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    if followed_result.data:
+                        alert = followed_result.data[0]
+                        return WhaleAlertBannerResponse(
+                            id=str(alert["id"]),
+                            title=alert["title"],
+                            description=alert["description"],
+                            ticker=alert.get("ticker"),
+                            action_title=alert.get("action_title", "View Full Alert"),
+                        )
+
+            # Fallback: any active alert
+            result = query.execute()
+            if result.data:
+                alert = result.data[0]
+                # Check expiry
+                expires = alert.get("expires_at")
+                if expires:
+                    from datetime import timezone
+                    exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                    if exp_dt < datetime.now(timezone.utc):
+                        return None
+                return WhaleAlertBannerResponse(
+                    id=str(alert["id"]),
+                    title=alert["title"],
+                    description=alert["description"],
+                    ticker=alert.get("ticker"),
+                    action_title=alert.get("action_title", "View Full Alert"),
+                )
+        except Exception as e:
+            logger.warning("Failed to fetch whale alerts: %s", e)
+
+        return None
 
     # ── Dual-Source Router ───────────────────────────────────────────
 
@@ -687,6 +757,14 @@ class WhaleService:
         # Step 4: Build aggregated data
         holdings_data = self._build_holdings(current_raw)
         total_value = sum(h["value"] for h in holdings_data)
+
+        # Compute change_percent from previous quarter
+        if prev_raw:
+            holdings_data = self._apply_change_percent(holdings_data, prev_raw)
+
+        # Apply logo cache from prior hydration snapshot
+        holdings_data = await self._apply_logo_cache(whale_id, holdings_data)
+
         sector_data = self._build_sectors_from_industry(industry_data)
         trade_group = self._diff_quarters(
             current_raw, prev_raw, filing_date, total_value
@@ -766,6 +844,13 @@ class WhaleService:
             self._aggregate_congressional_trades(raw_trades, now.isoformat()[:10])
         )
         total_value = sum(h.get("value", 0) for h in holdings_data)
+
+        # Apply logo cache from prior hydration snapshot
+        holdings_data = await self._apply_logo_cache(whale_id, holdings_data)
+
+        # Enrich sectors from company profiles if empty
+        if not sector_data and holdings_data:
+            sector_data = await self._enrich_sectors_from_profiles(holdings_data)
 
         behavior = self._generate_behavior_summary(trade_group, sector_data)
         sentiment = self._generate_sentiment_summary(
@@ -1133,6 +1218,100 @@ class WhaleService:
                     "allocation": round(weight, 1),
                     "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                 })
+        sectors.sort(key=lambda x: x["allocation"], reverse=True)
+        return sectors[:8]
+
+    def _apply_change_percent(
+        self,
+        holdings: List[Dict],
+        prev_raw: List[Dict],
+    ) -> List[Dict]:
+        """Compute change_percent by comparing current vs previous quarter allocations."""
+        prev_total = sum(float(h.get("value") or 0) for h in prev_raw)
+        if prev_total <= 0:
+            return holdings
+
+        prev_alloc: Dict[str, float] = {}
+        for h in prev_raw:
+            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
+            if sym and sym != "--":
+                val = float(h.get("value") or 0)
+                prev_alloc[sym] = val / prev_total * 100
+
+        for h in holdings:
+            prev_pct = prev_alloc.get(h["ticker"], 0)
+            curr_pct = h.get("allocation", 0)
+            h["change_percent"] = round(curr_pct - prev_pct, 2)
+
+        return holdings
+
+    async def _apply_logo_cache(
+        self, whale_id: str, holdings: List[Dict]
+    ) -> List[Dict]:
+        """Apply logos from prior hydration snapshot's logo_cache."""
+        try:
+            sb = get_supabase()
+            result = (
+                sb.table("whale_filing_snapshots")
+                .select("logo_cache")
+                .eq("whale_id", whale_id)
+                .order("processed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data and result.data[0].get("logo_cache"):
+                logo_cache = result.data[0]["logo_cache"]
+                for h in holdings:
+                    if not h.get("logo_url") and h["ticker"] in logo_cache:
+                        h["logo_url"] = logo_cache[h["ticker"]]
+        except Exception as e:
+            logger.warning("Failed to apply logo cache: %s", e)
+        return holdings
+
+    async def _enrich_sectors_from_profiles(
+        self, holdings: List[Dict]
+    ) -> List[Dict]:
+        """Enrich sector data for congressional whales by fetching company profiles."""
+        sector_accum: Dict[str, float] = {}
+        tickers = [h["ticker"] for h in holdings[:20]]
+
+        try:
+            # Batch fetch profiles
+            profiles = await self.fmp.get_company_profiles_batch(tickers)
+            if not profiles:
+                return []
+
+            profile_map = {}
+            for p in profiles:
+                sym = (p.get("symbol") or "").upper()
+                if sym:
+                    profile_map[sym] = p
+
+            total_alloc = sum(h.get("allocation", 0) for h in holdings[:20])
+            if total_alloc <= 0:
+                return []
+
+            for h in holdings[:20]:
+                p = profile_map.get(h["ticker"])
+                if p:
+                    sector = p.get("sector") or "Other"
+                    sector_accum[sector] = sector_accum.get(sector, 0) + h.get("allocation", 0)
+                    # Also apply logo while we have the profile
+                    if not h.get("logo_url") and p.get("image"):
+                        h["logo_url"] = p["image"]
+        except Exception as e:
+            logger.warning("Failed to enrich sectors from profiles: %s", e)
+            return []
+
+        sectors = [
+            {
+                "name": name,
+                "allocation": round(alloc, 1),
+                "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
+            }
+            for name, alloc in sector_accum.items()
+            if alloc > 0
+        ]
         sectors.sort(key=lambda x: x["allocation"], reverse=True)
         return sectors[:8]
 

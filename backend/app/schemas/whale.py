@@ -57,6 +57,7 @@ class WhaleHoldingResponse(BaseModel):
     logo_url: Optional[str] = None
     allocation: float
     change_percent: float = 0.0
+    asset_type: str = "stock"
 
 
 class WhaleTradeResponse(BaseModel):
@@ -71,6 +72,7 @@ class WhaleTradeResponse(BaseModel):
     previous_allocation: float = 0.0
     new_allocation: float = 0.0
     date: str
+    asset_type: str = "stock"
 
 
 class WhaleTradeGroupResponse(BaseModel):
@@ -134,6 +136,19 @@ class WhaleTradeGroupActivityResponse(BaseModel):
     total_amount: str  # Formatted: "$4.34B", "-$2.1B"
     summary: Optional[str] = None
     date: str
+
+
+# ── Alerts ──────────────────────────────────────────────────────────
+
+
+class WhaleAlertBannerResponse(BaseModel):
+    """Alert banner for large whale activities. Maps to Swift WhaleAlertBanner."""
+
+    id: str
+    title: str
+    description: str
+    ticker: Optional[str] = None
+    action_title: str = "View Full Alert"
 
 
 # ── Follow ───────────────────────────────────────────────────────────

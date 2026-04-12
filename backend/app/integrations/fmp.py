@@ -783,13 +783,28 @@ class FMPClient:
             return []
 
     async def get_institutional_industry_breakdown(
-        self, cik: str
+        self, cik: str, year: int = 0, quarter: int = 0
     ) -> List[Dict[str, Any]]:
-        """Get industry/sector allocation breakdown for a 13F holder."""
+        """Get industry/sector allocation breakdown for a 13F holder.
+
+        The stable API requires year and quarter parameters.
+        If not provided, uses the most recent quarter.
+        """
+        if year == 0 or quarter == 0:
+            from datetime import datetime
+            now = datetime.now()
+            # Most recent completed quarter
+            q = (now.month - 1) // 3
+            if q == 0:
+                year = now.year - 1
+                quarter = 4
+            else:
+                year = now.year
+                quarter = q
         try:
             return await self._make_request(
                 "institutional-ownership/holder-industry-breakdown",
-                params={"cik": cik},
+                params={"cik": cik, "year": year, "quarter": quarter},
             )
         except Exception as e:
             logger.warning(f"Industry breakdown failed for CIK {cik}: {e}")
@@ -1142,7 +1157,11 @@ class FMPClient:
     async def get_senate_disclosure(
         self, symbol: str
     ) -> List[Dict[str, Any]]:
-        """Get senate disclosure trades filtered by symbol."""
+        """Get senate disclosure trades filtered by symbol.
+
+        Falls back to senate-latest with client-side symbol filtering
+        if the dedicated endpoint is unavailable on the stable API.
+        """
         try:
             data = await self._make_request(
                 "senate-disclosure",
@@ -1151,8 +1170,14 @@ class FMPClient:
             return data if isinstance(data, list) else []
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
-                logger.warning("Senate disclosure endpoint unavailable")
-                return []
+                # Fallback: fetch senate-latest and filter by symbol
+                logger.info("senate-disclosure 404, falling back to senate-latest + filter")
+                all_trades = await self._fetch_congress_pages("senate-latest", 1000)
+                symbol_upper = symbol.upper()
+                return [
+                    t for t in all_trades
+                    if (t.get("symbol") or "").upper() == symbol_upper
+                ]
             raise
         except Exception as e:
             logger.warning(f"Senate disclosure request failed for {symbol}: {e}")
@@ -1161,7 +1186,11 @@ class FMPClient:
     async def get_house_disclosure(
         self, symbol: str
     ) -> List[Dict[str, Any]]:
-        """Get house disclosure trades filtered by symbol."""
+        """Get house disclosure trades filtered by symbol.
+
+        Falls back to house-latest with client-side symbol filtering
+        if the dedicated endpoint is unavailable on the stable API.
+        """
         try:
             data = await self._make_request(
                 "house-disclosure",
@@ -1170,35 +1199,61 @@ class FMPClient:
             return data if isinstance(data, list) else []
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
-                logger.warning("House disclosure endpoint unavailable")
-                return []
+                # Fallback: fetch house-latest and filter by symbol
+                logger.info("house-disclosure 404, falling back to house-latest + filter")
+                all_trades = await self._fetch_congress_pages("house-latest", 1000)
+                symbol_upper = symbol.upper()
+                return [
+                    t for t in all_trades
+                    if (t.get("symbol") or "").upper() == symbol_upper
+                ]
             raise
         except Exception as e:
             logger.warning(f"House disclosure request failed for {symbol}: {e}")
             return []
 
     async def get_senate_trades_by_name(
-        self, name: str
+        self, name: str, limit: int = 1000
     ) -> List[Dict[str, Any]]:
-        """Get senate trades by politician name."""
+        """Get senate trades by politician name.
+
+        The stable API does not support by-name filtering, so we fetch
+        from senate-latest in bulk and filter client-side by the
+        ``office`` field (which matches "FirstName LastName").
+        """
         try:
-            return await self._make_request(
-                "senate-trading-by-name",
-                params={"name": name},
+            all_trades = await self._fetch_congress_pages(
+                "senate-latest", limit
             )
+            name_lower = name.lower()
+            return [
+                t for t in all_trades
+                if (t.get("office") or "").lower() == name_lower
+                or f"{t.get('firstName', '')} {t.get('lastName', '')}".lower() == name_lower
+            ]
         except Exception as e:
             logger.warning(f"Senate trades failed for '{name}': {e}")
             return []
 
     async def get_house_trades_by_name(
-        self, name: str
+        self, name: str, limit: int = 1000
     ) -> List[Dict[str, Any]]:
-        """Get house trades by politician name."""
+        """Get house trades by politician name.
+
+        The stable API does not support by-name filtering, so we fetch
+        from house-latest in bulk and filter client-side by the
+        ``office`` field.
+        """
         try:
-            return await self._make_request(
-                "house-trading-by-name",
-                params={"name": name},
+            all_trades = await self._fetch_congress_pages(
+                "house-latest", limit
             )
+            name_lower = name.lower()
+            return [
+                t for t in all_trades
+                if (t.get("office") or "").lower() == name_lower
+                or f"{t.get('firstName', '')} {t.get('lastName', '')}".lower() == name_lower
+            ]
         except Exception as e:
             logger.warning(f"House trades failed for '{name}': {e}")
             return []
@@ -1206,18 +1261,32 @@ class FMPClient:
     async def get_company_profiles_batch(
         self, tickers: List[str]
     ) -> List[Dict[str, Any]]:
-        """Get company profiles for multiple tickers in one call."""
+        """Get company profiles for multiple tickers.
+
+        The stable API's profile endpoint only supports single symbols,
+        so we fetch them concurrently with a bounded semaphore.
+        """
         if not tickers:
             return []
-        try:
-            symbol_str = ",".join(t.upper() for t in tickers[:50])
-            data = await self._make_request(
-                "profile", params={"symbol": symbol_str}
-            )
-            return data if isinstance(data, list) else []
-        except Exception as e:
-            logger.warning(f"Batch profiles failed: {e}")
-            return []
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch_one(symbol: str) -> Optional[Dict]:
+            async with sem:
+                try:
+                    data = await self._make_request(
+                        "profile", params={"symbol": symbol.upper()}
+                    )
+                    if isinstance(data, list) and data:
+                        return data[0]
+                except Exception:
+                    pass
+                return None
+
+        results = await asyncio.gather(
+            *[_fetch_one(t) for t in tickers[:50]],
+            return_exceptions=True,
+        )
+        return [r for r in results if isinstance(r, dict)]
 
     # ── Stock peers ────────────────────────────────────────────────
 

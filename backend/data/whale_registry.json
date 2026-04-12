@@ -144,13 +144,13 @@
     "fmp_name": "Nancy Pelosi"
   },
   {
-    "name": "Dan Crenshaw",
-    "title": "U.S. Representative (TX-2)",
-    "description": "House member with an active and diversified portfolio.",
+    "name": "Josh Gottheimer",
+    "title": "U.S. Representative (NJ-5)",
+    "description": "One of the most active stock traders in Congress with a diversified portfolio.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",
-    "fmp_name": "Dan Crenshaw"
+    "fmp_name": "Josh Gottheimer"
   },
   {
     "name": "Tommy Tuberville",
@@ -162,22 +162,31 @@
     "fmp_name": "Tommy Tuberville"
   },
   {
-    "name": "Ted Cruz",
-    "title": "U.S. Senator (TX)",
-    "description": "Senator with investments in energy and technology sectors.",
+    "name": "John Boozman",
+    "title": "U.S. Senator (AR)",
+    "description": "The most active stock trader in the Senate with hundreds of transactions.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
-    "fmp_name": "Ted Cruz"
+    "fmp_name": "John Boozman"
   },
   {
-    "name": "Mark Kelly",
-    "title": "U.S. Senator (AZ)",
-    "description": "Senator and former astronaut with diversified investment holdings.",
+    "name": "Markwayne Mullin",
+    "title": "U.S. Senator (OK)",
+    "description": "Senator with a very active trading portfolio across diverse sectors.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
-    "fmp_name": "Mark Kelly"
+    "fmp_name": "Markwayne Mullin"
+  },
+  {
+    "name": "Sheldon Whitehouse",
+    "title": "U.S. Senator (RI)",
+    "description": "Senator with frequent stock trades and a focus on diverse market sectors.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Sheldon Whitehouse"
   },
   {
     "name": "Ro Khanna",
@@ -189,12 +198,12 @@
     "fmp_name": "Ro Khanna"
   },
   {
-    "name": "Michael Saylor",
-    "title": "MicroStrategy Executive Chairman",
-    "description": "Bitcoin maximalist. Transformed MicroStrategy into the largest corporate BTC holder.",
-    "category": "crypto",
-    "cik": "0001050446",
-    "data_source": "13f",
-    "fmp_name": null
+    "name": "Gilbert Cisneros",
+    "title": "U.S. Representative (CA-38)",
+    "description": "One of the most active stock traders in the House with hundreds of transactions.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_house",
+    "fmp_name": "Gilbert Cisneros"
   }
 ]

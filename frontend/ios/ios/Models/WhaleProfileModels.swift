@@ -275,7 +275,7 @@ enum WhaleTradeType: String, CaseIterable, Codable {
 
 // MARK: - Trade Filter Tab
 enum TradeFilterTab: String, CaseIterable {
-    case all = "All Trades"
+    case all = "All"
     case new = "New"
     case increased = "Increased"
     case decreased = "Decreased"

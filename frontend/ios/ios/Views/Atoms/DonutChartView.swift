@@ -138,9 +138,9 @@ struct DonutChartLegendItem: View {
             Text(label)
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Spacer()
+            Spacer(minLength: AppSpacing.sm)
 
             Text(String(format: "%.0f%%", value))
                 .font(AppTypography.bodySmallEmphasis)

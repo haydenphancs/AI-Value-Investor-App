@@ -43,7 +43,9 @@ struct WhaleProfile: Identifiable, Codable {
     }
 
     var isCongressional: Bool {
-        dataSource.contains("congressional")
+        if dataSource.contains("congressional") { return true }
+        let t = title.lowercased()
+        return t.contains("senator") || t.contains("representative") || t.contains("u.s. rep")
     }
 
     // MARK: - Helpers

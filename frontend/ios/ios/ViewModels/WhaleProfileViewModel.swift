@@ -96,7 +96,8 @@ class WhaleProfileViewModel: ObservableObject {
                 recentTrades: currentProfile.recentTrades,
                 behaviorSummary: currentProfile.behaviorSummary,
                 sentimentSummary: currentProfile.sentimentSummary,
-                isFollowing: isFollowing
+                isFollowing: isFollowing,
+                dataSource: currentProfile.dataSource
             )
             profile = currentProfile
         }
@@ -136,7 +137,8 @@ class WhaleProfileViewModel: ObservableObject {
                         recentTrades: loadedProfile.recentTrades,
                         behaviorSummary: loadedProfile.behaviorSummary,
                         sentimentSummary: loadedProfile.sentimentSummary,
-                        isFollowing: isFollowing
+                        isFollowing: isFollowing,
+                        dataSource: loadedProfile.dataSource
                     )
                 }
 
@@ -189,7 +191,8 @@ class WhaleProfileViewModel: ObservableObject {
             recentTrades: currentProfile.recentTrades,
             behaviorSummary: currentProfile.behaviorSummary,
             sentimentSummary: currentProfile.sentimentSummary,
-            isFollowing: newFollowState
+            isFollowing: newFollowState,
+            dataSource: currentProfile.dataSource
         )
         profile = updatedProfile
 

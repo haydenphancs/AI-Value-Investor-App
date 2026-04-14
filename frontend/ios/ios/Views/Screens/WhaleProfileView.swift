@@ -249,11 +249,17 @@ struct WhalePortfolioStats: View {
         HStack {
             // Portfolio Value
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text(profile.formattedPortfolioValue)
-                    .font(AppTypography.titleLarge)
-                    .foregroundColor(AppColors.textPrimary)
+                if profile.isCongressional && profile.portfolioValue == 0 {
+                    Text("N/A")
+                        .font(AppTypography.titleLarge)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    Text(profile.formattedPortfolioValue)
+                        .font(AppTypography.titleLarge)
+                        .foregroundColor(AppColors.textPrimary)
+                }
 
-                Text("13F Equity Portfolio")
+                Text(profile.isCongressional ? "Est. from Trades" : "13F Equity Portfolio")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
@@ -262,9 +268,15 @@ struct WhalePortfolioStats: View {
 
             // Annual Return
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                Text(profile.formattedYTDReturn)
-                    .font(AppTypography.titleLarge)
-                    .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
+                if profile.isCongressional && profile.ytdReturn == 0 {
+                    Text("N/A")
+                        .font(AppTypography.titleLarge)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    Text(profile.formattedYTDReturn)
+                        .font(AppTypography.titleLarge)
+                        .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
+                }
 
                 Text("Annual Return")
                     .font(AppTypography.caption)
@@ -299,18 +311,26 @@ struct WhaleSectorExposureSection: View {
                 .buttonStyle(.plain)
             }
 
-            DonutChartView(
-                segments: sectors.map { sector in
-                    DonutChartSegment(
-                        id: sector.id,
-                        value: sector.percentage,
-                        color: sector.color,
-                        label: sector.name
-                    )
-                },
-                lineWidth: 20
-            )
-            .padding(.vertical, AppSpacing.sm)
+            if sectors.isEmpty {
+                Text("No sector data available")
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, AppSpacing.xl)
+            } else {
+                DonutChartView(
+                    segments: sectors.map { sector in
+                        DonutChartSegment(
+                            id: sector.id,
+                            value: sector.percentage,
+                            color: sector.color,
+                            label: sector.name
+                        )
+                    },
+                    lineWidth: 20
+                )
+                .padding(.vertical, AppSpacing.sm)
+            }
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

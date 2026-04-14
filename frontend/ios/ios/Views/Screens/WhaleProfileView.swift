@@ -250,7 +250,7 @@ struct WhalePortfolioStats: View {
         HStack {
             // Portfolio Value
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                if profile.isCongressional && profile.portfolioValue == 0 {
+                if profile.isCongressional && profile.currentHoldings.count <= 3 {
                     Text("N/A")
                         .font(AppTypography.titleLarge)
                         .foregroundColor(AppColors.textMuted)
@@ -260,7 +260,9 @@ struct WhalePortfolioStats: View {
                         .foregroundColor(AppColors.textPrimary)
                 }
 
-                Text(profile.isCongressional ? "Est. from Trades" : "13F Equity Portfolio")
+                Text(profile.isCongressional
+                     ? (profile.currentHoldings.count <= 3 ? "Limited Data" : "Est. from Trades")
+                     : "13F Equity Portfolio")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
@@ -269,7 +271,7 @@ struct WhalePortfolioStats: View {
 
             // Annual Return
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                if profile.isCongressional && profile.ytdReturn == 0 {
+                if profile.isCongressional {
                     Text("N/A")
                         .font(AppTypography.titleLarge)
                         .foregroundColor(AppColors.textMuted)

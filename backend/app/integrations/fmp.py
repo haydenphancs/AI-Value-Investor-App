@@ -1104,7 +1104,7 @@ class FMPClient:
         sales on later pages).
         """
         PAGE_SIZE = 250
-        max_pages = min((limit + PAGE_SIZE - 1) // PAGE_SIZE, 5)
+        max_pages = min((limit + PAGE_SIZE - 1) // PAGE_SIZE, 30)
 
         results = await asyncio.gather(
             *[
@@ -1213,7 +1213,7 @@ class FMPClient:
             return []
 
     async def get_senate_trades_by_name(
-        self, name: str, limit: int = 1000
+        self, name: str, limit: int = 7500
     ) -> List[Dict[str, Any]]:
         """Get senate trades by politician name.
 
@@ -1236,7 +1236,7 @@ class FMPClient:
             return []
 
     async def get_house_trades_by_name(
-        self, name: str, limit: int = 1000
+        self, name: str, limit: int = 7500
     ) -> List[Dict[str, Any]]:
         """Get house trades by politician name.
 

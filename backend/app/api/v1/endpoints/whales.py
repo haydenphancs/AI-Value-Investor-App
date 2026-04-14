@@ -78,16 +78,20 @@ async def get_whale_alerts(
 async def get_whale_profile(
     whale_id: str,
     user_id: Optional[str] = Depends(get_optional_user_id),
+    force_refresh: bool = False,
 ):
     """Get full whale profile with holdings, trades, and summaries.
 
     Uses 3-tier cache-aside: in-memory (1h) → Supabase (24h) → FMP live.
     Follow state is always fresh (not cached).
+
+    Pass ?force_refresh=true to bypass all caches and rebuild from FMP.
     """
     service = WhaleService()
     try:
         profile = await service.get_whale_profile(
-            whale_id=whale_id, user_id=user_id
+            whale_id=whale_id, user_id=user_id,
+            force_refresh=force_refresh,
         )
     except Exception as e:
         logger.error(

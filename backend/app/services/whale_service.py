@@ -356,6 +356,7 @@ class WhaleService:
         self,
         whale_id: str,
         user_id: Optional[str] = None,
+        force_refresh: bool = False,
     ) -> Optional[WhaleProfileResponse]:
         """Get full whale profile — 3-tier cache-aside pattern.
 
@@ -364,49 +365,59 @@ class WhaleService:
         Tier 3: Live FMP processing → cache result in both tiers
 
         Follow state is ALWAYS read fresh (not cached) since it's per-user.
+        Pass force_refresh=True to bypass all caches and rebuild from FMP.
         """
         sb = get_supabase()
-
-        # ── Tier 1: In-memory cache (fast, per-process) ────────────
         mem_key = f"profile:{whale_id}"
-        cached = _cache_get(_whale_profile_cache, mem_key, WHALE_PROFILE_CACHE_TTL)
-        if cached is not None:
-            # Overlay fresh follow state
-            return self._overlay_follow_state(cached, user_id, sb)
 
-        # ── Tier 2: Supabase profile cache (24h TTL) ───────────────
-        try:
-            cache_row = (
-                sb.table("whale_profile_cache")
-                .select("profile_json, cached_at")
-                .eq("whale_id", whale_id)
-                .execute()
-            )
-            if cache_row.data:
-                row = cache_row.data[0]
-                cached_at = datetime.fromisoformat(
-                    row["cached_at"].replace("Z", "+00:00")
+        if force_refresh:
+            logger.info("Force refresh requested for whale %s — busting all caches", whale_id)
+            _whale_profile_cache.pop(mem_key, None)
+            try:
+                sb.table("whale_profile_cache").delete().eq("whale_id", whale_id).execute()
+                sb.table("whale_filing_snapshots").delete().eq("whale_id", whale_id).execute()
+            except Exception as e:
+                logger.warning("Cache bust failed for %s: %s", whale_id, e)
+        else:
+            # ── Tier 1: In-memory cache (fast, per-process) ────────────
+            cached = _cache_get(_whale_profile_cache, mem_key, WHALE_PROFILE_CACHE_TTL)
+            if cached is not None:
+                # Overlay fresh follow state
+                return self._overlay_follow_state(cached, user_id, sb)
+
+            # ── Tier 2: Supabase profile cache (24h TTL) ───────────────
+            try:
+                cache_row = (
+                    sb.table("whale_profile_cache")
+                    .select("profile_json, cached_at")
+                    .eq("whale_id", whale_id)
+                    .execute()
                 )
-                age_hours = (
-                    datetime.now(cached_at.tzinfo) - cached_at
-                ).total_seconds() / 3600
-                if age_hours < self.PROFILE_CACHE_TTL_HOURS:
-                    profile = WhaleProfileResponse(**row["profile_json"])
-                    _cache_set(_whale_profile_cache, mem_key, profile)
-                    logger.info(
-                        "Whale profile %s served from Supabase cache (%.1fh old)",
-                        whale_id, age_hours,
+                if cache_row.data:
+                    row = cache_row.data[0]
+                    cached_at = datetime.fromisoformat(
+                        row["cached_at"].replace("Z", "+00:00")
                     )
-                    return self._overlay_follow_state(profile, user_id, sb)
-                else:
-                    logger.info(
-                        "Whale profile cache expired for %s (%.1fh old)",
-                        whale_id, age_hours,
-                    )
-        except Exception as e:
-            logger.warning(
-                "whale_profile_cache read failed for %s: %s", whale_id, e
-            )
+                    age_hours = (
+                        datetime.now(cached_at.tzinfo) - cached_at
+                    ).total_seconds() / 3600
+                    if age_hours < self.PROFILE_CACHE_TTL_HOURS:
+                        profile = WhaleProfileResponse(**row["profile_json"])
+                        _cache_set(_whale_profile_cache, mem_key, profile)
+                        logger.info(
+                            "Whale profile %s served from Supabase cache (%.1fh old)",
+                            whale_id, age_hours,
+                        )
+                        return self._overlay_follow_state(profile, user_id, sb)
+                    else:
+                        logger.info(
+                            "Whale profile cache expired for %s (%.1fh old)",
+                            whale_id, age_hours,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "whale_profile_cache read failed for %s: %s", whale_id, e
+                )
 
         # ── Tier 3: Build from FMP + DB (slow, authoritative) ──────
         profile = await self._build_whale_profile(whale_id, user_id)
@@ -1415,6 +1426,25 @@ class WhaleService:
         holdings = [
             h for h in holdings_accum.values() if h["value"] > 0
         ]
+
+        # Fallback: when no positive holdings (e.g. all sells), show
+        # recently traded tickers so the profile isn't empty
+        if not holdings and trades:
+            traded: Dict[str, Dict] = {}
+            for t in trades:
+                ticker = t["ticker"]
+                if ticker not in traded:
+                    traded[ticker] = {
+                        "ticker": ticker,
+                        "company_name": t["company_name"],
+                        "value": t["amount"],
+                        "allocation": 0,
+                        "change_percent": 0,
+                    }
+                else:
+                    traded[ticker]["value"] += t["amount"]
+            holdings = list(traded.values())
+
         total_value = sum(h["value"] for h in holdings) or 1
         for h in holdings:
             h["allocation"] = round(h["value"] / total_value * 100, 2)

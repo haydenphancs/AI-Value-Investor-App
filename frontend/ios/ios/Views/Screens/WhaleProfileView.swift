@@ -250,7 +250,7 @@ struct WhalePortfolioStats: View {
         HStack {
             // Portfolio Value
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                if profile.isCongressional && profile.currentHoldings.count <= 3 {
+                if profile.isCongressional && profile.currentHoldings.count <= 10 {
                     Text("N/A")
                         .font(AppTypography.titleLarge)
                         .foregroundColor(AppColors.textMuted)
@@ -261,7 +261,7 @@ struct WhalePortfolioStats: View {
                 }
 
                 Text(profile.isCongressional
-                     ? (profile.currentHoldings.count <= 3 ? "Limited Data" : "Est. from Trades")
+                     ? (profile.currentHoldings.count <= 10 ? "Limited Data" : "Est. from Trades")
                      : "13F Equity Portfolio")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)

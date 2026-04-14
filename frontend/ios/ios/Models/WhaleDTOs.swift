@@ -98,6 +98,7 @@ struct WhaleProfileDTO: Codable {
     let behaviorSummary: WhaleBehaviorSummaryDTO
     let sentimentSummary: String
     let isFollowing: Bool
+    let dataSource: String
 
     enum CodingKeys: String, CodingKey {
         case id, name, title, description
@@ -112,6 +113,7 @@ struct WhaleProfileDTO: Codable {
         case behaviorSummary = "behavior_summary"
         case sentimentSummary = "sentiment_summary"
         case isFollowing = "is_following"
+        case dataSource = "data_source"
     }
 
     func toWhaleProfile() -> WhaleProfile {
@@ -130,7 +132,8 @@ struct WhaleProfileDTO: Codable {
             recentTrades: recentTrades.map { $0.toWhaleTrade() },
             behaviorSummary: behaviorSummary.toWhaleBehaviorSummary(),
             sentimentSummary: sentimentSummary,
-            isFollowing: isFollowing
+            isFollowing: isFollowing,
+            dataSource: dataSource
         )
     }
 }

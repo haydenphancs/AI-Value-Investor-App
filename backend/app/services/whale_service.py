@@ -655,6 +655,7 @@ class WhaleService:
             behavior_summary=behavior,
             sentiment_summary=sentiment,
             is_following=is_following,
+            data_source=whale.get("data_source", ""),
         )
 
         return profile
@@ -1353,6 +1354,10 @@ class WhaleService:
         holdings_accum: Dict[str, Dict] = {}
         sector_accum: Dict[str, float] = {}
 
+        # Track ticker occurrence order for New/Closed detection
+        seen_tickers: set = set()
+        full_sale_types = {"sale_full", "sale (full)"}
+
         for t in raw_trades:
             symbol = (t.get("symbol") or "").upper().strip()
             if not symbol or symbol == "--" or symbol == "N/A":
@@ -1369,10 +1374,17 @@ class WhaleService:
             )
             name = t.get("assetDescription") or t.get("asset_description") or symbol
 
-            if action == "BOUGHT":
+            # Detect New/Closed vs Increased/Decreased
+            if action == "BOUGHT" and symbol not in seen_tickers:
+                trade_type = "New"
+            elif action == "SOLD" and raw_type in full_sale_types:
+                trade_type = "Closed"
+            elif action == "BOUGHT":
                 trade_type = "Increased"
             else:
                 trade_type = "Decreased"
+
+            seen_tickers.add(symbol)
 
             trades.append({
                 "ticker": symbol,
@@ -1419,8 +1431,8 @@ class WhaleService:
         net_dollar = total_bought - total_sold
         net_action = "BOUGHT" if net_dollar >= 0 else "SOLD"
 
-        new_count = 0
-        closed_count = 0
+        new_count = sum(1 for t in recent if t["trade_type"] == "New")
+        closed_count = sum(1 for t in recent if t["trade_type"] == "Closed")
         summary = self._generate_trade_group_summary(
             recent, new_count, closed_count, net_action
         )

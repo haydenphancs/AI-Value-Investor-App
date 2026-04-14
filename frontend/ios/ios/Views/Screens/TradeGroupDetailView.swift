@@ -223,7 +223,9 @@ struct TradeDetailCard: View {
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
-                    AllocationChangeText(allocationChange: trade.formattedAllocationChange)
+                    if trade.previousAllocation != 0 || trade.newAllocation != 0 {
+                        AllocationChangeText(allocationChange: trade.formattedAllocationChange)
+                    }
                 }
 
                 Spacer()

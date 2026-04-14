@@ -41,10 +41,11 @@ struct WhaleProfileView: View {
                         // Sector Exposure
                         WhaleSectorExposureSection(sectors: profile.sectorExposure)
 
-                        // Current Picks
+                        // Current Picks / Recently Traded
                         WhaleCurrentPicksSection(
                             holdings: viewModel.displayedHoldings,
                             behaviorSummary: profile.behaviorSummary,
+                            isCongressional: profile.isCongressional,
                             onHoldingTapped: { viewModel.viewHolding($0) },
                             onTopTenTapped: { viewModel.viewMoreHoldings() }
                         )
@@ -595,6 +596,7 @@ struct WhaleBulletPoint: View {
 struct WhaleCurrentPicksSection: View {
     let holdings: [WhaleHolding]
     let behaviorSummary: WhaleBehaviorSummary
+    var isCongressional: Bool = false
     var onHoldingTapped: ((WhaleHolding) -> Void)?
     var onTopTenTapped: (() -> Void)?
 
@@ -602,36 +604,46 @@ struct WhaleCurrentPicksSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             HStack {
-                Text("Current Picks")
+                Text(isCongressional ? "Recently Traded" : "Current Picks")
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
                 Spacer()
 
-                Button {
-                    onTopTenTapped?()
-                } label: {
-                    Text("Top 10")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.primaryBlue)
+                if !isCongressional {
+                    Button {
+                        onTopTenTapped?()
+                    } label: {
+                        Text("Top 10")
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             // Behavior Summary Card
             WhaleBehaviorSummaryCard(behaviorSummary: behaviorSummary)
 
             // Holdings List
-            VStack(spacing: 0) {
-                ForEach(holdings) { holding in
-                    WhaleHoldingRow(
-                        holding: holding,
-                        onTap: { onHoldingTapped?(holding) }
-                    )
+            if holdings.isEmpty {
+                Text("No holdings data available")
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, AppSpacing.xl)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(holdings) { holding in
+                        WhaleHoldingRow(
+                            holding: holding,
+                            onTap: { onHoldingTapped?(holding) }
+                        )
 
-                    if holding.id != holdings.last?.id {
-                        Divider()
-                            .background(AppColors.cardBackgroundLight)
+                        if holding.id != holdings.last?.id {
+                            Divider()
+                                .background(AppColors.cardBackgroundLight)
+                        }
                     }
                 }
             }

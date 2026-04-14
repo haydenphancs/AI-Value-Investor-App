@@ -35,22 +35,23 @@ struct WhaleProfileView: View {
                             onFollowToggle: { viewModel.toggleFollow() }
                         )
 
-                        // Portfolio Stats
-                        WhalePortfolioStats(profile: profile)
+                        if !profile.isCongressional {
+                            // Portfolio Stats (13F only)
+                            WhalePortfolioStats(profile: profile)
 
-                        // Sector Exposure
-                        WhaleSectorExposureSection(sectors: profile.sectorExposure)
+                            // Sector Exposure (13F only)
+                            WhaleSectorExposureSection(sectors: profile.sectorExposure)
 
-                        // Current Picks / Recently Traded
-                        WhaleCurrentPicksSection(
-                            holdings: viewModel.displayedHoldings,
-                            behaviorSummary: profile.behaviorSummary,
-                            isCongressional: profile.isCongressional,
-                            onHoldingTapped: { viewModel.viewHolding($0) },
-                            onTopTenTapped: { viewModel.viewMoreHoldings() }
-                        )
+                            // Current Picks (13F only)
+                            WhaleCurrentPicksSection(
+                                holdings: viewModel.displayedHoldings,
+                                behaviorSummary: profile.behaviorSummary,
+                                onHoldingTapped: { viewModel.viewHolding($0) },
+                                onTopTenTapped: { viewModel.viewMoreHoldings() }
+                            )
+                        }
 
-                        // Recent Trades
+                        // Recent Trades (always shown)
                         WhaleRecentTradesSection(
                             tradeGroups: viewModel.displayedTradeGroups,
                             onTradeGroupTapped: { viewModel.viewTradeGroup($0) },

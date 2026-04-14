@@ -328,9 +328,9 @@ struct WhaleTrade: Identifiable, Codable {
     }
 
     var formattedAllocationChange: String {
-        let prev = previousAllocation == 0 ? "0%" : String(format: "%.1f%%", previousAllocation)
-        let new = newAllocation == 0 ? "0%" : String(format: "%.1f %%", newAllocation)
-        return "\(prev)  \u{2192}  \(new)"
+        let prev = String(format: "%.2f%%", previousAllocation)
+        let new = String(format: "%.2f%%", newAllocation)
+        return "\(prev) \u{2192} \(new)"
     }
 
     private func formatTradeAmount(_ amount: Double) -> String {

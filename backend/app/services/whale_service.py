@@ -1470,8 +1470,13 @@ class WhaleService:
             recent, new_count, closed_count, total_bought, total_sold
         )
 
+        # Use the most recent trade date (not today) to avoid duplicate groups
+        trade_group_date = max(
+            (t.get("date", as_of_date) for t in recent), default=as_of_date
+        )
+
         trade_group = {
-            "date": as_of_date,
+            "date": trade_group_date,
             "trade_count": len(recent),
             "net_action": net_action,
             "net_amount": abs(net_dollar),

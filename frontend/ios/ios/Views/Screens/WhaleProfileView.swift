@@ -121,6 +121,7 @@ struct WhaleProfileHeader: View {
         VStack(spacing: AppSpacing.lg) {
             // Avatar
             WhaleAvatarView(
+                name: profile.name,
                 avatarURL: profile.avatarURL,
                 size: 80
             )
@@ -148,11 +149,29 @@ struct WhaleProfileHeader: View {
 
 // MARK: - Whale Avatar View
 struct WhaleAvatarView: View {
+    let name: String
     let avatarURL: String?
     let size: CGFloat
+    var category: WhaleCategory = .investors
+
+    private var initials: String {
+        let parts = name.components(separatedBy: " ")
+        let first = parts.first?.first.map(String.init) ?? ""
+        let last = parts.count > 1 ? parts.last?.first.map(String.init) ?? "" : ""
+        return "\(first)\(last)"
+    }
+
+    private var backgroundColor: Color {
+        let colors: [Color] = [
+            Color(hex: "3B82F6"), Color(hex: "22C55E"),
+            Color(hex: "F97316"), Color(hex: "A855F7"),
+            Color(hex: "06B6D4"), Color(hex: "EF4444"),
+        ]
+        return colors[abs(name.hashValue) % colors.count]
+    }
 
     var body: some View {
-        if let url = avatarURL, let imageURL = URL(string: url) {
+        if category == .institutions, let url = avatarURL, let imageURL = URL(string: url) {
             AsyncImage(url: imageURL) { phase in
                 switch phase {
                 case .success(let image):
@@ -162,30 +181,24 @@ struct WhaleAvatarView: View {
                         .frame(width: size, height: size)
                         .clipShape(Circle())
                 case .failure, .empty:
-                    placeholderAvatar
+                    initialsAvatar
                 @unknown default:
-                    placeholderAvatar
+                    initialsAvatar
                 }
             }
         } else {
-            placeholderAvatar
+            initialsAvatar
         }
     }
 
-    private var placeholderAvatar: some View {
+    private var initialsAvatar: some View {
         Circle()
-            .fill(
-                LinearGradient(
-                    colors: [AppColors.cardBackgroundLight, AppColors.cardBackground],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            .fill(backgroundColor)
             .frame(width: size, height: size)
             .overlay(
-                Image(systemName: "person.fill")
-                    .font(.system(size: size * 0.4))
-                    .foregroundColor(AppColors.textMuted)
+                Text(initials)
+                    .font(.system(size: size * 0.38, weight: .bold))
+                    .foregroundColor(.white)
             )
     }
 }

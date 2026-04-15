@@ -667,6 +667,8 @@ class WhaleService:
             sentiment_summary=sentiment,
             is_following=is_following,
             data_source=whale.get("data_source", ""),
+            return_source=whale.get("return_source", ""),
+            return_label=whale.get("return_label", ""),
         )
 
         return profile
@@ -938,7 +940,7 @@ class WhaleService:
 
         try:
             if data_source == "13f":
-                return await self._process_13f_path(whale_id, whale["cik"])
+                return await self._process_13f_path(whale_id, whale["cik"], whale=whale)
             elif data_source in ("congressional_house", "congressional_senate"):
                 chamber = "house" if "house" in data_source else "senate"
                 return await self._process_congressional_path(
@@ -966,7 +968,7 @@ class WhaleService:
     # ── 13F Processing Path ──────────────────────────────────────────
 
     async def _process_13f_path(
-        self, whale_id: str, cik: str
+        self, whale_id: str, cik: str, whale: Optional[Dict] = None
     ) -> Optional[Dict[str, Any]]:
         """Fetch and aggregate 13F institutional data."""
         sb = get_supabase()
@@ -1026,7 +1028,8 @@ class WhaleService:
         current_raw = results[0] if not isinstance(results[0], BaseException) else []
         prev_raw = results[1] if not isinstance(results[1], BaseException) else []
         industry_data = results[2] if not isinstance(results[2], BaseException) else []
-        perf_data = results[3] if not isinstance(results[3], BaseException) else {}
+        perf_data_list = results[3] if not isinstance(results[3], BaseException) else []
+        perf_data = perf_data_list[0] if perf_data_list else {}
 
         for idx, r in enumerate(results):
             if isinstance(r, BaseException):
@@ -1089,7 +1092,8 @@ class WhaleService:
         # Sync to denormalized tables
         await self._sync_to_whale_tables(
             whale_id, holdings_data, sector_data, trade_group,
-            behavior, sentiment, total_value, perf_data,
+            behavior, sentiment, total_value, perf_data_list,
+            whale=whale,
         )
 
         return snapshot
@@ -1482,7 +1486,7 @@ class WhaleService:
             "net_amount": abs(net_dollar),
             "summary": summary,
             "insights": insights,
-            "trades": recent[:50],
+            "trades": sorted(recent, key=lambda t: t["amount"], reverse=True)[:50],
         } if recent else None
 
         # Sectors (basic — from holdings tickers)
@@ -1917,6 +1921,91 @@ class WhaleService:
 
     # ── Sync to Denormalized Tables ──────────────────────────────────
 
+    async def _compute_ticker_cagr(
+        self, ticker: str
+    ) -> Optional[float]:
+        """Compute long-term CAGR from a stock's max price change + IPO date."""
+        try:
+            price_change = await self.fmp.get_stock_price_change(ticker)
+            max_return = price_change.get("max")
+            if max_return is None or max_return <= -100:
+                return None
+
+            # Get IPO date from company profile
+            profiles = await self.fmp.get_company_profiles_batch([ticker])
+            if not profiles:
+                return None
+            ipo_date_str = profiles[0].get("ipoDate")
+            if not ipo_date_str:
+                return None
+
+            ipo_date = datetime.strptime(ipo_date_str, "%Y-%m-%d")
+            years = (datetime.now() - ipo_date).days / 365.25
+            if years < 1:
+                return None
+
+            total_multiplier = 1 + max_return / 100
+            if total_multiplier <= 0:
+                return None
+            cagr = (total_multiplier ** (1 / years) - 1) * 100
+            return round(cagr, 1)
+        except Exception as e:
+            logger.warning("Ticker CAGR failed for %s: %s", ticker, e)
+            return None
+
+    async def _compute_best_annual_return(
+        self,
+        whale: Dict,
+        perf_list: List[Dict],
+    ) -> Tuple[Optional[float], str, str]:
+        """Tiered annual return: associated ticker CAGR → 13F avg → N/A.
+
+        Returns: (return_value, return_source, return_label)
+        """
+        # Tier 1: Associated ticker CAGR
+        ticker = whale.get("associated_ticker")
+        if ticker:
+            cagr = await self._compute_ticker_cagr(ticker)
+            if cagr is not None:
+                return cagr, "stock_cagr", f"{ticker} CAGR"
+
+        # Tier 2: 13F portfolio average
+        avg = self._compute_avg_annual_return(perf_list)
+        if avg is not None:
+            return avg, "13f_avg", "13F Portfolio Avg."
+
+        return None, "", ""
+
+    @staticmethod
+    def _compute_avg_annual_return(perf_list: List[Dict]) -> Optional[float]:
+        """Compute historical average annual return from year-end records.
+
+        Uses Q4 (Dec 31) snapshots' 1-year performance to get true
+        calendar-year returns, then averages across all available years.
+        Filters out corrupted outlier data (|return| > 200%).
+        """
+        if not perf_list:
+            return None
+
+        year_end_returns = [
+            d["performancePercentage1year"]
+            for d in perf_list
+            if d.get("date", "").endswith("-12-31")
+            and d.get("performancePercentage1year") is not None
+            and -200 < d["performancePercentage1year"] < 500
+        ]
+
+        if not year_end_returns:
+            # Fallback: use latest 1-year return if no year-ends available
+            latest = perf_list[0] if perf_list else {}
+            val = latest.get("performancePercentage1year")
+            if val is not None and -200 < val < 500:
+                return round(float(val), 2)
+            return None
+
+        avg = sum(year_end_returns) / len(year_end_returns)
+        return round(avg, 2)
+
     async def _sync_to_whale_tables(
         self,
         whale_id: str,
@@ -1926,7 +2015,8 @@ class WhaleService:
         behavior: Dict,
         sentiment: str,
         total_value: float,
-        perf_data: Dict,
+        perf_data: Any,
+        whale: Optional[Dict] = None,
     ) -> None:
         """Write aggregated data into the existing whale_* tables."""
         sb = get_supabase()
@@ -1938,13 +2028,24 @@ class WhaleService:
                 "behavior_summary": behavior,
                 "sentiment_summary": sentiment,
             }
-            ytd = (
-                perf_data.get("ytdReturn")
-                or perf_data.get("performancePercentage")
-                or perf_data.get("changeInMarketValuePercentage")
-            )
-            if ytd:
-                whale_update["ytd_return"] = round(float(ytd), 2)
+
+            # Compute best annual return (tiered: ticker CAGR → 13F avg)
+            perf_list = perf_data if isinstance(perf_data, list) else []
+            if whale and whale.get("associated_ticker"):
+                ret_val, ret_source, ret_label = await self._compute_best_annual_return(
+                    whale, perf_list
+                )
+            else:
+                ret_val = self._compute_avg_annual_return(perf_list)
+                ret_source = "13f_avg" if ret_val is not None else ""
+                ret_label = "13F Portfolio Avg." if ret_val is not None else ""
+
+            if ret_val is not None:
+                whale_update["ytd_return"] = ret_val
+            if ret_source:
+                whale_update["return_source"] = ret_source
+            if ret_label:
+                whale_update["return_label"] = ret_label
             sb.table("whales").update(whale_update).eq("id", whale_id).execute()
 
             # Upsert holdings

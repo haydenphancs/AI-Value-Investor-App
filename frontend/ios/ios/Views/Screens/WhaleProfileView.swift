@@ -282,7 +282,7 @@ struct WhalePortfolioStats: View {
                         .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
                 }
 
-                Text("Annual Return")
+                Text(profile.returnLabel.isEmpty ? "Avg. Annual Return" : profile.returnLabel)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }

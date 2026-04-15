@@ -99,6 +99,8 @@ struct WhaleProfileDTO: Codable {
     let sentimentSummary: String
     let isFollowing: Bool
     let dataSource: String?
+    let returnSource: String?
+    let returnLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, title, description
@@ -114,6 +116,8 @@ struct WhaleProfileDTO: Codable {
         case sentimentSummary = "sentiment_summary"
         case isFollowing = "is_following"
         case dataSource = "data_source"
+        case returnSource = "return_source"
+        case returnLabel = "return_label"
     }
 
     func toWhaleProfile() -> WhaleProfile {
@@ -133,7 +137,8 @@ struct WhaleProfileDTO: Codable {
             behaviorSummary: behaviorSummary.toWhaleBehaviorSummary(),
             sentimentSummary: sentimentSummary,
             isFollowing: isFollowing,
-            dataSource: dataSource ?? ""
+            dataSource: dataSource ?? "",
+            returnLabel: returnLabel ?? ""
         )
     }
 }

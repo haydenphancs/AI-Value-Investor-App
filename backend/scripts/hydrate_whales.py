@@ -212,8 +212,8 @@ class WhaleHydrator:
         )
 
         # Step 7: Compute ytd_return + risk profile
-        ytd_return = self._compute_ytd_return(
-            whale_id, total_value, perf_data
+        ytd_return, return_source, return_label = await self._compute_ytd_return(
+            whale_id, total_value, perf_data_list, whale=whale
         )
         risk_profile = self._compute_risk_profile(
             holdings, sectors, trade_group, perf_data
@@ -235,7 +235,10 @@ class WhaleHydrator:
         }
 
         if not self.dry_run:
-            await self._persist(whale_id, snapshot, ytd_return, risk_profile)
+            await self._persist(
+                whale_id, snapshot, ytd_return, risk_profile,
+                return_source=return_source, return_label=return_label,
+            )
 
         self.stats["processed"] += 1
 
@@ -290,7 +293,8 @@ class WhaleHydrator:
         current_raw = results[0] if not isinstance(results[0], BaseException) else []
         prev_raw = results[1] if not isinstance(results[1], BaseException) else []
         industry_data = results[2] if not isinstance(results[2], BaseException) else []
-        perf_data = results[3] if not isinstance(results[3], BaseException) else {}
+        perf_data_list = results[3] if not isinstance(results[3], BaseException) else []
+        perf_data = perf_data_list[0] if perf_data_list else {}
 
         for idx, r in enumerate(results):
             if isinstance(r, BaseException):
@@ -1071,52 +1075,62 @@ class WhaleHydrator:
         else:
             return "very_aggressive"
 
-    def _compute_ytd_return(
+    async def _compute_ytd_return(
         self,
         whale_id: str,
         total_value: float,
-        perf_data: Dict,
-    ) -> Optional[float]:
-        """Compute ytd_return with multiple fallback strategies.
+        perf_data: Any,
+        whale: Optional[Dict] = None,
+    ) -> Tuple[Optional[float], str, str]:
+        """Compute best annual return with tiered approach.
 
-        FMP performance data fields (in priority order):
-        - ytdReturn (not always present in stable API)
-        - performancePercentage (quarter-over-quarter % change)
-        - changeInMarketValuePercentage (same as above, different key)
-        - performancePercentage1year (1-year return)
-        - Fallback: compare vs previous year Q4 snapshot
+        Tier 1: Associated ticker CAGR (for investors with public vehicles)
+        Tier 2: 13F year-end average (for hedge funds)
+        Tier 3: N/A
+
+        Returns: (return_value, return_source, return_label)
         """
-        if perf_data.get("ytdReturn"):
-            return float(perf_data["ytdReturn"])
-        # Use quarter-over-quarter performance as proxy
-        if perf_data.get("performancePercentage"):
-            return round(float(perf_data["performancePercentage"]), 2)
-        if perf_data.get("changeInMarketValuePercentage"):
-            return round(float(perf_data["changeInMarketValuePercentage"]), 2)
-        if perf_data.get("oneYearReturn"):
-            return float(perf_data["oneYearReturn"])
+        # Tier 1: Associated ticker CAGR
+        ticker = (whale or {}).get("associated_ticker")
+        if ticker:
+            try:
+                price_change = await self.fmp.get_stock_price_change(ticker)
+                max_return = price_change.get("max")
+                if max_return is not None and max_return > -100:
+                    profiles = await self.fmp.get_company_profiles_batch([ticker])
+                    if profiles:
+                        ipo_str = profiles[0].get("ipoDate")
+                        if ipo_str:
+                            ipo_date = datetime.strptime(ipo_str, "%Y-%m-%d")
+                            years = (datetime.now() - ipo_date).days / 365.25
+                            if years >= 1:
+                                total = 1 + max_return / 100
+                                if total > 0:
+                                    cagr = round((total ** (1 / years) - 1) * 100, 1)
+                                    return cagr, "stock_cagr", f"{ticker} CAGR"
+            except Exception as e:
+                logger.warning("  Ticker CAGR failed for %s: %s", ticker, e)
 
-        # Fallback: compare against previous year Q4 snapshot
-        try:
-            prev_year = datetime.now().year - 1
-            prev_snap = (
-                self.sb.table("whale_filing_snapshots")
-                .select("total_value")
-                .eq("whale_id", whale_id)
-                .like("filing_period", f"{prev_year}-Q4")
-                .limit(1)
-                .execute()
-            )
-            if prev_snap.data and prev_snap.data[0].get("total_value"):
-                prev_val = float(prev_snap.data[0]["total_value"])
-                if prev_val > 0 and total_value > 0:
-                    return round(
-                        (total_value - prev_val) / prev_val * 100, 1
-                    )
-        except Exception as e:
-            logger.warning("  ytd_return fallback failed: %s", e)
+        # Tier 2: 13F year-end average
+        perf_list = perf_data if isinstance(perf_data, list) else []
+        if perf_list:
+            year_end_returns = [
+                d["performancePercentage1year"]
+                for d in perf_list
+                if d.get("date", "").endswith("-12-31")
+                and d.get("performancePercentage1year") is not None
+                and -200 < d["performancePercentage1year"] < 500
+            ]
+            if year_end_returns:
+                avg = round(sum(year_end_returns) / len(year_end_returns), 2)
+                return avg, "13f_avg", "13F Portfolio Avg."
 
-        return None
+            latest = perf_list[0]
+            val = latest.get("performancePercentage1year")
+            if val is not None and -200 < val < 500:
+                return round(float(val), 2), "13f_avg", "13F Portfolio Avg."
+
+        return None, "", ""
 
     # ── Persistence ──────────────────────────────────────────────────
 
@@ -1126,6 +1140,8 @@ class WhaleHydrator:
         snapshot: Dict[str, Any],
         ytd_return: Optional[float],
         risk_profile: Optional[str] = None,
+        return_source: str = "",
+        return_label: str = "",
     ):
         """Write to snapshot cache + denormalized tables."""
         sb = self.sb
@@ -1156,6 +1172,10 @@ class WhaleHydrator:
             }
             if ytd_return is not None:
                 whale_update["ytd_return"] = ytd_return
+            if return_source:
+                whale_update["return_source"] = return_source
+            if return_label:
+                whale_update["return_label"] = return_label
             if risk_profile:
                 whale_update["risk_profile"] = risk_profile
             sb.table("whales").update(whale_update).eq(

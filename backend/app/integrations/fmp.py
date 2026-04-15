@@ -812,18 +812,37 @@ class FMPClient:
 
     async def get_institutional_performance(
         self, cik: str
-    ) -> Dict[str, Any]:
-        """Get performance summary (ytdReturn, etc.) for a 13F holder."""
+    ) -> List[Dict[str, Any]]:
+        """Get full performance history for a 13F holder.
+
+        Returns the complete list of quarterly performance records
+        (newest first) so callers can compute historical averages.
+        """
         try:
             data = await self._make_request(
                 "institutional-ownership/holder-performance-summary",
                 params={"cik": cik},
             )
+            if isinstance(data, list):
+                return data
+            return [data] if isinstance(data, dict) else []
+        except Exception as e:
+            logger.warning(f"Performance summary failed for CIK {cik}: {e}")
+            return []
+
+    async def get_stock_price_change(
+        self, symbol: str
+    ) -> Dict[str, Any]:
+        """Get total price change percentages (1D, 5D, 1M, ..., max) for a ticker."""
+        try:
+            data = await self._make_request(
+                "stock-price-change", params={"symbol": symbol}
+            )
             if isinstance(data, list) and data:
                 return data[0]
             return data if isinstance(data, dict) else {}
         except Exception as e:
-            logger.warning(f"Performance summary failed for CIK {cik}: {e}")
+            logger.warning(f"Stock price change failed for {symbol}: {e}")
             return {}
 
     # ── Shares float ────────────────────────────────────────────────

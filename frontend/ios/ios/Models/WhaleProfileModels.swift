@@ -26,6 +26,7 @@ struct WhaleProfile: Identifiable, Codable {
     let sentimentSummary: String
     var isFollowing: Bool
     let dataSource: String
+    let returnLabel: String
 
     // MARK: - Formatted Properties
 
@@ -527,7 +528,8 @@ extension WhaleProfile {
         ),
         sentimentSummary: "Warren Buffett maintains a conservative, value-driven approach with significant exposure to financial services and technology blue chips. Recent activity shows increased energy sector positioning while maintaining core long-term holdings. His strategy emphasizes quality businesses with strong fundamentals and predictable cash flows.",
         isFollowing: true,
-        dataSource: "13f"
+        dataSource: "13f",
+        returnLabel: "BRK-B CAGR"
     )
 
     static let cathieWood = WhaleProfile(
@@ -582,6 +584,7 @@ extension WhaleProfile {
         ),
         sentimentSummary: "Cathie Wood continues her focus on disruptive innovation, emphasizing AI, genomics, and blockchain technologies.",
         isFollowing: false,
-        dataSource: "13f"
+        dataSource: "13f",
+        returnLabel: "ARKK CAGR"
     )
 }

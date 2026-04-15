@@ -97,7 +97,8 @@ class WhaleProfileViewModel: ObservableObject {
                 behaviorSummary: currentProfile.behaviorSummary,
                 sentimentSummary: currentProfile.sentimentSummary,
                 isFollowing: isFollowing,
-                dataSource: currentProfile.dataSource
+                dataSource: currentProfile.dataSource,
+                returnLabel: currentProfile.returnLabel
             )
             profile = currentProfile
         }
@@ -138,7 +139,8 @@ class WhaleProfileViewModel: ObservableObject {
                         behaviorSummary: loadedProfile.behaviorSummary,
                         sentimentSummary: loadedProfile.sentimentSummary,
                         isFollowing: isFollowing,
-                        dataSource: loadedProfile.dataSource
+                        dataSource: loadedProfile.dataSource,
+                        returnLabel: loadedProfile.returnLabel
                     )
                 }
 
@@ -192,7 +194,8 @@ class WhaleProfileViewModel: ObservableObject {
             behaviorSummary: currentProfile.behaviorSummary,
             sentimentSummary: currentProfile.sentimentSummary,
             isFollowing: newFollowState,
-            dataSource: currentProfile.dataSource
+            dataSource: currentProfile.dataSource,
+            returnLabel: currentProfile.returnLabel
         )
         profile = updatedProfile
 

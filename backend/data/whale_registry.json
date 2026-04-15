@@ -6,7 +6,8 @@
     "category": "investors",
     "cik": "0001067983",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "associated_ticker": "BRK-B"
   },
   {
     "name": "Bill Ackman",
@@ -42,7 +43,8 @@
     "category": "institutions",
     "cik": "0001603466",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "associated_ticker": "ARKK"
   },
   {
     "name": "David Tepper",
@@ -69,7 +71,8 @@
     "category": "investors",
     "cik": "0000921669",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "associated_ticker": "IEP"
   },
   {
     "name": "Stanley Druckenmiller",

@@ -120,6 +120,8 @@ class WhaleProfileResponse(BaseModel):
     sentiment_summary: str = ""
     is_following: bool = False
     data_source: str = ""
+    return_source: str = ""
+    return_label: str = ""
 
 
 # ── Activity feed ────────────────────────────────────────────────────

@@ -532,21 +532,34 @@ class WhaleService:
             whale.get("risk_profile") or "", whale.get("risk_profile") or ""
         )
 
-        # Sectors
+        # Sectors — filter out 0% and roll them into "Other"
         sectors: List[WhaleSectorAllocationResponse] = []
+        other_pct = 0.0
         if snapshot and snapshot.get("sector_data"):
             for s in snapshot["sector_data"]:
+                pct = float(s.get("allocation", 0))
+                name = s.get("name", "Other")
+                if pct < 0.5 or name == "Other":
+                    other_pct += pct
+                else:
+                    sectors.append(
+                        WhaleSectorAllocationResponse(
+                            id=str(uuid.uuid4()),
+                            name=name,
+                            percentage=round(pct, 1),
+                            color_hex=s.get(
+                                "color_hex",
+                                SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
+                            ),
+                        )
+                    )
+            if other_pct > 0:
                 sectors.append(
                     WhaleSectorAllocationResponse(
                         id=str(uuid.uuid4()),
-                        name=s.get("name", "Other"),
-                        percentage=float(s.get("allocation", 0)),
-                        color_hex=s.get(
-                            "color_hex",
-                            SECTOR_COLORS.get(
-                                s.get("name", ""), DEFAULT_SECTOR_COLOR
-                            ),
-                        ),
+                        name="Other",
+                        percentage=round(other_pct, 1),
+                        color_hex=SECTOR_COLORS.get("Other", DEFAULT_SECTOR_COLOR),
                     )
                 )
 

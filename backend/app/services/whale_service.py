@@ -504,6 +504,14 @@ class WhaleService:
                 whale["name"], whale.get("data_source"), e,
             )
 
+        # Re-read whale record to pick up updates from _sync_to_whale_tables
+        try:
+            refreshed = sb.table("whales").select("*").eq("id", whale_id).execute()
+            if refreshed.data:
+                whale = refreshed.data[0]
+        except Exception:
+            pass
+
         # Step 3: Fetch follow state
         is_following = False
         if user_id:

@@ -373,14 +373,12 @@ struct FollowedWhalesRow: View {
                     } label: {
                         VStack(spacing: AppSpacing.sm) {
                             // Avatar
-                            Circle()
-                                .fill(AppColors.cardBackgroundLight)
-                                .frame(width: 64, height: 64)
-                                .overlay(
-                                    Image(systemName: "person.fill")
-                                        .font(AppTypography.iconXL)
-                                        .foregroundColor(AppColors.textMuted)
-                                )
+                            WhaleAvatarView(
+                                name: whale.name,
+                                avatarURL: whale.avatarName.isEmpty ? nil : whale.avatarName,
+                                size: 64,
+                                category: whale.category
+                            )
 
                             // Name
                             Text(whale.name.components(separatedBy: " ").last ?? whale.name)
@@ -775,15 +773,13 @@ struct WhaleHeroCard: View {
                     // Right side - avatar
                     VStack {
                         Spacer()
-                        Circle()
-                            .fill(AppColors.cardBackgroundLight)
-                            .frame(width: 80, height: 80)
-                            .overlay(
-                                Image(systemName: "person.fill")
-                                    .font(AppTypography.iconJumbo)
-                                    .foregroundColor(AppColors.textMuted)
-                            )
-                            .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        WhaleAvatarView(
+                            name: whale.name,
+                            avatarURL: whale.avatarName.isEmpty ? nil : whale.avatarName,
+                            size: 80,
+                            category: whale.category
+                        )
+                        .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
                         Spacer()
                     }
                     .padding(.trailing, AppSpacing.xl)
@@ -808,14 +804,12 @@ struct WhaleCard: View {
         } label: {
             HStack(spacing: AppSpacing.md) {
                 // Avatar
-                Circle()
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(AppTypography.iconLarge)
-                            .foregroundColor(AppColors.textMuted)
-                    )
+                WhaleAvatarView(
+                    name: whale.name,
+                    avatarURL: whale.avatarName.isEmpty ? nil : whale.avatarName,
+                    size: 44,
+                    category: whale.category
+                )
 
                 // Info
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {

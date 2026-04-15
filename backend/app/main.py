@@ -14,7 +14,7 @@ import asyncio
 from typing import Any
 
 from app.config import settings
-from app.database import check_supabase_health
+from app.database import check_supabase_health, get_supabase
 from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
 from app.integrations.fmp import close_fmp_client
@@ -35,6 +35,14 @@ async def lifespan(app: FastAPI):
     healthy = await check_supabase_health()
     if healthy:
         logger.info("Supabase connection OK")
+        # Clear whale profile cache on deploy so code changes take effect
+        # immediately without needing manual force_refresh per whale.
+        try:
+            sb = get_supabase()
+            sb.table("whale_profile_cache").delete().neq("whale_id", "").execute()
+            logger.info("Cleared whale_profile_cache on startup")
+        except Exception as e:
+            logger.warning("Failed to clear whale_profile_cache: %s", e)
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 

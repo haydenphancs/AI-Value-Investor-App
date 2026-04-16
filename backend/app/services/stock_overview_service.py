@@ -687,8 +687,8 @@ class StockOverviewService:
         })
 
         # Benchmark summary
-        benchmark_summary = self._build_benchmark_summary(
-            stock_historical, spy_historical,
+        benchmark_summary = await self._build_benchmark_summary(
+            stock_historical, spy_historical, profile=profile, ticker=ticker,
         )
 
         return StockOverviewResponse(
@@ -1418,67 +1418,138 @@ class StockOverviewService:
 
     # ── Benchmark Summary ─────────────────────────────────────────
 
-    def _build_benchmark_summary(
-        self, stock_hist: List[Dict], spy_hist: List[Dict]
+    async def _build_benchmark_summary(
+        self, stock_hist: List[Dict], spy_hist: List[Dict],
+        profile: Optional[Dict] = None, ticker: str = "",
     ) -> Optional[BenchmarkSummaryResponse]:
-        """Compute annualized (CAGR) returns since inception vs S&P 500."""
+        """Compute annualized (CAGR) returns since inception vs S&P 500.
+
+        Uses the IPO date from the company profile and fetches the IPO-era price
+        directly from FMP to avoid the 5,000-row limit on historical data.
+        The 5-year CAGR uses the already-fetched stock_hist (which always covers 5Y).
+        """
         if not stock_hist or len(stock_hist) < 252:
             return None
 
-        # Use ALL available data (from IPO/inception)
-        days = len(stock_hist) - 1
-        years = days / 252
+        from datetime import date as _date, datetime as _dt
 
-        stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
         stock_end = stock_hist[-1].get("close") or stock_hist[-1].get("adjClose")
-
-        if not stock_start or not stock_end or stock_start <= 0 or years <= 0:
+        end_date_str = stock_hist[-1].get("date", "")[:10]
+        if not stock_end or stock_end <= 0:
             return None
 
-        stock_annual = ((stock_end / stock_start) ** (1 / years) - 1) * 100
+        def _cagr_from(start_price, end_price, start_date_str, end_date_str_):
+            """Compute CAGR between two price/date pairs."""
+            if not start_price or not end_price or start_price <= 0:
+                return None
+            try:
+                sd = _date.fromisoformat(start_date_str[:10])
+                ed = _date.fromisoformat(end_date_str_[:10])
+                yrs = (ed - sd).days / 365.25
+            except (ValueError, TypeError):
+                return None
+            if yrs <= 0:
+                return None
+            return round(((end_price / start_price) ** (1 / yrs) - 1) * 100, 1)
 
-        # S&P 500: match the stock's start date
-        stock_start_date = stock_hist[0].get("date", "")
-        sp_annual = 0.0
-        sp_start_date_display = ""
-        if spy_hist:
+        # ── All-time CAGR (from IPO) ──────────────────────────────
+        ipo_date_str = (profile or {}).get("ipoDate", "")
+        alltime_stock = None
+        alltime_sp = None
+        alltime_since = None
+        ipo_start_date = None  # actual date string used for SPY alignment
+
+        if ipo_date_str:
+            # Fetch a small window of prices around IPO to get the earliest price
+            try:
+                ipo_end = (_date.fromisoformat(ipo_date_str) + timedelta(days=30)).isoformat()
+                ipo_prices = await self.fmp.get_historical_prices(
+                    ticker, ipo_date_str, ipo_end,
+                )
+            except Exception:
+                ipo_prices = []
+
+            # FMP may return dict with "historical" key or flat list
+            if isinstance(ipo_prices, dict):
+                ipo_prices = ipo_prices.get("historical", [])
+            elif not isinstance(ipo_prices, list):
+                ipo_prices = []
+
+            if ipo_prices:
+                ipo_prices.sort(key=lambda p: p.get("date", ""))
+                ipo_price = ipo_prices[0].get("close") or ipo_prices[0].get("adjClose")
+                ipo_start_date = ipo_prices[0].get("date", "")[:10]
+                alltime_stock = _cagr_from(ipo_price, stock_end, ipo_start_date, end_date_str)
+
+        # Fallback: use the earliest available price in stock_hist
+        if alltime_stock is None:
+            stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
+            ipo_start_date = stock_hist[0].get("date", "")[:10]
+            alltime_stock = _cagr_from(stock_start, stock_end, ipo_start_date, end_date_str)
+
+        # Format since date
+        if ipo_start_date:
+            try:
+                alltime_since = _dt.strptime(ipo_start_date, "%Y-%m-%d").strftime("%b %d, %Y")
+            except (ValueError, TypeError):
+                alltime_since = ipo_start_date
+
+        # S&P 500 aligned to the stock's actual start date
+        if spy_hist and ipo_start_date:
             sp_start_price = None
-            sp_start_found_date = ""
+            sp_found_date = ""
             for p in spy_hist:
-                if p.get("date", "") >= stock_start_date:
+                if p.get("date", "")[:10] >= ipo_start_date:
                     sp_start_price = p.get("close") or p.get("adjClose")
-                    sp_start_found_date = p.get("date", "")
+                    sp_found_date = p.get("date", "")[:10]
                     break
+            if sp_start_price is None and spy_hist:
+                # SPY data doesn't go back that far — use earliest available
+                sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
+                sp_found_date = spy_hist[0].get("date", "")[:10]
             sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
+            alltime_sp = _cagr_from(sp_start_price, sp_end_price, sp_found_date, end_date_str)
+        alltime_sp = alltime_sp or 0.0
 
-            if sp_start_price and sp_end_price and sp_start_price > 0:
-                sp_days = 0
-                for i, p in enumerate(spy_hist):
-                    if p.get("date", "") >= sp_start_found_date:
-                        sp_days = len(spy_hist) - 1 - i
-                        break
-                sp_years = sp_days / 252 if sp_days > 0 else years
-                sp_annual = ((sp_end_price / sp_start_price) ** (1 / sp_years) - 1) * 100
+        # ── 5-year windowed CAGR (primary display) ─────────────────
+        five_year_cutoff = (_date.today() - timedelta(days=365 * 5)).isoformat()
+        hist_5y = [p for p in stock_hist if p.get("date", "")[:10] >= five_year_cutoff]
 
-                from datetime import datetime as _dt
-                try:
-                    sp_start_date_display = _dt.strptime(sp_start_found_date, "%Y-%m-%d").strftime("%b %d, %Y")
-                except (ValueError, TypeError):
-                    sp_start_date_display = sp_start_found_date
+        if len(hist_5y) >= 252:
+            s5 = hist_5y[0].get("close") or hist_5y[0].get("adjClose")
+            stock_5y = _cagr_from(s5, stock_end, hist_5y[0].get("date", "")[:10], end_date_str)
 
-        # Format start date
-        try:
-            from datetime import datetime as _dt
-            stock_start_display = _dt.strptime(stock_start_date, "%Y-%m-%d").strftime("%b %d, %Y")
-        except (ValueError, TypeError):
-            stock_start_display = stock_start_date
+            spy_5y = [p for p in spy_hist if p.get("date", "")[:10] >= five_year_cutoff] if spy_hist else []
+            sp_5y_val = 0.0
+            if len(spy_5y) >= 2:
+                sp5_s = spy_5y[0].get("close") or spy_5y[0].get("adjClose")
+                sp5_e = spy_5y[-1].get("close") or spy_5y[-1].get("adjClose")
+                sp_5y_val = _cagr_from(sp5_s, sp5_e, spy_5y[0].get("date", "")[:10], end_date_str) or 0.0
 
+            try:
+                since_5y_display = _date.fromisoformat(five_year_cutoff).strftime("%b %Y")
+            except (ValueError, TypeError):
+                since_5y_display = alltime_since or ""
+
+            return BenchmarkSummaryResponse(
+                avg_annual_return=stock_5y or 0.0,
+                sp_benchmark=sp_5y_val,
+                benchmark_name="S&P 500",
+                since_date=since_5y_display,
+                benchmark_since_date=since_5y_display,
+                badge_threshold=0.0,
+                alltime_annual_return=alltime_stock if alltime_since else None,
+                alltime_benchmark=alltime_sp if alltime_since else None,
+                alltime_since_date=alltime_since,
+            )
+
+        # Stock has <5 years of data — use all-time only
         return BenchmarkSummaryResponse(
-            avg_annual_return=round(stock_annual, 1),
-            sp_benchmark=round(sp_annual, 1),
+            avg_annual_return=alltime_stock or 0.0,
+            sp_benchmark=alltime_sp,
             benchmark_name="S&P 500",
-            since_date=stock_start_display,
-            benchmark_since_date=sp_start_date_display or stock_start_display,
+            since_date=alltime_since or "",
+            benchmark_since_date=alltime_since or "",
             badge_threshold=0.0,
         )
 

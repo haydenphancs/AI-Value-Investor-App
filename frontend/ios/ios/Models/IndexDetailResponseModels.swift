@@ -105,10 +105,16 @@ struct IndexPerformancePeriodDTO: Decodable {
 struct IndexBenchmarkSummaryDTO: Decodable {
     let avgAnnualReturn: Double
     let spBenchmark: Double
+    let alltimeAnnualReturn: Double?
+    let alltimeBenchmark: Double?
+    let alltimeSinceDate: String?
 
     enum CodingKeys: String, CodingKey {
         case avgAnnualReturn = "avg_annual_return"
         case spBenchmark = "sp_benchmark"
+        case alltimeAnnualReturn = "alltime_annual_return"
+        case alltimeBenchmark = "alltime_benchmark"
+        case alltimeSinceDate = "alltime_since_date"
     }
 }
 
@@ -333,7 +339,10 @@ extension IndexDetailResponse {
         if let bs = benchmarkSummary {
             benchmark = PerformanceBenchmarkSummary(
                 avgAnnualReturn: bs.avgAnnualReturn,
-                spBenchmark: bs.spBenchmark
+                spBenchmark: bs.spBenchmark,
+                alltimeAnnualReturn: bs.alltimeAnnualReturn,
+                alltimeBenchmark: bs.alltimeBenchmark,
+                alltimeSinceDate: bs.alltimeSinceDate
             )
         } else {
             benchmark = nil

@@ -115,6 +115,14 @@ enum TradingDayHelper {
     static let marketCloseMinute = 16 * 60        // 960
     static let sessionLength = marketCloseMinute - marketOpenMinute  // 390 minutes
 
+    /// Filter price points to only the latest trading day.
+    /// Uses the date prefix (yyyy-MM-dd) of the last data point as the reference day.
+    static func filterToLatestDay(_ pricePoints: [StockPricePoint]) -> [StockPricePoint] {
+        guard let lastDate = pricePoints.last?.date.prefix(10) else { return pricePoints }
+        let latestDay = String(lastDate)
+        return pricePoints.filter { $0.date.hasPrefix(latestDay) }
+    }
+
     /// Compute normalized [0..1] time fractions for each price point.
     /// 0.0 = market open (9:30 AM ET), 1.0 = market close (4:00 PM ET).
     /// Pre-market points clamp to 0, after-hours clamp to 1.

@@ -478,7 +478,10 @@ extension ETFDetailResponseDTO {
                 spBenchmark: bs.spBenchmark,
                 benchmarkName: bs.benchmarkName ?? "S&P 500 Benchmark",
                 sinceDate: bs.sinceDate ?? "",
-                benchmarkSinceDate: bs.benchmarkSinceDate ?? ""
+                benchmarkSinceDate: bs.benchmarkSinceDate ?? "",
+                alltimeAnnualReturn: bs.alltimeAnnualReturn,
+                alltimeBenchmark: bs.alltimeBenchmark,
+                alltimeSinceDate: bs.alltimeSinceDate
             )
         } else {
             benchmark = nil

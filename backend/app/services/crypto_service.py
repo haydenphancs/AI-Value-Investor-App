@@ -947,33 +947,97 @@ class CryptoService:
         # Use 1-year return if less than 1 year of data
 
         def _cagr(prices: list) -> float:
-            """Compute compound annual growth rate from price history."""
+            """Compute compound annual growth rate from price history.
+            Uses actual date span from the data, not data point count.
+            """
             if not prices or len(prices) < 2:
                 return 0.0
-            start = prices[0].get("close") or prices[0].get("adjClose") or 0
-            end = prices[-1].get("close") or prices[-1].get("adjClose") or 0
-            if start <= 0 or end <= 0:
+            start_price = prices[0].get("close") or prices[0].get("adjClose") or 0
+            end_price = prices[-1].get("close") or prices[-1].get("adjClose") or 0
+            if start_price <= 0 or end_price <= 0:
                 return 0.0
-            years = len(prices) / 365.0
+
+            # Compute actual years from date strings
+            start_date_str = prices[0].get("date", "")[:10]
+            end_date_str = prices[-1].get("date", "")[:10]
+            try:
+                from datetime import date as _date
+                sd = _date.fromisoformat(start_date_str)
+                ed = _date.fromisoformat(end_date_str)
+                days = (ed - sd).days
+            except (ValueError, TypeError):
+                # Fallback: estimate from data point count
+                days = len(prices)
+
+            if days <= 0:
+                return 0.0
+            years = days / 365.25
             if years < 1:
                 # Less than 1 year — just return total return
-                return round(((end - start) / start) * 100, 1)
-            return round(((end / start) ** (1 / years) - 1) * 100, 1)
+                return round(((end_price - start_price) / start_price) * 100, 1)
+            return round(((end_price / start_price) ** (1 / years) - 1) * 100, 1)
 
-        asset_annual = _cagr(historical)
+        # Helper: filter prices to those on or after a cutoff date
+        def _filter_from(prices: list, cutoff: str) -> list:
+            return [p for p in prices if p.get("date", "")[:10] >= cutoff]
 
-        # Benchmark CAGR
-        bench_annual = 0.0
+        # Helper: CAGR for benchmark aligned to a start date
+        def _cagr_aligned(bench_prices: list, start_date: str) -> float:
+            if not bench_prices or not start_date:
+                return 0.0
+            aligned = _filter_from(bench_prices, start_date)
+            return _cagr(aligned) if aligned else _cagr(bench_prices)
+
+        # ── All-time CAGR ──────────────────────────────────────────
+        asset_start_date = historical[0].get("date", "")[:10] if historical else ""
+        alltime_asset = _cagr(historical)
+        alltime_bench = 0.0
         if symbol == "BTC" and spy_hist:
-            bench_annual = _cagr(spy_hist)
+            alltime_bench = _cagr_aligned(spy_hist, asset_start_date)
         elif symbol != "BTC" and btc_hist:
-            bench_annual = _cagr(btc_hist)
+            alltime_bench = _cagr_aligned(btc_hist, asset_start_date)
+
+        # Determine all-time "since" date from actual data
+        alltime_since = None
+        if historical:
+            try:
+                from datetime import date as _date
+                d = _date.fromisoformat(asset_start_date)
+                alltime_since = d.strftime("%B %d, %Y")
+            except (ValueError, TypeError):
+                alltime_since = profile_meta.get("launch_date")
+        if not alltime_since:
+            alltime_since = profile_meta.get("launch_date")
+
+        # ── 5-year CAGR (primary display) ──────────────────────────
+        five_year_cutoff = (today - timedelta(days=365 * 5)).isoformat()
+        hist_5y = _filter_from(historical, five_year_cutoff)
+
+        if len(hist_5y) >= 252:
+            asset_annual = _cagr(hist_5y)
+            bench_prices = spy_hist if symbol == "BTC" else btc_hist
+            bench_5y = _filter_from(bench_prices, five_year_cutoff) if bench_prices else []
+            bench_annual = _cagr(bench_5y) if bench_5y else 0.0
+            try:
+                from datetime import date as _date
+                d5 = _date.fromisoformat(five_year_cutoff)
+                since_display = d5.strftime("%B %Y")  # e.g. "April 2021"
+            except (ValueError, TypeError):
+                since_display = alltime_since
+        else:
+            # Asset has <5 years of data — use all-time for primary
+            asset_annual = alltime_asset
+            bench_annual = alltime_bench
+            since_display = alltime_since
 
         benchmark = BenchmarkSummaryResponse(
             avg_annual_return=asset_annual,
             sp_benchmark=bench_annual,
             benchmark_name="Bitcoin (BTC)" if symbol != "BTC" else "S&P 500",
-            since_date=profile_meta.get("launch_date") or None,
+            since_date=since_display,
+            alltime_annual_return=alltime_asset if alltime_since != since_display else None,
+            alltime_benchmark=alltime_bench if alltime_since != since_display else None,
+            alltime_since_date=alltime_since if alltime_since != since_display else None,
         )
 
         return CryptoDetailResponse(

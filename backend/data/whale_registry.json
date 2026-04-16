@@ -13,7 +13,7 @@
     "name": "Bill Ackman",
     "title": "Pershing Square Capital",
     "description": "Billionaire activist investor and founder of Pershing Square Capital Management. Known for taking concentrated positions in large-cap companies and pushing for operational changes to unlock shareholder value. Made headlines with his $2.6B profit on a COVID market hedge and high-profile battles with companies like Herbalife and Valeant.",
-    "category": "institutions",
+    "category": "investors",
     "cik": "0001336528",
     "data_source": "13f",
     "fmp_name": null
@@ -29,9 +29,9 @@
   },
   {
     "name": "Ray Dalio",
-    "title": "Bridgewater Associates",
-    "description": "Founder of Bridgewater Associates, the world's largest hedge fund managing approximately $100B in total assets. Pioneer of the 'All Weather' and 'Pure Alpha' strategies that combine systematic macro investing with risk parity allocation. The 13F portfolio shown here represents Bridgewater's US public equity holdings only — a fraction of their total assets under management.",
-    "category": "institutions",
+    "title": "Bridgewater Associates Founder",
+    "description": "Founder of Bridgewater Associates, the world's largest hedge fund managing approximately $100B in total assets. Pioneer of the 'All Weather' and 'Pure Alpha' strategies that combine systematic macro investing with risk parity allocation.",
+    "category": "investors",
     "cik": "0001350694",
     "data_source": "13f",
     "fmp_name": null
@@ -40,7 +40,7 @@
     "name": "Cathie Wood",
     "title": "ARK Invest CEO",
     "description": "Founder and CEO of ARK Invest, known for her high-conviction bets on disruptive innovation including AI, genomics, robotics, and blockchain. Her flagship ARK Innovation ETF (ARKK) became one of the most popular actively managed ETFs. Takes bold positions in early-stage technology companies and publishes her trades daily for full transparency.",
-    "category": "institutions",
+    "category": "investors",
     "cik": "0001603466",
     "data_source": "13f",
     "fmp_name": null,
@@ -48,18 +48,18 @@
   },
   {
     "name": "David Tepper",
-    "title": "Appaloosa Management",
-    "description": "Founder of Appaloosa Management, one of the most successful hedge fund managers in history. Specializes in distressed debt and equity investing with a contrarian macro approach. Known for making massive bets during market crises — his fund returned 132% in 2009 by buying beaten-down bank stocks. Consistently ranks among the highest-earning hedge fund managers.",
-    "category": "institutions",
+    "title": "Appaloosa Management Founder",
+    "description": "Founder of Appaloosa Management, one of the most successful hedge fund managers in history. Specializes in distressed debt and equity investing with a contrarian macro approach. Known for making massive bets during market crises — his fund returned 132% in 2009 by buying beaten-down bank stocks.",
+    "category": "investors",
     "cik": "0001656456",
     "data_source": "13f",
     "fmp_name": null
   },
   {
     "name": "George Soros",
-    "title": "Soros Fund Management",
-    "description": "Legendary macro investor and founder of Soros Fund Management. Most famous for 'breaking the Bank of England' in 1992 by shorting the British pound, netting over $1 billion in a single day. His reflexivity theory of markets influenced a generation of traders. Now manages capital through his family office after returning outside investor capital in 2011.",
-    "category": "institutions",
+    "title": "Soros Fund Management Founder",
+    "description": "Legendary macro investor and founder of Soros Fund Management. Most famous for 'breaking the Bank of England' in 1992 by shorting the British pound, netting over $1 billion in a single day. His reflexivity theory of markets influenced a generation of traders.",
+    "category": "investors",
     "cik": "0001029160",
     "data_source": "13f",
     "fmp_name": null
@@ -67,7 +67,7 @@
   {
     "name": "Carl Icahn",
     "title": "Icahn Enterprises",
-    "description": "One of Wall Street's most feared activist investors for over four decades. Built his fortune through hostile takeovers and corporate restructuring, pushing companies to unlock shareholder value through management changes, spin-offs, and buybacks. His investment philosophy centers on finding undervalued companies with poor management that can be improved.",
+    "description": "One of Wall Street's most feared activist investors for over four decades. Built his fortune through hostile takeovers and corporate restructuring, pushing companies to unlock shareholder value through management changes, spin-offs, and buybacks.",
     "category": "investors",
     "cik": "0000921669",
     "data_source": "13f",
@@ -77,7 +77,7 @@
   {
     "name": "Stanley Druckenmiller",
     "title": "Duquesne Family Office",
-    "description": "Former lead portfolio manager for George Soros's Quantum Fund, where he co-executed the famous British pound trade. Later ran Duquesne Capital Management with one of the best long-term track records in hedge fund history — averaging 30% annual returns over 30 years with no losing year. Now manages his personal fortune through Duquesne Family Office with a flexible macro approach.",
+    "description": "Former lead portfolio manager for George Soros's Quantum Fund, where he co-executed the famous British pound trade. Later ran Duquesne Capital Management with one of the best long-term track records in hedge fund history — averaging 30% annual returns over 30 years with no losing year.",
     "category": "investors",
     "cik": "0001536411",
     "data_source": "13f",
@@ -85,17 +85,26 @@
   },
   {
     "name": "Seth Klarman",
-    "title": "Baupost Group",
-    "description": "Founder of The Baupost Group and author of 'Margin of Safety,' one of the most sought-after investing books ever written. A disciple of Benjamin Graham's value investing philosophy, he focuses on finding deeply undervalued securities with a significant margin of safety. Known for holding large cash positions when he can't find bargains, patience is central to his strategy.",
-    "category": "institutions",
+    "title": "Baupost Group Founder",
+    "description": "Founder of The Baupost Group and author of 'Margin of Safety,' one of the most sought-after investing books ever written. A disciple of Benjamin Graham's value investing philosophy, he focuses on finding deeply undervalued securities with a significant margin of safety.",
+    "category": "investors",
     "cik": "0001061768",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Dan Loeb",
+    "title": "Third Point LLC",
+    "description": "Founder of Third Point LLC, an activist hedge fund that combines deep fundamental research with shareholder activism. Known for writing forceful public letters to company boards demanding strategic changes.",
+    "category": "investors",
+    "cik": "0001040273",
     "data_source": "13f",
     "fmp_name": null
   },
   {
     "name": "Renaissance Technologies",
     "title": "Quantitative Hedge Fund",
-    "description": "Founded by mathematician Jim Simons, Renaissance Technologies is widely considered the most successful quantitative trading firm in history. Their flagship Medallion Fund reportedly generated 66% average annual returns before fees from 1988 to 2018. The firm employs scientists and mathematicians rather than traditional Wall Street analysts, using complex mathematical models to find market patterns.",
+    "description": "Founded by mathematician Jim Simons, Renaissance Technologies is widely considered the most successful quantitative trading firm in history. Their flagship Medallion Fund reportedly generated 66% average annual returns before fees from 1988 to 2018. The firm employs scientists and mathematicians rather than traditional Wall Street analysts.",
     "category": "institutions",
     "cik": "0001037389",
     "data_source": "13f",
@@ -104,7 +113,7 @@
   {
     "name": "Citadel Advisors",
     "title": "Multi-Strategy Hedge Fund",
-    "description": "Founded by Ken Griffin, Citadel is one of the world's largest and most profitable hedge funds with over $60B in AUM. Operates across multiple strategies including equities, fixed income, commodities, and quantitative trading. Also runs Citadel Securities, one of the largest market makers on Wall Street, handling roughly 25% of all US equity volume.",
+    "description": "Founded by Ken Griffin, Citadel is one of the world's largest and most profitable hedge funds with over $60B in AUM. Operates across multiple strategies including equities, fixed income, commodities, and quantitative trading. Also runs Citadel Securities, one of the largest market makers on Wall Street.",
     "category": "institutions",
     "cik": "0001423053",
     "data_source": "13f",
@@ -113,7 +122,7 @@
   {
     "name": "Two Sigma Investments",
     "title": "Quantitative Hedge Fund",
-    "description": "A technology-driven systematic investment manager founded by David Siegel and John Overdeck. Uses machine learning, distributed computing, and massive datasets to build predictive models for financial markets. Manages over $60B in assets and employs more engineers and data scientists than traditional portfolio managers.",
+    "description": "A technology-driven systematic investment manager founded by David Siegel and John Overdeck. Uses machine learning, distributed computing, and massive datasets to build predictive models for financial markets. Manages over $60B in assets.",
     "category": "institutions",
     "cik": "0001179392",
     "data_source": "13f",
@@ -122,18 +131,100 @@
   {
     "name": "Tiger Global Management",
     "title": "Technology-Focused Hedge Fund",
-    "description": "Founded by Chase Coleman III, a protege of legendary investor Julian Robertson at Tiger Management. Became one of the most influential technology investors globally with early bets on companies like Facebook, LinkedIn, and JD.com. Their public equity portfolio focuses on high-growth technology and internet companies.",
+    "description": "Founded by Chase Coleman III, a protege of legendary investor Julian Robertson at Tiger Management. Became one of the most influential technology investors globally with early bets on companies like Facebook, LinkedIn, and JD.com.",
     "category": "institutions",
     "cik": "0001167483",
     "data_source": "13f",
     "fmp_name": null
   },
   {
-    "name": "Dan Loeb",
-    "title": "Third Point LLC",
-    "description": "Founder of Third Point LLC, an activist hedge fund that combines deep fundamental research with shareholder activism. Known for writing forceful public letters to company boards demanding strategic changes. Has driven major corporate actions at companies like Yahoo, Sony, and Nestlé. Invests across equities, credit, and structured products.",
-    "category": "investors",
-    "cik": "0001040273",
+    "name": "Bridgewater Associates",
+    "title": "World's Largest Hedge Fund",
+    "description": "The world's largest hedge fund, managing approximately $100B in total assets. Founded by Ray Dalio, Bridgewater pioneered the 'All Weather' and 'Pure Alpha' strategies combining systematic macro investing with risk parity allocation. The 13F portfolio represents their US public equity holdings.",
+    "category": "institutions",
+    "cik": "0001350694",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Pershing Square Capital",
+    "title": "Activist Hedge Fund",
+    "description": "Founded by Bill Ackman, Pershing Square Capital Management is known for taking large concentrated positions in undervalued companies and using activist strategies to drive change. Manages approximately $18B in assets with a focused portfolio of typically 8-12 positions.",
+    "category": "institutions",
+    "cik": "0001336528",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "ARK Invest",
+    "title": "Disruptive Innovation ETFs",
+    "description": "ARK Investment Management, founded by Cathie Wood, focuses exclusively on disruptive innovation across AI, genomics, robotics, energy storage, and blockchain. Manages several actively traded ETFs including the flagship ARK Innovation ETF (ARKK). Known for daily trade transparency and high-conviction growth investing.",
+    "category": "institutions",
+    "cik": "0001603466",
+    "data_source": "13f",
+    "fmp_name": null,
+    "associated_ticker": "ARKK"
+  },
+  {
+    "name": "Baupost Group",
+    "title": "Value-Oriented Hedge Fund",
+    "description": "Founded by Seth Klarman, The Baupost Group is one of the largest and most respected value-oriented hedge funds, managing approximately $25B in assets. Known for holding large cash positions when bargains are scarce and investing across distressed debt, equities, and real estate when opportunities arise.",
+    "category": "institutions",
+    "cik": "0001061768",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Soros Fund Management",
+    "title": "Macro-Focused Family Office",
+    "description": "Founded by George Soros, one of the most successful investors in history. Manages the Soros family fortune through a flexible macro approach spanning equities, currencies, fixed income, and commodities. Now operates as a family office after returning outside investor capital in 2011.",
+    "category": "institutions",
+    "cik": "0001029160",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Appaloosa Management",
+    "title": "Distressed Debt Hedge Fund",
+    "description": "Founded by David Tepper, Appaloosa Management is known for making bold contrarian bets during market dislocations. Specializes in distressed debt and equity investing with a macro overlay. The fund returned 132% in 2009 by buying beaten-down bank stocks during the financial crisis.",
+    "category": "institutions",
+    "cik": "0001656456",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "D.E. Shaw",
+    "title": "Quantitative Hedge Fund",
+    "description": "Founded by David Shaw, D.E. Shaw is one of the largest and most sophisticated quantitative hedge funds in the world, managing over $60B in assets. Combines computational techniques with human judgment across systematic, discretionary, and hybrid strategies spanning equities, fixed income, and alternative investments.",
+    "category": "institutions",
+    "cik": "0001009207",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Millennium Management",
+    "title": "Multi-Strategy Hedge Fund",
+    "description": "Founded by Israel Englander, Millennium Management is one of the world's largest multi-strategy hedge funds managing over $65B in assets. Operates through hundreds of independent trading teams across equities, fixed income, commodities, and quantitative strategies, with rigorous risk controls at both the team and portfolio level.",
+    "category": "institutions",
+    "cik": "0001273087",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Point72 Asset Management",
+    "title": "Multi-Strategy Hedge Fund",
+    "description": "Founded by Steve Cohen, Point72 manages approximately $35B in assets through discretionary long/short equity, systematic trading, and macro strategies. Evolved from SAC Capital Advisors, the firm is known for its deep fundamental research and significant investment in technology and data science.",
+    "category": "institutions",
+    "cik": "0001666091",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "AQR Capital Management",
+    "title": "Quantitative Investment Manager",
+    "description": "Founded by Cliff Asness, AQR Capital Management is a global quantitative investment firm managing over $100B in assets. Pioneered factor-based investing strategies including value, momentum, and low-volatility approaches. Known for rigorous academic research and systematic portfolio construction.",
+    "category": "institutions",
+    "cik": "0001167557",
     "data_source": "13f",
     "fmp_name": null
   },
@@ -167,7 +258,7 @@
   {
     "name": "John Boozman",
     "title": "U.S. Senator (AR)",
-    "description": "U.S. Senator from Arkansas and the most prolific stock trader in the current Senate by transaction count. A senior member of the Appropriations Committee, his portfolio spans hundreds of positions across virtually every sector of the market, making his trading patterns especially noteworthy for market watchers.",
+    "description": "U.S. Senator from Arkansas and the most prolific stock trader in the current Senate by transaction count. A senior member of the Appropriations Committee, his portfolio spans hundreds of positions across virtually every sector of the market.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -176,7 +267,7 @@
   {
     "name": "Markwayne Mullin",
     "title": "U.S. Senator (OK)",
-    "description": "U.S. Senator from Oklahoma and former professional MMA fighter. Maintains one of the largest and most actively traded portfolios in Congress with positions spanning energy, technology, and industrials. His trading frequency and the diversity of his holdings make him a closely tracked congressional investor.",
+    "description": "U.S. Senator from Oklahoma and former professional MMA fighter. Maintains one of the largest and most actively traded portfolios in Congress with positions spanning energy, technology, and industrials.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -185,7 +276,7 @@
   {
     "name": "Sheldon Whitehouse",
     "title": "U.S. Senator (RI)",
-    "description": "U.S. Senator from Rhode Island known for his advocacy on climate change and dark money in politics. Despite his reformist stance, maintains an active stock portfolio with frequent trades. Serves on the Senate Budget Committee and Judiciary Committee, both of which influence corporate regulation.",
+    "description": "U.S. Senator from Rhode Island known for his advocacy on climate change and dark money in politics. Despite his reformist stance, maintains an active stock portfolio with frequent trades. Serves on the Senate Budget Committee and Judiciary Committee.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_senate",
@@ -203,7 +294,7 @@
   {
     "name": "Gilbert Cisneros",
     "title": "U.S. Representative (CA-38)",
-    "description": "U.S. Representative for California's 38th district and a former lottery winner who became a philanthropist and politician. One of the most active stock traders in the House by transaction volume, with hundreds of trades spanning diverse sectors including technology, healthcare, and financial services.",
+    "description": "U.S. Representative for California's 38th district. One of the most active stock traders in the House by transaction volume, with hundreds of trades spanning diverse sectors including technology, healthcare, and financial services.",
     "category": "politicians",
     "cik": null,
     "data_source": "congressional_house",

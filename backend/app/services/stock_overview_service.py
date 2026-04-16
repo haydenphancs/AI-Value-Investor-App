@@ -352,6 +352,32 @@ class StockOverviewService:
             from app.integrations.finra_short_interest import get_short_interest
             fundamentals["short_interest"] = await get_short_interest(ticker)
 
+        # ── Fetch IPO-era price for true all-time CAGR ──────────────
+        # FMP caps historical data at 5,000 rows; for old stocks like AAPL
+        # (IPO 1980) we fetch the first few days around the IPO date separately.
+        ipo_price_data = None
+        profile = fundamentals.get("profile", {})
+        ipo_date_str = profile.get("ipoDate", "")
+        if ipo_date_str:
+            try:
+                from datetime import date as _ipo_date
+                ipo_end = (_ipo_date.fromisoformat(ipo_date_str) + timedelta(days=30)).isoformat()
+                ipo_raw = await self.fmp.get_historical_prices(ticker, ipo_date_str, ipo_end)
+                if isinstance(ipo_raw, dict):
+                    ipo_prices = ipo_raw.get("historical", [])
+                elif isinstance(ipo_raw, list):
+                    ipo_prices = ipo_raw
+                else:
+                    ipo_prices = []
+                if ipo_prices:
+                    ipo_prices.sort(key=lambda p: p.get("date", ""))
+                    ipo_price_data = {
+                        "price": ipo_prices[0].get("close") or ipo_prices[0].get("adjClose"),
+                        "date": ipo_prices[0].get("date", ""),
+                    }
+            except Exception as e:
+                logger.warning(f"IPO price fetch failed for {ticker}: {e}")
+
         # ── Build response from both data sources ─────────────────
         response = self._build_full_response(
             ticker, fundamentals, volatile, chart_range, interval, extended_hours,
@@ -360,6 +386,7 @@ class StockOverviewService:
             valuation_snapshot=val_snapshot,
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
+            ipo_price_data=ipo_price_data,
         )
 
         # Related tickers (async call, uses its own caching)
@@ -603,6 +630,7 @@ class StockOverviewService:
         chart_range: str, interval: str, extended_hours: bool,
         profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
+        ipo_price_data=None,
     ) -> StockOverviewResponse:
         """Combine fundamentals + volatile into one response."""
         profile = fund.get("profile", {})
@@ -686,9 +714,8 @@ class StockOverviewService:
             "industry_rank": sector_industry.industry_rank,
         })
 
-        # Benchmark summary
-        benchmark_summary = await self._build_benchmark_summary(
-            stock_historical, spy_historical, profile=profile, ticker=ticker,
+        benchmark_summary = self._build_benchmark_summary(
+            stock_historical, spy_historical, ipo_price_data=ipo_price_data,
         )
 
         return StockOverviewResponse(
@@ -1418,15 +1445,15 @@ class StockOverviewService:
 
     # ── Benchmark Summary ─────────────────────────────────────────
 
-    async def _build_benchmark_summary(
+    def _build_benchmark_summary(
         self, stock_hist: List[Dict], spy_hist: List[Dict],
-        profile: Optional[Dict] = None, ticker: str = "",
+        ipo_price_data: Optional[Dict] = None,
     ) -> Optional[BenchmarkSummaryResponse]:
         """Compute annualized (CAGR) returns since inception vs S&P 500.
 
-        Uses the IPO date from the company profile and fetches the IPO-era price
-        directly from FMP to avoid the 5,000-row limit on historical data.
-        The 5-year CAGR uses the already-fetched stock_hist (which always covers 5Y).
+        ipo_price_data: {"price": float, "date": str} from the IPO-era fetch
+                        done in get_overview (avoids 5,000-row FMP cap).
+        The 5-year CAGR uses the already-fetched stock_hist (which covers 5Y+).
         """
         if not stock_hist or len(stock_hist) < 252:
             return None
@@ -1453,33 +1480,15 @@ class StockOverviewService:
             return round(((end_price / start_price) ** (1 / yrs) - 1) * 100, 1)
 
         # ── All-time CAGR (from IPO) ──────────────────────────────
-        ipo_date_str = (profile or {}).get("ipoDate", "")
         alltime_stock = None
         alltime_sp = None
         alltime_since = None
-        ipo_start_date = None  # actual date string used for SPY alignment
+        ipo_start_date = None
 
-        if ipo_date_str:
-            # Fetch a small window of prices around IPO to get the earliest price
-            try:
-                ipo_end = (_date.fromisoformat(ipo_date_str) + timedelta(days=30)).isoformat()
-                ipo_prices = await self.fmp.get_historical_prices(
-                    ticker, ipo_date_str, ipo_end,
-                )
-            except Exception:
-                ipo_prices = []
-
-            # FMP may return dict with "historical" key or flat list
-            if isinstance(ipo_prices, dict):
-                ipo_prices = ipo_prices.get("historical", [])
-            elif not isinstance(ipo_prices, list):
-                ipo_prices = []
-
-            if ipo_prices:
-                ipo_prices.sort(key=lambda p: p.get("date", ""))
-                ipo_price = ipo_prices[0].get("close") or ipo_prices[0].get("adjClose")
-                ipo_start_date = ipo_prices[0].get("date", "")[:10]
-                alltime_stock = _cagr_from(ipo_price, stock_end, ipo_start_date, end_date_str)
+        if ipo_price_data and ipo_price_data.get("price") and ipo_price_data.get("date"):
+            ipo_price = ipo_price_data["price"]
+            ipo_start_date = ipo_price_data["date"][:10]
+            alltime_stock = _cagr_from(ipo_price, stock_end, ipo_start_date, end_date_str)
 
         # Fallback: use the earliest available price in stock_hist
         if alltime_stock is None:
@@ -1504,7 +1513,6 @@ class StockOverviewService:
                     sp_found_date = p.get("date", "")[:10]
                     break
             if sp_start_price is None and spy_hist:
-                # SPY data doesn't go back that far — use earliest available
                 sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
                 sp_found_date = spy_hist[0].get("date", "")[:10]
             sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")

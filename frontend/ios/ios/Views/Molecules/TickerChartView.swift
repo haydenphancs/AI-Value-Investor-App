@@ -62,12 +62,20 @@ struct TickerChartView: View {
         return 0
     }
 
-    /// Slice of price points visible in the current viewport
+    /// Slice of price points visible in the current viewport.
+    /// For 1D intraday stock charts, filters to only the latest trading day
+    /// to prevent multiple days overlapping on the time-based X axis.
     private var visiblePoints: [StockPricePoint] {
         guard !pricePoints.isEmpty else { return [] }
         let start = max(0, min(viewportState.visibleStart, pricePoints.count - 1))
         let end = max(start, min(pricePoints.count - 1, viewportState.visibleEnd))
-        return Array(pricePoints[start...end])
+        let sliced = Array(pricePoints[start...end])
+
+        // For 1D stock charts, only show the latest trading day
+        if selectedRange == .oneDay && assetContext != .crypto {
+            return TradingDayHelper.filterToLatestDay(sliced)
+        }
+        return sliced
     }
 
     /// Close prices preceding the visible range so MA/Bollinger

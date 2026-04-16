@@ -44,6 +44,9 @@ class BenchmarkSummaryResponse(BaseModel):
     since_date: Optional[str] = None
     benchmark_since_date: Optional[str] = None
     badge_threshold: Optional[float] = None
+    alltime_annual_return: Optional[float] = None
+    alltime_benchmark: Optional[float] = None
+    alltime_since_date: Optional[str] = None
 
 
 # ── ETF-specific snapshot models ─────────────────────────────────

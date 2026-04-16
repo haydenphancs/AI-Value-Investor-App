@@ -56,6 +56,10 @@ class BenchmarkSummaryResponse(BaseModel):
     since_date: Optional[str] = None
     benchmark_since_date: Optional[str] = None
     badge_threshold: float = 5.0
+    # All-time secondary info (shown below the primary 5-year CAGR)
+    alltime_annual_return: Optional[float] = None
+    alltime_benchmark: Optional[float] = None
+    alltime_since_date: Optional[str] = None
 
 
 class CryptoNewsArticleResponse(BaseModel):

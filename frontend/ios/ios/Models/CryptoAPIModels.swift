@@ -172,6 +172,9 @@ struct BenchmarkSummaryDTO: Codable {
     let sinceDate: String?
     let benchmarkSinceDate: String?
     let badgeThreshold: Double?
+    let alltimeAnnualReturn: Double?
+    let alltimeBenchmark: Double?
+    let alltimeSinceDate: String?
 
     enum CodingKeys: String, CodingKey {
         case avgAnnualReturn = "avg_annual_return"
@@ -180,6 +183,9 @@ struct BenchmarkSummaryDTO: Codable {
         case sinceDate = "since_date"
         case benchmarkSinceDate = "benchmark_since_date"
         case badgeThreshold = "badge_threshold"
+        case alltimeAnnualReturn = "alltime_annual_return"
+        case alltimeBenchmark = "alltime_benchmark"
+        case alltimeSinceDate = "alltime_since_date"
     }
 
     func toModel() -> PerformanceBenchmarkSummary {
@@ -189,7 +195,10 @@ struct BenchmarkSummaryDTO: Codable {
             benchmarkName: benchmarkName ?? "Bitcoin (BTC)",
             sinceDate: sinceDate,
             benchmarkSinceDate: benchmarkSinceDate,
-            badgeThreshold: badgeThreshold ?? 5.0
+            badgeThreshold: badgeThreshold ?? 5.0,
+            alltimeAnnualReturn: alltimeAnnualReturn,
+            alltimeBenchmark: alltimeBenchmark,
+            alltimeSinceDate: alltimeSinceDate
         )
     }
 }

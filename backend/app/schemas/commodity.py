@@ -73,6 +73,9 @@ class BenchmarkSummaryResponse(BaseModel):
     sp_benchmark: float
     benchmark_name: str = "S&P 500"
     since_date: Optional[str] = None
+    alltime_annual_return: Optional[float] = None
+    alltime_benchmark: Optional[float] = None
+    alltime_since_date: Optional[str] = None
 
 
 class CommodityDetailResponse(BaseModel):

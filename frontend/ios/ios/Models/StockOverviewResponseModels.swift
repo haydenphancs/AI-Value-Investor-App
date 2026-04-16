@@ -223,7 +223,12 @@ extension StockOverviewResponseDTO {
         let benchmark: PerformanceBenchmarkSummary? = benchmarkSummary.map {
             PerformanceBenchmarkSummary(
                 avgAnnualReturn: $0.avgAnnualReturn,
-                spBenchmark: $0.spBenchmark
+                spBenchmark: $0.spBenchmark,
+                sinceDate: $0.sinceDate,
+                benchmarkSinceDate: $0.benchmarkSinceDate,
+                alltimeAnnualReturn: $0.alltimeAnnualReturn,
+                alltimeBenchmark: $0.alltimeBenchmark,
+                alltimeSinceDate: $0.alltimeSinceDate
             )
         }
 

@@ -54,6 +54,9 @@ struct PerformanceBenchmarkSummary {
     let sinceDate: String?
     let benchmarkSinceDate: String?
     let badgeThreshold: Double
+    let alltimeAnnualReturn: Double?
+    let alltimeBenchmark: Double?
+    let alltimeSinceDate: String?
 
     init(
         avgAnnualReturn: Double,
@@ -61,7 +64,10 @@ struct PerformanceBenchmarkSummary {
         benchmarkName: String = "S&P 500 Benchmark",
         sinceDate: String? = nil,
         benchmarkSinceDate: String? = nil,
-        badgeThreshold: Double = 0
+        badgeThreshold: Double = 0,
+        alltimeAnnualReturn: Double? = nil,
+        alltimeBenchmark: Double? = nil,
+        alltimeSinceDate: String? = nil
     ) {
         self.avgAnnualReturn = avgAnnualReturn
         self.spBenchmark = spBenchmark
@@ -69,6 +75,9 @@ struct PerformanceBenchmarkSummary {
         self.sinceDate = sinceDate
         self.benchmarkSinceDate = benchmarkSinceDate
         self.badgeThreshold = badgeThreshold
+        self.alltimeAnnualReturn = alltimeAnnualReturn
+        self.alltimeBenchmark = alltimeBenchmark
+        self.alltimeSinceDate = alltimeSinceDate
     }
 
     var isOutperforming: Bool {
@@ -89,6 +98,21 @@ struct PerformanceBenchmarkSummary {
 
     var badgeLabel: String {
         isOutperforming ? "Outperforming" : "Underperforming"
+    }
+
+    // All-time secondary info
+    var hasAlltimeData: Bool {
+        alltimeAnnualReturn != nil && alltimeSinceDate != nil
+    }
+
+    var formattedAlltimeReturn: String {
+        guard let v = alltimeAnnualReturn else { return "" }
+        return String(format: "%.1f%%", v)
+    }
+
+    var formattedAlltimeBenchmark: String {
+        guard let v = alltimeBenchmark else { return "" }
+        return String(format: "%.1f%%", v)
     }
 }
 
@@ -130,6 +154,28 @@ struct PerformanceBenchmarkRow: View {
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
                     }
+                }
+            }
+
+            // Secondary: All-time CAGR (only shown when primary is 5-year)
+            if summary.hasAlltimeData {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("All-time: \(summary.formattedAlltimeReturn)")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                        if let since = summary.alltimeSinceDate {
+                            Text("Since \(since)")
+                                .font(.system(size: 10))
+                                .foregroundColor(AppColors.textMuted.opacity(0.7))
+                        }
+                    }
+
+                    Spacer()
+
+                    Text(summary.formattedAlltimeBenchmark)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
                 }
             }
 

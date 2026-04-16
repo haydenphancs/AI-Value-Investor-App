@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
@@ -202,7 +203,7 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    now = datetime.now(tz=timezone(timedelta(hours=-5)))  # EST
+    now = datetime.now(tz=ZoneInfo("America/New_York"))  # Handles EST/EDT automatically
     hour = now.hour
     minute = now.minute
     weekday = now.weekday()
@@ -221,11 +222,15 @@ def _get_market_status() -> MarketStatusResponse:
         status = "closed"
 
     if status == "closed":
+        # Use the actual UTC offset (handles EST vs EDT correctly)
+        utc_offset = now.strftime("%z")  # e.g. "-0500" or "-0400"
+        offset_formatted = f"{utc_offset[:3]}:{utc_offset[3:]}"  # "-05:00" or "-04:00"
+        tz_abbr = "EDT" if now.dst() else "EST"
         return MarketStatusResponse(
             status="closed",
-            date=now.strftime("%Y-%m-%dT16:00:00-05:00"),
+            date=now.strftime(f"%Y-%m-%dT16:00:00{offset_formatted}"),
             time="4:00 PM",
-            timezone="EST",
+            timezone=tz_abbr,
         )
     return MarketStatusResponse(status=status)
 

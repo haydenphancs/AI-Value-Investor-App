@@ -10,6 +10,7 @@ import SwiftUI
 struct ChartXAxisLabels: View {
     let pricePoints: [StockPricePoint]
     let selectedRange: ChartTimeRange
+    var useIntradayTimeMapping: Bool = false
 
     var body: some View {
         let labels = computeLabels()
@@ -27,6 +28,15 @@ struct ChartXAxisLabels: View {
     }
 
     private func computeLabels() -> [String] {
+        // For 1D intraday with time mapping, use evenly-spaced session labels
+        if useIntradayTimeMapping {
+            let refDate = pricePoints.first.flatMap { ChartDateFormatters.parseDate($0.date) }
+            return TradingDayHelper.sessionTimeLabels(
+                count: selectedRange.xAxisLabelCount,
+                referenceDate: refDate
+            )
+        }
+
         let count = pricePoints.count
         guard count > 1 else {
             if let first = pricePoints.first {

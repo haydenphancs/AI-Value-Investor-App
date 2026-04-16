@@ -21,6 +21,8 @@ struct ChartCrosshairGesture: View {
     let selectedRange: ChartTimeRange
     @ObservedObject var crosshairState: CrosshairState
     @ObservedObject var viewportState: ChartViewportState
+    /// Normalized time fractions for intraday time-based mapping
+    var timeFractions: [CGFloat]? = nil
 
     /// Tracks the viewport snapshot at the start of a pinch gesture
     @State private var zoomAnchorStart: Int = 0
@@ -94,7 +96,12 @@ struct ChartCrosshairGesture: View {
                    idx >= 0, idx < pricePoints.count {
                     let count = pricePoints.count
                     let point = pricePoints[idx]
-                    let x = CGFloat(idx) * size.width / CGFloat(max(1, count - 1))
+                    let x: CGFloat = {
+                        if let fracs = timeFractions, idx < fracs.count {
+                            return fracs[idx] * size.width
+                        }
+                        return CGFloat(idx) * size.width / CGFloat(max(1, count - 1))
+                    }()
 
                     // Compute y from close price
                     let closes = pricePoints.map { $0.close }
@@ -149,8 +156,26 @@ struct ChartCrosshairGesture: View {
         let count = pricePoints.count
         guard count > 1 else { return }
         let x = min(max(location.x, 0), size.width)
-        let idx = Int(round(x / size.width * CGFloat(count - 1)))
-        let clampedIdx = min(max(idx, 0), count - 1)
+
+        let clampedIdx: Int
+        if let fracs = timeFractions, !fracs.isEmpty {
+            // Time-based: find nearest data point by comparing touch fraction
+            let touchFrac = x / size.width
+            var bestIdx = 0
+            var bestDist = CGFloat.greatestFiniteMagnitude
+            for i in 0..<min(fracs.count, count) {
+                let dist = abs(fracs[i] - touchFrac)
+                if dist < bestDist {
+                    bestDist = dist
+                    bestIdx = i
+                }
+            }
+            clampedIdx = bestIdx
+        } else {
+            let idx = Int(round(x / size.width * CGFloat(count - 1)))
+            clampedIdx = min(max(idx, 0), count - 1)
+        }
+
         if crosshairState.selectedIndex != clampedIdx {
             crosshairState.selectedIndex = clampedIdx
         }

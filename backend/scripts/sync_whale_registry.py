@@ -79,8 +79,18 @@ def main():
             if args.dry_run:
                 logger.info("  [DRY RUN] Would create: %s", name)
             else:
-                sb.table("whales").insert(row).execute()
-                logger.info("  Created: %s", name)
+                try:
+                    sb.table("whales").insert(row).execute()
+                    logger.info("  Created: %s", name)
+                except Exception as e:
+                    # CIK unique constraint conflict — retry without CIK
+                    if "23505" in str(e) and "cik" in row:
+                        logger.warning("  CIK conflict for %s, inserting without CIK", name)
+                        row.pop("cik", None)
+                        sb.table("whales").insert(row).execute()
+                        logger.info("  Created (no CIK): %s", name)
+                    else:
+                        raise
             created += 1
 
     logger.info(

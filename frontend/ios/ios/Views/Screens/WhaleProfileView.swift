@@ -175,10 +175,15 @@ struct WhaleAvatarView: View {
             AsyncImage(url: imageURL) { phase in
                 switch phase {
                 case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
+                    Circle()
+                        .fill(Color.white)
                         .frame(width: size, height: size)
+                        .overlay(
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .padding(size * 0.15)
+                        )
                         .clipShape(Circle())
                 case .failure, .empty:
                     initialsAvatar

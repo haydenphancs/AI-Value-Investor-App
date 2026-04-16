@@ -131,14 +131,18 @@ struct TickerChartView: View {
                     overlays: chartSettings.activeOverlays,
                     showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
-                    chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil
+                    chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
+                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto
                 )
 
                 ChartCrosshairGesture(
                     pricePoints: visiblePoints,
                     selectedRange: selectedRange,
                     crosshairState: crosshairState,
-                    viewportState: viewportState
+                    viewportState: viewportState,
+                    timeFractions: (selectedRange == .oneDay && assetContext != .crypto)
+                        ? TradingDayHelper.timeFractions(for: visiblePoints)
+                        : nil
                 )
             }
             .frame(height: 140)
@@ -146,7 +150,11 @@ struct TickerChartView: View {
 
             // X-axis date labels
             if visiblePoints.count > 1 {
-                ChartXAxisLabels(pricePoints: visiblePoints, selectedRange: selectedRange)
+                ChartXAxisLabels(
+                    pricePoints: visiblePoints,
+                    selectedRange: selectedRange,
+                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto
+                )
                     .padding(.horizontal, AppSpacing.lg)
             }
 

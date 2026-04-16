@@ -17,6 +17,8 @@ struct MainChartCanvas: View {
     var lookbackCloses: [Double] = []
     /// Earnings and dividend dates to render as "E" and "D" markers
     var chartEventDates: ChartEventDates? = nil
+    /// When true, use time-based X positioning (1D intraday)
+    var useIntradayTimeMapping: Bool = false
 
     private var lineColor: Color {
         isPositive ? AppColors.bullish : AppColors.bearish
@@ -53,9 +55,21 @@ struct MainChartCanvas: View {
             let size = geometry.size
 
             if pricePoints.count > 1 {
-                let baseCoord = chartType == .candle || chartType == .bar
-                    ? ChartCoordinateSystem.from(pricePoints: pricePoints, size: size)
-                    : ChartCoordinateSystem.from(closes: pricePoints.map { $0.close }, size: size)
+                let useOHLC = chartType == .candle || chartType == .bar
+                let closes = pricePoints.map { $0.close }
+                let baseCoord: ChartCoordinateSystem = {
+                    if useIntradayTimeMapping {
+                        return ChartCoordinateSystem.intradayTimeBased(
+                            closes: closes,
+                            pricePoints: pricePoints,
+                            size: size,
+                            useOHLC: useOHLC
+                        )
+                    }
+                    return useOHLC
+                        ? ChartCoordinateSystem.from(pricePoints: pricePoints, size: size)
+                        : ChartCoordinateSystem.from(closes: closes, size: size)
+                }()
 
                 // Expand coordinate range to include overlay values so MA/Bollinger Bands aren't clipped
                 let coord: ChartCoordinateSystem = {
@@ -103,7 +117,8 @@ struct MainChartCanvas: View {
                         height: size.height,
                         minValue: minVal,
                         maxValue: maxVal,
-                        dataCount: pricePoints.count
+                        dataCount: pricePoints.count,
+                        timeFractions: baseCoord.timeFractions
                     )
                 }()
 

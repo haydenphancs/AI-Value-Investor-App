@@ -14,6 +14,7 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Private
     private var cancellables = Set<AnyCancellable>()
     private let apiClient: APIClient
+    private var priceRefreshTask: Task<Void, Never>?
 
     // MARK: - Published Properties
 
@@ -84,7 +85,12 @@ class TrackingViewModel: ObservableObject {
         // Load real data on init
         Task { [weak self] in
             await self?.loadData()
+            self?.startPriceRefreshTimer()
         }
+    }
+
+    deinit {
+        priceRefreshTask?.cancel()
     }
 
     private func recalculateDiversification(_ holdings: [PortfolioHolding]) {
@@ -253,6 +259,28 @@ class TrackingViewModel: ObservableObject {
         isRefreshing = true
         await loadData()
         isRefreshing = false
+    }
+
+    // MARK: - Live Price Refresh
+
+    /// Periodically re-fetches asset prices while the market is active.
+    func startPriceRefreshTimer() {
+        priceRefreshTask?.cancel()
+        priceRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+                guard MarketHoursUtil.isMarketActive() else { continue }
+                await self.loadTrackingFeed()
+                print("[TrackingVM] 🔄 Auto-refreshed asset prices")
+            }
+        }
+    }
+
+    func stopPriceRefreshTimer() {
+        priceRefreshTask?.cancel()
+        priceRefreshTask = nil
     }
 
     /// Called when the Whales tab appears — retries loading if the list is still empty.

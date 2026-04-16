@@ -67,6 +67,7 @@ class TickerDetailViewModel: ObservableObject {
     private var newsDisplayCount: Int = 10
     private let newsPageSize: Int = 10
     private var chartRefreshTask: Task<Void, Never>?
+    private var quotePollTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -238,13 +239,100 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Live Price
 
     func connectLivePrice() {
-        guard let token = KeychainService.shared.get("access_token") else { return }
-        livePriceManager.connect(ticker: tickerSymbol, authToken: token)
+        let token = KeychainService.shared.get("access_token")
+        if let token = token {
+            livePriceManager.connect(ticker: tickerSymbol, authToken: token)
+        }
+
+        // Fallback: if WebSocket doesn't connect within 5 seconds, start REST polling
+        startQuotePollFallback(hasToken: token != nil)
     }
 
     func disconnectLivePrice() {
         livePriceManager.disconnect()
         stopChartRefreshTimer()
+        stopQuotePoll()
+    }
+
+    // MARK: - REST Quote Polling Fallback
+
+    /// Starts REST polling as a fallback if WebSocket doesn't connect.
+    private func startQuotePollFallback(hasToken: Bool) {
+        quotePollTask?.cancel()
+        quotePollTask = Task { [weak self] in
+            // If we had a token, give WebSocket 5 seconds to connect first
+            if hasToken {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { return }
+                guard let self = self else { return }
+                if self.livePriceManager.isConnected {
+                    print("📡 TickerDetailVM: WebSocket connected, skipping REST polling")
+                    return
+                }
+            }
+
+            print("📡 TickerDetailVM: WebSocket not connected — starting REST quote polling for \(self?.tickerSymbol ?? "")")
+
+            // Poll every 15 seconds
+            while !Task.isCancelled {
+                guard let self = self else { break }
+                guard MarketHoursUtil.isMarketActive() else {
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    continue
+                }
+
+                // Stop polling if WebSocket connected in the meantime
+                if self.livePriceManager.isConnected {
+                    print("📡 TickerDetailVM: WebSocket connected, stopping REST polling")
+                    return
+                }
+
+                await self.pollQuotePrice()
+                try? await Task.sleep(nanoseconds: 15_000_000_000) // 15 seconds
+            }
+        }
+    }
+
+    private func stopQuotePoll() {
+        quotePollTask?.cancel()
+        quotePollTask = nil
+    }
+
+    /// Fetches the latest quote via REST and updates tickerData.
+    private func pollQuotePrice() async {
+        do {
+            let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol)
+            guard var data = self.tickerData, let price = quote.price else { return }
+
+            data.currentPrice = price
+            if let change = quote.change {
+                data.priceChange = change
+            }
+            if let changePct = quote.changePercent {
+                data.priceChangePercent = changePct
+            }
+
+            // Update last chart candle for intraday ranges
+            if self.chartSettings.selectedInterval.isIntraday,
+               !data.chartPricePoints.isEmpty {
+                let lastIndex = data.chartPricePoints.count - 1
+                let last = data.chartPricePoints[lastIndex]
+                let updatedPoint = StockPricePoint(
+                    date: last.date,
+                    close: price,
+                    open: last.open,
+                    high: max(last.high ?? price, price),
+                    low: min(last.low ?? price, price),
+                    volume: last.volume
+                )
+                data.chartPricePoints[lastIndex] = updatedPoint
+            }
+
+            self.tickerData = data
+            print("📡 TickerDetailVM: REST poll updated price to \(price)")
+        } catch {
+            print("⚠️ TickerDetailVM: REST poll failed: \(error)")
+        }
     }
 
     // MARK: - Chart Refresh Timer

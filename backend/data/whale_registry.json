@@ -42,7 +42,7 @@
     "title": "ARK Invest CEO",
     "description": "Founder and CEO of ARK Invest, known for her high-conviction bets on disruptive innovation including AI, genomics, robotics, and blockchain. Her flagship ARK Innovation ETF (ARKK) became one of the most popular actively managed ETFs. Takes bold positions in early-stage technology companies and publishes her trades daily for full transparency.",
     "category": "investors",
-    "cik": "0001603466",
+    "cik": "0001697748",
     "data_source": "13f",
     "fmp_name": null,
     "associated_ticker": "ARKK"
@@ -162,7 +162,7 @@
     "title": "Disruptive Innovation ETFs",
     "description": "ARK Investment Management, founded by Cathie Wood, focuses exclusively on disruptive innovation across AI, genomics, robotics, energy storage, and blockchain. Manages several actively traded ETFs including the flagship ARK Innovation ETF (ARKK). Known for daily trade transparency and high-conviction growth investing.",
     "category": "institutions",
-    "cik": "0001603466",
+    "cik": "0001697748",
     "data_source": "13f",
     "fmp_name": null,
     "associated_ticker": "ARKK"
@@ -217,7 +217,7 @@
     "title": "Multi-Strategy Hedge Fund",
     "description": "Founded by Steve Cohen, Point72 manages approximately $35B in assets through discretionary long/short equity, systematic trading, and macro strategies. Evolved from SAC Capital Advisors, the firm is known for its deep fundamental research and significant investment in technology and data science.",
     "category": "institutions",
-    "cik": "0001666091",
+    "cik": "0001603466",
     "data_source": "13f",
     "fmp_name": null
   },

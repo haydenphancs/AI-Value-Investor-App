@@ -118,58 +118,92 @@ struct AlertDetailView: View {
 
     private func whaleTradeDetail(_ data: AppAlert.WhaleTradeAlertData) -> some View {
         VStack(spacing: AppSpacing.md) {
-            detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Company", value: data.companyName)
-            detailRow(label: "Action", value: data.action.rawValue)
-            detailRow(label: "Whales", value: "\(data.whaleCount)")
-            if let lead = data.leadWhaleName {
-                detailRow(label: "Lead Whale", value: lead)
+            summaryCard {
+                detailRow(label: "Action", value: data.action.rawValue)
+                detailRow(label: "Tickers", value: "\(data.items.count)")
+                detailRow(label: "Total Amount", value: data.totalAmount)
+                detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
             }
-            detailRow(label: "Total Amount", value: data.totalAmount)
-            detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
+
+            ForEach(data.items) { item in
+                summaryCard {
+                    detailRow(label: "Ticker", value: item.ticker)
+                    detailRow(label: "Company", value: item.companyName)
+                    detailRow(label: "Whales", value: "\(item.whaleCount)")
+                    if let lead = item.leadWhaleName {
+                        detailRow(label: "Lead Whale", value: lead)
+                    }
+                    detailRow(label: "Amount", value: item.amount)
+                }
+            }
         }
-        .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
     }
 
     // MARK: - Analyst Rating Detail
 
     private func analystRatingDetail(_ data: AppAlert.AnalystRatingAlertData) -> some View {
         VStack(spacing: AppSpacing.md) {
-            detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Firm", value: data.firmName)
-            detailRow(label: "Action", value: data.action.rawValue.capitalized)
-            if let prev = data.previousRating {
-                detailRow(label: "Rating", value: "\(prev) → \(data.newRating)")
-            } else {
-                detailRow(label: "Rating", value: data.newRating)
+            summaryCard {
+                detailRow(label: "Updates", value: "\(data.items.count)")
+                detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
             }
-            if let pt = data.priceTarget {
-                let ptStr = "$\(Int(pt))"
-                if let prevPt = data.previousPriceTarget {
-                    detailRow(label: "Price Target", value: "$\(Int(prevPt)) → \(ptStr)")
-                } else {
-                    detailRow(label: "Price Target", value: ptStr)
+
+            ForEach(data.items) { item in
+                summaryCard {
+                    detailRow(label: "Ticker", value: item.ticker)
+                    detailRow(label: "Firm", value: item.firmName)
+                    detailRow(label: "Action", value: item.action.rawValue.capitalized)
+                    if let prev = item.previousRating {
+                        detailRow(label: "Rating", value: "\(prev) → \(item.newRating)")
+                    } else {
+                        detailRow(label: "Rating", value: item.newRating)
+                    }
+                    if let pt = item.priceTarget {
+                        let ptStr = "$\(Int(pt))"
+                        if let prevPt = item.previousPriceTarget {
+                            detailRow(label: "Price Target", value: "$\(Int(prevPt)) → \(ptStr)")
+                        } else {
+                            detailRow(label: "Price Target", value: ptStr)
+                        }
+                    }
+                    if item.day > 0 {
+                        detailRow(label: "Date", value: "\(item.formattedMonth) \(item.formattedDay)")
+                    }
                 }
             }
-            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
         }
-        .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
     }
 
     // MARK: - Insider Transaction Detail
 
     private func insiderTransactionDetail(_ data: AppAlert.InsiderTransactionAlertData) -> some View {
         VStack(spacing: AppSpacing.md) {
-            detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Insider", value: data.insiderName)
-            detailRow(label: "Title", value: data.insiderTitle)
-            detailRow(label: "Action", value: data.action.rawValue)
-            detailRow(label: "Amount", value: data.amount)
-            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
+            summaryCard {
+                detailRow(label: "Action", value: data.action.rawValue)
+                detailRow(label: "Insiders", value: "\(data.items.count)")
+                detailRow(label: "Total Amount", value: data.totalAmount)
+                detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
+            }
+
+            ForEach(data.items) { item in
+                summaryCard {
+                    detailRow(label: "Ticker", value: item.ticker)
+                    detailRow(label: "Insider", value: item.insiderName)
+                    detailRow(label: "Title", value: item.insiderTitle)
+                    detailRow(label: "Amount", value: item.amount)
+                    if item.day > 0 {
+                        detailRow(label: "Date", value: "\(item.formattedMonth) \(item.formattedDay)")
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Summary Card Wrapper
+
+    private func summaryCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            content()
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

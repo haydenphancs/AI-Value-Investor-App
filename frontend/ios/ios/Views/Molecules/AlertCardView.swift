@@ -84,7 +84,7 @@ struct AlertCardView: View {
             Text("\(data.items.count)")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-            Text("UPDATES")
+            Text("CHANGES")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }

@@ -72,40 +72,17 @@ def main():
             if args.dry_run:
                 logger.info("  [DRY RUN] Would update: %s", name)
             else:
-                try:
-                    sb.table("whales").update(row).eq(
-                        "id", existing_names[name]
-                    ).execute()
-                    logger.info("  Updated: %s", name)
-                except Exception as e:
-                    # CIK unique conflict (another whale owns this CIK, e.g.
-                    # Ray Dalio + Bridgewater share one). Retry without CIK.
-                    if "23505" in str(e) and "cik" in row:
-                        logger.warning("  CIK conflict for %s, updating without CIK", name)
-                        row_no_cik = {k: v for k, v in row.items() if k != "cik"}
-                        sb.table("whales").update(row_no_cik).eq(
-                            "id", existing_names[name]
-                        ).execute()
-                        logger.info("  Updated (no CIK): %s", name)
-                    else:
-                        raise
+                sb.table("whales").update(row).eq(
+                    "id", existing_names[name]
+                ).execute()
+                logger.info("  Updated: %s", name)
             updated += 1
         else:
             if args.dry_run:
                 logger.info("  [DRY RUN] Would create: %s", name)
             else:
-                try:
-                    sb.table("whales").insert(row).execute()
-                    logger.info("  Created: %s", name)
-                except Exception as e:
-                    # CIK unique constraint conflict — retry without CIK
-                    if "23505" in str(e) and "cik" in row:
-                        logger.warning("  CIK conflict for %s, inserting without CIK", name)
-                        row.pop("cik", None)
-                        sb.table("whales").insert(row).execute()
-                        logger.info("  Created (no CIK): %s", name)
-                    else:
-                        raise
+                sb.table("whales").insert(row).execute()
+                logger.info("  Created: %s", name)
             created += 1
 
     logger.info(

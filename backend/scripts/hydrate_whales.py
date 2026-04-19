@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -172,6 +173,7 @@ class WhaleHydrator:
         total_value = raw["total_value"]
         raw_hash = raw["raw_hash"]
         perf_data = raw.get("perf_data", {})
+        perf_data_list = raw.get("perf_data_list", [])
         filing_period = raw["filing_period"]
         filing_date = raw["filing_date"]
         prev_holdings = raw.get("prev_holdings", [])
@@ -328,6 +330,7 @@ class WhaleHydrator:
             "total_value": total_value,
             "raw_hash": raw_hash,
             "perf_data": perf_data if isinstance(perf_data, dict) else {},
+            "perf_data_list": perf_data_list if isinstance(perf_data_list, list) else [],
             "filing_period": period,
             "filing_date": filing_date,
         }
@@ -1111,7 +1114,7 @@ class WhaleHydrator:
             except Exception as e:
                 logger.warning("  Ticker CAGR failed for %s: %s", ticker, e)
 
-        # Tier 2: 13F year-end average
+        # Tier 2: 13F portfolio CAGR (geometric mean of year-end returns)
         perf_list = perf_data if isinstance(perf_data, list) else []
         if perf_list:
             year_end_returns = [
@@ -1122,13 +1125,15 @@ class WhaleHydrator:
                 and -200 < d["performancePercentage1year"] < 500
             ]
             if year_end_returns:
-                avg = round(sum(year_end_returns) / len(year_end_returns), 2)
-                return avg, "13f_avg", "13F Portfolio Avg."
+                product = math.prod(1 + r / 100 for r in year_end_returns)
+                if product > 0:
+                    cagr = (product ** (1 / len(year_end_returns)) - 1) * 100
+                    return round(cagr, 2), "13f_avg", "13F Portfolio CAGR"
 
             latest = perf_list[0]
             val = latest.get("performancePercentage1year")
             if val is not None and -200 < val < 500:
-                return round(float(val), 2), "13f_avg", "13F Portfolio Avg."
+                return round(float(val), 2), "13f_avg", "13F Portfolio CAGR"
 
         return None, "", ""
 

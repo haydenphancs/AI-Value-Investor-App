@@ -14,7 +14,6 @@ private enum WhaleCategoryFilter: String, CaseIterable {
     case investors = "Investors"
     case institutions = "Institutions"
     case politicians = "Politicians"
-    case crypto = "Crypto"
 
     var matchedCategory: WhaleCategory? {
         switch self {
@@ -22,7 +21,6 @@ private enum WhaleCategoryFilter: String, CaseIterable {
         case .investors: return .investors
         case .institutions: return .institutions
         case .politicians: return .politicians
-        case .crypto: return .cryptoWhales
         }
     }
 }

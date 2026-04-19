@@ -16,7 +16,8 @@
     "category": "investors",
     "cik": "0001336528",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "associated_ticker": "PSH.L"
   },
   {
     "name": "Michael Burry",
@@ -153,7 +154,8 @@
     "category": "institutions",
     "cik": "0001336528",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "associated_ticker": "PSH.L"
   },
   {
     "name": "ARK Invest",

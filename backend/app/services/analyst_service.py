@@ -314,14 +314,22 @@ def _build_actions(grades: List[Dict], limit: int = 50) -> List[AnalystAction]:
         previous = g.get("previousGrade") or None
         new = g.get("newGrade", "N/A")
         action_type = _map_action(g.get("action", ""), previous, new)
+        try:
+            prev_pt = float(g["previousPriceTarget"]) if g.get("previousPriceTarget") is not None else None
+        except (TypeError, ValueError):
+            prev_pt = None
+        try:
+            new_pt = float(g["priceTarget"]) if g.get("priceTarget") is not None else None
+        except (TypeError, ValueError):
+            new_pt = None
         actions.append(AnalystAction(
             firm_name=g.get("gradingCompany", "Unknown"),
             action_type=action_type,
             date=date_str[:10],
             previous_rating=previous,
             new_rating=new,
-            previous_price_target=None,
-            new_price_target=None,
+            previous_price_target=prev_pt,
+            new_price_target=new_pt,
         ))
     return actions
 

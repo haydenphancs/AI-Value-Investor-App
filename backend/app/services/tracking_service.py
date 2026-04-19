@@ -318,24 +318,28 @@ class TrackingService:
                 timing_token = parse_fmp_timing(entry.get("time"))
                 report_time = alert_report_time(timing_token)
 
-                # Build description
-                eps_est = entry.get("epsEstimated")
-                rev_est = entry.get("revenueEstimated")
-                desc_parts = []
-                if eps_est is not None:
-                    desc_parts.append(f"EPS Est: ${eps_est:.2f}")
-                if rev_est is not None:
-                    rev_b = float(rev_est) / 1_000_000_000
-                    desc_parts.append(f"Rev Est: ${rev_b:.1f}B")
-                description = ". ".join(desc_parts) if desc_parts else "Earnings report upcoming"
+                # Consensus numbers — emitted as structured fields so the
+                # iOS detail view shows "EPS Est: $X | Rev Est: $YB" in the
+                # Consensus row without repeating the sentence.
+                try:
+                    eps_est = float(entry["epsEstimated"]) if entry.get("epsEstimated") is not None else None
+                except (TypeError, ValueError):
+                    eps_est = None
+                try:
+                    rev_est = float(entry["revenueEstimated"]) if entry.get("revenueEstimated") is not None else None
+                except (TypeError, ValueError):
+                    rev_est = None
 
-                # Only mention the trading session when FMP actually told us
-                # — don't hallucinate "after market close" for missing data.
+                # One-line description for the card. iOS rebuilds its own
+                # version for the alert card, but keep a sane fallback here.
+                date_phrase = f"on {month} {day}" if day and month else ""
                 sentence = timing_sentence(timing_token)
+                pieces = [f"{symbol} reports earnings"]
+                if date_phrase:
+                    pieces.append(date_phrase)
                 if sentence:
-                    full_desc = f"{symbol} reports earnings {sentence}. {description}"
-                else:
-                    full_desc = f"{symbol} reports earnings. {description}"
+                    pieces.append(sentence)
+                full_desc = " ".join(pieces) + "."
 
                 alerts.append(
                     AlertResponse(
@@ -347,6 +351,8 @@ class TrackingService:
                         day=day,
                         month=month,
                         report_time=report_time,
+                        eps_estimate=eps_est,
+                        revenue_estimate=rev_est,
                     )
                 )
 
@@ -522,12 +528,17 @@ class TrackingService:
                     # Keep scanning for a material action within the window.
                     continue
 
+                price_target = _opt_float(entry.get("priceTarget"))
+                previous_price_target = _opt_float(entry.get("previousPriceTarget"))
+
                 return AnalystRatingItemResponse(
                     ticker=ticker.upper(),
                     firm_name=firm,
                     rating_action=rating_action,
                     new_rating=new_rating,
                     previous_rating=previous_rating,
+                    price_target=price_target,
+                    previous_price_target=previous_price_target,
                     day=dt.day,
                     month=dt.strftime("%b").upper(),
                 )
@@ -740,6 +751,16 @@ def _join_tickers(tickers: List[str], max_visible: int = 4) -> str:
         return ", ".join(tickers)
     head = ", ".join(tickers[:max_visible])
     return f"{head} and {len(tickers) - max_visible} more"
+
+
+def _opt_float(value: Any) -> Optional[float]:
+    """Return ``float(value)`` when possible, else ``None``."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_date(date_str: str) -> Optional[datetime]:

@@ -86,7 +86,12 @@ enum AppAlert: Identifiable {
         let id = UUID()
         let ticker: String
         let companyName: String
-        let reportTime: EarningsReportTime
+        /// ``nil`` when FMP didn't specify a trading session — matches the
+        /// Financials Earnings section, which shows "Time Not Specified"
+        /// rather than a hallucinated "before market open".
+        let reportTime: EarningsReportTime?
+        /// Short consensus string like "EPS Est: $1.00 · Rev Est: $20.0B",
+        /// or empty when neither estimate was available.
         let consensus: String
         let day: Int
         let month: String
@@ -203,7 +208,18 @@ enum AppAlert: Identifiable {
     var description: String {
         switch self {
         case .earnings(let data):
-            return "\(data.ticker) reports earnings tomorrow \(data.reportTime.displayText). Analyst consensus: \(data.consensus)"
+            var pieces: [String] = ["\(data.ticker) reports earnings"]
+            if !data.formattedMonth.isEmpty && data.day > 0 {
+                pieces.append("on \(data.formattedMonth) \(data.formattedDay)")
+            }
+            if let timing = data.reportTime {
+                pieces.append(timing.displayText)
+            }
+            var sentence = pieces.joined(separator: " ") + "."
+            if !data.consensus.isEmpty {
+                sentence += " \(data.consensus)"
+            }
+            return sentence
         case .market(let data):
             return data.description
         case .whaleTrade(let data):
@@ -253,14 +269,18 @@ enum AnalystRatingAction: String {
     case upgrade
     case downgrade
     case initiate
-    case reiterate
+    /// Matches the backend's `_analyst_common.normalize_fmp_action()` canon
+    /// ("upgrade" | "downgrade" | "initiate" | "maintain"). The alert feed
+    /// filters maintains out today, but the fallback decode path still needs
+    /// a bucket for them if the filter ever loosens.
+    case maintain
 
     var iconName: String {
         switch self {
         case .upgrade: return "arrow.up.right"
         case .downgrade: return "arrow.down.right"
         case .initiate: return "sparkles"
-        case .reiterate: return "equal"
+        case .maintain: return "equal"
         }
     }
 
@@ -269,7 +289,7 @@ enum AnalystRatingAction: String {
         case .upgrade: return AppColors.bullish
         case .downgrade: return AppColors.bearish
         case .initiate: return AppColors.primaryBlue
-        case .reiterate: return AppColors.alertOrange
+        case .maintain: return AppColors.alertOrange
         }
     }
 }
@@ -397,6 +417,8 @@ struct AlertDTO: Codable, Identifiable {
     let day: Int?
     let month: String?
     let reportTime: String?
+    let epsEstimate: Double?
+    let revenueEstimate: Double?
 
     // shared rollup
     let action: String?
@@ -413,6 +435,8 @@ struct AlertDTO: Codable, Identifiable {
         case companyName = "company_name"
         case day, month
         case reportTime = "report_time"
+        case epsEstimate = "eps_estimate"
+        case revenueEstimate = "revenue_estimate"
         case action
         case totalAmount = "total_amount"
         case timeWindowLabel = "time_window_label"
@@ -424,11 +448,28 @@ struct AlertDTO: Codable, Identifiable {
     func toAppAlert() -> AppAlert {
         switch type {
         case "earnings":
+            let mappedTime: AppAlert.EarningsReportTime?
+            switch reportTime {
+            case "before_open": mappedTime = .beforeOpen
+            case "after_close": mappedTime = .afterClose
+            default:            mappedTime = nil
+            }
+
+            var consensusParts: [String] = []
+            if let eps = epsEstimate {
+                consensusParts.append(String(format: "EPS Est: $%.2f", eps))
+            }
+            if let rev = revenueEstimate {
+                let revB = rev / 1_000_000_000
+                consensusParts.append(String(format: "Rev Est: $%.1fB", revB))
+            }
+            let consensus = consensusParts.joined(separator: " · ")
+
             return .earnings(AppAlert.EarningsData(
                 ticker: ticker ?? "",
                 companyName: companyName ?? "",
-                reportTime: reportTime == "after_close" ? .afterClose : .beforeOpen,
-                consensus: description,
+                reportTime: mappedTime,
+                consensus: consensus,
                 day: day ?? 0,
                 month: month ?? ""
             ))
@@ -525,7 +566,7 @@ struct AnalystRatingItemDTO: Codable {
         AppAlert.AnalystRatingItem(
             ticker: ticker,
             firmName: firmName,
-            action: AnalystRatingAction(rawValue: ratingAction.lowercased()) ?? .reiterate,
+            action: AnalystRatingAction(rawValue: ratingAction.lowercased()) ?? .maintain,
             newRating: newRating,
             previousRating: previousRating,
             priceTarget: priceTarget,
@@ -781,7 +822,7 @@ extension AppAlert {
             ticker: "NVDA",
             companyName: "NVIDIA Corp.",
             reportTime: .afterClose,
-            consensus: "Beat expected",
+            consensus: "EPS Est: $1.00 · Rev Est: $20.0B",
             day: 22,
             month: "FEB"
         )),

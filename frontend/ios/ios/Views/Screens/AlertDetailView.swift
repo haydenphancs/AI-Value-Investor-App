@@ -96,8 +96,12 @@ struct AlertDetailView: View {
         VStack(spacing: AppSpacing.md) {
             detailRow(label: "Ticker", value: data.ticker)
             detailRow(label: "Company", value: data.companyName)
-            detailRow(label: "Report Time", value: data.reportTime.displayText.capitalized)
-            detailRow(label: "Consensus", value: data.consensus)
+            if let timing = data.reportTime {
+                detailRow(label: "Report Time", value: timing.displayText.capitalized)
+            }
+            if !data.consensus.isEmpty {
+                detailRow(label: "Consensus", value: data.consensus)
+            }
             detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
         }
         .padding(AppSpacing.lg)

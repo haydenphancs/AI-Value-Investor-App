@@ -164,6 +164,32 @@ class WhaleHydrator:
 
         if not raw:
             logger.warning("  No data returned for %s", name)
+            # Ticker-only fallback: if whale has an associated_ticker
+            # (e.g. PSH.L, ARKK), we can still compute its Tier-1 CAGR
+            # even without 13F holdings.
+            if whale.get("associated_ticker"):
+                ytd_return, return_source, return_label = (
+                    await self._compute_ytd_return(
+                        whale_id, 0.0, [], whale=whale
+                    )
+                )
+                if ytd_return is not None:
+                    try:
+                        self.sb.table("whales").update({
+                            "ytd_return": ytd_return,
+                            "return_source": return_source,
+                            "return_label": return_label,
+                        }).eq("id", whale_id).execute()
+                        logger.info(
+                            "  %s — ticker-only return updated: %s%% (%s)",
+                            name, ytd_return, return_label,
+                        )
+                        self.stats["processed"] += 1
+                        return
+                    except Exception as e:
+                        logger.error(
+                            "  Ticker-only update failed for %s: %s", name, e
+                        )
             self.stats["skipped"] += 1
             return
 
@@ -393,12 +419,14 @@ class WhaleHydrator:
     def _build_13f_holdings(
         self, raw_holdings: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Transform raw FMP 13F data into normalized holdings."""
-        total = sum(float(h.get("value") or 0) for h in raw_holdings)
-        if total <= 0:
-            return []
+        """Transform raw FMP 13F data into normalized holdings.
 
-        holdings = []
+        Aggregates by ticker so multiple CUSIPs for the same symbol
+        (share classes, call/put option tranches) collapse into one
+        position. Without this, DB INSERT hits the UNIQUE(whale_id,
+        ticker) constraint and allocations double-count.
+        """
+        by_ticker: Dict[str, Dict[str, Any]] = {}
         for h in raw_holdings:
             val = float(h.get("value") or 0)
             if val <= 0:
@@ -406,19 +434,30 @@ class WhaleHydrator:
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if not sym or sym == "--":
                 continue
-            holdings.append({
-                "ticker": sym,
-                "company_name": (
-                    h.get("securityName") or h.get("companyName") or sym
-                ),
-                "logo_url": None,
-                "allocation": round(val / total * 100, 2),
-                "change_percent": 0.0,
-                "value": val,
-                "shares": int(
-                    float(h.get("sharesNumber") or h.get("shares") or 0)
-                ),
-            })
+            shares = int(float(h.get("sharesNumber") or h.get("shares") or 0))
+            name = h.get("securityName") or h.get("companyName") or sym
+
+            existing = by_ticker.get(sym)
+            if existing:
+                existing["value"] += val
+                existing["shares"] += shares
+            else:
+                by_ticker[sym] = {
+                    "ticker": sym,
+                    "company_name": name,
+                    "logo_url": None,
+                    "value": val,
+                    "shares": shares,
+                }
+
+        total = sum(h["value"] for h in by_ticker.values())
+        if total <= 0:
+            return []
+
+        holdings = list(by_ticker.values())
+        for h in holdings:
+            h["allocation"] = round(h["value"] / total * 100, 2)
+            h["change_percent"] = 0.0
 
         holdings.sort(key=lambda x: x["value"], reverse=True)
         return holdings

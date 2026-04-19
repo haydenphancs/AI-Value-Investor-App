@@ -11,7 +11,6 @@ import SwiftUI
 struct AssetsListSection: View {
     let assets: [TrackedAsset]
     var onSortTapped: (() -> Void)?
-    var onAddTapped: (() -> Void)?
     var onAssetTapped: ((TrackedAsset) -> Void)?
     var onRemoveAsset: ((TrackedAsset) -> Void)?
 
@@ -23,9 +22,11 @@ struct AssetsListSection: View {
                 Spacer()
             }
             .padding(.horizontal, AppSpacing.lg)
-            .padding(.bottom, AppSpacing.md)
 
-            // Assets List with swipe-to-delete
+            // Assets List with swipe-to-delete.
+            // InsetGroupedListStyle adds its own ~20pt top inset we can't
+            // control; negative top padding cancels it so the gap below the
+            // Sort row visually matches the 8pt the parent adds above it.
             List {
                 Section {
                     ForEach(Array(assets.enumerated()), id: \.element.id) { index, asset in
@@ -51,19 +52,12 @@ struct AssetsListSection: View {
             .listSectionSpacing(AppSpacing.sm)
             .scrollContentBackground(.hidden)
             .scrollDisabled(true)
-            .frame(height: CGFloat(assets.count) * 72 + 20)
-
-            // Add button
-            Button(action: { onAddTapped?() }) {
-                Image(systemName: "plus")
-                    .font(AppTypography.iconSmall).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(AppSpacing.md)
-                    .background(AppColors.cardBackground)
-                    .cornerRadius(AppCornerRadius.pill)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, AppSpacing.md)
+            // Negative top padding cancels InsetGroupedListStyle's built-in
+            // top inset so the gap under "Sort" matches the gap above it.
+            // Bottom is left untouched — negative padding there leaks hit-
+            // testing into the next section and freezes the outer ScrollView.
+            .padding(.top, -AppSpacing.md)
+            .frame(height: CGFloat(assets.count) * 72 + 8)
         }
     }
 }

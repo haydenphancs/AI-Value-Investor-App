@@ -15,6 +15,7 @@ Design:
 import asyncio
 import hashlib
 import json
+import math
 import time as _time
 import uuid
 from datetime import datetime, timedelta
@@ -1986,20 +1987,20 @@ class WhaleService:
             if cagr is not None:
                 return cagr, "stock_cagr", f"{ticker} CAGR"
 
-        # Tier 2: 13F portfolio average
-        avg = self._compute_avg_annual_return(perf_list)
-        if avg is not None:
-            return avg, "13f_avg", "13F Portfolio Avg."
+        # Tier 2: 13F portfolio CAGR (compound annualized)
+        cagr = self._compute_avg_annual_return(perf_list)
+        if cagr is not None:
+            return cagr, "13f_avg", "13F Portfolio CAGR"
 
         return None, "", ""
 
     @staticmethod
     def _compute_avg_annual_return(perf_list: List[Dict]) -> Optional[float]:
-        """Compute historical average annual return from year-end records.
+        """Compute compound annualized return (CAGR) from year-end 13F records.
 
-        Uses Q4 (Dec 31) snapshots' 1-year performance to get true
-        calendar-year returns, then averages across all available years.
-        Filters out corrupted outlier data (|return| > 200%).
+        Takes Q4 (Dec 31) snapshots' 1-year performance as calendar-year
+        returns, then compounds them geometrically to produce a true CAGR
+        over the observed history. Filters outliers (|return| > 200%).
         """
         if not perf_list:
             return None
@@ -2020,8 +2021,11 @@ class WhaleService:
                 return round(float(val), 2)
             return None
 
-        avg = sum(year_end_returns) / len(year_end_returns)
-        return round(avg, 2)
+        product = math.prod(1 + r / 100 for r in year_end_returns)
+        if product <= 0:
+            return None
+        cagr = (product ** (1 / len(year_end_returns)) - 1) * 100
+        return round(cagr, 2)
 
     async def _sync_to_whale_tables(
         self,

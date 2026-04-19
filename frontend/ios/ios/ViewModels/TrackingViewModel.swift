@@ -208,12 +208,19 @@ class TrackingViewModel: ObservableObject {
 
                 // Split into followed vs not-followed
                 self.trackedWhales = allWhales.filter { $0.isFollowing }
-                self.popularWhales = Array(allWhales.filter { !$0.isFollowing }.prefix(5))
                 self.allPopularWhales = allWhales
 
-                // Hero whales: first 4 with descriptions (or top 4 overall)
+                // Hero whales: top 5 with descriptions (fallback: top 5 overall)
                 let whalesWithDesc = allWhales.filter { !$0.description.isEmpty }
-                self.heroWhales = Array((whalesWithDesc.isEmpty ? allWhales : whalesWithDesc).prefix(4))
+                self.heroWhales = Array((whalesWithDesc.isEmpty ? allWhales : whalesWithDesc).prefix(5))
+
+                // Popular row: next 5 unfollowed whales after the hero (no dup with hero)
+                let heroIds = Set(self.heroWhales.map(\.id))
+                self.popularWhales = Array(
+                    allWhales
+                        .filter { !$0.isFollowing && !heroIds.contains($0.id) }
+                        .prefix(5)
+                )
 
                 print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
                 return // success — exit loop

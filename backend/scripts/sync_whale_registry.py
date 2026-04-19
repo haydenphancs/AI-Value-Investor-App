@@ -65,15 +65,30 @@ def main():
             row["cik"] = whale["cik"]
         if whale.get("fmp_name"):
             row["fmp_name"] = whale["fmp_name"]
+        if whale.get("associated_ticker"):
+            row["associated_ticker"] = whale["associated_ticker"]
 
         if name in existing_names:
             if args.dry_run:
                 logger.info("  [DRY RUN] Would update: %s", name)
             else:
-                sb.table("whales").update(row).eq(
-                    "id", existing_names[name]
-                ).execute()
-                logger.info("  Updated: %s", name)
+                try:
+                    sb.table("whales").update(row).eq(
+                        "id", existing_names[name]
+                    ).execute()
+                    logger.info("  Updated: %s", name)
+                except Exception as e:
+                    # CIK unique conflict (another whale owns this CIK, e.g.
+                    # Ray Dalio + Bridgewater share one). Retry without CIK.
+                    if "23505" in str(e) and "cik" in row:
+                        logger.warning("  CIK conflict for %s, updating without CIK", name)
+                        row_no_cik = {k: v for k, v in row.items() if k != "cik"}
+                        sb.table("whales").update(row_no_cik).eq(
+                            "id", existing_names[name]
+                        ).execute()
+                        logger.info("  Updated (no CIK): %s", name)
+                    else:
+                        raise
             updated += 1
         else:
             if args.dry_run:

@@ -609,7 +609,6 @@ enum WhaleCategory: String, CaseIterable {
     case investors = "Investors"
     case institutions = "Institutions"
     case politicians = "Politicians"
-    case cryptoWhales = "Crypto"
 
     /// Maps lowercase backend category strings to the enum
     static func fromBackend(_ value: String) -> WhaleCategory {
@@ -617,7 +616,6 @@ enum WhaleCategory: String, CaseIterable {
         case "investors": return .investors
         case "institutions": return .institutions
         case "politicians": return .politicians
-        case "crypto": return .cryptoWhales
         default: return .investors
         }
     }
@@ -628,7 +626,6 @@ enum WhaleCategory: String, CaseIterable {
         case .investors: return "investors"
         case .institutions: return "institutions"
         case .politicians: return "politicians"
-        case .cryptoWhales: return "crypto"
         }
     }
 }
@@ -986,14 +983,6 @@ extension TrendingWhale {
             recentTradeCount: 4
         ),
         TrendingWhale(
-            name: "Michael Saylor",
-            category: .cryptoWhales,
-            avatarName: "avatar_saylor",
-            followersCount: 134000,
-            isFollowing: true,
-            recentTradeCount: 2
-        ),
-        TrendingWhale(
             name: "Michael Burry",
             category: .investors,
             avatarName: "avatar_burry",
@@ -1003,7 +992,7 @@ extension TrendingWhale {
         )
     ]
 
-    // Top 5 popular whales for main screen (mixed categories)
+    // Top popular whales for main screen (mixed categories)
     static let topPopularWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Ray Dalio",
@@ -1028,14 +1017,6 @@ extension TrendingWhale {
             followersCount: 89000,
             isFollowing: false,
             title: "ARK Invest CEO"
-        ),
-        TrendingWhale(
-            name: "Vitalik Buterin",
-            category: .cryptoWhales,
-            avatarName: "avatar_vitalik",
-            followersCount: 201000,
-            isFollowing: false,
-            title: "Ethereum Co-founder"
         ),
         TrendingWhale(
             name: "Tommy Tuberville",
@@ -1131,17 +1112,8 @@ extension TrendingWhale {
         TrendingWhale(name: "Dan Sullivan", category: .politicians, avatarName: "avatar_sullivan", followersCount: 18000, isFollowing: false, title: "U.S. Senator (AK)")
     ]
 
-    // 5 Crypto Whales
-    static let allCryptoWhalesData: [TrendingWhale] = [
-        TrendingWhale(name: "Vitalik Buterin", category: .cryptoWhales, avatarName: "avatar_vitalik", followersCount: 201000, isFollowing: false, title: "Ethereum Co-founder"),
-        TrendingWhale(name: "Changpeng Zhao", category: .cryptoWhales, avatarName: "avatar_cz", followersCount: 175000, isFollowing: false, title: "Binance Founder"),
-        TrendingWhale(name: "Michael Saylor", category: .cryptoWhales, avatarName: "avatar_saylor", followersCount: 134000, isFollowing: false, title: "MicroStrategy Chairman"),
-        TrendingWhale(name: "Brian Armstrong", category: .cryptoWhales, avatarName: "avatar_armstrong", followersCount: 88000, isFollowing: false, title: "Coinbase CEO"),
-        TrendingWhale(name: "Chris Larsen", category: .cryptoWhales, avatarName: "avatar_larsen", followersCount: 48000, isFollowing: false, title: "Ripple Co-founder")
-    ]
-
     // All popular whales combined
-    static let allPopularWhalesData: [TrendingWhale] = allInvestorsData + allInstitutionsData + allPoliticiansData + allCryptoWhalesData
+    static let allPopularWhalesData: [TrendingWhale] = allInvestorsData + allInstitutionsData + allPoliticiansData
 
     // Combined for backward compatibility
     static let sampleData: [TrendingWhale] = trackedWhalesData + topPopularWhalesData

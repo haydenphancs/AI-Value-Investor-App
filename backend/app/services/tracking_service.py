@@ -395,6 +395,7 @@ class TrackingService:
                     "company_name": row.get("company_name") or ticker,
                     "total_amount": 0.0,
                     "whale_ids": set(),
+                    "lead_whale_id": None,
                     "lead_whale_name": None,
                     "lead_whale_avatar": None,
                 },
@@ -409,6 +410,7 @@ class TrackingService:
             if bucket["lead_whale_name"] is None:
                 whale = row.get("whales") or {}
                 if isinstance(whale, dict):
+                    bucket["lead_whale_id"] = whale_id
                     bucket["lead_whale_name"] = whale.get("name")
                     bucket["lead_whale_avatar"] = whale.get("avatar_url")
 
@@ -430,6 +432,7 @@ class TrackingService:
                     company_name=bucket["company_name"],
                     whale_count=whale_count,
                     amount=amount_label,
+                    lead_whale_id=bucket["lead_whale_id"],
                     lead_whale_name=bucket["lead_whale_name"],
                     lead_whale_avatar_name=bucket["lead_whale_avatar"],
                 )

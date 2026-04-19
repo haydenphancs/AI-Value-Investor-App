@@ -122,6 +122,7 @@ enum AppAlert: Identifiable {
         let companyName: String
         let whaleCount: Int
         let amount: String
+        let leadWhaleId: String?
         let leadWhaleName: String?
         let leadWhaleAvatarName: String?
     }
@@ -471,6 +472,7 @@ struct WhaleTradeItemDTO: Codable {
     let companyName: String
     let whaleCount: Int
     let amount: String
+    let leadWhaleId: String?
     let leadWhaleName: String?
     let leadWhaleAvatarName: String?
 
@@ -479,6 +481,7 @@ struct WhaleTradeItemDTO: Codable {
         case companyName = "company_name"
         case whaleCount = "whale_count"
         case amount
+        case leadWhaleId = "lead_whale_id"
         case leadWhaleName = "lead_whale_name"
         case leadWhaleAvatarName = "lead_whale_avatar_name"
     }
@@ -489,6 +492,7 @@ struct WhaleTradeItemDTO: Codable {
             companyName: companyName,
             whaleCount: whaleCount,
             amount: amount,
+            leadWhaleId: leadWhaleId,
             leadWhaleName: leadWhaleName,
             leadWhaleAvatarName: leadWhaleAvatarName
         )
@@ -797,6 +801,7 @@ extension AppAlert {
                     companyName: "Apple Inc.",
                     whaleCount: 5,
                     amount: "$2.4B",
+                    leadWhaleId: nil,
                     leadWhaleName: "Warren Buffett",
                     leadWhaleAvatarName: "avatar_buffett"
                 ),
@@ -805,6 +810,7 @@ extension AppAlert {
                     companyName: "Salesforce Inc.",
                     whaleCount: 2,
                     amount: "$120M",
+                    leadWhaleId: nil,
                     leadWhaleName: "Ro Khanna",
                     leadWhaleAvatarName: nil
                 )
@@ -820,6 +826,7 @@ extension AppAlert {
                     companyName: "Alphabet Inc.",
                     whaleCount: 3,
                     amount: "$688.4M",
+                    leadWhaleId: nil,
                     leadWhaleName: "Tommy Tuberville",
                     leadWhaleAvatarName: nil
                 ),
@@ -828,6 +835,7 @@ extension AppAlert {
                     companyName: "Apple Inc.",
                     whaleCount: 2,
                     amount: "$669K",
+                    leadWhaleId: nil,
                     leadWhaleName: "Tommy Tuberville",
                     leadWhaleAvatarName: nil
                 )

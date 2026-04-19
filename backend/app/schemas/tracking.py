@@ -84,6 +84,11 @@ class AlertResponse(BaseModel):
     day: Optional[int] = None
     month: Optional[str] = None
     report_time: Optional[str] = None  # "before_open" | "after_close"
+    # earnings consensus — split out so iOS can render "EPS $X · Rev $Y" cleanly
+    # in the detail view's Consensus row instead of repeating the full
+    # description sentence.
+    eps_estimate: Optional[float] = None
+    revenue_estimate: Optional[float] = None
 
     # shared rollup fields (whale_trade, insider_transaction)
     action: Optional[str] = None  # "bought" | "sold"

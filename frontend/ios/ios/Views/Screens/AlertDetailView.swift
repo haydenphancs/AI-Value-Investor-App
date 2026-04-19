@@ -10,6 +10,7 @@ import SwiftUI
 struct AlertDetailView: View {
     let alert: AppAlert
     @Environment(\.dismiss) private var dismiss
+    @State private var navigateToWhaleId: String?
 
     var body: some View {
         ZStack {
@@ -51,6 +52,9 @@ struct AlertDetailView: View {
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
+        }
+        .navigationDestination(item: $navigateToWhaleId) { whaleId in
+            WhaleProfileView(whaleId: whaleId)
         }
     }
 
@@ -131,11 +135,36 @@ struct AlertDetailView: View {
                     detailRow(label: "Company", value: item.companyName)
                     detailRow(label: "Whales", value: "\(item.whaleCount)")
                     if let lead = item.leadWhaleName {
-                        detailRow(label: "Lead Whale", value: lead)
+                        leadWhaleRow(name: lead, whaleId: item.leadWhaleId)
                     }
                     detailRow(label: "Amount", value: item.amount)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func leadWhaleRow(name: String, whaleId: String?) -> some View {
+        if let whaleId {
+            Button {
+                navigateToWhaleId = whaleId
+            } label: {
+                HStack {
+                    Text("Lead Whale")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textMuted)
+                    Spacer()
+                    Text(name)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.primaryBlue)
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconSmall)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
+            detailRow(label: "Lead Whale", value: name)
         }
     }
 

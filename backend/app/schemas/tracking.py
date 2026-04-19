@@ -37,6 +37,7 @@ class WhaleTradeItemResponse(BaseModel):
     company_name: str
     whale_count: int
     amount: str  # e.g. "$2.4B"
+    lead_whale_id: Optional[str] = None
     lead_whale_name: Optional[str] = None
     lead_whale_avatar_name: Optional[str] = None
 

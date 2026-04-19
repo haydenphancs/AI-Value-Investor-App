@@ -30,24 +30,55 @@ class TrackedAssetResponse(BaseModel):
     market_cap: Optional[float] = None
 
 
-class EarningsAlertResponse(BaseModel):
-    """An alert or upcoming event for the user's watchlist."""
+class AlertResponse(BaseModel):
+    """An alert or upcoming event for the user's watchlist.
 
-    type: str = "earnings"  # "earnings" | "market" | "smart_money"
+    The `type` discriminator selects which subset of fields is populated.
+    Supported types: "earnings", "market", "whale_trade", "analyst_rating",
+    "insider_transaction".
+    """
+
+    type: str  # "earnings" | "market" | "whale_trade" | "analyst_rating" | "insider_transaction"
     ticker: Optional[str] = None
     company_name: Optional[str] = None
     title: str
     description: str
     day: Optional[int] = None
     month: Optional[str] = None
+
+    # earnings-only
     report_time: Optional[str] = None  # "before_open" | "after_close"
+
+    # whale_trade
+    whale_count: Optional[int] = None
+    total_amount: Optional[str] = None
+    action: Optional[str] = None  # "bought" | "sold"
+    lead_whale_name: Optional[str] = None
+    lead_whale_avatar_name: Optional[str] = None
+    time_window_label: Optional[str] = None
+
+    # analyst_rating
+    firm_name: Optional[str] = None
+    rating_action: Optional[str] = None  # "upgrade" | "downgrade" | "initiate" | "reiterate"
+    new_rating: Optional[str] = None
+    previous_rating: Optional[str] = None
+    price_target: Optional[float] = None
+    previous_price_target: Optional[float] = None
+
+    # insider_transaction
+    insider_name: Optional[str] = None
+    insider_title: Optional[str] = None
+
+
+# Backward-compat alias; remove after all callers migrate.
+EarningsAlertResponse = AlertResponse
 
 
 class TrackingFeedResponse(BaseModel):
     """Aggregated response for the Assets tab."""
 
     assets: List[TrackedAssetResponse] = Field(default_factory=list)
-    alerts: List[EarningsAlertResponse] = Field(default_factory=list)
+    alerts: List[AlertResponse] = Field(default_factory=list)
 
 
 # ── Portfolio Holdings CRUD ─────────────────────────────────────────

@@ -77,8 +77,12 @@ struct AlertDetailView: View {
             earningsDetail(data)
         case .market(let data):
             marketDetail(data)
-        case .smartMoney(let data):
-            smartMoneyDetail(data)
+        case .whaleTrade(let data):
+            whaleTradeDetail(data)
+        case .analystRating(let data):
+            analystRatingDetail(data)
+        case .insiderTransaction(let data):
+            insiderTransactionDetail(data)
         }
     }
 
@@ -110,13 +114,62 @@ struct AlertDetailView: View {
         .cornerRadius(AppCornerRadius.large)
     }
 
-    // MARK: - Smart Money Detail
+    // MARK: - Whale Trade Detail
 
-    private func smartMoneyDetail(_ data: AppAlert.SmartMoneyData) -> some View {
+    private func whaleTradeDetail(_ data: AppAlert.WhaleTradeAlertData) -> some View {
         VStack(spacing: AppSpacing.md) {
             detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Funds Buying", value: "\(data.fundCount) hedge funds")
-            detailRow(label: "Avg. Position", value: data.positionSize)
+            detailRow(label: "Company", value: data.companyName)
+            detailRow(label: "Action", value: data.action.rawValue)
+            detailRow(label: "Whales", value: "\(data.whaleCount)")
+            if let lead = data.leadWhaleName {
+                detailRow(label: "Lead Whale", value: lead)
+            }
+            detailRow(label: "Total Amount", value: data.totalAmount)
+            detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+    }
+
+    // MARK: - Analyst Rating Detail
+
+    private func analystRatingDetail(_ data: AppAlert.AnalystRatingAlertData) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            detailRow(label: "Ticker", value: data.ticker)
+            detailRow(label: "Firm", value: data.firmName)
+            detailRow(label: "Action", value: data.action.rawValue.capitalized)
+            if let prev = data.previousRating {
+                detailRow(label: "Rating", value: "\(prev) → \(data.newRating)")
+            } else {
+                detailRow(label: "Rating", value: data.newRating)
+            }
+            if let pt = data.priceTarget {
+                let ptStr = "$\(Int(pt))"
+                if let prevPt = data.previousPriceTarget {
+                    detailRow(label: "Price Target", value: "$\(Int(prevPt)) → \(ptStr)")
+                } else {
+                    detailRow(label: "Price Target", value: ptStr)
+                }
+            }
+            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
+        }
+        .padding(AppSpacing.lg)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+    }
+
+    // MARK: - Insider Transaction Detail
+
+    private func insiderTransactionDetail(_ data: AppAlert.InsiderTransactionAlertData) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            detailRow(label: "Ticker", value: data.ticker)
+            detailRow(label: "Insider", value: data.insiderName)
+            detailRow(label: "Title", value: data.insiderTitle)
+            detailRow(label: "Action", value: data.action.rawValue)
+            detailRow(label: "Amount", value: data.amount)
+            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

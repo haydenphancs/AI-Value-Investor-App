@@ -45,7 +45,6 @@ class TrackingViewModel: ObservableObject {
     @Published var showAllTrades: Bool = false
     @Published var groupedWhaleTrades: [GroupedWhaleTrades] = []
     @Published var allWhaleTrades: [GroupedWhaleTrades] = []
-    @Published var whaleAlertBanner: WhaleAlertBanner? = WhaleAlertBanner.sampleData
 
     // Loading States
     @Published var isLoading: Bool = false
@@ -550,7 +549,4 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
-    func viewWhaleAlert() {
-        print("View whale alert tapped")
-    }
 }

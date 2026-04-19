@@ -265,12 +265,15 @@ struct AssetsTabContent: View {
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xxl) {
+            // Tight spacing between sections. Previously used negative padding
+            // on children to shorten just this one gap, but that overlapped
+            // the inner List's gesture recognizer with the next section and
+            // froze the outer scroll. A smaller uniform spacing is safer.
+            LazyVStack(spacing: AppSpacing.md) {
                 // Assets List Section
                 AssetsListSection(
                     assets: viewModel.filteredAssets,
                     onSortTapped: { viewModel.openSortOptions() },
-                    onAddTapped: { viewModel.addNewAsset() },
                     onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
                     onRemoveAsset: { asset in viewModel.removeAsset(asset) }
                 )
@@ -321,16 +324,7 @@ struct WhalesTabContent: View {
                     )
                 }
 
-                // 3. Whale Alert Banner
-                if let alert = viewModel.whaleAlertBanner {
-                    WhaleAlertBannerCard(
-                        alert: alert,
-                        onViewAlert: { viewModel.viewWhaleAlert() }
-                    )
-                    .padding(.horizontal, AppSpacing.lg)
-                }
-
-                // 4. Most Popular Whales (unchanged)
+                // 3. Most Popular Whales
                 MostPopularWhalesSection(
                     heroWhales: viewModel.heroWhales,
                     whales: viewModel.popularWhales,
@@ -567,64 +561,6 @@ struct WhaleTradeCard: View {
             .cornerRadius(AppCornerRadius.large)
         }
         .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Whale Alert Banner Card
-struct WhaleAlertBannerCard: View {
-    let alert: WhaleAlertBanner
-    var onViewAlert: (() -> Void)?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(spacing: AppSpacing.md) {
-                // Bell icon
-                Circle()
-                    .fill(AppColors.alertOrange.opacity(0.2))
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        Image(systemName: "bell.fill")
-                            .font(AppTypography.iconLarge)
-                            .foregroundColor(AppColors.alertOrange)
-                    )
-
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text(alert.title)
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-
-                    Text(alert.description)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
-                        .lineLimit(2)
-                }
-            }
-
-            // View Full Alert button
-            Button {
-                onViewAlert?()
-            } label: {
-                Text(alert.actionTitle)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.alertOrange)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.sm)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .stroke(AppColors.alertOrange.opacity(0.5), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .stroke(AppColors.alertOrange.opacity(0.3), lineWidth: 1)
-                )
-        )
     }
 }
 

@@ -769,15 +769,6 @@ struct GroupedWhaleTrades: Identifiable {
     let activities: [WhaleTradeGroupActivity]
 }
 
-// MARK: - Whale Alert Banner
-struct WhaleAlertBanner: Identifiable {
-    let id = UUID()
-    let title: String
-    let description: String
-    let ticker: String?
-    let actionTitle: String
-}
-
 // MARK: - Sample Data
 extension TrackedAsset {
     static let sampleData: [TrackedAsset] = [
@@ -1327,11 +1318,3 @@ extension WhaleTradeGroupActivity {
     }
 }
 
-extension WhaleAlertBanner {
-    static let sampleData = WhaleAlertBanner(
-        title: "Whale Alert",
-        description: "Large crypto whale just moved $50M into COIN stock",
-        ticker: "COIN",
-        actionTitle: "View Full Alert"
-    )
-}

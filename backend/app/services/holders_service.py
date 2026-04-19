@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.services._insider_common import classify_insider_transaction
+from app.services._whale_common import (
+    parse_congress_amount_dollars,
+    calc_13f_trade_dollars,
+)
 from app.schemas.holders import (
     CongressActivitiesDataSchema,
     CongressActivitySchema,
@@ -587,23 +591,37 @@ class HoldersService:
         """Convert institutional holder analytics into recent activity entries."""
         result = []
         for h in holders[:15]:
-            # Analytics endpoint fields
-            # Use share count change × implied price to strip out
-            # stock-price-appreciation that contaminates changeInMarketValue.
+            # Shared 13F formula — same one whale_service uses to populate
+            # Supabase whale_trades.amount — so alert totals match this view.
             shares_change = _safe_float(h, "changeInSharesNumber", 0.0)
-            total_shares = max(_safe_float(h, "sharesNumber", 1.0), 1.0)
-            total_value = _safe_float(h, "marketValue",
-                            _safe_float(h, "value", 0.0))
-            implied_price = total_value / total_shares
-            change_in_value = shares_change * implied_price
+            total_shares = _safe_float(h, "sharesNumber", 0.0)
+            total_value = _safe_float(
+                h, "marketValue", _safe_float(h, "value", 0.0)
+            )
+            # Reconstruct prev from current + delta so we can reuse the helper.
+            prev_shares = max(total_shares - shares_change, 0.0)
+            implied_price = (
+                total_value / total_shares if total_shares > 0 else 0.0
+            )
+            prev_value = prev_shares * implied_price
+
+            action, amount = calc_13f_trade_dollars(
+                curr_shares=total_shares,
+                curr_value=total_value,
+                prev_shares=prev_shares,
+                prev_value=prev_value,
+                min_amount=0.0,  # institutional section shows tiny deltas too
+            )
 
             change_pct = _safe_float(h, "changeInSharesNumberPercentage",
                             _safe_float(h, "changeInSharesPercentage", 0.0))
 
-            if change_in_value == 0.0:
+            if action is None or amount == 0.0:
                 continue
 
-            change_value_millions = change_in_value / 1_000_000
+            # Preserve sign (negative = sold) for the UI's existing contract.
+            signed_amount = amount if action == "BOUGHT" else -amount
+            change_value_millions = signed_amount / 1_000_000
 
             # Filing date
             date_str = h.get("filingDate", h.get("dateReported", ""))
@@ -1475,39 +1493,12 @@ class HoldersService:
 
     @staticmethod
     def _parse_congress_amount(amount_str: str) -> float:
-        """Parse FMP congressional amount range to midpoint in millions.
+        """Congressional amount range → midpoint in MILLIONS.
 
-        FMP uses ranges like '$1,001 - $15,000', '$15,001 - $50,000', etc.
+        Thin adapter over the shared dollar-returning helper so this service
+        and ``whale_service`` never disagree on the same range.
         """
-        if not amount_str:
-            return 0.0
-
-        # Remove $ signs and commas
-        clean = amount_str.replace("$", "").replace(",", "").strip()
-
-        # Try to parse as range (e.g., "1001 - 15000")
-        if " - " in clean:
-            parts = clean.split(" - ")
-            try:
-                low = float(parts[0].strip())
-                high = float(parts[1].strip())
-                return (low + high) / 2 / 1_000_000  # Convert to millions
-            except (ValueError, IndexError):
-                pass
-
-        # Handle "Over X" format (e.g., "Over 50000000" after cleaning)
-        if clean.lower().startswith("over "):
-            try:
-                base = float(clean[5:].strip())
-                return (base * 1.5) / 1_000_000  # 1.5x as estimated midpoint
-            except ValueError:
-                pass
-
-        # Try as single number
-        try:
-            return float(clean) / 1_000_000
-        except ValueError:
-            return 0.0
+        return parse_congress_amount_dollars(amount_str) / 1_000_000
 
     @staticmethod
     def _parse_congress_amount_max(amount_str: str) -> float:

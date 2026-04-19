@@ -27,6 +27,12 @@ from app.schemas.tracking import (
     InsiderTransactionItemResponse,
 )
 from app.services._insider_common import classify_for_alerts
+from app.services._analyst_common import classify_for_alerts as classify_analyst_for_alerts
+from app.services._earnings_common import (
+    parse_fmp_timing,
+    timing_sentence,
+    alert_report_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,14 +313,10 @@ class TrackingService:
                     except ValueError:
                         pass
 
-                # Determine report time
-                report_time_raw = (entry.get("time") or "").lower()
-                if "bmo" in report_time_raw or "before" in report_time_raw:
-                    report_time = "before_open"
-                elif "amc" in report_time_raw or "after" in report_time_raw:
-                    report_time = "after_close"
-                else:
-                    report_time = None
+                # Determine report time (shared parser keeps this in sync
+                # with the Financials Earnings section's next_earnings_date).
+                timing_token = parse_fmp_timing(entry.get("time"))
+                report_time = alert_report_time(timing_token)
 
                 # Build description
                 eps_est = entry.get("epsEstimated")
@@ -327,8 +329,13 @@ class TrackingService:
                     desc_parts.append(f"Rev Est: ${rev_b:.1f}B")
                 description = ". ".join(desc_parts) if desc_parts else "Earnings report upcoming"
 
-                report_time_display = "before market open" if report_time == "before_open" else "after market close"
-                full_desc = f"{symbol} reports earnings {report_time_display}. {description}"
+                # Only mention the trading session when FMP actually told us
+                # — don't hallucinate "after market close" for missing data.
+                sentence = timing_sentence(timing_token)
+                if sentence:
+                    full_desc = f"{symbol} reports earnings {sentence}. {description}"
+                else:
+                    full_desc = f"{symbol} reports earnings. {description}"
 
                 alerts.append(
                     AlertResponse(
@@ -503,17 +510,16 @@ class TrackingService:
                 )
                 new_rating = entry.get("newGrade") or ""
                 previous_rating = entry.get("previousGrade") or None
-                action_raw = (entry.get("action") or "").lower()
-                if action_raw in ("upgrade", "downgrade", "initiate", "reiterate"):
-                    rating_action = action_raw
-                elif previous_rating and new_rating:
-                    rating_action = _infer_rating_action(previous_rating, new_rating)
-                else:
-                    rating_action = "reiterate"
 
-                # Reiterations are not real changes — keep scanning for a
-                # material action within the cutoff window.
-                if rating_action == "reiterate":
+                # Shared normalizer keeps this in lockstep with the
+                # Analysis tab's Actions screen — same row will be
+                # classified the same way in both views.
+                rating_action, material = classify_analyst_for_alerts(
+                    entry.get("action"), previous_rating, new_rating
+                )
+                if not material:
+                    # Maintain / reiterate — firm didn't change its view.
+                    # Keep scanning for a material action within the window.
                     continue
 
                 return AnalystRatingItemResponse(

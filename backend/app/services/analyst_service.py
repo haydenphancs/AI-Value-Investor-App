@@ -24,6 +24,7 @@ from app.schemas.analyst import (
     AnalystPriceTarget,
     AnalystRatingDistribution,
 )
+from app.services._analyst_common import normalize_fmp_action
 
 logger = logging.getLogger(__name__)
 
@@ -90,22 +91,28 @@ def _classify_grade(grade: str) -> str:
 
 
 # ── FMP action mapping ──────────────────────────────────────────────
+# Uses the shared normalizer so this service and tracking_service never
+# disagree on whether a given FMP row is an upgrade/downgrade/initiate/
+# maintain. The iOS enum keeps MAINTAIN and REITERATED as separate cases
+# for historical reasons, but semantically they are the same; we only
+# ever emit MAINTAIN here (FMP's "reiterated" rows also collapse to it).
 
-_FMP_ACTION_MAP = {
+_NORMALIZED_TO_ENUM = {
     "upgrade": AnalystActionType.UPGRADE,
     "downgrade": AnalystActionType.DOWNGRADE,
+    "initiate": AnalystActionType.INITIATED,
     "maintain": AnalystActionType.MAINTAIN,
-    "hold": AnalystActionType.MAINTAIN,
-    "init": AnalystActionType.INITIATED,
-    "reiterated": AnalystActionType.REITERATED,
 }
 
 
-def _map_action(fmp_action: str) -> AnalystActionType:
-    """Map FMP action string to our AnalystActionType enum."""
-    return _FMP_ACTION_MAP.get(
-        fmp_action.lower().strip(), AnalystActionType.MAINTAIN
-    )
+def _map_action(
+    fmp_action: str,
+    previous_grade: Optional[str] = None,
+    new_grade: Optional[str] = None,
+) -> AnalystActionType:
+    """Map FMP action (plus optional prev/new ratings) to our enum."""
+    normalized = normalize_fmp_action(fmp_action, previous_grade, new_grade)
+    return _NORMALIZED_TO_ENUM.get(normalized, AnalystActionType.MAINTAIN)
 
 
 # ── Rating distribution from grades ────────────────────────────────
@@ -245,7 +252,13 @@ def _compute_momentum(
 # ── Actions summary ────────────────────────────────────────────────
 
 def _compute_actions_summary(grades: List[Dict]) -> AnalystActionsSummary:
-    """Count upgrades, maintains, downgrades from the last 12 months only."""
+    """Count upgrades, maintains, downgrades from the last 12 months only.
+
+    Uses the shared normalizer so a Buy→Overweight row labeled
+    ``action="maintain"`` by FMP is still counted as an upgrade.
+    Initiations are grouped with maintains since the iOS UI only exposes
+    three buckets.
+    """
     cutoff = datetime.utcnow() - timedelta(days=365)
     upgrades = 0
     maintains = 0
@@ -260,12 +273,14 @@ def _compute_actions_summary(grades: List[Dict]) -> AnalystActionsSummary:
         if dt < cutoff:
             continue
 
-        action = g.get("action", "").lower().strip()
-        if action == "upgrade":
+        normalized = normalize_fmp_action(
+            g.get("action"), g.get("previousGrade"), g.get("newGrade")
+        )
+        if normalized == "upgrade":
             upgrades += 1
-        elif action == "downgrade":
+        elif normalized == "downgrade":
             downgrades += 1
-        else:
+        else:  # maintain + initiate (iOS shows 3 buckets)
             maintains += 1
 
     return AnalystActionsSummary(
@@ -278,7 +293,12 @@ def _compute_actions_summary(grades: List[Dict]) -> AnalystActionsSummary:
 # ── Build individual actions ───────────────────────────────────────
 
 def _build_actions(grades: List[Dict], limit: int = 50) -> List[AnalystAction]:
-    """Convert recent FMP grade records (last 12 months) to AnalystAction models."""
+    """Convert recent FMP grade records (last 12 months) to AnalystAction models.
+
+    Uses the shared normalizer so action classifications match the
+    tracking_service alert feed (both treat FMP ``maintain`` with an
+    actual grade change as upgrade/downgrade, not maintain).
+    """
     cutoff = datetime.utcnow() - timedelta(days=365)
     actions: List[AnalystAction] = []
     for g in grades:
@@ -291,13 +311,15 @@ def _build_actions(grades: List[Dict], limit: int = 50) -> List[AnalystAction]:
             continue
         if dt < cutoff:
             break  # Grades are sorted newest-first, so stop once past cutoff
-        action_type = _map_action(g.get("action", ""))
+        previous = g.get("previousGrade") or None
+        new = g.get("newGrade", "N/A")
+        action_type = _map_action(g.get("action", ""), previous, new)
         actions.append(AnalystAction(
             firm_name=g.get("gradingCompany", "Unknown"),
             action_type=action_type,
             date=date_str[:10],
-            previous_rating=g.get("previousGrade") or None,
-            new_rating=g.get("newGrade", "N/A"),
+            previous_rating=previous,
+            new_rating=new,
             previous_price_target=None,
             new_price_target=None,
         ))

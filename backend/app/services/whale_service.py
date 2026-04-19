@@ -23,6 +23,10 @@ import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.database import get_supabase
+from app.services._whale_common import (
+    parse_congress_amount_dollars,
+    calc_13f_trade_dollars,
+)
 from app.schemas.whale import (
     TrendingWhaleResponse,
     WhaleProfileResponse,
@@ -1279,12 +1283,24 @@ class WhaleService:
             curr = current_map.get(ticker)
             prev = prev_map.get(ticker)
 
-            curr_val = curr["value"] if curr else 0
-            prev_val = prev["value"] if prev else 0
-            diff = curr_val - prev_val
+            curr_val = float(curr["value"]) if curr else 0.0
+            prev_val = float(prev["value"]) if prev else 0.0
+            curr_shares = float(curr["shares"]) if curr else 0.0
+            prev_shares = float(prev["shares"]) if prev else 0.0
 
-            # Skip negligible changes
-            if abs(diff) < 1000:
+            # Shared 13F formula — shares_change × implied_price. Keeps
+            # Supabase whale_trades.amount aligned with what TickerDetailView's
+            # Institutional Activities section shows for the same holding,
+            # and strips out stock-price appreciation (which could otherwise
+            # flip the action between BOUGHT and SOLD).
+            action, amount = calc_13f_trade_dollars(
+                curr_shares=curr_shares,
+                curr_value=curr_val,
+                prev_shares=prev_shares,
+                prev_value=prev_val,
+                min_amount=1_000.0,
+            )
+            if action is None:
                 continue
 
             prev_alloc = (
@@ -1300,53 +1316,28 @@ class WhaleService:
             name = (curr or prev)["name"]
 
             if prev is None and curr is not None:
-                trades.append({
-                    "ticker": ticker,
-                    "company_name": name,
-                    "action": "BOUGHT",
-                    "trade_type": "New",
-                    "amount": curr_val,
-                    "previous_allocation": 0,
-                    "new_allocation": round(new_alloc, 2),
-                    "date": filing_date,
-                })
-                total_bought += curr_val
+                trade_type = "New"
             elif curr is None and prev is not None:
-                trades.append({
-                    "ticker": ticker,
-                    "company_name": name,
-                    "action": "SOLD",
-                    "trade_type": "Closed",
-                    "amount": prev_val,
-                    "previous_allocation": round(prev_alloc, 2),
-                    "new_allocation": 0,
-                    "date": filing_date,
-                })
-                total_sold += prev_val
-            elif diff > 0:
-                trades.append({
-                    "ticker": ticker,
-                    "company_name": name,
-                    "action": "BOUGHT",
-                    "trade_type": "Increased",
-                    "amount": abs(diff),
-                    "previous_allocation": round(prev_alloc, 2),
-                    "new_allocation": round(new_alloc, 2),
-                    "date": filing_date,
-                })
-                total_bought += abs(diff)
-            elif diff < 0:
-                trades.append({
-                    "ticker": ticker,
-                    "company_name": name,
-                    "action": "SOLD",
-                    "trade_type": "Decreased",
-                    "amount": abs(diff),
-                    "previous_allocation": round(prev_alloc, 2),
-                    "new_allocation": round(new_alloc, 2),
-                    "date": filing_date,
-                })
-                total_sold += abs(diff)
+                trade_type = "Closed"
+            elif action == "BOUGHT":
+                trade_type = "Increased"
+            else:
+                trade_type = "Decreased"
+
+            trades.append({
+                "ticker": ticker,
+                "company_name": name,
+                "action": action,
+                "trade_type": trade_type,
+                "amount": amount,
+                "previous_allocation": round(prev_alloc, 2),
+                "new_allocation": round(new_alloc, 2),
+                "date": filing_date,
+            })
+            if action == "BOUGHT":
+                total_bought += amount
+            else:
+                total_sold += amount
 
         if not trades:
             return None
@@ -1402,7 +1393,12 @@ class WhaleService:
             raw_type = (t.get("type") or "").lower().strip()
             action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
             amount_str = t.get("amount") or "$1,001 - $15,000"
-            amount = AMOUNT_RANGES.get(amount_str, 8_000)
+            # Shared helper keeps this in lockstep with holders_service —
+            # AMOUNT_RANGES covered only the common buckets; the helper
+            # also handles missing / "Over $X" / unparseable inputs.
+            amount = parse_congress_amount_dollars(amount_str)
+            if amount == 0.0:
+                amount = 8_000  # safety fallback matches prior behavior
             tx_date = (
                 t.get("transactionDate")
                 or t.get("transaction_date")

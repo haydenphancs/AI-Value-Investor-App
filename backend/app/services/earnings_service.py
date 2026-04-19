@@ -23,6 +23,11 @@ from app.schemas.earnings import (
     EarningsResponse,
     NextEarningsDateSchema,
 )
+from app.services._earnings_common import (
+    parse_fmp_timing,
+    timing_display,
+    UNSPECIFIED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +285,23 @@ class EarningsService:
         logger.info(f"earnings-calendar found {len(unique)} records for {ticker}")
         return unique
 
+    async def _fetch_earnings_calendar_window(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> List[dict]:
+        """Fetch earnings-calendar for an arbitrary window, filter to ticker."""
+        try:
+            data = await self.fmp._make_request(
+                "earnings-calendar", params={"from": from_date, "to": to_date}
+            )
+            if isinstance(data, list):
+                return [r for r in data if r.get("symbol") == ticker]
+        except Exception as e:
+            logger.warning(
+                f"earnings-calendar forward window failed for {ticker} "
+                f"({from_date} to {to_date}): {e}"
+            )
+        return []
+
     async def _build_earnings(self, ticker: str) -> EarningsResponse:
         today = date.today()
         four_years_ago = (today - timedelta(days=4 * 365)).strftime("%Y-%m-%d")
@@ -316,7 +338,42 @@ class EarningsService:
             ad = rec.get("acceptedDate", rec.get("filingDate", rec["date"]))
             accepted_dates.append(ad[:10] if ad else rec["date"][:10])
 
-        ec_records = await self._fetch_earnings_calendar_for_symbol(ticker, accepted_dates)
+        # Fetch both the historical windows (around past filings) AND a
+        # series of forward windows so we capture upcoming earnings dates
+        # for ``next_earnings_date``. Without the forward fetch the service
+        # falls back to analyst-estimates (which returns quarter-end dates
+        # like Jun 30 instead of real report dates like Apr 29).
+        #
+        # FMP's ``earnings-calendar`` caps at 4000 records per query, so a
+        # single 90-day window silently drops liquid tickers. We walk
+        # forward in 14-day hops — same window size the alert feed uses
+        # — so results are stable for quarterly reporters up to ~70 days.
+        forward_tasks = []
+        for i in range(5):
+            fr = (today + timedelta(days=i * 14)).strftime("%Y-%m-%d")
+            to_ = (today + timedelta(days=(i + 1) * 14)).strftime("%Y-%m-%d")
+            forward_tasks.append(
+                self._fetch_earnings_calendar_window(ticker, fr, to_)
+            )
+
+        results = await asyncio.gather(
+            self._fetch_earnings_calendar_for_symbol(ticker, accepted_dates),
+            *forward_tasks,
+            return_exceptions=True,
+        )
+        historical_ec = results[0] if isinstance(results[0], list) else []
+        forward_ec: List[dict] = []
+        for r in results[1:]:
+            if isinstance(r, list):
+                forward_ec.extend(r)
+
+        ec_records = list(historical_ec)
+        seen_dates = {(r.get("date") or "")[:10] for r in ec_records}
+        for rec in forward_ec:
+            d = (rec.get("date") or "")[:10]
+            if d and d not in seen_dates:
+                seen_dates.add(d)
+                ec_records.append(rec)
 
         # Build earnings-calendar lookup keyed by report date
         # We'll match these to income statements by date proximity
@@ -602,7 +659,13 @@ class EarningsService:
         used_fiscal_dates: set,
         today_str: str,
     ) -> Optional[NextEarningsDateSchema]:
-        """Find the next future earnings date."""
+        """Find the next future earnings date.
+
+        Prefers FMP's earnings-calendar (confirmed date + timing) over
+        analyst-estimates (fiscal period-end). Uses the shared timing
+        parser so the returned ``timing`` matches what the alert card
+        shows for the same event.
+        """
         # First, check earnings-calendar for future dates with timing info
         for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
             ec_date = (ec.get("date") or "")[:10]
@@ -611,13 +674,14 @@ class EarningsService:
             # Check this quarter wasn't already reported
             if _safe_float(ec, "epsActual") is not None:
                 continue
+            timing_token = parse_fmp_timing(ec.get("time"))
             return NextEarningsDateSchema(
                 date=ec_date,
                 is_confirmed=True,
-                timing="Time Not Specified",
+                timing=timing_display(timing_token),
             )
 
-        # Fallback: use analyst-estimates
+        # Fallback: use analyst-estimates (fiscal-period-end, no timing)
         for est in estimates_sorted:
             est_date = est.get("date", "")
             if est_date > today_str:
@@ -632,7 +696,7 @@ class EarningsService:
                     return NextEarningsDateSchema(
                         date=est_date[:10],
                         is_confirmed=False,
-                        timing="Time Not Specified",
+                        timing=timing_display(UNSPECIFIED),
                     )
         return None
 

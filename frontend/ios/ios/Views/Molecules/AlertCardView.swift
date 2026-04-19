@@ -60,20 +60,20 @@ struct AlertCardView: View {
         case .market(let data):
             EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
         case .whaleTrade(let data):
-            whaleTradeTrailing(data)
+            amountTrailing(amount: data.totalAmount, action: data.action)
         case .analystRating(let data):
             analystRatingTrailing(data)
         case .insiderTransaction(let data):
-            EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
+            amountTrailing(amount: data.totalAmount, action: data.action)
         }
     }
 
-    private func whaleTradeTrailing(_ data: AppAlert.WhaleTradeAlertData) -> some View {
+    private func amountTrailing(amount: String, action: WhaleAction) -> some View {
         VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-            Text(data.totalAmount)
+            Text(amount)
                 .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(data.action.color)
-            Text(data.action.rawValue)
+                .foregroundColor(action.color)
+            Text(action.rawValue)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
@@ -81,14 +81,12 @@ struct AlertCardView: View {
 
     private func analystRatingTrailing(_ data: AppAlert.AnalystRatingAlertData) -> some View {
         VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-            Image(systemName: data.action.iconName)
-                .font(AppTypography.iconSmall).fontWeight(.semibold)
-                .foregroundColor(data.action.color)
-            if let pt = data.priceTarget {
-                Text("PT $\(Int(pt))")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
+            Text("\(data.items.count)")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            Text("UPDATES")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
         }
     }
 }

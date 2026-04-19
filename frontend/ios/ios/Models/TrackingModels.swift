@@ -108,20 +108,35 @@ enum AppAlert: Identifiable {
 
     struct WhaleTradeAlertData: Identifiable {
         let id = UUID()
+        let action: WhaleAction             // .bought / .sold
+        let totalAmount: String             // summed across items
+        let timeWindowLabel: String         // e.g. "this week"
+        let items: [WhaleTradeItem]
+
+        var tickers: [String] { items.map(\.ticker) }
+    }
+
+    struct WhaleTradeItem: Identifiable {
+        let id = UUID()
         let ticker: String
         let companyName: String
-        let action: WhaleAction             // reuse .bought / .sold
         let whaleCount: Int
-        let totalAmount: String             // e.g. "$2.4B"
+        let amount: String
         let leadWhaleName: String?
         let leadWhaleAvatarName: String?
-        let timeWindowLabel: String         // e.g. "this week"
     }
 
     struct AnalystRatingAlertData: Identifiable {
         let id = UUID()
+        let timeWindowLabel: String         // e.g. "this week"
+        let items: [AnalystRatingItem]
+
+        var tickers: [String] { items.map(\.ticker) }
+    }
+
+    struct AnalystRatingItem: Identifiable {
+        let id = UUID()
         let ticker: String
-        let companyName: String
         let firmName: String
         let action: AnalystRatingAction
         let newRating: String
@@ -137,11 +152,19 @@ enum AppAlert: Identifiable {
 
     struct InsiderTransactionAlertData: Identifiable {
         let id = UUID()
+        let action: WhaleAction             // .bought / .sold
+        let totalAmount: String
+        let timeWindowLabel: String
+        let items: [InsiderTransactionItem]
+
+        var tickers: [String] { items.map(\.ticker) }
+    }
+
+    struct InsiderTransactionItem: Identifiable {
+        let id = UUID()
         let ticker: String
-        let companyName: String
         let insiderName: String
         let insiderTitle: String
-        let action: WhaleAction             // reuse .bought / .sold
         let amount: String
         let day: Int
         let month: String
@@ -168,9 +191,11 @@ enum AppAlert: Identifiable {
         switch self {
         case .earnings: return "Earnings Alert"
         case .market: return "Market"
-        case .whaleTrade: return "Whale Trade"
-        case .analystRating: return "Analyst Rating"
-        case .insiderTransaction: return "Insider Transaction"
+        case .whaleTrade(let data):
+            return data.action == .bought ? "Whales Bought" : "Whales Sold"
+        case .analystRating: return "Analyst Ratings"
+        case .insiderTransaction(let data):
+            return data.action == .bought ? "Insider Bought" : "Insider Sold"
         }
     }
 
@@ -181,28 +206,14 @@ enum AppAlert: Identifiable {
         case .market(let data):
             return data.description
         case .whaleTrade(let data):
-            let subjects = data.whaleCount > 1
-                ? "\(data.whaleCount) whales"
-                : (data.leadWhaleName ?? "1 whale")
-            let lead = (data.whaleCount > 1 && data.leadWhaleName != nil)
-                ? " (led by \(data.leadWhaleName!))"
-                : ""
-            return "\(subjects) \(data.action.rawValue.lowercased()) \(data.ticker) \(data.timeWindowLabel) — totaling \(data.totalAmount)\(lead)."
+            return "\(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel) — totaling \(data.totalAmount)."
         case .analystRating(let data):
-            let verb: String
-            switch data.action {
-            case .upgrade: verb = "upgraded"
-            case .downgrade: verb = "downgraded"
-            case .initiate: verb = "initiated coverage of"
-            case .reiterate: verb = "reiterated"
-            }
-            var text = "\(data.firmName) \(verb) \(data.ticker) at \(data.newRating)"
-            if let prev = data.previousRating, data.action == .upgrade || data.action == .downgrade {
-                text += " (from \(prev))"
-            }
-            return text
+            let countLabel = data.items.count == 1
+                ? "1 analyst update"
+                : "\(data.items.count) analyst updates"
+            return "\(countLabel) on \(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel)."
         case .insiderTransaction(let data):
-            return "\(data.insiderName) (\(data.insiderTitle)) \(data.action.rawValue.lowercased()) \(data.amount) of \(data.ticker)."
+            return "\(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel) — totaling \(data.totalAmount)."
         }
     }
 
@@ -219,9 +230,19 @@ enum AppAlert: Identifiable {
         switch self {
         case .earnings, .market: return AppColors.primaryBlue
         case .whaleTrade(let data): return data.action.color
-        case .analystRating(let data): return data.action.color
+        case .analystRating: return AppColors.alertOrange
         case .insiderTransaction(let data): return data.action.color
         }
+    }
+
+    /// Join tickers with truncation ("AAPL, CRM and 2 more").
+    static func joinTickers(_ tickers: [String], maxVisible: Int = 4) -> String {
+        guard !tickers.isEmpty else { return "" }
+        if tickers.count <= maxVisible {
+            return tickers.joined(separator: ", ")
+        }
+        let head = tickers.prefix(maxVisible).joined(separator: ", ")
+        return "\(head) and \(tickers.count - maxVisible) more"
     }
 }
 
@@ -364,60 +385,41 @@ struct TrackedAssetDTO: Codable, Identifiable {
 /// An alert or event from the backend. The `type` discriminator selects
 /// which subset of the optional fields is populated.
 struct AlertDTO: Codable, Identifiable {
-    var id: String { "\(type)_\(ticker ?? "")_\(day ?? 0)_\(description.hashValue)" }
+    var id: String { "\(type)_\(action ?? "")_\(ticker ?? "")_\(description.hashValue)" }
     let type: String
-    let ticker: String?
-    let companyName: String?
     let title: String
     let description: String
+
+    // earnings / market
+    let ticker: String?
+    let companyName: String?
     let day: Int?
     let month: String?
-
-    // earnings-only
     let reportTime: String?
 
-    // whale_trade
-    let whaleCount: Int?
-    let totalAmount: String?
+    // shared rollup
     let action: String?
-    let leadWhaleName: String?
-    let leadWhaleAvatarName: String?
+    let totalAmount: String?
     let timeWindowLabel: String?
 
-    // analyst_rating
-    let firmName: String?
-    let ratingAction: String?
-    let newRating: String?
-    let previousRating: String?
-    let priceTarget: Double?
-    let previousPriceTarget: Double?
-
-    // insider_transaction
-    let insiderName: String?
-    let insiderTitle: String?
+    // rollup item lists
+    let whaleTradeItems: [WhaleTradeItemDTO]?
+    let analystRatingItems: [AnalystRatingItemDTO]?
+    let insiderTransactionItems: [InsiderTransactionItemDTO]?
 
     enum CodingKeys: String, CodingKey {
-        case type, ticker
+        case type, title, description, ticker
         case companyName = "company_name"
-        case title, description, day, month
+        case day, month
         case reportTime = "report_time"
-        case whaleCount = "whale_count"
-        case totalAmount = "total_amount"
         case action
-        case leadWhaleName = "lead_whale_name"
-        case leadWhaleAvatarName = "lead_whale_avatar_name"
+        case totalAmount = "total_amount"
         case timeWindowLabel = "time_window_label"
-        case firmName = "firm_name"
-        case ratingAction = "rating_action"
-        case newRating = "new_rating"
-        case previousRating = "previous_rating"
-        case priceTarget = "price_target"
-        case previousPriceTarget = "previous_price_target"
-        case insiderName = "insider_name"
-        case insiderTitle = "insider_title"
+        case whaleTradeItems = "whale_trade_items"
+        case analystRatingItems = "analyst_rating_items"
+        case insiderTransactionItems = "insider_transaction_items"
     }
 
-    /// Map to the AppAlert enum used by AlertsEventsSection
     func toAppAlert() -> AppAlert {
         switch type {
         case "earnings":
@@ -430,42 +432,26 @@ struct AlertDTO: Codable, Identifiable {
                 month: month ?? ""
             ))
         case "whale_trade":
-            let whaleAction: WhaleAction = (action?.lowercased() == "sold") ? .sold : .bought
+            let items = (whaleTradeItems ?? []).map { $0.toItem() }
             return .whaleTrade(AppAlert.WhaleTradeAlertData(
-                ticker: ticker ?? "",
-                companyName: companyName ?? ticker ?? "",
-                action: whaleAction,
-                whaleCount: whaleCount ?? 1,
+                action: (action?.lowercased() == "sold") ? .sold : .bought,
                 totalAmount: totalAmount ?? "",
-                leadWhaleName: leadWhaleName,
-                leadWhaleAvatarName: leadWhaleAvatarName,
-                timeWindowLabel: timeWindowLabel ?? "this week"
+                timeWindowLabel: timeWindowLabel ?? "this week",
+                items: items
             ))
         case "analyst_rating":
-            let ratingActionParsed = AnalystRatingAction(rawValue: ratingAction?.lowercased() ?? "") ?? .reiterate
+            let items = (analystRatingItems ?? []).map { $0.toItem() }
             return .analystRating(AppAlert.AnalystRatingAlertData(
-                ticker: ticker ?? "",
-                companyName: companyName ?? ticker ?? "",
-                firmName: firmName ?? "Analyst",
-                action: ratingActionParsed,
-                newRating: newRating ?? "",
-                previousRating: previousRating,
-                priceTarget: priceTarget,
-                previousPriceTarget: previousPriceTarget,
-                day: day ?? 0,
-                month: month ?? ""
+                timeWindowLabel: timeWindowLabel ?? "this week",
+                items: items
             ))
         case "insider_transaction":
-            let insiderAction: WhaleAction = (action?.lowercased() == "sold") ? .sold : .bought
+            let items = (insiderTransactionItems ?? []).map { $0.toItem() }
             return .insiderTransaction(AppAlert.InsiderTransactionAlertData(
-                ticker: ticker ?? "",
-                companyName: companyName ?? ticker ?? "",
-                insiderName: insiderName ?? "Insider",
-                insiderTitle: insiderTitle ?? "Officer",
-                action: insiderAction,
-                amount: totalAmount ?? "",
-                day: day ?? 0,
-                month: month ?? ""
+                action: (action?.lowercased() == "sold") ? .sold : .bought,
+                totalAmount: totalAmount ?? "",
+                timeWindowLabel: timeWindowLabel ?? "this week",
+                items: items
             ))
         default:
             return .market(AppAlert.MarketData(
@@ -475,6 +461,101 @@ struct AlertDTO: Codable, Identifiable {
                 month: month ?? ""
             ))
         }
+    }
+}
+
+// MARK: - Alert Item DTOs
+
+struct WhaleTradeItemDTO: Codable {
+    let ticker: String
+    let companyName: String
+    let whaleCount: Int
+    let amount: String
+    let leadWhaleName: String?
+    let leadWhaleAvatarName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker
+        case companyName = "company_name"
+        case whaleCount = "whale_count"
+        case amount
+        case leadWhaleName = "lead_whale_name"
+        case leadWhaleAvatarName = "lead_whale_avatar_name"
+    }
+
+    func toItem() -> AppAlert.WhaleTradeItem {
+        AppAlert.WhaleTradeItem(
+            ticker: ticker,
+            companyName: companyName,
+            whaleCount: whaleCount,
+            amount: amount,
+            leadWhaleName: leadWhaleName,
+            leadWhaleAvatarName: leadWhaleAvatarName
+        )
+    }
+}
+
+struct AnalystRatingItemDTO: Codable {
+    let ticker: String
+    let firmName: String
+    let ratingAction: String
+    let newRating: String
+    let previousRating: String?
+    let priceTarget: Double?
+    let previousPriceTarget: Double?
+    let day: Int?
+    let month: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker
+        case firmName = "firm_name"
+        case ratingAction = "rating_action"
+        case newRating = "new_rating"
+        case previousRating = "previous_rating"
+        case priceTarget = "price_target"
+        case previousPriceTarget = "previous_price_target"
+        case day, month
+    }
+
+    func toItem() -> AppAlert.AnalystRatingItem {
+        AppAlert.AnalystRatingItem(
+            ticker: ticker,
+            firmName: firmName,
+            action: AnalystRatingAction(rawValue: ratingAction.lowercased()) ?? .reiterate,
+            newRating: newRating,
+            previousRating: previousRating,
+            priceTarget: priceTarget,
+            previousPriceTarget: previousPriceTarget,
+            day: day ?? 0,
+            month: month ?? ""
+        )
+    }
+}
+
+struct InsiderTransactionItemDTO: Codable {
+    let ticker: String
+    let insiderName: String
+    let insiderTitle: String
+    let amount: String
+    let day: Int?
+    let month: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker
+        case insiderName = "insider_name"
+        case insiderTitle = "insider_title"
+        case amount, day, month
+    }
+
+    func toItem() -> AppAlert.InsiderTransactionItem {
+        AppAlert.InsiderTransactionItem(
+            ticker: ticker,
+            insiderName: insiderName,
+            insiderTitle: insiderTitle,
+            amount: amount,
+            day: day ?? 0,
+            month: month ?? ""
+        )
     }
 }
 
@@ -707,36 +788,92 @@ extension AppAlert {
             month: "FEB"
         )),
         .whaleTrade(WhaleTradeAlertData(
-            ticker: "AAPL",
-            companyName: "Apple Inc.",
             action: .bought,
-            whaleCount: 5,
-            totalAmount: "$2.4B",
-            leadWhaleName: "Warren Buffett",
-            leadWhaleAvatarName: "avatar_buffett",
-            timeWindowLabel: "this week"
+            totalAmount: "$2.52B",
+            timeWindowLabel: "this week",
+            items: [
+                WhaleTradeItem(
+                    ticker: "AAPL",
+                    companyName: "Apple Inc.",
+                    whaleCount: 5,
+                    amount: "$2.4B",
+                    leadWhaleName: "Warren Buffett",
+                    leadWhaleAvatarName: "avatar_buffett"
+                ),
+                WhaleTradeItem(
+                    ticker: "CRM",
+                    companyName: "Salesforce Inc.",
+                    whaleCount: 2,
+                    amount: "$120M",
+                    leadWhaleName: "Ro Khanna",
+                    leadWhaleAvatarName: nil
+                )
+            ]
+        )),
+        .whaleTrade(WhaleTradeAlertData(
+            action: .sold,
+            totalAmount: "$689M",
+            timeWindowLabel: "this week",
+            items: [
+                WhaleTradeItem(
+                    ticker: "GOOGL",
+                    companyName: "Alphabet Inc.",
+                    whaleCount: 3,
+                    amount: "$688.4M",
+                    leadWhaleName: "Tommy Tuberville",
+                    leadWhaleAvatarName: nil
+                ),
+                WhaleTradeItem(
+                    ticker: "AAPL",
+                    companyName: "Apple Inc.",
+                    whaleCount: 2,
+                    amount: "$669K",
+                    leadWhaleName: "Tommy Tuberville",
+                    leadWhaleAvatarName: nil
+                )
+            ]
         )),
         .analystRating(AnalystRatingAlertData(
-            ticker: "GOOGL",
-            companyName: "Alphabet Inc.",
-            firmName: "Morgan Stanley",
-            action: .upgrade,
-            newRating: "Overweight",
-            previousRating: "Equal-Weight",
-            priceTarget: 210.0,
-            previousPriceTarget: 185.0,
-            day: 18,
-            month: "FEB"
+            timeWindowLabel: "this week",
+            items: [
+                AnalystRatingItem(
+                    ticker: "GOOGL",
+                    firmName: "Morgan Stanley",
+                    action: .upgrade,
+                    newRating: "Overweight",
+                    previousRating: "Equal-Weight",
+                    priceTarget: 210.0,
+                    previousPriceTarget: 185.0,
+                    day: 18,
+                    month: "FEB"
+                ),
+                AnalystRatingItem(
+                    ticker: "CRM",
+                    firmName: "BTIG",
+                    action: .reiterate,
+                    newRating: "Buy",
+                    previousRating: "Buy",
+                    priceTarget: nil,
+                    previousPriceTarget: nil,
+                    day: 17,
+                    month: "FEB"
+                )
+            ]
         )),
         .insiderTransaction(InsiderTransactionAlertData(
-            ticker: "NVDA",
-            companyName: "NVIDIA Corp.",
-            insiderName: "Colette Kress",
-            insiderTitle: "CFO",
             action: .bought,
-            amount: "$5.2M",
-            day: 16,
-            month: "FEB"
+            totalAmount: "$5.2M",
+            timeWindowLabel: "this week",
+            items: [
+                InsiderTransactionItem(
+                    ticker: "NVDA",
+                    insiderName: "Colette Kress",
+                    insiderTitle: "CFO",
+                    amount: "$5.2M",
+                    day: 16,
+                    month: "FEB"
+                )
+            ]
         ))
     ]
 }

@@ -26,6 +26,7 @@ from app.schemas.tracking import (
     AnalystRatingItemResponse,
     InsiderTransactionItemResponse,
 )
+from app.services._insider_common import classify_for_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +511,11 @@ class TrackingService:
                 else:
                     rating_action = "reiterate"
 
+                # Reiterations are not real changes — keep scanning for a
+                # material action within the cutoff window.
+                if rating_action == "reiterate":
+                    continue
+
                 return AnalystRatingItemResponse(
                     ticker=ticker.upper(),
                     firm_name=firm,
@@ -536,7 +542,7 @@ class TrackingService:
 
         tickers = [it.ticker for it in items]
         count_label = (
-            "1 analyst update" if len(items) == 1 else f"{len(items)} analyst updates"
+            "1 rating change" if len(items) == 1 else f"{len(items)} rating changes"
         )
         description = (
             f"{count_label} on {_join_tickers(tickers)} this week."
@@ -589,12 +595,14 @@ class TrackingService:
                 if dt is None or dt < cutoff:
                     continue
 
-                tx_type = (tx.get("transactionType") or "").upper()
-                if tx_type.startswith("P") or "PURCHASE" in tx_type:
-                    action_word = "bought"
-                elif tx_type.startswith("S") or "SALE" in tx_type or "SOLD" in tx_type:
-                    action_word = "sold"
-                else:
+                # Shared classifier keeps this in lockstep with the Holders
+                # tab — only surface trades the Holders tab would label
+                # "Informative Buy/Sell". Option exercises, tax withholding,
+                # and composite S+OE sales are filtered out.
+                action_word, informative = classify_for_alerts(
+                    tx.get("transactionType") or ""
+                )
+                if not informative:
                     continue
 
                 try:

@@ -210,8 +210,8 @@ enum AppAlert: Identifiable {
             return "\(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel) — totaling \(data.totalAmount)."
         case .analystRating(let data):
             let countLabel = data.items.count == 1
-                ? "1 analyst update"
-                : "\(data.items.count) analyst updates"
+                ? "1 rating change"
+                : "\(data.items.count) rating changes"
             return "\(countLabel) on \(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel)."
         case .insiderTransaction(let data):
             return "\(AppAlert.joinTickers(data.tickers)) \(data.timeWindowLabel) — totaling \(data.totalAmount)."
@@ -858,9 +858,9 @@ extension AppAlert {
                 AnalystRatingItem(
                     ticker: "CRM",
                     firmName: "BTIG",
-                    action: .reiterate,
+                    action: .upgrade,
                     newRating: "Buy",
-                    previousRating: "Buy",
+                    previousRating: "Neutral",
                     priceTarget: nil,
                     previousPriceTarget: nil,
                     day: 17,

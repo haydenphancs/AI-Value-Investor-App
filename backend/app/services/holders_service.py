@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
+from app.services._insider_common import classify_insider_transaction
 from app.schemas.holders import (
     CongressActivitiesDataSchema,
     CongressActivitySchema,
@@ -91,43 +92,8 @@ def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float
         return default
 
 
-def _classify_insider_transaction(tx_type: str) -> str:
-    """
-    Classify FMP transactionType into informative/uninformative categories.
-
-    Only open-market purchases (P) and pure sales (S) are informative.
-    Composite sale types (S-Sale+OE, S-Sale+DIS) indicate option exercises
-    or RSU dispositions paired with sales — these are uninformative because
-    they reflect compensation mechanics, not insider sentiment.
-
-      - P-Purchase           → Informative Buy
-      - S-Sale (pure)        → Informative Sell
-      - S-Sale+OE / +DIS     → Uninformative Sell (option exercise / disposition combo)
-      - A-*/M-*/G-*          → Uninformative Buy (awards, exercises, gifts)
-      - F-*/D-*              → Uninformative Sell (tax withholding, disposition)
-    """
-    tx = (tx_type or "").strip().upper()
-
-    # Open-market purchases are always informative
-    if tx.startswith("P"):
-        return "Informative Buy"
-
-    # Sales: only pure open-market sales are informative.
-    # Composite types like "S - SALE+OE" are option-exercise sales → uninformative.
-    if tx.startswith("S"):
-        if "+OE" in tx or "+DIS" in tx or "EXEMPT" in tx:
-            return "Uninformative Sell"
-        return "Informative Sell"
-
-    # Awards, option exercises, gifts → uninformative acquisitions
-    if tx.startswith(("A", "M", "G")):
-        return "Uninformative Buy"
-
-    # Tax withholding, dispositions
-    if tx.startswith(("F", "D")):
-        return "Uninformative Sell"
-
-    return "Uninformative Sell"
+# Backward-compat alias — callers use the private name; shared impl lives in _insider_common.
+_classify_insider_transaction = classify_insider_transaction
 
 
 _SUPABASE_CACHE_TTL_HOURS = 24

@@ -173,7 +173,7 @@ struct AlertDetailView: View {
     private func analystRatingDetail(_ data: AppAlert.AnalystRatingAlertData) -> some View {
         VStack(spacing: AppSpacing.md) {
             summaryCard {
-                detailRow(label: "Updates", value: "\(data.items.count)")
+                detailRow(label: "Changes", value: "\(data.items.count)")
                 detailRow(label: "Window", value: data.timeWindowLabel.capitalized)
             }
 

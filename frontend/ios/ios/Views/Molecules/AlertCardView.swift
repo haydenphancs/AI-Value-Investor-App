@@ -42,7 +42,7 @@ struct AlertCardView: View {
 
                 Spacer()
 
-                // Trailing: date badge for earnings/market, chevron for smartMoney
+                // Trailing view varies by alert type
                 trailingView
             }
             .padding(AppSpacing.lg)
@@ -56,19 +56,39 @@ struct AlertCardView: View {
     private var trailingView: some View {
         switch alert {
         case .earnings(let data):
-            EventDateBadge(
-                day: data.formattedDay,
-                month: data.formattedMonth
-            )
+            EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
         case .market(let data):
-            EventDateBadge(
-                day: data.formattedDay,
-                month: data.formattedMonth
-            )
-        case .smartMoney:
-            Image(systemName: "chevron.right")
-                .font(AppTypography.iconSmall).fontWeight(.medium)
+            EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
+        case .whaleTrade(let data):
+            whaleTradeTrailing(data)
+        case .analystRating(let data):
+            analystRatingTrailing(data)
+        case .insiderTransaction(let data):
+            EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
+        }
+    }
+
+    private func whaleTradeTrailing(_ data: AppAlert.WhaleTradeAlertData) -> some View {
+        VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+            Text(data.totalAmount)
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(data.action.color)
+            Text(data.action.rawValue)
+                .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+        }
+    }
+
+    private func analystRatingTrailing(_ data: AppAlert.AnalystRatingAlertData) -> some View {
+        VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+            Image(systemName: data.action.iconName)
+                .font(AppTypography.iconSmall).fontWeight(.semibold)
+                .foregroundColor(data.action.color)
+            if let pt = data.priceTarget {
+                Text("PT $\(Int(pt))")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
     }
 }

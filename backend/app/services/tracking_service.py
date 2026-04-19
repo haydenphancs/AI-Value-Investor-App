@@ -20,7 +20,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.database import get_supabase
 from app.schemas.tracking import (
     TrackedAssetResponse,
-    EarningsAlertResponse,
+    AlertResponse,
     TrackingFeedResponse,
 )
 
@@ -120,9 +120,18 @@ class TrackingService:
         quotes_task = self._get_batch_quotes(tickers)
         sparklines_task = self._get_all_sparklines(tickers)
         earnings_task = self._get_earnings_alerts(tickers)
+        whale_task = self._get_whale_trade_alerts(tickers)
+        analyst_task = self._get_analyst_rating_alerts(tickers)
+        insider_task = self._get_insider_transaction_alerts(tickers)
 
         results = await asyncio.gather(
-            quotes_task, sparklines_task, earnings_task, return_exceptions=True
+            quotes_task,
+            sparklines_task,
+            earnings_task,
+            whale_task,
+            analyst_task,
+            insider_task,
+            return_exceptions=True,
         )
 
         quotes_map: Dict[str, Dict] = (
@@ -131,14 +140,34 @@ class TrackingService:
         sparklines_map: Dict[str, List[float]] = (
             results[1] if not isinstance(results[1], BaseException) else {}
         )
-        alerts: List[EarningsAlertResponse] = (
+        earnings_alerts: List[AlertResponse] = (
             results[2] if not isinstance(results[2], BaseException) else []
         )
+        whale_alerts: List[AlertResponse] = (
+            results[3] if not isinstance(results[3], BaseException) else []
+        )
+        analyst_alerts: List[AlertResponse] = (
+            results[4] if not isinstance(results[4], BaseException) else []
+        )
+        insider_alerts: List[AlertResponse] = (
+            results[5] if not isinstance(results[5], BaseException) else []
+        )
 
-        section_names = ["batch_quotes", "sparklines", "earnings_alerts"]
+        section_names = [
+            "batch_quotes",
+            "sparklines",
+            "earnings_alerts",
+            "whale_trade_alerts",
+            "analyst_rating_alerts",
+            "insider_transaction_alerts",
+        ]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
                 logger.error("[Tracking] %s failed: %s", section_names[idx], res)
+
+        alerts: List[AlertResponse] = (
+            earnings_alerts + whale_alerts + analyst_alerts + insider_alerts
+        )
 
         # 3. Merge watchlist + quotes + sparklines into TrackedAssetResponse
         assets: List[TrackedAssetResponse] = []
@@ -243,7 +272,7 @@ class TrackingService:
 
     async def _get_earnings_alerts(
         self, watchlist_tickers: List[str]
-    ) -> List[EarningsAlertResponse]:
+    ) -> List[AlertResponse]:
         """Fetch upcoming earnings from FMP, filtered to user's watchlist."""
         try:
             today = datetime.now().strftime("%Y-%m-%d")
@@ -255,7 +284,7 @@ class TrackingService:
                 return []
 
             ticker_set = {t.upper() for t in watchlist_tickers}
-            alerts: List[EarningsAlertResponse] = []
+            alerts: List[AlertResponse] = []
 
             for entry in calendar:
                 symbol = (entry.get("symbol") or "").upper()
@@ -298,7 +327,7 @@ class TrackingService:
                 full_desc = f"{symbol} reports earnings {report_time_display}. {description}"
 
                 alerts.append(
-                    EarningsAlertResponse(
+                    AlertResponse(
                         type="earnings",
                         ticker=symbol,
                         company_name=entry.get("companyName") or symbol,
@@ -315,3 +344,335 @@ class TrackingService:
         except Exception as exc:
             logger.warning("Earnings alerts failed: %s", exc)
             return []
+
+    # ── Whale Trade Alerts ──────────────────────────────────────────
+
+    async def _get_whale_trade_alerts(
+        self, watchlist_tickers: List[str]
+    ) -> List[AlertResponse]:
+        """Aggregate recent whale trades on watchlist tickers from Supabase.
+
+        One alert per (ticker, dominant action) for trades in the last 7 days.
+        """
+        if not watchlist_tickers:
+            return []
+
+        ticker_list = [t.upper() for t in watchlist_tickers]
+        cutoff_iso = (datetime.now() - timedelta(days=7)).isoformat()
+
+        sb = get_supabase()
+        try:
+            result = (
+                sb.table("whale_trades")
+                .select("ticker, company_name, action, amount, date, created_at, whale_id, whales(name, avatar_url)")
+                .in_("ticker", ticker_list)
+                .gte("created_at", cutoff_iso)
+                .order("created_at", desc=True)
+                .limit(500)
+                .execute()
+            )
+            rows = result.data or []
+        except Exception as exc:
+            logger.warning("[Tracking] whale_trades query failed: %s", exc)
+            return []
+
+        # Group by (ticker, action)
+        groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in rows:
+            ticker = (row.get("ticker") or "").upper()
+            action = (row.get("action") or "").upper()
+            if not ticker or action not in ("BOUGHT", "SOLD"):
+                continue
+            key = (ticker, action)
+            bucket = groups.setdefault(
+                key,
+                {
+                    "company_name": row.get("company_name") or ticker,
+                    "total_amount": 0.0,
+                    "whale_ids": set(),
+                    "lead_whale_name": None,
+                    "lead_whale_avatar": None,
+                },
+            )
+            try:
+                bucket["total_amount"] += float(row.get("amount") or 0)
+            except (TypeError, ValueError):
+                pass
+            whale_id = row.get("whale_id")
+            if whale_id:
+                bucket["whale_ids"].add(whale_id)
+            # First row per group is the most recent — use it as the lead whale
+            if bucket["lead_whale_name"] is None:
+                whale = row.get("whales") or {}
+                if isinstance(whale, dict):
+                    bucket["lead_whale_name"] = whale.get("name")
+                    bucket["lead_whale_avatar"] = whale.get("avatar_url")
+
+        alerts: List[AlertResponse] = []
+        for (ticker, action), bucket in groups.items():
+            whale_count = len(bucket["whale_ids"])
+            if whale_count == 0:
+                continue
+            action_word = "bought" if action == "BOUGHT" else "sold"
+            amount_label = _format_amount(bucket["total_amount"])
+            lead = bucket["lead_whale_name"]
+            whales_phrase = (
+                f"{whale_count} whales"
+                if whale_count > 1
+                else (lead or "1 whale")
+            )
+            if whale_count > 1 and lead:
+                suffix = f" (led by {lead})"
+            else:
+                suffix = ""
+            description = (
+                f"{whales_phrase} {action_word} {ticker} this week"
+                f" — totaling {amount_label}{suffix}."
+            )
+            alerts.append(
+                AlertResponse(
+                    type="whale_trade",
+                    ticker=ticker,
+                    company_name=bucket["company_name"],
+                    title="Whale Trade",
+                    description=description,
+                    whale_count=whale_count,
+                    total_amount=amount_label,
+                    action=action_word,
+                    lead_whale_name=lead,
+                    lead_whale_avatar_name=bucket["lead_whale_avatar"],
+                    time_window_label="this week",
+                )
+            )
+
+        return alerts
+
+    # ── Analyst Rating Alerts ───────────────────────────────────────
+
+    async def _get_analyst_rating_alerts(
+        self, watchlist_tickers: List[str]
+    ) -> List[AlertResponse]:
+        """Fetch recent analyst grade changes per watchlist ticker via FMP."""
+        if not watchlist_tickers:
+            return []
+
+        cutoff = datetime.now() - timedelta(days=14)
+
+        async def _fetch_one(ticker: str) -> Optional[AlertResponse]:
+            try:
+                grades = await self.fmp.get_grades(ticker, limit=20)
+            except Exception as exc:
+                logger.warning("Analyst grades for %s failed: %s", ticker, exc)
+                return None
+            if not isinstance(grades, list) or not grades:
+                return None
+
+            # Find the most recent grade within the cutoff window
+            for entry in grades:
+                date_str = entry.get("publishedDate") or entry.get("date") or ""
+                dt = _parse_date(date_str)
+                if dt is None or dt < cutoff:
+                    continue
+
+                firm = (
+                    entry.get("gradingCompany")
+                    or entry.get("analystCompany")
+                    or entry.get("newsPublisher")
+                    or "Analyst"
+                )
+                new_rating = entry.get("newGrade") or ""
+                previous_rating = entry.get("previousGrade") or None
+                action_raw = (entry.get("action") or "").lower()
+                if action_raw in ("upgrade", "downgrade", "initiate", "reiterate"):
+                    rating_action = action_raw
+                elif previous_rating and new_rating:
+                    rating_action = _infer_rating_action(previous_rating, new_rating)
+                else:
+                    rating_action = "reiterate"
+
+                verb = {
+                    "upgrade": "upgraded",
+                    "downgrade": "downgraded",
+                    "initiate": "initiated coverage of",
+                    "reiterate": "reiterated",
+                }[rating_action]
+
+                description = f"{firm} {verb} {ticker.upper()} at {new_rating}"
+                if previous_rating and rating_action in ("upgrade", "downgrade"):
+                    description += f" (from {previous_rating})"
+
+                return AlertResponse(
+                    type="analyst_rating",
+                    ticker=ticker.upper(),
+                    company_name=ticker.upper(),
+                    title="Analyst Rating",
+                    description=description,
+                    day=dt.day,
+                    month=dt.strftime("%b").upper(),
+                    firm_name=firm,
+                    rating_action=rating_action,
+                    new_rating=new_rating,
+                    previous_rating=previous_rating,
+                )
+            return None
+
+        results = await asyncio.gather(
+            *[_fetch_one(t) for t in watchlist_tickers], return_exceptions=True
+        )
+        alerts: List[AlertResponse] = []
+        for res in results:
+            if isinstance(res, AlertResponse):
+                alerts.append(res)
+        # Cap to avoid flooding the section
+        return alerts[:5]
+
+    # ── Insider Transaction Alerts ──────────────────────────────────
+
+    async def _get_insider_transaction_alerts(
+        self, watchlist_tickers: List[str]
+    ) -> List[AlertResponse]:
+        """Fetch recent notable insider (Form 4) transactions per watchlist ticker."""
+        if not watchlist_tickers:
+            return []
+
+        cutoff = datetime.now() - timedelta(days=14)
+        MIN_AMOUNT = 100_000  # $100K threshold to reduce noise
+
+        async def _fetch_one(ticker: str) -> Optional[AlertResponse]:
+            try:
+                trades = await self.fmp.get_insider_trading(ticker, limit=30)
+            except Exception as exc:
+                logger.warning("Insider trading for %s failed: %s", ticker, exc)
+                return None
+            if not isinstance(trades, list) or not trades:
+                return None
+
+            # Aggregate by (insider_name, transaction_date, action) — Form 4
+            # filings often split one decision across many small rows.
+            buckets: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+            for tx in trades:
+                date_str = tx.get("transactionDate") or tx.get("filingDate") or ""
+                dt = _parse_date(date_str)
+                if dt is None or dt < cutoff:
+                    continue
+
+                tx_type = (tx.get("transactionType") or "").upper()
+                if tx_type.startswith("P") or "PURCHASE" in tx_type:
+                    action_word = "bought"
+                elif tx_type.startswith("S") or "SALE" in tx_type or "SOLD" in tx_type:
+                    action_word = "sold"
+                else:
+                    # Skip option exercises (M), tax withholding (F), grants (A), etc.
+                    continue
+
+                try:
+                    shares = float(tx.get("securitiesTransacted") or 0)
+                    price = float(tx.get("price") or 0)
+                    amount = shares * price
+                except (TypeError, ValueError):
+                    continue
+                if amount <= 0:
+                    continue
+
+                insider_name = (tx.get("reportingName") or "Insider").strip()
+                insider_title = (tx.get("typeOfOwner") or "Officer").strip()
+                key = (insider_name, date_str, action_word)
+                bucket = buckets.setdefault(
+                    key,
+                    {
+                        "insider_title": insider_title,
+                        "amount": 0.0,
+                        "dt": dt,
+                    },
+                )
+                bucket["amount"] += amount
+
+            if not buckets:
+                return None
+
+            # Pick the largest (by dollar) aggregated transaction above threshold
+            best: Optional[Tuple[Tuple[str, str, str], Dict[str, Any]]] = None
+            for key, bucket in buckets.items():
+                if bucket["amount"] < MIN_AMOUNT:
+                    continue
+                if best is None or bucket["amount"] > best[1]["amount"]:
+                    best = (key, bucket)
+            if best is None:
+                return None
+
+            (insider_name, _, action_word), bucket = best
+            amount_label = _format_amount(bucket["amount"])
+            description = (
+                f"{insider_name} ({bucket['insider_title']}) {action_word} "
+                f"{amount_label} of {ticker.upper()}."
+            )
+            return AlertResponse(
+                type="insider_transaction",
+                ticker=ticker.upper(),
+                company_name=ticker.upper(),
+                title="Insider Transaction",
+                description=description,
+                day=bucket["dt"].day,
+                month=bucket["dt"].strftime("%b").upper(),
+                insider_name=insider_name,
+                insider_title=bucket["insider_title"],
+                action=action_word,
+                total_amount=amount_label,
+            )
+
+        results = await asyncio.gather(
+            *[_fetch_one(t) for t in watchlist_tickers], return_exceptions=True
+        )
+        alerts: List[AlertResponse] = []
+        for res in results:
+            if isinstance(res, AlertResponse):
+                alerts.append(res)
+        return alerts[:5]
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _format_amount(value: float) -> str:
+    """Format a dollar amount as $X.XB / $X.XM / $XK."""
+    amt = abs(value)
+    if amt >= 1_000_000_000:
+        return f"${amt / 1_000_000_000:.2f}B"
+    if amt >= 1_000_000:
+        return f"${amt / 1_000_000:.1f}M"
+    if amt >= 1_000:
+        return f"${amt / 1_000:.0f}K"
+    return f"${amt:.0f}"
+
+
+def _parse_date(date_str: str) -> Optional[datetime]:
+    """Parse a date string in common FMP formats."""
+    if not date_str:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+_RATING_RANK = {
+    "strong sell": 0, "sell": 1, "underperform": 1, "underweight": 1,
+    "hold": 2, "neutral": 2, "market perform": 2, "equal-weight": 2, "equal weight": 2,
+    "buy": 3, "overweight": 3, "outperform": 3, "accumulate": 3,
+    "strong buy": 4, "conviction buy": 4,
+}
+
+
+def _infer_rating_action(previous: str, new: str) -> str:
+    """Infer upgrade/downgrade/reiterate from two rating labels."""
+    prev = _RATING_RANK.get(previous.strip().lower())
+    curr = _RATING_RANK.get(new.strip().lower())
+    if prev is None or curr is None:
+        return "reiterate"
+    if curr > prev:
+        return "upgrade"
+    if curr < prev:
+        return "downgrade"
+    return "reiterate"

@@ -736,7 +736,7 @@ class WhaleService:
         # Fetch whale names
         whales = (
             sb.table("whales")
-            .select("id, name, avatar_url")
+            .select("id, name, avatar_url, category")
             .in_("id", whale_ids)
             .execute()
         )
@@ -753,6 +753,7 @@ class WhaleService:
                     whale_id=str(tg["whale_id"]),
                     entity_name=whale.get("name", "Unknown"),
                     entity_avatar_name=whale.get("avatar_url", ""),
+                    category=whale.get("category"),
                     action=tg.get("net_action", "BOUGHT"),
                     trade_count=tg.get("trade_count", 0),
                     total_amount=_format_amount(
@@ -1376,16 +1377,25 @@ class WhaleService:
         raw_trades: List[Dict],
         as_of_date: str,
     ) -> Tuple[List[Dict], Optional[Dict], List[Dict]]:
-        """Aggregate congressional trades into holdings + trade group + sectors."""
-        # Normalize and filter trades
-        trades = []
-        holdings_accum: Dict[str, Dict] = {}
-        sector_accum: Dict[str, float] = {}
+        """Aggregate congressional trades into holdings + trade group + sectors.
 
-        # Track ticker occurrence order for New/Closed detection
-        seen_tickers: set = set()
+        Uses a chronological walk (oldest → newest) to reconstruct
+        `previous_allocation` and `new_allocation` at each trade. This is a
+        directional estimate, NOT a live portfolio:
+
+        - Starting portfolio assumed empty (STOCK Act has no pre-disclosure baseline).
+        - Dollar values use bucket midpoints — absolute amounts drift 20–40% per trade.
+        - No market-price adjustment between disclosures (trade-flow only).
+        - Sales exceeding known holdings clamp to zero (no negative allocations).
+
+        The raw STOCK Act bucket string (e.g. ``"$1,001 - $15,000"``) is
+        preserved on each trade as ``amount_range`` so the UI can display the
+        honest range instead of the midpoint.
+        """
         full_sale_types = {"sale_full", "sale (full)"}
 
+        # ── Pass 1: normalize + sort by date ────────────────────────────
+        normalized: List[Dict] = []
         for t in raw_trades:
             symbol = (t.get("symbol") or "").upper().strip()
             if not symbol or symbol == "--" or symbol == "N/A":
@@ -1393,13 +1403,10 @@ class WhaleService:
 
             raw_type = (t.get("type") or "").lower().strip()
             action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
-            amount_str = t.get("amount") or "$1,001 - $15,000"
-            # Shared helper keeps this in lockstep with holders_service —
-            # AMOUNT_RANGES covered only the common buckets; the helper
-            # also handles missing / "Over $X" / unparseable inputs.
-            amount = parse_congress_amount_dollars(amount_str)
+            amount_range = t.get("amount") or "$1,001 - $15,000"
+            amount = parse_congress_amount_dollars(amount_range)
             if amount == 0.0:
-                amount = 8_000  # safety fallback matches prior behavior
+                amount = 8_000  # safety fallback
             tx_date = (
                 t.get("transactionDate")
                 or t.get("transaction_date")
@@ -1407,7 +1414,31 @@ class WhaleService:
             )
             name = t.get("assetDescription") or t.get("asset_description") or symbol
 
-            # Detect New/Closed vs Increased/Decreased
+            normalized.append({
+                "ticker": symbol,
+                "company_name": name,
+                "action": action,
+                "raw_type": raw_type,
+                "amount": amount,
+                "amount_range": amount_range,
+                "date": tx_date,
+            })
+
+        # Sort oldest → newest; stable preserves FMP order for same-day trades
+        normalized.sort(key=lambda t: t["date"])
+
+        # ── Pass 2: chronological walk with running portfolio ──────────
+        running_portfolio: Dict[str, float] = {}
+        seen_tickers: set = set()
+        trades: List[Dict] = []
+
+        for t in normalized:
+            symbol = t["ticker"]
+            action = t["action"]
+            raw_type = t["raw_type"]
+            amount = t["amount"]
+
+            # Trade type classification (uses running portfolio knowledge)
             if action == "BOUGHT" and symbol not in seen_tickers:
                 trade_type = "New"
             elif action == "SOLD" and raw_type in full_sale_types:
@@ -1416,37 +1447,58 @@ class WhaleService:
                 trade_type = "Increased"
             else:
                 trade_type = "Decreased"
-
             seen_tickers.add(symbol)
+
+            # Allocation BEFORE applying this trade
+            total_before = sum(running_portfolio.values())
+            prev_value = running_portfolio.get(symbol, 0.0)
+            previous_allocation = (
+                round(prev_value / total_before * 100, 2)
+                if total_before > 0
+                else 0.0
+            )
+
+            # Apply trade to running portfolio; clamp at zero on oversell
+            if action == "BOUGHT":
+                running_portfolio[symbol] = prev_value + amount
+            else:
+                running_portfolio[symbol] = max(prev_value - amount, 0.0)
+
+            # Allocation AFTER applying this trade
+            total_after = sum(running_portfolio.values())
+            new_value = running_portfolio[symbol]
+            new_allocation = (
+                round(new_value / total_after * 100, 2)
+                if total_after > 0
+                else 0.0
+            )
 
             trades.append({
                 "ticker": symbol,
-                "company_name": name,
+                "company_name": t["company_name"],
                 "action": action,
                 "trade_type": trade_type,
                 "amount": amount,
-                "previous_allocation": 0,
-                "new_allocation": 0,
-                "date": tx_date,
+                "amount_range": t["amount_range"],
+                "previous_allocation": previous_allocation,
+                "new_allocation": new_allocation,
+                "date": t["date"],
             })
 
-            # Accumulate for holdings estimation
-            if symbol not in holdings_accum:
-                holdings_accum[symbol] = {
-                    "ticker": symbol,
-                    "company_name": name,
-                    "value": 0,
-                    "allocation": 0,
-                    "change_percent": 0,
-                }
-            if action == "BOUGHT":
-                holdings_accum[symbol]["value"] += amount
-            else:
-                holdings_accum[symbol]["value"] -= amount
-
-        # Build holdings (positive positions only)
+        # ── Build holdings from final running portfolio ─────────────────
         holdings = [
-            h for h in holdings_accum.values() if h["value"] > 0
+            {
+                "ticker": sym,
+                "company_name": next(
+                    (t["company_name"] for t in trades if t["ticker"] == sym),
+                    sym,
+                ),
+                "value": val,
+                "allocation": 0,
+                "change_percent": 0,
+            }
+            for sym, val in running_portfolio.items()
+            if val > 0
         ]
 
         # Fallback: when no positive holdings (e.g. all sells), show
@@ -1750,6 +1802,7 @@ class WhaleService:
                 action=t.get("action", "BOUGHT"),
                 trade_type=t.get("trade_type", "Increased"),
                 amount=float(t.get("amount", 0)),
+                amount_range=t.get("amount_range"),
                 previous_allocation=float(t.get("previous_allocation", 0)),
                 new_allocation=float(t.get("new_allocation", 0)),
                 date=t.get("date", ""),
@@ -1769,6 +1822,7 @@ class WhaleService:
                 action=t.get("action", "BOUGHT"),
                 trade_type=t.get("trade_type", "Increased"),
                 amount=float(t.get("amount", 0)),
+                amount_range=t.get("amount_range"),
                 previous_allocation=float(t.get("previous_allocation") or 0),
                 new_allocation=float(t.get("new_allocation") or 0),
                 date=t.get("date", ""),

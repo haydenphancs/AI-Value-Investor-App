@@ -705,16 +705,18 @@ struct WhaleTradeGroupActivity: Identifiable {
     let id: String
     let entityName: String
     let entityAvatarName: String
+    let category: WhaleCategory?
     let action: WhaleAction
     let tradeCount: Int
     let totalAmount: String
     let summary: String?
     let date: Date
 
-    init(id: String = UUID().uuidString, entityName: String, entityAvatarName: String, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
+    init(id: String = UUID().uuidString, entityName: String, entityAvatarName: String, category: WhaleCategory? = nil, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
         self.id = id
         self.entityName = entityName
         self.entityAvatarName = entityAvatarName
+        self.category = category
         self.action = action
         self.tradeCount = tradeCount
         self.totalAmount = totalAmount

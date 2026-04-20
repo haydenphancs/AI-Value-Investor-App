@@ -230,11 +230,12 @@ struct TradeDetailCard: View {
 
                 Spacer()
 
-                // Action badge + amount
+                // Action badge + amount (STOCK Act bucket for politicians,
+                // dollar amount for 13F investors/institutions).
                 VStack(alignment: .trailing, spacing: AppSpacing.xs) {
                     TradeActionBadge(action: trade.action)
 
-                    Text(trade.formattedAmount)
+                    Text(trade.displayAmount)
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
                 }

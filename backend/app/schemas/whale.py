@@ -69,6 +69,7 @@ class WhaleTradeResponse(BaseModel):
     action: str  # "BOUGHT" or "SOLD"
     trade_type: str  # "New", "Increased", "Decreased", "Closed"
     amount: float
+    amount_range: Optional[str] = None  # STOCK Act bucket, e.g. "$1,001 - $15,000"
     previous_allocation: float = 0.0
     new_allocation: float = 0.0
     date: str
@@ -134,6 +135,7 @@ class WhaleTradeGroupActivityResponse(BaseModel):
     whale_id: str = ""
     entity_name: str
     entity_avatar_name: str = ""
+    category: Optional[str] = None  # "investors" | "institutions" | "politicians" | "crypto"
     action: str  # "BOUGHT" or "SOLD"
     trade_count: int
     total_amount: str  # Formatted: "$4.34B", "-$2.1B"

@@ -319,6 +319,7 @@ struct WhaleTrade: Identifiable, Codable {
     let action: WhaleTradeAction
     let tradeType: WhaleTradeType
     let amount: Double
+    let amountRange: String?
     let previousAllocation: Double
     let newAllocation: Double
     let date: Date
@@ -326,6 +327,14 @@ struct WhaleTrade: Identifiable, Codable {
 
     var formattedAmount: String {
         formatTradeAmount(amount)
+    }
+
+    /// Preferred label for the amount column. For congressional disclosures,
+    /// the raw STOCK Act bucket (`"$1,001 - $15,000"`) is more honest than the
+    /// midpoint dollar value; for 13F trades, `amountRange` is nil and the
+    /// computed dollar amount is used.
+    var displayAmount: String {
+        amountRange ?? formattedAmount
     }
 
     var formattedAllocationChange: String {
@@ -353,6 +362,7 @@ struct WhaleTrade: Identifiable, Codable {
         action: WhaleTradeAction,
         tradeType: WhaleTradeType = .increased,
         amount: Double,
+        amountRange: String? = nil,
         previousAllocation: Double = 0,
         newAllocation: Double = 0,
         date: Date = Date(),
@@ -364,6 +374,7 @@ struct WhaleTrade: Identifiable, Codable {
         self.action = action
         self.tradeType = tradeType
         self.amount = amount
+        self.amountRange = amountRange
         self.previousAllocation = previousAllocation
         self.newAllocation = newAllocation
         self.date = date

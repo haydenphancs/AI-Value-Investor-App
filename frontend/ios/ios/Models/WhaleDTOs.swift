@@ -51,6 +51,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
     let whaleId: String
     let entityName: String
     let entityAvatarName: String
+    let category: String?
     let action: String
     let tradeCount: Int
     let totalAmount: String
@@ -58,7 +59,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
     let date: String
 
     enum CodingKeys: String, CodingKey {
-        case id, action, summary, date
+        case id, category, action, summary, date
         case whaleId = "whale_id"
         case entityName = "entity_name"
         case entityAvatarName = "entity_avatar_name"
@@ -71,6 +72,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
             id: id,
             entityName: entityName,
             entityAvatarName: entityAvatarName,
+            category: category.map { WhaleCategory.fromBackend($0) },
             action: WhaleAction(rawValue: action) ?? .bought,
             tradeCount: tradeCount,
             totalAmount: totalAmount,
@@ -235,6 +237,7 @@ struct WhaleTradeDTO: Codable {
     let action: String
     let tradeType: String
     let amount: Double
+    let amountRange: String?
     let previousAllocation: Double
     let newAllocation: Double
     let date: String
@@ -244,6 +247,7 @@ struct WhaleTradeDTO: Codable {
         case id, ticker, action, amount, date
         case companyName = "company_name"
         case tradeType = "trade_type"
+        case amountRange = "amount_range"
         case previousAllocation = "previous_allocation"
         case newAllocation = "new_allocation"
         case assetType = "asset_type"
@@ -257,6 +261,7 @@ struct WhaleTradeDTO: Codable {
             action: WhaleTradeAction(rawValue: action) ?? .bought,
             tradeType: WhaleTradeType(rawValue: tradeType) ?? .increased,
             amount: amount,
+            amountRange: amountRange,
             previousAllocation: previousAllocation,
             newAllocation: newAllocation,
             date: DateParser.parseDate(date),

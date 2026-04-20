@@ -531,10 +531,15 @@ struct WhaleTradeCard: View {
                         Spacer()
 
                         // Amount + Action badge
+                        // For politicians, STOCK Act dollar midpoints are
+                        // misleading — show only the action badge. Allocation
+                        // arrows appear on the trade detail rows instead.
                         VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                            Text(activity.formattedAmount)
-                                .font(AppTypography.bodySmallEmphasis)
-                                .foregroundColor(activity.action.color)
+                            if activity.category != .politicians {
+                                Text(activity.formattedAmount)
+                                    .font(AppTypography.bodySmallEmphasis)
+                                    .foregroundColor(activity.action.color)
+                            }
 
                             Text(activity.action.rawValue)
                                 .font(AppTypography.captionSmall).fontWeight(.bold)

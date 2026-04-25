@@ -6,17 +6,25 @@ in portfolio_items.ticker must already exist as a watchlist row for the same
 user (enforced at the service layer; a portfolio can never contain a ticker
 the user isn't tracking).
 
+Each portfolio_items row also carries optional per-portfolio holding values —
+``shares`` and ``market_value`` — that drive the Portfolio Insights
+diversification score for the active portfolio. These are independent across
+portfolios: GOOGL with 10 shares set in "Holdings" doesn't leak into a
+separate "Tech" portfolio.
+
 The first call to GET /portfolios for a user with no rows lazily seeds a
-default "Holdings" portfolio populated from their existing watchlist, so the
-iOS client never has to special-case the empty state.
+default "Holdings" portfolio populated from their existing watchlist (carrying
+over each row's shares / market_value), so the iOS client never has to
+special-case the empty state.
 
 Routes:
-  GET    /portfolios                        → PortfolioListResponse
-  POST   /portfolios                        → PortfolioResponse
-  PUT    /portfolios/reorder                → message
-  PUT    /portfolios/{portfolio_id}         → PortfolioResponse
-  DELETE /portfolios/{portfolio_id}         → message
-  PUT    /portfolios/{portfolio_id}/tickers → PortfolioResponse
+  GET    /portfolios                         → PortfolioListResponse
+  POST   /portfolios                         → PortfolioResponse
+  PUT    /portfolios/reorder                 → message
+  PUT    /portfolios/{portfolio_id}          → PortfolioResponse
+  DELETE /portfolios/{portfolio_id}          → message
+  PUT    /portfolios/{portfolio_id}/tickers  → PortfolioResponse  (membership; preserves holdings)
+  PUT    /portfolios/{portfolio_id}/holdings → PortfolioResponse  (per-portfolio shares / market_value)
 """
 
 from datetime import datetime
@@ -38,11 +46,19 @@ router = APIRouter()
 # ── Schemas ─────────────────────────────────────────────────────────
 
 
+class PortfolioItemResponse(BaseModel):
+    """A ticker inside a portfolio with optional per-portfolio holding values."""
+
+    ticker: str
+    shares: Optional[float] = None
+    market_value: Optional[float] = None
+
+
 class PortfolioResponse(BaseModel):
     id: str
     name: str
     sort_order: int
-    tickers: List[str]
+    items: List[PortfolioItemResponse]
     created_at: datetime
     updated_at: datetime
 
@@ -67,6 +83,23 @@ class ReorderPortfoliosRequest(BaseModel):
     portfolio_ids: List[str]
 
 
+class HoldingItem(BaseModel):
+    """One row of the per-portfolio holdings bulk-update payload.
+
+    Setting both ``shares`` and ``market_value`` to ``null`` clears the
+    holding values for that ticker — the row stays in the portfolio but
+    stops counting toward the diversification score.
+    """
+
+    ticker: str
+    shares: Optional[float] = None
+    market_value: Optional[float] = None
+
+
+class SetPortfolioHoldingsRequest(BaseModel):
+    items: List[HoldingItem]
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -74,19 +107,41 @@ def _normalize_name(name: str) -> str:
     return name.strip()
 
 
-def _row_to_portfolio(row: dict, tickers: List[str]) -> PortfolioResponse:
+def _row_to_portfolio(row: dict, items: List[PortfolioItemResponse]) -> PortfolioResponse:
     return PortfolioResponse(
         id=str(row["id"]),
         name=row["name"],
         sort_order=int(row.get("sort_order") or 0),
-        tickers=tickers,
+        items=items,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
 
 
+def _fetch_portfolio_items(
+    supabase: Client, portfolio_id: str
+) -> List[PortfolioItemResponse]:
+    rows = (
+        supabase.table("portfolio_items")
+        .select("ticker,shares,market_value")
+        .eq("portfolio_id", portfolio_id)
+        .order("position")
+        .execute()
+        .data
+        or []
+    )
+    return [
+        PortfolioItemResponse(
+            ticker=r["ticker"],
+            shares=r.get("shares"),
+            market_value=r.get("market_value"),
+        )
+        for r in rows
+    ]
+
+
 def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResponse]:
-    """Return all of the user's portfolios with their ticker lists, ordered by sort_order."""
+    """Return all of the user's portfolios with their items, ordered by sort_order."""
     rows = (
         supabase.table("portfolios")
         .select("*")
@@ -100,9 +155,9 @@ def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResp
         return []
 
     portfolio_ids = [r["id"] for r in rows]
-    items = (
+    item_rows = (
         supabase.table("portfolio_items")
-        .select("portfolio_id,ticker,position")
+        .select("portfolio_id,ticker,position,shares,market_value")
         .in_("portfolio_id", portfolio_ids)
         .order("position")
         .execute()
@@ -110,18 +165,31 @@ def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResp
         or []
     )
 
-    by_portfolio: dict[str, List[str]] = {pid: [] for pid in portfolio_ids}
-    for item in items:
-        by_portfolio[item["portfolio_id"]].append(item["ticker"])
+    by_portfolio: dict[str, List[PortfolioItemResponse]] = {
+        pid: [] for pid in portfolio_ids
+    }
+    for item in item_rows:
+        by_portfolio[item["portfolio_id"]].append(
+            PortfolioItemResponse(
+                ticker=item["ticker"],
+                shares=item.get("shares"),
+                market_value=item.get("market_value"),
+            )
+        )
 
     return [_row_to_portfolio(r, by_portfolio.get(r["id"], [])) for r in rows]
 
 
 def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
-    """Create a "Holdings" portfolio populated from the user's watchlist."""
+    """Create a "Holdings" portfolio populated from the user's watchlist.
+
+    Carries over each watchlist row's ``shares`` / ``market_value`` so a user
+    who already filled in Insights values doesn't lose them on the first call
+    after migration 038.
+    """
     seed_rows = (
         supabase.table("watchlist_items")
-        .select("ticker,added_at")
+        .select("ticker,added_at,shares,market_value")
         .eq("user_id", user_id)
         .order("added_at", desc=True)
         .execute()
@@ -142,6 +210,8 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
                 "portfolio_id": portfolio_row["id"],
                 "ticker": (r["ticker"] or "").upper(),
                 "position": i,
+                "shares": r.get("shares"),
+                "market_value": r.get("market_value"),
             }
             for i, r in enumerate(seed_rows)
             if r.get("ticker")
@@ -192,7 +262,7 @@ async def list_portfolios(
     user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
-    """List the user's portfolios (with their tickers).
+    """List the user's portfolios (with items + per-portfolio holdings).
 
     Lazy-seeds a default "Holdings" portfolio on first call so the iOS client
     never has to special-case the empty state.
@@ -296,16 +366,8 @@ async def rename_portfolio(
         .data[0]
     )
 
-    items = (
-        supabase.table("portfolio_items")
-        .select("ticker,position")
-        .eq("portfolio_id", portfolio_id)
-        .order("position")
-        .execute()
-        .data
-        or []
-    )
-    return _row_to_portfolio(row, [i["ticker"] for i in items])
+    items = _fetch_portfolio_items(supabase, portfolio_id)
+    return _row_to_portfolio(row, items)
 
 
 @router.delete("/{portfolio_id}")
@@ -352,8 +414,12 @@ async def set_portfolio_tickers(
     silently dropped (the iOS Add Asset flow always pushes the ticker to the
     master watchlist before calling this endpoint, so this is a defensive
     skip rather than a normal path).
+
+    Per-portfolio holding values (``shares`` / ``market_value``) are
+    PRESERVED for tickers that remain in the portfolio after the swap; new
+    tickers come in with no holdings; removed tickers lose theirs.
     """
-    portfolio_row = _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
 
     # Dedupe + uppercase while preserving order.
     seen: set[str] = set()
@@ -381,14 +447,40 @@ async def set_portfolio_tickers(
     else:
         accepted = []
 
+    # Capture existing holdings so kept tickers don't lose shares /
+    # market_value when we delete + reinsert below.
+    existing_items = (
+        supabase.table("portfolio_items")
+        .select("ticker,shares,market_value")
+        .eq("portfolio_id", portfolio_id)
+        .execute()
+        .data
+        or []
+    )
+    existing_holdings = {
+        (item["ticker"] or "").upper(): {
+            "shares": item.get("shares"),
+            "market_value": item.get("market_value"),
+        }
+        for item in existing_items
+    }
+
     supabase.table("portfolio_items").delete().eq(
         "portfolio_id", portfolio_id
     ).execute()
     if accepted:
-        rows = [
-            {"portfolio_id": portfolio_id, "ticker": t, "position": i}
-            for i, t in enumerate(accepted)
-        ]
+        rows = []
+        for i, t in enumerate(accepted):
+            prior = existing_holdings.get(t, {})
+            rows.append(
+                {
+                    "portfolio_id": portfolio_id,
+                    "ticker": t,
+                    "position": i,
+                    "shares": prior.get("shares"),
+                    "market_value": prior.get("market_value"),
+                }
+            )
         supabase.table("portfolio_items").insert(rows).execute()
 
     supabase.table("portfolios").update(
@@ -402,4 +494,55 @@ async def set_portfolio_tickers(
         .execute()
         .data[0]
     )
-    return _row_to_portfolio(refreshed, accepted)
+    items = _fetch_portfolio_items(supabase, portfolio_id)
+    return _row_to_portfolio(refreshed, items)
+
+
+@router.put("/{portfolio_id}/holdings", response_model=PortfolioResponse)
+async def set_portfolio_holdings(
+    portfolio_id: str,
+    request: SetPortfolioHoldingsRequest,
+    user: dict = Depends(get_current_user_or_guest),
+    supabase: Client = Depends(get_supabase),
+):
+    """Bulk-update shares / market_value for tickers within a portfolio.
+
+    Used by the iOS Portfolio Insights config sheet, which now scopes
+    holdings per portfolio (rather than the older watchlist-global flow).
+    Only updates tickers already in this portfolio (others are silently
+    ignored — the sheet should never send those). Setting both fields to
+    ``null`` clears that ticker's holding values: it stays in the portfolio
+    but stops counting toward the diversification score.
+    """
+    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+
+    errors: List[str] = []
+    for item in request.items:
+        ticker = item.ticker.upper()
+        if item.shares is not None and item.shares < 0:
+            errors.append(f"{ticker}: shares cannot be negative")
+            continue
+        if item.market_value is not None and item.market_value < 0:
+            errors.append(f"{ticker}: market_value cannot be negative")
+            continue
+
+        supabase.table("portfolio_items").update(
+            {"shares": item.shares, "market_value": item.market_value}
+        ).eq("portfolio_id", portfolio_id).eq("ticker", ticker).execute()
+
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+
+    supabase.table("portfolios").update(
+        {"updated_at": datetime.utcnow().isoformat()}
+    ).eq("id", portfolio_id).execute()
+
+    refreshed = (
+        supabase.table("portfolios")
+        .select("*")
+        .eq("id", portfolio_id)
+        .execute()
+        .data[0]
+    )
+    items = _fetch_portfolio_items(supabase, portfolio_id)
+    return _row_to_portfolio(refreshed, items)

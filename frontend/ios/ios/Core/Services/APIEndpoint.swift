@@ -106,6 +106,7 @@ enum APIEndpoint: Sendable {
     case renamePortfolio(id: String, name: String)
     case deletePortfolio(id: String)
     case setPortfolioTickers(id: String, tickers: [String])
+    case setPortfolioHoldings(id: String, items: [HoldingUpdateItem])
     case reorderPortfolios(ids: [String])
 
     // MARK: - Research
@@ -275,6 +276,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/portfolios/\(id)"
         case .setPortfolioTickers(let id, _):
             return "/api/v1/portfolios/\(id)/tickers"
+        case .setPortfolioHoldings(let id, _):
+            return "/api/v1/portfolios/\(id)/holdings"
         case .reorderPortfolios:
             return "/api/v1/portfolios/reorder"
 
@@ -358,7 +361,7 @@ enum APIEndpoint: Sendable {
             return .PATCH
 
         case .bulkUpdateHoldings,
-             .renamePortfolio, .setPortfolioTickers, .reorderPortfolios:
+             .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios:
             return .PUT
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
@@ -509,6 +512,9 @@ enum APIEndpoint: Sendable {
 
         case .setPortfolioTickers(_, let tickers):
             return SetPortfolioTickersRequestBody(tickers: tickers)
+
+        case .setPortfolioHoldings(_, let items):
+            return SetPortfolioHoldingsRequestBody(items: items)
 
         case .reorderPortfolios(let ids):
             return ReorderPortfoliosRequestBody(portfolioIds: ids)

@@ -14,6 +14,7 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Private
     private var cancellables = Set<AnyCancellable>()
     private let apiClient: APIClient
+    let portfolioStore: PortfolioStore
     private var priceRefreshTask: Task<Void, Never>?
 
     // MARK: - Published Properties
@@ -30,8 +31,6 @@ class TrackingViewModel: ObservableObject {
     // Alerts & Events
     @Published var alerts: [AppAlert] = []
 
-    // Portfolio Insights
-    @Published var diversificationScore: DiversificationScore?
     /// Local UI preference for showing the Portfolio Insights section.
     /// Persisted in UserDefaults so it survives app restarts on this device.
     @Published var isInsightsEnabled: Bool {
@@ -40,6 +39,8 @@ class TrackingViewModel: ObservableObject {
         }
     }
     private static let insightsEnabledKey = "TrackingView.isInsightsEnabled"
+    private static let sortOptionKey = "TrackingView.sortOption"
+    private static let sortAscendingKey = "TrackingView.sortAscending"
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -61,6 +62,8 @@ class TrackingViewModel: ObservableObject {
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
     @Published var showPortfolioConfigSheet: Bool = false
+    @Published var showNewPortfolioSheet: Bool = false
+    @Published var showEditPortfolioSheet: Bool = false
 
     // Navigation States
     @Published var selectedAssetNavigation: SearchSelection?
@@ -71,15 +74,36 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Init
 
-    init(apiClient: APIClient = .shared) {
+    init(apiClient: APIClient = .shared, portfolioStore: PortfolioStore? = nil) {
         self.apiClient = apiClient
+        // `.shared` is @MainActor-isolated; defaulting the parameter to it
+        // crosses the isolation boundary at the call site. Resolve here
+        // instead — this initializer is itself @MainActor.
+        self.portfolioStore = portfolioStore ?? PortfolioStore.shared
         self.isInsightsEnabled = UserDefaults.standard.bool(forKey: Self.insightsEnabledKey)
+
+        // Restore persisted sort preferences. Sort lives on the VM so it
+        // applies to whichever portfolio is active — the menu in the new
+        // PortfolioHeaderBar writes to the same keys.
+        if let raw = UserDefaults.standard.string(forKey: Self.sortOptionKey),
+           let restored = AssetSortOption(rawValue: raw) {
+            self.sortOption = restored
+        }
+        if UserDefaults.standard.object(forKey: Self.sortAscendingKey) != nil {
+            self.sortAscending = UserDefaults.standard.bool(forKey: Self.sortAscendingKey)
+        }
 
         NotificationCenter.default.publisher(for: .whaleFollowStateChanged)
             .receive(on: RunLoop.main)
             .sink { [weak self] notification in
                 self?.handleFollowStateChange(notification)
             }
+            .store(in: &cancellables)
+
+        // Republish whenever the portfolio store changes so filteredAssets,
+        // filteredAlerts, and portfolioDiversificationScore re-render.
+        self.portfolioStore.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         // Load real data on init
@@ -95,8 +119,21 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Computed Properties
 
+    /// Tickers in the active portfolio, uppercased Set for O(1) membership.
+    private var activeTickerSet: Set<String> {
+        Set(portfolioStore.activePortfolio?.tickers.map { $0.uppercased() } ?? [])
+    }
+
+    /// Active portfolio's tickers in their stored order — used for `.dateAdded`
+    /// sort, which now means "order in the portfolio" (the portfolio is the
+    /// closest analogue to the old "added at" concept).
+    private var activeTickerOrder: [String] {
+        (portfolioStore.activePortfolio?.tickers ?? []).map { $0.uppercased() }
+    }
+
     var filteredAssets: [TrackedAsset] {
-        var assets = trackedAssets
+        let active = activeTickerSet
+        var assets = trackedAssets.filter { active.contains($0.ticker.uppercased()) }
 
         // Apply search filter
         if !searchText.isEmpty {
@@ -131,11 +168,51 @@ class TrackingViewModel: ObservableObject {
                 }
             }
         case .dateAdded:
-            // Keep original order from backend (added_at desc)
-            if !sortAscending { assets.reverse() }
+            // "Date added" now means position in the active portfolio.
+            let order = activeTickerOrder
+            let positions = Dictionary(uniqueKeysWithValues:
+                order.enumerated().map { ($1, $0) })
+            assets.sort { lhs, rhs in
+                let l = positions[lhs.ticker.uppercased()] ?? Int.max
+                let r = positions[rhs.ticker.uppercased()] ?? Int.max
+                return sortAscending ? l < r : l > r
+            }
         }
 
         return assets
+    }
+
+    /// Alerts scoped to the active portfolio's tickers. `.market` events have
+    /// no ticker and are always shown (macro relevance). Multi-ticker rollups
+    /// are kept whole when *any* of their tickers are in the portfolio —
+    /// trimming inner items would invalidate the pre-aggregated totals.
+    var filteredAlerts: [AppAlert] {
+        let active = activeTickerSet
+        return alerts.filter { alert in
+            switch alert {
+            case .market:
+                return true
+            case .earnings(let data):
+                return active.contains(data.ticker.uppercased())
+            case .whaleTrade(let data):
+                return data.tickers.contains { active.contains($0.uppercased()) }
+            case .analystRating(let data):
+                return data.tickers.contains { active.contains($0.uppercased()) }
+            case .insiderTransaction(let data):
+                return data.tickers.contains { active.contains($0.uppercased()) }
+            }
+        }
+    }
+
+    /// Diversification score computed locally from the active portfolio's
+    /// holdings. Replaces the server-computed score, which was scoped to the
+    /// whole watchlist (no longer the right unit).
+    var portfolioDiversificationScore: DiversificationScore? {
+        let active = activeTickerSet
+        let holdings = trackedAssets
+            .filter { active.contains($0.ticker.uppercased()) && $0.isHolding }
+            .map { $0.toPortfolioHolding() }
+        return DiversificationCalculator.calculate(holdings: holdings)
     }
 
     var filteredWhaleActivities: [WhaleActivity] {
@@ -150,17 +227,27 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets, insights, AND whale data in parallel. Holdings now live
-        // on the watchlist rows themselves (each TrackedAsset carries its own
-        // shares/marketValue), so there's no separate /holdings call.
-        async let feedTask: () = loadTrackingFeed()
-        async let insightsTask: () = loadPortfolioInsights()
+        // Load assets, portfolios, and whale data in parallel. Diversification
+        // is computed locally from the active portfolio's holdings (see
+        // `portfolioDiversificationScore`), so the server-insights endpoint
+        // isn't called anymore.
+        async let feedTask: Bool = loadTrackingFeed()
+        async let portfoliosTask: () = portfolioStore.loadPortfolios()
         async let whalesTask: () = loadWhaleData()
 
-        _ = await (feedTask, insightsTask, whalesTask)
+        let (feedSucceeded, _, _) = await (feedTask, portfoliosTask, whalesTask)
+
+        // Drop tickers from any portfolio that no longer exist on the master
+        // watchlist (e.g. removed on another device). Only purge when the
+        // feed call actually succeeded — otherwise we'd wipe real tickers
+        // off portfolios on a transient network failure.
+        if feedSucceeded {
+            await portfolioStore.purgeTickers(notIn: Set(trackedAssets.map(\.ticker)))
+        }
     }
 
-    private func loadTrackingFeed() async {
+    @discardableResult
+    private func loadTrackingFeed() async -> Bool {
         do {
             let feed = try await apiClient.request(
                 endpoint: .getTrackingAssets,
@@ -169,6 +256,7 @@ class TrackingViewModel: ObservableObject {
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
             self.alerts = feed.alerts.map { $0.toAppAlert() }
             print("[TrackingVM] ✅ Loaded \(feed.assets.count) assets, \(feed.alerts.count) alerts from API")
+            return true
         } catch {
             print("[TrackingVM] ❌ Tracking feed failed: \(error)")
             // Fallback to sample data on first load if empty
@@ -177,34 +265,7 @@ class TrackingViewModel: ObservableObject {
                 alerts = AppAlert.sampleData
                 print("[TrackingVM] ⚠️ Using sample data as fallback")
             }
-        }
-    }
-
-    /// Fetch the server-computed Portfolio Insights payload (diversification
-    /// score, sector breakdown, sub-scores). The backend returns ``null`` when
-    /// the user has fewer than the minimum number of holdings — we map that to
-    /// ``nil`` so the UI shows its empty state.
-    func loadPortfolioInsights() async {
-        do {
-            let dto = try await apiClient.request(
-                endpoint: .getPortfolioInsights,
-                responseType: PortfolioInsightsDTO?.self
-            )
-            self.diversificationScore = dto?.toDiversificationScore()
-            print("[TrackingVM] ✅ Loaded portfolio insights (score=\(dto?.score ?? -1))")
-        } catch {
-            print("[TrackingVM] ❌ Portfolio insights load failed: \(error)")
-            // Dev fallback: if we're showing sample assets, compute locally
-            // from their embedded holding data so the preview card still
-            // renders. In production this branch is a no-op because real
-            // assets get a real server response.
-            let sampleHoldings = trackedAssets
-                .filter { $0.isHolding }
-                .map { $0.toPortfolioHolding() }
-            if !sampleHoldings.isEmpty {
-                diversificationScore = DiversificationCalculator.calculate(holdings: sampleHoldings)
-                print("[TrackingVM] ⚠️ Using local diversification calc on tracked assets")
-            }
+            return false
         }
     }
 
@@ -342,29 +403,75 @@ class TrackingViewModel: ObservableObject {
 
     func toggleSort() {
         sortAscending.toggle()
+        UserDefaults.standard.set(sortAscending, forKey: Self.sortAscendingKey)
     }
 
     func selectSortOption(_ option: AssetSortOption) {
         sortOption = option
+        UserDefaults.standard.set(option.rawValue, forKey: Self.sortOptionKey)
         showSortSheet = false
     }
 
+    /// Swipe-to-delete: removes the ticker from the active portfolio only.
+    /// The master watchlist (and any other portfolio that contains it) is
+    /// untouched. Use `removeAssetFromAll` for the long-press path that
+    /// fully removes the ticker.
     func removeAsset(_ asset: TrackedAsset) {
-        // Optimistic UI removal
+        Task {
+            do {
+                try await portfolioStore.removeTicker(asset.ticker)
+            } catch {
+                print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from portfolio: \(error)")
+            }
+        }
+    }
+
+    /// Long-press "Remove from all portfolios": removes the ticker from every
+    /// portfolio it belongs to AND from the master watchlist.
+    func removeAssetFromAll(_ asset: TrackedAsset) {
+        // Optimistic UI removal from the underlying asset list — the swipe
+        // animation looks broken if the row sticks around while the network
+        // request flies.
         trackedAssets.removeAll { $0.id == asset.id }
 
-        // Fire-and-forget backend call
         Task {
+            await portfolioStore.removeTickerFromAllPortfolios(asset.ticker)
             do {
                 try await apiClient.request(
                     endpoint: .removeFromWatchlist(stockId: asset.ticker)
                 )
-                print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist")
+                print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist + all portfolios")
             } catch {
                 print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from watchlist: \(error)")
-                // Could re-add on failure, but for now just log
             }
         }
+    }
+
+    // MARK: - Portfolio Actions
+
+    func setActivePortfolio(_ id: String) {
+        portfolioStore.setActivePortfolio(id)
+    }
+
+    func openNewPortfolioSheet() {
+        showNewPortfolioSheet = true
+    }
+
+    func openEditPortfolioSheet() {
+        showEditPortfolioSheet = true
+    }
+
+    @discardableResult
+    func createPortfolio(named name: String) async throws -> Portfolio {
+        try await portfolioStore.createPortfolio(named: name)
+    }
+
+    func renamePortfolio(id: String, to newName: String) async throws {
+        _ = try await portfolioStore.renamePortfolio(id: id, to: newName)
+    }
+
+    func deletePortfolio(id: String) async throws {
+        try await portfolioStore.deletePortfolio(id: id)
     }
 
     // MARK: - Portfolio Insights Actions
@@ -385,7 +492,8 @@ class TrackingViewModel: ObservableObject {
             endpoint: .bulkUpdateHoldings(items: items)
         )
         await loadTrackingFeed()
-        await loadPortfolioInsights()
+        // Diversification re-derives from the refreshed trackedAssets via
+        // `portfolioDiversificationScore` — no separate insights call needed.
     }
 
     // MARK: - Navigation

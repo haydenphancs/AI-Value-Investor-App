@@ -20,6 +20,7 @@ from app.api.v1.endpoints import (
     commodities,
     ticker_report,
     tracking,
+    portfolios,
     whales,
     live_price,
 )
@@ -40,6 +41,7 @@ api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
+api_router.include_router(portfolios.router, prefix="/portfolios", tags=["Portfolios"])
 api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
 api_router.include_router(live_price.router, tags=["Live Price"])

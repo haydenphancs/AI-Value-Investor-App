@@ -100,6 +100,14 @@ enum APIEndpoint: Sendable {
     case bulkUpdateHoldings(items: [HoldingUpdateItem])
     case getPortfolioInsights
 
+    // MARK: - Portfolios
+    case getPortfolios
+    case createPortfolio(name: String)
+    case renamePortfolio(id: String, name: String)
+    case deletePortfolio(id: String)
+    case setPortfolioTickers(id: String, tickers: [String])
+    case reorderPortfolios(ids: [String])
+
     // MARK: - Research
     case generateResearch(stockId: String, persona: String)
     case getResearchStatus(reportId: String)
@@ -260,6 +268,16 @@ enum APIEndpoint: Sendable {
         case .getPortfolioInsights:
             return "/api/v1/tracking/portfolio-insights"
 
+        // Portfolios
+        case .getPortfolios, .createPortfolio:
+            return "/api/v1/portfolios"
+        case .renamePortfolio(let id, _), .deletePortfolio(let id):
+            return "/api/v1/portfolios/\(id)"
+        case .setPortfolioTickers(let id, _):
+            return "/api/v1/portfolios/\(id)/tickers"
+        case .reorderPortfolios:
+            return "/api/v1/portfolios/reorder"
+
         // Research
         case .generateResearch:
             return "/api/v1/research/generate"
@@ -332,17 +350,19 @@ enum APIEndpoint: Sendable {
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport,
-             .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews:
+             .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
+             .createPortfolio:
             return .POST
 
         case .updateProfile, .updateChatSession:
             return .PATCH
 
-        case .bulkUpdateHoldings:
+        case .bulkUpdateHoldings,
+             .renamePortfolio, .setPortfolioTickers, .reorderPortfolios:
             return .PUT
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
-             .unfollowWhale:
+             .unfollowWhale, .deletePortfolio:
             return .DELETE
 
         default:
@@ -480,6 +500,18 @@ enum APIEndpoint: Sendable {
 
         case .enrichCommodityNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
+
+        case .createPortfolio(let name):
+            return CreatePortfolioRequestBody(name: name)
+
+        case .renamePortfolio(_, let name):
+            return RenamePortfolioRequestBody(name: name)
+
+        case .setPortfolioTickers(_, let tickers):
+            return SetPortfolioTickersRequestBody(tickers: tickers)
+
+        case .reorderPortfolios(let ids):
+            return ReorderPortfoliosRequestBody(portfolioIds: ids)
 
         default:
             return nil

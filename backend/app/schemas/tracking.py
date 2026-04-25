@@ -46,6 +46,7 @@ class WhaleTradeItemResponse(BaseModel):
     company_name: str
     whale_count: int
     amount: str  # e.g. "$2.4B"
+    raw_amount: float  # numeric dollars — lets iOS re-aggregate after trimming to active portfolio
     lead_whale_id: Optional[str] = None
     lead_whale_name: Optional[str] = None
     lead_whale_avatar_name: Optional[str] = None
@@ -72,6 +73,7 @@ class InsiderTransactionItemResponse(BaseModel):
     insider_name: str
     insider_title: str
     amount: str  # e.g. "$348K"
+    raw_amount: float  # numeric dollars — lets iOS re-aggregate after trimming to active portfolio
     day: Optional[int] = None
     month: Optional[str] = None
 

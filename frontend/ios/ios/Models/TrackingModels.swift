@@ -167,6 +167,7 @@ enum AppAlert: Identifiable {
         let companyName: String
         let whaleCount: Int
         let amount: String
+        let rawAmount: Double?
         let leadWhaleId: String?
         let leadWhaleName: String?
         let leadWhaleAvatarName: String?
@@ -212,6 +213,7 @@ enum AppAlert: Identifiable {
         let insiderName: String
         let insiderTitle: String
         let amount: String
+        let rawAmount: Double?
         let day: Int
         let month: String
 
@@ -622,6 +624,7 @@ struct WhaleTradeItemDTO: Codable {
     let companyName: String
     let whaleCount: Int
     let amount: String
+    let rawAmount: Double?
     let leadWhaleId: String?
     let leadWhaleName: String?
     let leadWhaleAvatarName: String?
@@ -631,6 +634,7 @@ struct WhaleTradeItemDTO: Codable {
         case companyName = "company_name"
         case whaleCount = "whale_count"
         case amount
+        case rawAmount = "raw_amount"
         case leadWhaleId = "lead_whale_id"
         case leadWhaleName = "lead_whale_name"
         case leadWhaleAvatarName = "lead_whale_avatar_name"
@@ -642,6 +646,7 @@ struct WhaleTradeItemDTO: Codable {
             companyName: companyName,
             whaleCount: whaleCount,
             amount: amount,
+            rawAmount: rawAmount,
             leadWhaleId: leadWhaleId,
             leadWhaleName: leadWhaleName,
             leadWhaleAvatarName: leadWhaleAvatarName
@@ -691,6 +696,7 @@ struct InsiderTransactionItemDTO: Codable {
     let insiderName: String
     let insiderTitle: String
     let amount: String
+    let rawAmount: Double?
     let day: Int?
     let month: String?
 
@@ -698,7 +704,9 @@ struct InsiderTransactionItemDTO: Codable {
         case ticker
         case insiderName = "insider_name"
         case insiderTitle = "insider_title"
-        case amount, day, month
+        case amount
+        case rawAmount = "raw_amount"
+        case day, month
     }
 
     func toItem() -> AppAlert.InsiderTransactionItem {
@@ -707,6 +715,7 @@ struct InsiderTransactionItemDTO: Codable {
             insiderName: insiderName,
             insiderTitle: insiderTitle,
             amount: amount,
+            rawAmount: rawAmount,
             day: day ?? 0,
             month: month ?? ""
         )
@@ -963,6 +972,7 @@ extension AppAlert {
                     companyName: "Apple Inc.",
                     whaleCount: 5,
                     amount: "$2.4B",
+                    rawAmount: 2_400_000_000,
                     leadWhaleId: nil,
                     leadWhaleName: "Warren Buffett",
                     leadWhaleAvatarName: "avatar_buffett"
@@ -972,6 +982,7 @@ extension AppAlert {
                     companyName: "Salesforce Inc.",
                     whaleCount: 2,
                     amount: "$120M",
+                    rawAmount: 120_000_000,
                     leadWhaleId: nil,
                     leadWhaleName: "Ro Khanna",
                     leadWhaleAvatarName: nil
@@ -988,6 +999,7 @@ extension AppAlert {
                     companyName: "Alphabet Inc.",
                     whaleCount: 3,
                     amount: "$688.4M",
+                    rawAmount: 688_400_000,
                     leadWhaleId: nil,
                     leadWhaleName: "Tommy Tuberville",
                     leadWhaleAvatarName: nil
@@ -997,6 +1009,7 @@ extension AppAlert {
                     companyName: "Apple Inc.",
                     whaleCount: 2,
                     amount: "$669K",
+                    rawAmount: 669_000,
                     leadWhaleId: nil,
                     leadWhaleName: "Tommy Tuberville",
                     leadWhaleAvatarName: nil
@@ -1040,6 +1053,7 @@ extension AppAlert {
                     insiderName: "Colette Kress",
                     insiderTitle: "CFO",
                     amount: "$5.2M",
+                    rawAmount: 5_200_000,
                     day: 16,
                     month: "FEB"
                 )

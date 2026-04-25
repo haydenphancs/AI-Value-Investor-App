@@ -12,7 +12,7 @@ struct PortfolioInsightsSection: View {
     var onAddHoldingTapped: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section Header
             HStack {
                 Text("Portfolio Insights")
@@ -78,6 +78,8 @@ struct PortfolioInsightsSection: View {
                 .padding(.horizontal, AppSpacing.lg)
             }
         }
+        .padding(.top, AppSpacing.lg)
+        .padding(.bottom, AppSpacing.sm)
     }
 }
 

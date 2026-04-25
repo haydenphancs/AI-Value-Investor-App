@@ -41,8 +41,47 @@ struct TrackedAsset: Identifiable {
     let assetType: String  // "stock", "crypto", "etf", "index", "commodity"
     let marketCap: Double?
 
+    // Portfolio Insights holding info (server-side `watchlist_items` columns).
+    // Populated when the user has opted this ticker into Portfolio Insights
+    // via the config sheet. Used to pre-fill the sheet's inputs and to decide
+    // which rows count toward the diversification score.
+    let shares: Double?
+    let marketValue: Double?
+    let sector: String?
+    let country: String?
+
     var isPositive: Bool {
         changePercent >= 0
+    }
+
+    /// `true` when this ticker is opted into Portfolio Insights — i.e. the
+    /// user has provided either a share count or a dollar amount for it.
+    var isHolding: Bool {
+        (shares ?? 0) > 0 || (marketValue ?? 0) > 0
+    }
+
+    /// Convert to the ``PortfolioHolding`` shape that ``DiversificationCalculator``
+    /// understands. Used by the offline / sample-data fallback in the
+    /// ViewModel; production code uses the server-computed insights endpoint.
+    func toPortfolioHolding() -> PortfolioHolding {
+        let mappedAssetType: AssetType
+        switch assetType.lowercased() {
+        case "etf":     mappedAssetType = .etf
+        case "bond":    mappedAssetType = .bond
+        case "crypto":  mappedAssetType = .crypto
+        case "cash":    mappedAssetType = .cash
+        default:
+            mappedAssetType = (country ?? "US") == "US" ? .stock : .internationalStock
+        }
+        return PortfolioHolding(
+            ticker: ticker,
+            companyName: companyName,
+            marketValue: marketValue ?? 0,
+            shares: shares,
+            sector: sector,
+            assetType: mappedAssetType,
+            country: country ?? "US"
+        )
     }
 
     var formattedPrice: String {
@@ -439,6 +478,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let country: String?
     let marketCap: Double?
     let assetType: String?
+    let shares: Double?
+    let marketValue: Double?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -447,9 +488,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case changePercent = "change_percent"
         case sparklineData = "sparkline_data"
         case logoUrl = "logo_url"
-        case sector, country
+        case sector, country, shares
         case marketCap = "market_cap"
         case assetType = "asset_type"
+        case marketValue = "market_value"
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -461,7 +503,11 @@ struct TrackedAssetDTO: Codable, Identifiable {
             changePercent: changePercent,
             sparklineData: sparklineData,
             assetType: assetType ?? "stock",
-            marketCap: marketCap
+            marketCap: marketCap,
+            shares: shares,
+            marketValue: marketValue,
+            sector: sector,
+            country: country
         )
     }
 }
@@ -843,7 +889,11 @@ extension TrackedAsset {
             changePercent: 2.34,
             sparklineData: [165, 168, 170, 172, 175, 173, 176, 178],
             assetType: "stock",
-            marketCap: 2_750_000_000_000
+            marketCap: 2_750_000_000_000,
+            shares: 100,
+            marketValue: 17_842,
+            sector: "Technology",
+            country: "US"
         ),
         TrackedAsset(
             ticker: "NVDA",
@@ -852,7 +902,11 @@ extension TrackedAsset {
             changePercent: 5.67,
             sparklineData: [450, 460, 470, 465, 480, 490, 495],
             assetType: "stock",
-            marketCap: 1_220_000_000_000
+            marketCap: 1_220_000_000_000,
+            shares: 50,
+            marketValue: 24_761,
+            sector: "Technology",
+            country: "US"
         ),
         TrackedAsset(
             ticker: "MSFT",
@@ -861,7 +915,11 @@ extension TrackedAsset {
             changePercent: -1.23,
             sparklineData: [390, 388, 385, 382, 380, 378, 379],
             assetType: "stock",
-            marketCap: 2_810_000_000_000
+            marketCap: 2_810_000_000_000,
+            shares: 50,
+            marketValue: 18_945.50,
+            sector: "Technology",
+            country: "US"
         ),
         TrackedAsset(
             ticker: "GOOGL",
@@ -870,7 +928,11 @@ extension TrackedAsset {
             changePercent: 1.89,
             sparklineData: [135, 136, 137, 138, 137, 139, 140],
             assetType: "stock",
-            marketCap: 1_750_000_000_000
+            marketCap: 1_750_000_000_000,
+            shares: 100,
+            marketValue: 13_967,
+            sector: "Communication Services",
+            country: "US"
         )
     ]
 }

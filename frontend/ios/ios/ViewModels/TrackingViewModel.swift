@@ -31,8 +31,15 @@ class TrackingViewModel: ObservableObject {
     @Published var alerts: [AppAlert] = []
 
     // Portfolio Insights
-    @Published var portfolioHoldings: [PortfolioHolding] = []
     @Published var diversificationScore: DiversificationScore?
+    /// Local UI preference for showing the Portfolio Insights section.
+    /// Persisted in UserDefaults so it survives app restarts on this device.
+    @Published var isInsightsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isInsightsEnabled, forKey: Self.insightsEnabledKey)
+        }
+    }
+    private static let insightsEnabledKey = "TrackingView.isInsightsEnabled"
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -53,7 +60,7 @@ class TrackingViewModel: ObservableObject {
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
-    @Published var showAddHoldingSheet: Bool = false
+    @Published var showPortfolioConfigSheet: Bool = false
 
     // Navigation States
     @Published var selectedAssetNavigation: SearchSelection?
@@ -66,6 +73,7 @@ class TrackingViewModel: ObservableObject {
 
     init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
+        self.isInsightsEnabled = UserDefaults.standard.bool(forKey: Self.insightsEnabledKey)
 
         NotificationCenter.default.publisher(for: .whaleFollowStateChanged)
             .receive(on: RunLoop.main)
@@ -142,13 +150,14 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets, holdings, insights, AND whale data in parallel
+        // Load assets, insights, AND whale data in parallel. Holdings now live
+        // on the watchlist rows themselves (each TrackedAsset carries its own
+        // shares/marketValue), so there's no separate /holdings call.
         async let feedTask: () = loadTrackingFeed()
-        async let holdingsTask: () = loadHoldings()
         async let insightsTask: () = loadPortfolioInsights()
         async let whalesTask: () = loadWhaleData()
 
-        _ = await (feedTask, holdingsTask, insightsTask, whalesTask)
+        _ = await (feedTask, insightsTask, whalesTask)
     }
 
     private func loadTrackingFeed() async {
@@ -171,29 +180,11 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
-    private func loadHoldings() async {
-        do {
-            let holdings = try await apiClient.request(
-                endpoint: .getHoldings,
-                responseType: [PortfolioHolding].self
-            )
-            self.portfolioHoldings = holdings
-            print("[TrackingVM] ✅ Loaded \(holdings.count) portfolio holdings from API")
-        } catch {
-            print("[TrackingVM] ❌ Holdings load failed: \(error)")
-            // Fallback to sample data
-            if portfolioHoldings.isEmpty {
-                portfolioHoldings = PortfolioHolding.sampleData
-                print("[TrackingVM] ⚠️ Using sample holdings as fallback")
-            }
-        }
-    }
-
     /// Fetch the server-computed Portfolio Insights payload (diversification
     /// score, sector breakdown, sub-scores). The backend returns ``null`` when
     /// the user has fewer than the minimum number of holdings — we map that to
     /// ``nil`` so the UI shows its empty state.
-    private func loadPortfolioInsights() async {
+    func loadPortfolioInsights() async {
         do {
             let dto = try await apiClient.request(
                 endpoint: .getPortfolioInsights,
@@ -203,12 +194,16 @@ class TrackingViewModel: ObservableObject {
             print("[TrackingVM] ✅ Loaded portfolio insights (score=\(dto?.score ?? -1))")
         } catch {
             print("[TrackingVM] ❌ Portfolio insights load failed: \(error)")
-            // Dev fallback: if we're showing sample holdings, compute locally
-            // so the preview card still renders. In production this branch is
-            // a no-op because real holdings get a real server response.
-            if portfolioHoldings.elementsEqual(PortfolioHolding.sampleData, by: { $0.ticker == $1.ticker }) {
-                diversificationScore = DiversificationCalculator.calculate(holdings: portfolioHoldings)
-                print("[TrackingVM] ⚠️ Using local diversification calc on sample data")
+            // Dev fallback: if we're showing sample assets, compute locally
+            // from their embedded holding data so the preview card still
+            // renders. In production this branch is a no-op because real
+            // assets get a real server response.
+            let sampleHoldings = trackedAssets
+                .filter { $0.isHolding }
+                .map { $0.toPortfolioHolding() }
+            if !sampleHoldings.isEmpty {
+                diversificationScore = DiversificationCalculator.calculate(holdings: sampleHoldings)
+                print("[TrackingVM] ⚠️ Using local diversification calc on tracked assets")
             }
         }
     }
@@ -372,51 +367,25 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Holding Actions
+    // MARK: - Portfolio Insights Actions
 
-    func openAddHoldingSheet() {
-        showAddHoldingSheet = true
+    func openPortfolioConfigSheet() {
+        showPortfolioConfigSheet = true
     }
 
-    /// Add a holding by share count (preferred — ``marketValue`` will track
-    /// the live FMP price) or by static dollar amount. After the upsert,
-    /// re-fetches holdings + insights so the score updates.
-    func addHolding(
-        ticker: String,
-        companyName: String?,
-        shares: Double?,
-        marketValue: Double?,
-        assetType: String?
-    ) async throws {
+    /// Push every row's `shares` / `marketValue` from the config sheet to the
+    /// backend in a single bulk PUT, then refresh the insights score and the
+    /// asset list (so its embedded holding fields are in sync with the DB).
+    ///
+    /// `null` for both shares and market_value on a row clears that ticker's
+    /// holding values — the row stays on the watchlist but stops counting
+    /// toward the diversification score.
+    func saveHoldingsConfig(_ items: [HoldingUpdateItem]) async throws {
         try await apiClient.request(
-            endpoint: .addHolding(
-                ticker: ticker,
-                companyName: companyName,
-                shares: shares,
-                marketValue: marketValue,
-                assetType: assetType
-            )
+            endpoint: .bulkUpdateHoldings(items: items)
         )
-        await loadHoldings()
+        await loadTrackingFeed()
         await loadPortfolioInsights()
-    }
-
-    /// Remove a holding. Optimistically pulls it from the local list and
-    /// re-fetches insights so the score updates without a full reload.
-    func removeHolding(_ holding: PortfolioHolding) {
-        portfolioHoldings.removeAll { $0.id == holding.id }
-        Task {
-            do {
-                try await apiClient.request(
-                    endpoint: .deleteHolding(ticker: holding.ticker)
-                )
-                await loadPortfolioInsights()
-                print("[TrackingVM] ✅ Removed \(holding.ticker) from holdings")
-            } catch {
-                print("[TrackingVM] ❌ Failed to remove \(holding.ticker) from holdings: \(error)")
-                await loadHoldings() // restore on failure
-            }
-        }
     }
 
     // MARK: - Navigation

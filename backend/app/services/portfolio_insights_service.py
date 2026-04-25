@@ -86,17 +86,31 @@ class PortfolioInsightsService:
     async def get_holdings(
         self, user_id: str
     ) -> List[PortfolioHoldingResponse]:
-        """Fetch holdings and refresh ``market_value`` from FMP for share-based
-        rows. Static rows pass through unchanged."""
+        """Fetch portfolio holdings — i.e., watchlist rows that the user has
+        marked as part of their portfolio by setting ``shares`` or
+        ``market_value``. Watchlist rows with neither set are tracked tickers
+        only and are excluded from insights.
+
+        For rows with ``shares`` set, ``market_value`` is recomputed from the
+        current FMP price so the diversification score stays accurate as the
+        market moves.
+        """
         sb = get_supabase()
         result = (
-            sb.table("portfolio_holdings")
+            sb.table("watchlist_items")
             .select("*")
             .eq("user_id", user_id)
-            .order("market_value", desc=True)
             .execute()
         )
         rows = result.data or []
+        if not rows:
+            return []
+
+        # Keep only rows that the user opted into the portfolio.
+        rows = [
+            r for r in rows
+            if r.get("shares") is not None or float(r.get("market_value") or 0) > 0
+        ]
         if not rows:
             return []
 
@@ -126,6 +140,9 @@ class PortfolioInsightsService:
                     country=row.get("country") or "US",
                 )
             )
+        # Sort by value desc (the table doesn't have an index on this, so we
+        # do it client-side after the live-price refresh anyway).
+        out.sort(key=lambda h: h.market_value, reverse=True)
         return out
 
     async def compute_insights(

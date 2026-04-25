@@ -97,10 +97,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Tracking
     case getTrackingAssets
-    case getHoldings
-    case addHolding(ticker: String, companyName: String?, shares: Double?, marketValue: Double?, assetType: String?)
-    case updateHolding(ticker: String, shares: Double?, marketValue: Double?)
-    case deleteHolding(ticker: String)
+    case bulkUpdateHoldings(items: [HoldingUpdateItem])
     case getPortfolioInsights
 
     // MARK: - Research
@@ -258,14 +255,8 @@ enum APIEndpoint: Sendable {
         // Tracking
         case .getTrackingAssets:
             return "/api/v1/tracking/assets"
-        case .getHoldings:
-            return "/api/v1/tracking/holdings"
-        case .addHolding:
-            return "/api/v1/tracking/holdings"
-        case .updateHolding(let ticker, _, _):
-            return "/api/v1/tracking/holdings/\(ticker)"
-        case .deleteHolding(let ticker):
-            return "/api/v1/tracking/holdings/\(ticker)"
+        case .bulkUpdateHoldings:
+            return "/api/v1/tracking/assets/holdings"
         case .getPortfolioInsights:
             return "/api/v1/tracking/portfolio-insights"
 
@@ -340,17 +331,17 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport, .addHolding,
+             .chatWithTickerReport,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews:
             return .POST
 
         case .updateProfile, .updateChatSession:
             return .PATCH
 
-        case .updateHolding:
+        case .bulkUpdateHoldings:
             return .PUT
 
-        case .removeFromWatchlist, .deleteReport, .deleteChatSession, .deleteHolding,
+        case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale:
             return .DELETE
 
@@ -473,17 +464,10 @@ enum APIEndpoint: Sendable {
         case .chatWithTickerReport(let ticker, let message, let persona):
             return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
 
-        case .addHolding(let ticker, let companyName, let shares, let marketValue, let assetType):
-            return AddHoldingRequestBody(
-                ticker: ticker,
-                companyName: companyName,
-                shares: shares,
-                marketValue: marketValue,
-                assetType: assetType
-            )
-
-        case .updateHolding(_, let shares, let marketValue):
-            return UpdateHoldingRequestBody(shares: shares, marketValue: marketValue)
+        case .bulkUpdateHoldings(let items):
+            // FastAPI accepts a JSON array as the body when the route handler
+            // declares its parameter as `List[BulkHoldingUpdateItem]`.
+            return items
 
         case .enrichStockNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
@@ -621,27 +605,17 @@ nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {
     let persona: String
 }
 
-nonisolated struct AddHoldingRequestBody: Encodable, Sendable {
+/// One row of the bulk-update payload sent to ``PUT /tracking/assets/holdings``.
+/// Setting both ``shares`` and ``marketValue`` to nil clears the holding values
+/// for that ticker — the row stays on the user's watchlist but stops counting
+/// toward the diversification score.
+nonisolated struct HoldingUpdateItem: Encodable, Sendable {
     let ticker: String
-    let companyName: String?
     let shares: Double?
     let marketValue: Double?
-    let assetType: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
-        case companyName = "company_name"
-        case shares
-        case marketValue = "market_value"
-        case assetType = "asset_type"
-    }
-}
-
-nonisolated struct UpdateHoldingRequestBody: Encodable, Sendable {
-    let shares: Double?
-    let marketValue: Double?
-
-    enum CodingKeys: String, CodingKey {
         case shares
         case marketValue = "market_value"
     }

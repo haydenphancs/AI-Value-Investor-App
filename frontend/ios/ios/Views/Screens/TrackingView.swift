@@ -134,7 +134,9 @@ struct TrackingContentView: View {
                     },
                     onDismiss: {
                         showSearch = false
-                    }
+                    },
+                    isInWatchlist: { ticker in viewModel.isOnWatchlist(ticker) },
+                    onAddToWatchlist: { result in viewModel.addTickerFromSearch(result) }
                 )
                 .preferredColorScheme(.dark)
             }
@@ -263,7 +265,9 @@ struct TrackingContentViewWithBinding: View {
                     },
                     onDismiss: {
                         showSearch = false
-                    }
+                    },
+                    isInWatchlist: { ticker in viewModel.isOnWatchlist(ticker) },
+                    onAddToWatchlist: { result in viewModel.addTickerFromSearch(result) }
                 )
                 .preferredColorScheme(.dark)
             }

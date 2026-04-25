@@ -65,6 +65,11 @@ class TrackingViewModel: ObservableObject {
     @Published var showNewPortfolioSheet: Bool = false
     @Published var showEditPortfolioSheet: Bool = false
 
+    /// Tickers the user just added via the in-sheet star button. Tracked
+    /// optimistically so the star fills immediately, before the next
+    /// `/tracking/assets` refresh reflects the new row in `trackedAssets`.
+    @Published var recentlyAddedTickers: Set<String> = []
+
     // Navigation States
     @Published var selectedAssetNavigation: SearchSelection?
     @Published var selectedSearchResult: SearchSelection?
@@ -423,6 +428,41 @@ class TrackingViewModel: ObservableObject {
             } catch {
                 print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from portfolio: \(error)")
             }
+        }
+    }
+
+    /// Whether the ticker is on the master watchlist (or was just added in
+    /// this session). Used by the search sheet's star icon to render the
+    /// filled state immediately after a tap, before the next refresh lands.
+    func isOnWatchlist(_ ticker: String) -> Bool {
+        let upper = ticker.uppercased()
+        if recentlyAddedTickers.contains(upper) { return true }
+        return trackedAssets.contains { $0.ticker.uppercased() == upper }
+    }
+
+    /// Add a ticker to the master watchlist + active portfolio from the in-sheet
+    /// search star button. Idempotent on the server (UNIQUE constraint), so it's
+    /// safe to call repeatedly. Tickers already on the watchlist still get
+    /// pushed into the active portfolio — that's the whole point of tapping
+    /// the star while looking at this portfolio.
+    func addTickerFromSearch(_ result: StockSearchResult) {
+        let symbol = result.ticker.uppercased()
+        recentlyAddedTickers.insert(symbol)
+
+        Task { @MainActor in
+            do {
+                try await apiClient.request(
+                    endpoint: .addToWatchlist(stockId: result.ticker)
+                )
+                print("[TrackingVM] ✅ Added \(symbol) to watchlist via search star")
+            } catch {
+                // Most common reason this fails is that the ticker is already
+                // on the master watchlist (409). That's fine — we still want
+                // it in the active portfolio.
+                print("[TrackingVM] ⚠️ Watchlist add failed for \(symbol) (likely already present): \(error)")
+            }
+            try? await portfolioStore.addTicker(symbol)
+            await refresh()
         }
     }
 

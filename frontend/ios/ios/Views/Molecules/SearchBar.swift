@@ -11,6 +11,12 @@ struct SearchBar: View {
     @Binding var text: String
     var placeholder: String = "Search ticker or ask AI..."
     var onSubmit: (() -> Void)?
+    /// Open the keyboard automatically when this view appears. Used by sheets
+    /// that present a search input — the user already tapped a search target
+    /// to get here, so making them tap a second time is busywork.
+    var autoFocus: Bool = false
+
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
@@ -24,6 +30,7 @@ struct SearchBar: View {
                 .foregroundColor(AppColors.textPrimary)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
+                .focused($fieldFocused)
                 .onSubmit {
                     onSubmit?()
                 }
@@ -42,6 +49,16 @@ struct SearchBar: View {
         .padding(.vertical, AppSpacing.md)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .onAppear {
+            // Defer focusing slightly so the sheet present animation completes
+            // first — focusing too early gets swallowed by UIKit and the
+            // keyboard never appears.
+            if autoFocus {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    fieldFocused = true
+                }
+            }
+        }
     }
 }
 

@@ -23,6 +23,14 @@ struct TickerLiveSearchSheet: View {
 
     var onTickerSelected: ((SearchSelection) -> Void)?
     var onDismiss: (() -> Void)?
+    /// Returns true when the result is already on the user's master watchlist —
+    /// drives the star icon's filled/empty state. When nil, the star button
+    /// is hidden (used by call sites that don't have a watchlist context,
+    /// e.g. the Ticker Detail in-screen search).
+    var isInWatchlist: ((String) -> Bool)?
+    /// Tap handler for the star button. When provided alongside `isInWatchlist`,
+    /// each result row gets a star button on the far right outside the card.
+    var onAddToWatchlist: ((StockSearchResult) -> Void)?
 
     private let stockRepository = StockRepository.shared
 
@@ -35,7 +43,8 @@ struct TickerLiveSearchSheet: View {
                 VStack(spacing: AppSpacing.lg) {
                     SearchBar(
                         text: $searchText,
-                        placeholder: "Search stocks, crypto, ETFs..."
+                        placeholder: "Search stocks, crypto, ETFs...",
+                        autoFocus: true
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
@@ -69,45 +78,7 @@ struct TickerLiveSearchSheet: View {
                         ScrollView {
                             LazyVStack(spacing: AppSpacing.sm) {
                                 ForEach(searchResults) { result in
-                                    Button {
-                                        onTickerSelected?(SearchSelection(
-                                            symbol: result.ticker,
-                                            type: result.type ?? "stock"
-                                        ))
-                                    } label: {
-                                        HStack(spacing: AppSpacing.md) {
-                                            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                                                Text(result.ticker)
-                                                    .font(AppTypography.bodyEmphasis)
-                                                    .foregroundColor(AppColors.textPrimary)
-
-                                                Text(result.companyName)
-                                                    .font(AppTypography.caption)
-                                                    .foregroundColor(AppColors.textSecondary)
-                                                    .lineLimit(1)
-                                            }
-
-                                            Spacer()
-
-                                            if let exchange = result.exchange {
-                                                Text(exchange)
-                                                    .font(AppTypography.captionSmall)
-                                                    .foregroundColor(AppColors.textMuted)
-                                                    .padding(.horizontal, AppSpacing.sm)
-                                                    .padding(.vertical, AppSpacing.xxs)
-                                                    .background(AppColors.cardBackgroundLight)
-                                                    .cornerRadius(AppCornerRadius.small)
-                                            }
-
-                                            Image(systemName: "chevron.right")
-                                                .font(AppTypography.iconSmall)
-                                                .foregroundColor(AppColors.textMuted)
-                                        }
-                                        .padding(AppSpacing.md)
-                                        .background(AppColors.cardBackground)
-                                        .cornerRadius(AppCornerRadius.medium)
-                                    }
-                                    .buttonStyle(.plain)
+                                    resultRow(result)
                                 }
                             }
                             .padding(.horizontal, AppSpacing.lg)
@@ -131,6 +102,68 @@ struct TickerLiveSearchSheet: View {
         .presentationDetents([.medium, .large])
         .onChange(of: searchText) { _, newValue in
             debounceSearch(newValue)
+        }
+    }
+
+    @ViewBuilder
+    private func resultRow(_ result: StockSearchResult) -> some View {
+        HStack(spacing: AppSpacing.sm) {
+            Button {
+                onTickerSelected?(SearchSelection(
+                    symbol: result.ticker,
+                    type: result.type ?? "stock"
+                ))
+            } label: {
+                HStack(spacing: AppSpacing.md) {
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text(result.ticker)
+                            .font(AppTypography.bodyEmphasis)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        Text(result.companyName)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    if let exchange = result.exchange {
+                        Text(exchange)
+                            .font(AppTypography.captionSmall)
+                            .foregroundColor(AppColors.textMuted)
+                            .padding(.horizontal, AppSpacing.sm)
+                            .padding(.vertical, AppSpacing.xxs)
+                            .background(AppColors.cardBackgroundLight)
+                            .cornerRadius(AppCornerRadius.small)
+                    }
+
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconSmall)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .padding(AppSpacing.md)
+                .background(AppColors.cardBackground)
+                .cornerRadius(AppCornerRadius.medium)
+            }
+            .buttonStyle(.plain)
+
+            // Star button — only shown when the call site supplies the
+            // watchlist callbacks. Lives outside the card on purpose so the
+            // tap target is unambiguous: tap card = navigate, tap star = add.
+            if let isInWatchlist, let onAddToWatchlist {
+                let inList = isInWatchlist(result.ticker)
+                Button {
+                    onAddToWatchlist(result)
+                } label: {
+                    Image(systemName: inList ? "star.fill" : "star")
+                        .font(AppTypography.iconMedium)
+                        .foregroundColor(inList ? AppColors.neutral : AppColors.textPrimary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(inList ? "On watchlist" : "Add to watchlist")
+            }
         }
     }
 

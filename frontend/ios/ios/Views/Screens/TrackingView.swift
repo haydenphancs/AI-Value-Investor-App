@@ -8,22 +8,23 @@
 import SwiftUI
 
 // MARK: - Navigation Models
-/// Wrapper for trade group navigation to conform to Hashable
+/// Wrapper for trade group navigation. Carries the activity feed item so the
+/// destination view can render its header immediately and then fetch the full
+/// per-ticker trades from `GET /whales/{whaleId}/trade-groups/{groupId}`.
 struct TradeGroupNavigation: Identifiable, Hashable {
-    let id: String
-    let tradeGroup: WhaleTradeGroup
-    let whaleName: String
-    
-    init(tradeGroup: WhaleTradeGroup, whaleName: String) {
-        self.id = tradeGroup.id
-        self.tradeGroup = tradeGroup
-        self.whaleName = whaleName
+    let activity: WhaleTradeGroupActivity
+
+    var id: String { activity.id }
+    var whaleName: String { activity.entityName }
+
+    init(activity: WhaleTradeGroupActivity) {
+        self.activity = activity
     }
-    
+
     static func == (lhs: TradeGroupNavigation, rhs: TradeGroupNavigation) -> Bool {
         lhs.id == rhs.id
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
@@ -89,6 +90,10 @@ struct TrackingContentView: View {
                     }
                 )
             }
+            .sheet(isPresented: $viewModel.showAddHoldingSheet) {
+                AddHoldingSheet(viewModel: viewModel)
+                    .preferredColorScheme(.dark)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection)
             }
@@ -100,7 +105,7 @@ struct TrackingContentView: View {
             }
             .navigationDestination(item: $viewModel.selectedTradeGroup) { tradeData in
                 TradeGroupDetailView(
-                    tradeGroup: tradeData.tradeGroup,
+                    activity: tradeData.activity,
                     whaleName: tradeData.whaleName
                 )
             }
@@ -202,6 +207,10 @@ struct TrackingContentViewWithBinding: View {
                     }
                 )
             }
+            .sheet(isPresented: $viewModel.showAddHoldingSheet) {
+                AddHoldingSheet(viewModel: viewModel)
+                    .preferredColorScheme(.dark)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection, onNavigateToResearch: {
                     researchTickerSymbol = selection.symbol
@@ -219,7 +228,7 @@ struct TrackingContentViewWithBinding: View {
             }
             .navigationDestination(item: $viewModel.selectedTradeGroup) { tradeData in
                 TradeGroupDetailView(
-                    tradeGroup: tradeData.tradeGroup,
+                    activity: tradeData.activity,
                     whaleName: tradeData.whaleName
                 )
             }
@@ -286,7 +295,10 @@ struct AssetsTabContent: View {
                 )
 
                 // Portfolio Insights Section
-                PortfolioInsightsSection(score: viewModel.diversificationScore)
+                PortfolioInsightsSection(
+                    score: viewModel.diversificationScore,
+                    onAddHoldingTapped: { viewModel.openAddHoldingSheet() }
+                )
 
                 // Bottom spacing for tab bar
                 Spacer()
@@ -433,6 +445,7 @@ struct WhaleTradesTimelineSection: View {
 
                         WhaleTradeTimelineRow(
                             activity: activity,
+                            showDate: activityIndex == 0,
                             isFirst: isFirst,
                             isLast: isLast,
                             onTapped: { onActivityTapped?(activity) }
@@ -448,6 +461,7 @@ struct WhaleTradesTimelineSection: View {
 // MARK: - Whale Trade Timeline Row
 struct WhaleTradeTimelineRow: View {
     let activity: WhaleTradeGroupActivity
+    let showDate: Bool
     let isFirst: Bool
     let isLast: Bool
     var onTapped: (() -> Void)?
@@ -466,7 +480,7 @@ struct WhaleTradeTimelineRow: View {
                             .frame(width: 1)
                     }
                 }
-                
+
                 // Dot on top
                 VStack(spacing: 0) {
                     if !isFirst {
@@ -481,10 +495,12 @@ struct WhaleTradeTimelineRow: View {
 
             // Content Column
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Date label
-                Text(activity.formattedDate)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                // Date label — only on the first row of each date bucket
+                if showDate {
+                    Text(activity.formattedDate)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
 
                 // Trade Card
                 WhaleTradeCard(activity: activity, onTapped: onTapped)

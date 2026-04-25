@@ -39,6 +39,7 @@ struct TrackedAsset: Identifiable {
     let changePercent: Double
     let sparklineData: [Double]
     let assetType: String  // "stock", "crypto", "etf", "index", "commodity"
+    let marketCap: Double?
 
     var isPositive: Bool {
         changePercent >= 0
@@ -364,6 +365,67 @@ struct TrackingFeedResponse: Codable {
     let alerts: [AlertDTO]
 }
 
+// MARK: - Portfolio Insights DTO
+
+/// Response from GET /api/v1/tracking/portfolio-insights — the server-computed
+/// diversification score, sector breakdown, and three sub-scores.
+struct PortfolioInsightsDTO: Codable {
+    let score: Int
+    let message: String
+    let sectorCount: Int
+    let allocations: [SectorAllocationDTO]
+    let subScores: DiversificationSubScoresDTO
+    let holdingsCount: Int
+    let totalValue: Double
+
+    enum CodingKeys: String, CodingKey {
+        case score, message, allocations
+        case sectorCount = "sector_count"
+        case subScores = "sub_scores"
+        case holdingsCount = "holdings_count"
+        case totalValue = "total_value"
+    }
+
+    func toDiversificationScore() -> DiversificationScore {
+        DiversificationScore(
+            score: score,
+            message: message,
+            sectorCount: sectorCount,
+            allocations: allocations.map { $0.toSectorAllocation() },
+            subScores: subScores.toSubScores()
+        )
+    }
+}
+
+struct SectorAllocationDTO: Codable {
+    let name: String
+    let percentage: Double
+
+    func toSectorAllocation() -> SectorAllocation {
+        SectorAllocation(name: name, percentage: percentage)
+    }
+}
+
+struct DiversificationSubScoresDTO: Codable {
+    let concentrationScore: Int
+    let sectorScore: Int
+    let diversityScore: Int
+
+    enum CodingKeys: String, CodingKey {
+        case concentrationScore = "concentration_score"
+        case sectorScore = "sector_score"
+        case diversityScore = "diversity_score"
+    }
+
+    func toSubScores() -> DiversificationSubScores {
+        DiversificationSubScores(
+            concentrationScore: concentrationScore,
+            sectorScore: sectorScore,
+            diversityScore: diversityScore
+        )
+    }
+}
+
 /// A watchlist item enriched with real-time price data from the backend.
 struct TrackedAssetDTO: Codable, Identifiable {
     var id: String { ticker }
@@ -398,7 +460,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
             price: price,
             changePercent: changePercent,
             sparklineData: sparklineData,
-            assetType: assetType ?? "stock"
+            assetType: assetType ?? "stock",
+            marketCap: marketCap
         )
     }
 }
@@ -702,7 +765,8 @@ struct TrendingWhale: Identifiable {
 
 // MARK: - Whale Trade Group Activity (for Recent Trades timeline)
 struct WhaleTradeGroupActivity: Identifiable {
-    let id: String
+    let id: String          // trade group id — matches GET /whales/{whale}/trade-groups/{id}
+    let whaleId: String     // owner of the trade group
     let entityName: String
     let entityAvatarName: String
     let category: WhaleCategory?
@@ -712,8 +776,9 @@ struct WhaleTradeGroupActivity: Identifiable {
     let summary: String?
     let date: Date
 
-    init(id: String = UUID().uuidString, entityName: String, entityAvatarName: String, category: WhaleCategory? = nil, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
+    init(id: String = UUID().uuidString, whaleId: String = "", entityName: String, entityAvatarName: String, category: WhaleCategory? = nil, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
         self.id = id
+        self.whaleId = whaleId
         self.entityName = entityName
         self.entityAvatarName = entityAvatarName
         self.category = category
@@ -777,7 +842,8 @@ extension TrackedAsset {
             price: 178.42,
             changePercent: 2.34,
             sparklineData: [165, 168, 170, 172, 175, 173, 176, 178],
-            assetType: "stock"
+            assetType: "stock",
+            marketCap: 2_750_000_000_000
         ),
         TrackedAsset(
             ticker: "NVDA",
@@ -785,7 +851,8 @@ extension TrackedAsset {
             price: 495.22,
             changePercent: 5.67,
             sparklineData: [450, 460, 470, 465, 480, 490, 495],
-            assetType: "stock"
+            assetType: "stock",
+            marketCap: 1_220_000_000_000
         ),
         TrackedAsset(
             ticker: "MSFT",
@@ -793,7 +860,8 @@ extension TrackedAsset {
             price: 378.91,
             changePercent: -1.23,
             sparklineData: [390, 388, 385, 382, 380, 378, 379],
-            assetType: "stock"
+            assetType: "stock",
+            marketCap: 2_810_000_000_000
         ),
         TrackedAsset(
             ticker: "GOOGL",
@@ -801,7 +869,8 @@ extension TrackedAsset {
             price: 139.67,
             changePercent: 1.89,
             sparklineData: [135, 136, 137, 138, 137, 139, 140],
-            assetType: "stock"
+            assetType: "stock",
+            marketCap: 1_750_000_000_000
         )
     ]
 }

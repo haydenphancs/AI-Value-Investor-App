@@ -13,6 +13,15 @@ struct TradeGroupDetailView: View {
     @StateObject private var viewModel: TradeGroupDetailViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// Production path — fetches the real trade group from the backend.
+    init(activity: WhaleTradeGroupActivity, whaleName: String) {
+        _viewModel = StateObject(wrappedValue: TradeGroupDetailViewModel(
+            activity: activity,
+            whaleName: whaleName
+        ))
+    }
+
+    /// Preview / offline path — renders a fully-built trade group as-is.
     init(tradeGroup: WhaleTradeGroup, whaleName: String) {
         _viewModel = StateObject(wrappedValue: TradeGroupDetailViewModel(
             tradeGroup: tradeGroup,
@@ -34,59 +43,104 @@ struct TradeGroupDetailView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, AppSpacing.lg)
 
-                    // Filter Tabs
-                    TradeFilterTabBar(
-                        selectedFilter: viewModel.selectedFilter,
-                        filterCounts: viewModel.filterCounts,
-                        onSelect: { viewModel.selectFilter($0) }
-                    )
-
-                    // Insights Card
-                    if !viewModel.tradeGroup.insights.isEmpty {
-                        TradeGroupInsightsCard(insights: viewModel.tradeGroup.insights)
-                    }
-
-                    // Trade count label
-                    if viewModel.tradeGroup.tradeCount > viewModel.tradeGroup.trades.count {
-                        Text("Showing top \(viewModel.tradeGroup.trades.count) of \(viewModel.tradeGroup.tradeCount) trades by value")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text("Showing all \(viewModel.tradeGroup.tradeCount) trades")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    // Trade Cards
-                    VStack(spacing: AppSpacing.md) {
-                        ForEach(viewModel.filteredTrades) { trade in
-                            TradeDetailCard(
-                                trade: trade,
-                                onTap: { viewModel.viewTrade(trade) }
-                            )
-                        }
-                    }
-
-                    // Empty state
-                    if viewModel.filteredTrades.isEmpty {
+                    if viewModel.showsLoadingState {
+                        // Initial fetch — show a spinner instead of the empty
+                        // filter tabs / "0 of N trades" header that would
+                        // otherwise flash before the data arrives.
                         VStack(spacing: AppSpacing.md) {
-                            Image(systemName: "tray")
-                                .font(AppTypography.iconJumbo)
-                                .foregroundColor(AppColors.textMuted)
-
-                            Text("No trades in this category")
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                            Text("Loading trades…")
                                 .font(AppTypography.body)
                                 .foregroundColor(AppColors.textSecondary)
                         }
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, AppSpacing.xxxl)
+                    } else if let error = viewModel.loadError, viewModel.tradeGroup.trades.isEmpty {
+                        VStack(spacing: AppSpacing.md) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(AppTypography.iconJumbo)
+                                .foregroundColor(AppColors.alertOrange)
+
+                            Text(error)
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textSecondary)
+                                .multilineTextAlignment(.center)
+
+                            Button {
+                                Task { await viewModel.loadTradeGroup() }
+                            } label: {
+                                Text("Retry")
+                                    .font(AppTypography.bodySmallEmphasis)
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, AppSpacing.lg)
+                                    .padding(.vertical, AppSpacing.sm)
+                                    .background(AppColors.primaryBlue)
+                                    .cornerRadius(AppCornerRadius.pill)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xxl)
+                    } else {
+                        // Filter Tabs
+                        TradeFilterTabBar(
+                            selectedFilter: viewModel.selectedFilter,
+                            filterCounts: viewModel.filterCounts,
+                            onSelect: { viewModel.selectFilter($0) }
+                        )
+
+                        // Insights Card
+                        if !viewModel.tradeGroup.insights.isEmpty {
+                            TradeGroupInsightsCard(insights: viewModel.tradeGroup.insights)
+                        }
+
+                        // Trade count label
+                        if viewModel.tradeGroup.tradeCount > viewModel.tradeGroup.trades.count {
+                            Text("Showing top \(viewModel.tradeGroup.trades.count) of \(viewModel.tradeGroup.tradeCount) trades by value")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text("Showing all \(viewModel.tradeGroup.tradeCount) trades")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        // Trade Cards
+                        VStack(spacing: AppSpacing.md) {
+                            ForEach(viewModel.filteredTrades) { trade in
+                                TradeDetailCard(
+                                    trade: trade,
+                                    onTap: { viewModel.viewTrade(trade) }
+                                )
+                            }
+                        }
+
+                        // Empty state — only meaningful once the fetch finished
+                        // with real data but the active filter has zero matches.
+                        if viewModel.filteredTrades.isEmpty {
+                            VStack(spacing: AppSpacing.md) {
+                                Image(systemName: "tray")
+                                    .font(AppTypography.iconJumbo)
+                                    .foregroundColor(AppColors.textMuted)
+
+                                Text("No trades in this category")
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textSecondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, AppSpacing.xxl)
+                        }
                     }
 
                     Spacer().frame(height: 40)
                 }
                 .padding(.horizontal, AppSpacing.lg)
+            }
+            .refreshable {
+                await viewModel.loadTradeGroup()
             }
         }
         .navigationBarBackButtonHidden(true)

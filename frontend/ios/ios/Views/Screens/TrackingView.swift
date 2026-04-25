@@ -90,8 +90,8 @@ struct TrackingContentView: View {
                     }
                 )
             }
-            .sheet(isPresented: $viewModel.showAddHoldingSheet) {
-                AddHoldingSheet(viewModel: viewModel)
+            .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
+                PortfolioConfigSheet(viewModel: viewModel)
                     .preferredColorScheme(.dark)
             }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
@@ -207,8 +207,8 @@ struct TrackingContentViewWithBinding: View {
                     }
                 )
             }
-            .sheet(isPresented: $viewModel.showAddHoldingSheet) {
-                AddHoldingSheet(viewModel: viewModel)
+            .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
+                PortfolioConfigSheet(viewModel: viewModel)
                     .preferredColorScheme(.dark)
             }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
@@ -297,7 +297,8 @@ struct AssetsTabContent: View {
                 // Portfolio Insights Section
                 PortfolioInsightsSection(
                     score: viewModel.diversificationScore,
-                    onAddHoldingTapped: { viewModel.openAddHoldingSheet() }
+                    isEnabled: $viewModel.isInsightsEnabled,
+                    onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
                 )
 
                 // Bottom spacing for tab bar
@@ -307,6 +308,13 @@ struct AssetsTabContent: View {
         }
         .refreshable {
             await viewModel.refresh()
+        }
+        // Auto-open the config sheet the first time the user enables the
+        // section without any holding data — saves them a tap.
+        .onChange(of: viewModel.isInsightsEnabled) { _, isOn in
+            if isOn && viewModel.diversificationScore == nil {
+                viewModel.openPortfolioConfigSheet()
+            }
         }
     }
 }
@@ -1033,49 +1041,79 @@ struct SortOptionsSheet: View {
     }
 }
 
-// MARK: - Add Holding Sheet
+// MARK: - Portfolio Insights Config Sheet
 //
-// Inlined here (rather than in Views/Sheets/) so the sheet's types are picked
-// up by the existing TrackingView.swift entry in the Xcode project. The Sheets
-// folder is brand new in this checkout and Xcode's file-system-sync sometimes
-// doesn't pick up newly-created subfolders until a project reopen — keeping
-// the sheet next to AddAssetSheet avoids that footgun.
+// One-screen editor for the user's Portfolio Insights data. Lists every ticker
+// on their watchlist (Assets tab) with an editable shares-or-dollars input.
+// Saving fires a single bulk PUT to /tracking/assets/holdings.
+//
+// Inlined here (rather than in Views/Sheets/) so it ships in the same file
+// Xcode already knows about — avoids the FS-sync gotcha that bit AddHoldingSheet.
 
 private enum HoldingInputMode: String, CaseIterable {
     case shares = "Shares"
-    case dollars = "Dollar amount"
+    case dollars = "Dollars"
+}
 
-    var helperText: String {
-        switch self {
+private struct PortfolioConfigRow: Identifiable {
+    let id: String      // ticker — stable, unique per row
+    let ticker: String
+    let companyName: String
+    var inputMode: HoldingInputMode
+    var sharesInput: String
+    var dollarsInput: String
+
+    init(asset: TrackedAsset) {
+        self.id = asset.ticker
+        self.ticker = asset.ticker
+        self.companyName = asset.companyName
+        if let s = asset.shares, s > 0 {
+            self.inputMode = .shares
+            self.sharesInput = Self.formatNumber(s)
+            self.dollarsInput = ""
+        } else if let v = asset.marketValue, v > 0 {
+            self.inputMode = .dollars
+            self.sharesInput = ""
+            self.dollarsInput = Self.formatNumber(v)
+        } else {
+            self.inputMode = .shares
+            self.sharesInput = ""
+            self.dollarsInput = ""
+        }
+    }
+
+    /// Render a number without a trailing ".0" so a clean integer round-trips
+    /// as "100" instead of "100.0" in the text field.
+    private static func formatNumber(_ value: Double) -> String {
+        if value.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(Int(value))
+        }
+        return String(value)
+    }
+
+    /// Build the wire payload for this row. A row with empty inputs becomes
+    /// a clear (both fields nil) on the server.
+    func toUpdateItem() -> HoldingUpdateItem {
+        switch inputMode {
         case .shares:
-            return "Value updates as the price moves."
+            let parsed = Double(sharesInput)
+            let value = (parsed ?? 0) > 0 ? parsed : nil
+            return HoldingUpdateItem(ticker: ticker, shares: value, marketValue: nil)
         case .dollars:
-            return "Stored as a static amount."
+            let parsed = Double(dollarsInput)
+            let value = (parsed ?? 0) > 0 ? parsed : nil
+            return HoldingUpdateItem(ticker: ticker, shares: nil, marketValue: value)
         }
     }
 }
 
-struct AddHoldingSheet: View {
+struct PortfolioConfigSheet: View {
     @ObservedObject var viewModel: TrackingViewModel
     @Environment(\.dismiss) private var dismiss
 
-    // Search state
-    @State private var searchText: String = ""
-    @State private var searchResults: [StockSearchResult] = []
-    @State private var isSearching: Bool = false
-    @State private var searchTask: Task<Void, Never>?
-
-    // Selection + form state
-    @State private var selected: StockSearchResult?
-    @State private var inputMode: HoldingInputMode = .shares
-    @State private var sharesInput: String = ""
-    @State private var dollarsInput: String = ""
-
-    // Submission state
+    @State private var rows: [PortfolioConfigRow] = []
     @State private var isSubmitting: Bool = false
-    @State private var formError: String?
-
-    private let stockRepository = StockRepository.shared
+    @State private var saveError: String?
 
     var body: some View {
         NavigationView {
@@ -1083,305 +1121,138 @@ struct AddHoldingSheet: View {
                 AppColors.background
                     .ignoresSafeArea()
 
-                VStack(spacing: AppSpacing.lg) {
-                    if let pinned = selected {
-                        AddHoldingSelectedHeader(result: pinned) {
-                            selected = nil
+                if viewModel.trackedAssets.isEmpty {
+                    emptyState
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            Text("Enter shares or dollar amount for each ticker. Leave empty to skip — it stays on your watchlist but won't count toward the score.")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                                .padding(.horizontal, AppSpacing.lg)
+
+                            VStack(spacing: AppSpacing.sm) {
+                                ForEach($rows) { $row in
+                                    PortfolioConfigRowView(row: $row)
+                                }
+                            }
+                            .padding(.horizontal, AppSpacing.lg)
                         }
-                        .padding(.horizontal, AppSpacing.lg)
-
-                        inputForm(for: pinned)
-                            .padding(.horizontal, AppSpacing.lg)
-
-                        Spacer()
-                    } else {
-                        SearchBar(text: $searchText, placeholder: "Search ticker or name…")
-                            .padding(.horizontal, AppSpacing.lg)
-
-                        searchBody
+                        .padding(.vertical, AppSpacing.lg)
                     }
                 }
-                .padding(.top, AppSpacing.lg)
+
+                if let error = saveError {
+                    VStack {
+                        Spacer()
+                        Text(error)
+                            .font(AppTypography.caption)
+                            .foregroundColor(.white)
+                            .padding(AppSpacing.md)
+                            .background(AppColors.bearish)
+                            .cornerRadius(AppCornerRadius.medium)
+                            .padding(.bottom, AppSpacing.xl)
+                    }
+                }
             }
-            .navigationTitle("Add Holding")
+            .navigationTitle("Portfolio Insights")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isSubmitting)
                 }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .onChange(of: searchText) { _, newValue in
-            debounceSearch(newValue)
-        }
-    }
-
-    // MARK: - Search Results
-
-    @ViewBuilder
-    private var searchBody: some View {
-        if searchText.isEmpty {
-            searchEmptyState(
-                icon: "magnifyingglass",
-                title: "Search for a ticker to add to your portfolio"
-            )
-        } else if isSearching {
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if searchResults.isEmpty {
-            searchEmptyState(
-                icon: "magnifyingglass",
-                title: "No results for \"\(searchText)\""
-            )
-        } else {
-            ScrollView {
-                LazyVStack(spacing: AppSpacing.sm) {
-                    ForEach(searchResults) { result in
-                        Button {
-                            selectResult(result)
-                        } label: {
-                            AddHoldingResultRow(result: result)
-                        }
-                        .buttonStyle(.plain)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSubmitting ? "Saving…" : "Save") {
+                        save()
                     }
+                    .fontWeight(.semibold)
+                    .disabled(isSubmitting)
                 }
-                .padding(.horizontal, AppSpacing.lg)
             }
         }
+        .onAppear { initRowsIfNeeded() }
     }
 
-    private func searchEmptyState(icon: String, title: String) -> some View {
+    private var emptyState: some View {
         VStack(spacing: AppSpacing.md) {
-            Image(systemName: icon)
+            Image(systemName: "list.bullet.rectangle")
                 .font(AppTypography.iconHero)
                 .foregroundColor(AppColors.textMuted)
 
-            Text(title)
+            Text("Add tickers to your Assets first")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, AppSpacing.lg)
     }
 
-    // MARK: - Input Form
-
-    @ViewBuilder
-    private func inputForm(for result: StockSearchResult) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Picker("Input mode", selection: $inputMode) {
-                ForEach(HoldingInputMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                if inputMode == .shares {
-                    TextField("e.g. 25", text: $sharesInput)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(.roundedBorder)
-                } else {
-                    TextField("e.g. 12500", text: $dollarsInput)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                Text(inputMode.helperText)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            if let error = formError {
-                Text(error)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.bearish)
-            }
-
-            Button {
-                submit(for: result)
-            } label: {
-                HStack {
-                    if isSubmitting {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .tint(.white)
-                    }
-                    Text(isSubmitting ? "Adding…" : "Add to Portfolio")
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(.white)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.md)
-                .background(canSubmit ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
-                .cornerRadius(AppCornerRadius.medium)
-            }
-            .buttonStyle(.plain)
-            .disabled(!canSubmit || isSubmitting)
-        }
+    private func initRowsIfNeeded() {
+        // Only initialize on first appear — re-rendering shouldn't blow away
+        // the user's in-progress edits.
+        guard rows.isEmpty else { return }
+        rows = viewModel.trackedAssets.map(PortfolioConfigRow.init)
     }
 
-    // MARK: - Helpers
-
-    private var canSubmit: Bool {
-        switch inputMode {
-        case .shares:
-            return Double(sharesInput).map { $0 > 0 } ?? false
-        case .dollars:
-            return Double(dollarsInput).map { $0 > 0 } ?? false
-        }
-    }
-
-    private func selectResult(_ result: StockSearchResult) {
-        selected = result
-        searchText = ""
-        searchResults = []
-        formError = nil
-    }
-
-    private func submit(for result: StockSearchResult) {
-        formError = nil
-        let shares: Double?
-        let marketValue: Double?
-        switch inputMode {
-        case .shares:
-            shares = Double(sharesInput)
-            marketValue = nil
-        case .dollars:
-            shares = nil
-            marketValue = Double(dollarsInput)
-        }
-
-        let assetType = mapAssetType(result.type)
-
+    private func save() {
         isSubmitting = true
+        saveError = nil
+        let items = rows.map { $0.toUpdateItem() }
         Task { @MainActor in
             do {
-                try await viewModel.addHolding(
-                    ticker: result.ticker,
-                    companyName: result.companyName,
-                    shares: shares,
-                    marketValue: marketValue,
-                    assetType: assetType
-                )
+                try await viewModel.saveHoldingsConfig(items)
                 isSubmitting = false
                 dismiss()
             } catch {
-                print("[AddHoldingSheet] ❌ Add failed: \(error)")
-                formError = "Couldn't add \(result.ticker). It may already be in your portfolio."
+                print("[PortfolioConfigSheet] ❌ Save failed: \(error)")
+                saveError = "Couldn't save. Pull down and try again."
                 isSubmitting = false
             }
         }
     }
-
-    private func mapAssetType(_ type: String?) -> String {
-        switch type?.lowercased() {
-        case "crypto":      return "Crypto"
-        case "etf":         return "ETF"
-        case "trust":       return "ETF"
-        default:            return "Stock"
-        }
-    }
-
-    private func debounceSearch(_ query: String) {
-        searchTask?.cancel()
-        formError = nil
-
-        guard !query.isEmpty else {
-            searchResults = []
-            return
-        }
-
-        searchTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
-            guard !Task.isCancelled else { return }
-
-            isSearching = true
-            do {
-                searchResults = try await stockRepository.searchStocks(query: query, limit: 10)
-            } catch {
-                print("[AddHoldingSheet] Search failed: \(error)")
-                searchResults = []
-            }
-            isSearching = false
-        }
-    }
 }
 
-private struct AddHoldingSelectedHeader: View {
-    let result: StockSearchResult
-    var onClear: () -> Void
+private struct PortfolioConfigRowView: View {
+    @Binding var row: PortfolioConfigRow
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(result.ticker)
-                    .font(AppTypography.headingSmall)
-                    .foregroundColor(AppColors.textPrimary)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.sm) {
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    Text(row.ticker)
+                        .font(AppTypography.bodyEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
 
-                Text(result.companyName)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineLimit(1)
+                    Text(row.companyName)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Picker("Input mode", selection: $row.inputMode) {
+                    ForEach(HoldingInputMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 160)
             }
 
-            Spacer()
-
-            Button {
-                onClear()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(AppTypography.iconLarge)
-                    .foregroundColor(AppColors.textMuted)
+            if row.inputMode == .shares {
+                TextField("Shares (e.g. 25)", text: $row.sharesInput)
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField("Dollars (e.g. 12500)", text: $row.dollarsInput)
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
             }
-            .buttonStyle(.plain)
-        }
-        .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
-    }
-}
-
-/// File-private row used by AddHoldingSheet's ticker picker. Named distinctly
-/// from `Views/Molecules/SearchResultRow.swift` so the call site picks the
-/// right one without ambiguity (the global `SearchResultRow` takes a different
-/// `item:` argument shape, so a same-named private struct here causes the
-/// compiler to mis-resolve the call).
-private struct AddHoldingResultRow: View {
-    let result: StockSearchResult
-
-    var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(result.ticker)
-                    .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text(result.companyName)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            if let exchange = result.exchange {
-                Text(exchange)
-                    .font(AppTypography.captionSmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(.horizontal, AppSpacing.sm)
-                    .padding(.vertical, AppSpacing.xxs)
-                    .background(AppColors.cardBackgroundLight)
-                    .cornerRadius(AppCornerRadius.small)
-            }
-
-            Image(systemName: "plus.circle.fill")
-                .font(AppTypography.iconLarge)
-                .foregroundColor(AppColors.primaryBlue)
         }
         .padding(AppSpacing.md)
         .background(AppColors.cardBackground)

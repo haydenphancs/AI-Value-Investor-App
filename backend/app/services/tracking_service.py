@@ -194,6 +194,13 @@ class TrackingService:
                 price = quote.get("price") or 0
                 market_cap_raw = quote.get("marketCap")
 
+                # Holding info — these columns live on watchlist_items and
+                # are populated by the Portfolio Insights config sheet. iOS
+                # uses them to pre-fill the inputs and decide which rows
+                # count toward the diversification score.
+                shares = item.get("shares")
+                stored_value = item.get("market_value")
+
                 assets.append(
                     TrackedAssetResponse(
                         ticker=ticker,
@@ -202,9 +209,12 @@ class TrackingService:
                         change_percent=round(float(change_pct), 2),
                         sparkline_data=sparkline,
                         logo_url=item.get("logo_url"),
-                        sector=quote.get("sector"),
-                        country=quote.get("country"),
+                        sector=item.get("sector") or quote.get("sector"),
+                        country=item.get("country") or quote.get("country"),
                         market_cap=float(market_cap_raw) if market_cap_raw else None,
+                        shares=float(shares) if shares is not None else None,
+                        market_value=float(stored_value) if stored_value is not None else None,
+                        asset_type=item.get("asset_type"),
                     )
                 )
             except Exception as exc:

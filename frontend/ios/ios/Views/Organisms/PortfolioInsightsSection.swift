@@ -2,18 +2,24 @@
 //  PortfolioInsightsSection.swift
 //  ios
 //
-//  Organism: Portfolio Insights section with diversification score
+//  Organism: Portfolio Insights section with a toggle.
+//
+//  Hidden behind an opt-in `Toggle` because the diversification score is only
+//  meaningful when the user has filled in shares / market value for at least
+//  some of their watchlist tickers — first-run users see the toggle and an
+//  inviting blurb instead of a misleading "0" score.
 //
 
 import SwiftUI
 
 struct PortfolioInsightsSection: View {
     let score: DiversificationScore?
-    var onAddHoldingTapped: (() -> Void)?
+    @Binding var isEnabled: Bool
+    var onConfigureTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Section Header
+            // Section Header — title + toggle, always visible.
             HStack {
                 Text("Portfolio Insights")
                     .font(AppTypography.heading)
@@ -21,14 +27,34 @@ struct PortfolioInsightsSection: View {
 
                 Spacer()
 
-                if onAddHoldingTapped != nil {
+                Toggle("", isOn: $isEnabled)
+                    .labelsHidden()
+                    .tint(AppColors.primaryBlue)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+
+            content
+        }
+        .padding(.top, AppSpacing.lg)
+        .padding(.bottom, AppSpacing.sm)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if !isEnabled {
+            collapsedHint
+        } else if let score = score {
+            VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+                DiversificationCard(score: score)
+
+                if onConfigureTapped != nil {
                     Button {
-                        onAddHoldingTapped?()
+                        onConfigureTapped?()
                     } label: {
                         HStack(spacing: AppSpacing.xxs) {
-                            Image(systemName: "plus")
-                                .font(AppTypography.iconXS).fontWeight(.semibold)
-                            Text("Add holding")
+                            Image(systemName: "pencil")
+                                .font(AppTypography.iconXS)
+                            Text("Edit holdings")
                                 .font(AppTypography.bodySmallEmphasis)
                         }
                         .foregroundColor(AppColors.primaryBlue)
@@ -37,49 +63,52 @@ struct PortfolioInsightsSection: View {
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
+        } else {
+            emptyState
+        }
+    }
 
-            // Diversification Card
-            if let score = score {
-                DiversificationCard(score: score)
-                    .padding(.horizontal, AppSpacing.lg)
-            } else {
-                // Empty State
-                VStack(spacing: AppSpacing.md) {
-                    Image(systemName: "chart.pie")
-                        .font(AppTypography.iconDisplay)
-                        .foregroundColor(AppColors.textMuted)
+    private var collapsedHint: some View {
+        Text("Toggle on to score your portfolio's diversification.")
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textSecondary)
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.xs)
+    }
 
-                    Text("Add holdings to see your diversification score")
-                        .font(AppTypography.body)
-                        .foregroundColor(AppColors.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, AppSpacing.lg)
+    private var emptyState: some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "chart.pie")
+                .font(AppTypography.iconDisplay)
+                .foregroundColor(AppColors.textMuted)
 
-                    if let onAddHoldingTapped = onAddHoldingTapped {
-                        Button {
-                            onAddHoldingTapped()
-                        } label: {
-                            Text("Add Holding")
-                                .font(AppTypography.bodySmallEmphasis)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, AppSpacing.xl)
-                                .padding(.vertical, AppSpacing.sm)
-                                .background(AppColors.primaryBlue)
-                                .cornerRadius(AppCornerRadius.pill)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, AppSpacing.xs)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.xxl)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.large)
+            Text("Enter shares or amounts for the tickers you own to see your diversification score.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
                 .padding(.horizontal, AppSpacing.lg)
+
+            if let onConfigureTapped = onConfigureTapped {
+                Button {
+                    onConfigureTapped()
+                } label: {
+                    Text("Set up Portfolio Insights")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, AppSpacing.xl)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(AppColors.primaryBlue)
+                        .cornerRadius(AppCornerRadius.pill)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, AppSpacing.xs)
             }
         }
-        .padding(.top, AppSpacing.lg)
-        .padding(.bottom, AppSpacing.sm)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, AppSpacing.xxl)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+        .padding(.horizontal, AppSpacing.lg)
     }
 }
 
@@ -87,11 +116,18 @@ struct PortfolioInsightsSection: View {
     VStack(spacing: AppSpacing.xxl) {
         PortfolioInsightsSection(
             score: DiversificationScore.sampleData,
-            onAddHoldingTapped: {}
+            isEnabled: .constant(true),
+            onConfigureTapped: {}
         )
         PortfolioInsightsSection(
             score: nil,
-            onAddHoldingTapped: {}
+            isEnabled: .constant(true),
+            onConfigureTapped: {}
+        )
+        PortfolioInsightsSection(
+            score: nil,
+            isEnabled: .constant(false),
+            onConfigureTapped: {}
         )
     }
     .padding(.vertical)

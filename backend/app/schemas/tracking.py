@@ -17,7 +17,13 @@ from typing import Optional, List
 
 
 class TrackedAssetResponse(BaseModel):
-    """A watchlist item enriched with real-time price data."""
+    """A watchlist item enriched with real-time price data.
+
+    ``shares`` / ``market_value`` / ``asset_type`` carry the user's portfolio
+    holding info for this ticker. They're populated when the user has opted
+    this ticker into Portfolio Insights via the config sheet, and ``null``
+    otherwise. iOS uses them to pre-fill the config sheet inputs.
+    """
 
     ticker: str
     company_name: str
@@ -28,6 +34,9 @@ class TrackedAssetResponse(BaseModel):
     sector: Optional[str] = None
     country: Optional[str] = None
     market_cap: Optional[float] = None
+    shares: Optional[float] = None
+    market_value: Optional[float] = None
+    asset_type: Optional[str] = None
 
 
 class WhaleTradeItemResponse(BaseModel):
@@ -153,6 +162,18 @@ class PortfolioHoldingResponse(BaseModel):
     sector: Optional[str] = None
     asset_type: str = "Stock"
     country: str = "US"
+
+
+class BulkHoldingUpdateItem(BaseModel):
+    """One row of the bulk-update payload.
+
+    ``shares = null && market_value = null`` clears the holding values for that
+    ticker (the row stays on the watchlist, but is excluded from insights).
+    """
+
+    ticker: str
+    shares: Optional[float] = None
+    market_value: Optional[float] = None
 
 
 # ── Portfolio Insights (diversification score) ──────────────────────

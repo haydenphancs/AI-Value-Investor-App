@@ -15,6 +15,14 @@ CREATE INDEX IF NOT EXISTS idx_portfolios_user_id
 CREATE INDEX IF NOT EXISTS idx_portfolios_user_sort
     ON portfolios (user_id, sort_order);
 
+-- Supabase auto-adds a FK from any user_id column to users(id) when the table
+-- is created via its dashboard. We intentionally don't have that FK — the
+-- get_current_user_or_guest dependency uses a fixed GUEST_USER_ID that isn't
+-- in the users table, and the existing watchlist_items / portfolio_holdings
+-- tables also omit it. Drop defensively so re-applying this migration on
+-- another env produces the same schema.
+ALTER TABLE portfolios DROP CONSTRAINT IF EXISTS portfolios_user_id_fkey;
+
 ALTER TABLE portfolios ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Users manage own portfolios" ON portfolios;
@@ -47,6 +55,9 @@ CREATE TABLE IF NOT EXISTS portfolio_items (
 
 CREATE INDEX IF NOT EXISTS idx_portfolio_items_portfolio
     ON portfolio_items (portfolio_id, position);
+
+-- Same reasoning as portfolios above: drop any auto-added user_id FK.
+ALTER TABLE portfolio_items DROP CONSTRAINT IF EXISTS portfolio_items_user_id_fkey;
 
 ALTER TABLE portfolio_items ENABLE ROW LEVEL SECURITY;
 

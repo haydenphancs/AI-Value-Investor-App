@@ -456,6 +456,7 @@ class TrackingService:
                     company_name=bucket["company_name"],
                     whale_count=whale_count,
                     amount=amount_label,
+                    raw_amount=bucket["total_amount"],
                     lead_whale_id=bucket["lead_whale_id"],
                     lead_whale_name=bucket["lead_whale_name"],
                     lead_whale_avatar_name=bucket["lead_whale_avatar"],
@@ -672,6 +673,7 @@ class TrackingService:
                 insider_name=insider_name,
                 insider_title=bucket["insider_title"],
                 amount=_format_amount(bucket["amount"]),
+                raw_amount=bucket["amount"],
                 day=bucket["dt"].day,
                 month=bucket["dt"].strftime("%b").upper(),
             )

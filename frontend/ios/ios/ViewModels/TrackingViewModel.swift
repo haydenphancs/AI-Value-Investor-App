@@ -190,26 +190,74 @@ class TrackingViewModel: ObservableObject {
         return assets
     }
 
-    /// Alerts scoped to the active portfolio's tickers. `.market` events have
-    /// no ticker and are always shown (macro relevance). Multi-ticker rollups
-    /// are kept whole when *any* of their tickers are in the portfolio —
-    /// trimming inner items would invalidate the pre-aggregated totals.
+    /// Alerts scoped strictly to the active portfolio. Multi-ticker rollups
+    /// are trimmed to only their portfolio members, and dollar totals are
+    /// re-aggregated from per-item raw amounts so the displayed total always
+    /// matches the displayed ticker list. `.market` events have no ticker
+    /// and are always shown (macro relevance).
     var filteredAlerts: [AppAlert] {
         let active = activeTickerSet
-        return alerts.filter { alert in
+        return alerts.compactMap { alert -> AppAlert? in
             switch alert {
             case .market:
-                return true
+                return alert
             case .earnings(let data):
-                return active.contains(data.ticker.uppercased())
+                return active.contains(data.ticker.uppercased()) ? alert : nil
             case .whaleTrade(let data):
-                return data.tickers.contains { active.contains($0.uppercased()) }
+                let trimmed = data.items.filter { active.contains($0.ticker.uppercased()) }
+                guard !trimmed.isEmpty else { return nil }
+                return .whaleTrade(AppAlert.WhaleTradeAlertData(
+                    action: data.action,
+                    totalAmount: Self.recomputedTotal(
+                        trimmed.compactMap(\.rawAmount),
+                        fallback: data.totalAmount,
+                        expectedCount: trimmed.count
+                    ),
+                    timeWindowLabel: data.timeWindowLabel,
+                    items: trimmed
+                ))
             case .analystRating(let data):
-                return data.tickers.contains { active.contains($0.uppercased()) }
+                let trimmed = data.items.filter { active.contains($0.ticker.uppercased()) }
+                guard !trimmed.isEmpty else { return nil }
+                return .analystRating(AppAlert.AnalystRatingAlertData(
+                    timeWindowLabel: data.timeWindowLabel,
+                    items: trimmed
+                ))
             case .insiderTransaction(let data):
-                return data.tickers.contains { active.contains($0.uppercased()) }
+                let trimmed = data.items.filter { active.contains($0.ticker.uppercased()) }
+                guard !trimmed.isEmpty else { return nil }
+                return .insiderTransaction(AppAlert.InsiderTransactionAlertData(
+                    action: data.action,
+                    totalAmount: Self.recomputedTotal(
+                        trimmed.compactMap(\.rawAmount),
+                        fallback: data.totalAmount,
+                        expectedCount: trimmed.count
+                    ),
+                    timeWindowLabel: data.timeWindowLabel,
+                    items: trimmed
+                ))
             }
         }
+    }
+
+    /// Sum trimmed items' raw amounts and format. If any item is missing
+    /// `rawAmount` (older backend), fall back to the server-supplied label
+    /// rather than print a misleading $0.
+    private static func recomputedTotal(
+        _ amounts: [Double], fallback: String, expectedCount: Int
+    ) -> String {
+        guard amounts.count == expectedCount else { return fallback }
+        return formatDollars(amounts.reduce(0, +))
+    }
+
+    /// Mirrors backend `_format_amount` in tracking_service.py so re-aggregated
+    /// totals look identical to alerts that come straight from the server.
+    private static func formatDollars(_ value: Double) -> String {
+        let amt = abs(value)
+        if amt >= 1_000_000_000 { return String(format: "$%.2fB", amt / 1_000_000_000) }
+        if amt >= 1_000_000     { return String(format: "$%.1fM", amt / 1_000_000) }
+        if amt >= 1_000         { return String(format: "$%.0fK", amt / 1_000) }
+        return String(format: "$%.0f", amt)
     }
 
     /// Diversification score computed locally from the active portfolio's

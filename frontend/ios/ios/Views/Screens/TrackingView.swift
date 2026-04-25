@@ -1071,9 +1071,11 @@ struct SortOptionsSheet: View {
 
 // MARK: - Portfolio Insights Config Sheet
 //
-// One-screen editor for the user's Portfolio Insights data. Lists every ticker
-// on their watchlist (Assets tab) with an editable shares-or-dollars input.
-// Saving fires a single bulk PUT to /tracking/assets/holdings.
+// One-screen editor for the active portfolio's per-portfolio holdings.
+// Lists every ticker in that portfolio with an editable shares-or-dollars
+// input; values are scoped to this portfolio only (the same ticker in a
+// different portfolio carries its own values). Saving fires a single bulk
+// PUT to /api/v1/portfolios/{id}/holdings.
 //
 // Inlined here (rather than in Views/Sheets/) so it ships in the same file
 // Xcode already knows about — avoids the FS-sync gotcha that bit AddHoldingSheet.
@@ -1091,15 +1093,15 @@ private struct PortfolioConfigRow: Identifiable {
     var sharesInput: String
     var dollarsInput: String
 
-    init(asset: TrackedAsset) {
-        self.id = asset.ticker
-        self.ticker = asset.ticker
-        self.companyName = asset.companyName
-        if let s = asset.shares, s > 0 {
+    init(item: PortfolioItem, companyName: String) {
+        self.id = item.ticker
+        self.ticker = item.ticker
+        self.companyName = companyName
+        if let s = item.shares, s > 0 {
             self.inputMode = .shares
             self.sharesInput = Self.formatNumber(s)
             self.dollarsInput = ""
-        } else if let v = asset.marketValue, v > 0 {
+        } else if let v = item.marketValue, v > 0 {
             self.inputMode = .dollars
             self.sharesInput = ""
             self.dollarsInput = Self.formatNumber(v)
@@ -1149,12 +1151,12 @@ struct PortfolioConfigSheet: View {
                 AppColors.background
                     .ignoresSafeArea()
 
-                if viewModel.filteredAssets.isEmpty {
+                if rows.isEmpty {
                     emptyState
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: AppSpacing.md) {
-                            Text("Enter shares or dollar amount for each ticker. Leave empty to skip — it stays on your watchlist but won't count toward the score.")
+                            Text("Enter shares or dollar amount for each ticker in this portfolio. Leave empty to skip — it stays in the portfolio but won't count toward the score.")
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textSecondary)
                                 .padding(.horizontal, AppSpacing.lg)
@@ -1202,11 +1204,13 @@ struct PortfolioConfigSheet: View {
             }
         }
         .onAppear { syncRows() }
-        // The sheet can auto-open before the first /tracking/assets fetch
-        // resolves (toggle flips → sheet shows immediately), so re-sync when
-        // the filtered list arrives. Watching the count keeps the dependency
-        // Equatable without making TrackedAsset itself Equatable.
-        .onChange(of: viewModel.filteredAssets.count) { _, _ in
+        // The active portfolio is the source of truth — re-sync whenever its
+        // membership changes (user added/removed a ticker while the sheet
+        // was open, or the portfolio just finished loading).
+        .onChange(of: viewModel.portfolioStore.activePortfolio?.items.count ?? 0) { _, _ in
+            syncRows()
+        }
+        .onChange(of: viewModel.portfolioStore.activePortfolioId) { _, _ in
             syncRows()
         }
     }
@@ -1217,7 +1221,7 @@ struct PortfolioConfigSheet: View {
                 .font(AppTypography.iconHero)
                 .foregroundColor(AppColors.textMuted)
 
-            Text("Add tickers to your Assets first")
+            Text("Add tickers to this portfolio first")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
@@ -1226,15 +1230,28 @@ struct PortfolioConfigSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Reconcile `rows` with the active portfolio's tickers. Adds rows for
-    /// new tickers and drops rows for tickers no longer in the portfolio;
-    /// preserves any in-progress input the user already typed for tickers
-    /// that still exist. Scoped to the active portfolio so the user only
-    /// sees inputs for the tickers they're actually viewing.
+    /// Reconcile `rows` with the active portfolio's items. Reads directly
+    /// from `PortfolioStore.activePortfolio.items` (which loads with the
+    /// portfolio response) instead of `viewModel.filteredAssets` — the
+    /// latter is async and previously caused the sheet to render blank when
+    /// it opened before the trackedAssets fetch resolved. Joins with
+    /// trackedAssets only for the company-name display label.
     private func syncRows() {
+        guard let active = viewModel.portfolioStore.activePortfolio else {
+            rows = []
+            return
+        }
+        let companyByTicker = Dictionary(uniqueKeysWithValues:
+            viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.companyName) })
         let existingByTicker = Dictionary(uniqueKeysWithValues: rows.map { ($0.ticker, $0) })
-        rows = viewModel.filteredAssets.map { asset in
-            existingByTicker[asset.ticker] ?? PortfolioConfigRow(asset: asset)
+        rows = active.items.map { item in
+            if let existing = existingByTicker[item.ticker] {
+                return existing
+            }
+            return PortfolioConfigRow(
+                item: item,
+                companyName: companyByTicker[item.ticker.uppercased()] ?? item.ticker
+            )
         }
     }
 
@@ -1244,7 +1261,7 @@ struct PortfolioConfigSheet: View {
         let items = rows.map { $0.toUpdateItem() }
         Task { @MainActor in
             do {
-                try await viewModel.saveHoldingsConfig(items)
+                try await viewModel.savePortfolioHoldings(items)
                 isSubmitting = false
                 dismiss()
             } catch {

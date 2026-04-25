@@ -261,13 +261,38 @@ class TrackingViewModel: ObservableObject {
     }
 
     /// Diversification score computed locally from the active portfolio's
-    /// holdings. Replaces the server-computed score, which was scoped to the
-    /// whole watchlist (no longer the right unit).
+    /// per-portfolio holdings (`shares` / `marketValue` on each
+    /// `PortfolioItem`). Joined with `trackedAssets` for the price-feed
+    /// metadata (sector, asset_type, country, company name) that the
+    /// calculator needs but the per-portfolio item doesn't carry.
     var portfolioDiversificationScore: DiversificationScore? {
-        let active = activeTickerSet
-        let holdings = trackedAssets
-            .filter { active.contains($0.ticker.uppercased()) && $0.isHolding }
-            .map { $0.toPortfolioHolding() }
+        guard let active = portfolioStore.activePortfolio else { return nil }
+        let assetsByTicker = Dictionary(uniqueKeysWithValues:
+            trackedAssets.map { ($0.ticker.uppercased(), $0) })
+
+        let holdings: [PortfolioHolding] = active.items.compactMap { item in
+            guard item.isHolding else { return nil }
+            let asset = assetsByTicker[item.ticker.uppercased()]
+            let assetTypeLower = (asset?.assetType ?? "stock").lowercased()
+            let mappedAssetType: AssetType
+            switch assetTypeLower {
+            case "etf":     mappedAssetType = .etf
+            case "bond":    mappedAssetType = .bond
+            case "crypto":  mappedAssetType = .crypto
+            case "cash":    mappedAssetType = .cash
+            default:
+                mappedAssetType = (asset?.country ?? "US") == "US" ? .stock : .internationalStock
+            }
+            return PortfolioHolding(
+                ticker: item.ticker.uppercased(),
+                companyName: asset?.companyName ?? item.ticker,
+                marketValue: item.marketValue ?? 0,
+                shares: item.shares,
+                sector: asset?.sector,
+                assetType: mappedAssetType,
+                country: asset?.country ?? "US"
+            )
+        }
         return DiversificationCalculator.calculate(holdings: holdings)
     }
 
@@ -607,20 +632,20 @@ class TrackingViewModel: ObservableObject {
         showPortfolioConfigSheet = true
     }
 
-    /// Push every row's `shares` / `marketValue` from the config sheet to the
-    /// backend in a single bulk PUT, then refresh the insights score and the
-    /// asset list (so its embedded holding fields are in sync with the DB).
+    /// Push every row's `shares` / `marketValue` from the config sheet to
+    /// the backend in a single bulk PUT, scoped to the active portfolio.
+    /// The server response is the refreshed portfolio (with per-item
+    /// holdings); PortfolioStore drops it into local state, which triggers
+    /// `portfolioDiversificationScore` to recompute.
     ///
-    /// `null` for both shares and market_value on a row clears that ticker's
-    /// holding values — the row stays on the watchlist but stops counting
-    /// toward the diversification score.
-    func saveHoldingsConfig(_ items: [HoldingUpdateItem]) async throws {
-        try await apiClient.request(
-            endpoint: .bulkUpdateHoldings(items: items)
-        )
-        await loadTrackingFeed()
-        // Diversification re-derives from the refreshed trackedAssets via
-        // `portfolioDiversificationScore` — no separate insights call needed.
+    /// `null` for both fields on a row clears that ticker's holding values —
+    /// the row stays in the portfolio but stops counting toward the
+    /// diversification score.
+    func savePortfolioHoldings(_ items: [HoldingUpdateItem]) async throws {
+        guard let portfolioId = portfolioStore.activePortfolioId else {
+            throw APIError.unknown(message: "No active portfolio selected.")
+        }
+        try await portfolioStore.setHoldings(items, in: portfolioId)
     }
 
     // MARK: - Navigation

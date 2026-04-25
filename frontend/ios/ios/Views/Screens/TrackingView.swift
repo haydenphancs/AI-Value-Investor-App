@@ -94,6 +94,12 @@ struct TrackingContentView: View {
                 PortfolioConfigSheet(viewModel: viewModel)
                     .preferredColorScheme(.dark)
             }
+            .sheet(isPresented: $viewModel.showNewPortfolioSheet) {
+                NewPortfolioSheet(viewModel: viewModel)
+            }
+            .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
+                EditPortfolioSheet(viewModel: viewModel)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection)
             }
@@ -211,6 +217,12 @@ struct TrackingContentViewWithBinding: View {
                 PortfolioConfigSheet(viewModel: viewModel)
                     .preferredColorScheme(.dark)
             }
+            .sheet(isPresented: $viewModel.showNewPortfolioSheet) {
+                NewPortfolioSheet(viewModel: viewModel)
+            }
+            .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
+                EditPortfolioSheet(viewModel: viewModel)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection, onNavigateToResearch: {
                     researchTickerSymbol = selection.symbol
@@ -279,24 +291,28 @@ struct AssetsTabContent: View {
             // the inner List's gesture recognizer with the next section and
             // froze the outer scroll. A smaller uniform spacing is safer.
             LazyVStack(spacing: AppSpacing.md) {
-                // Assets List Section
+                // Active portfolio name (left) + "..." management menu (right).
+                // Replaces the old Sort button — sort now lives inside the menu.
+                PortfolioHeaderBar(viewModel: viewModel)
+                    .padding(.top, AppSpacing.sm)
+
+                // Assets List Section — scoped to the active portfolio.
                 AssetsListSection(
                     assets: viewModel.filteredAssets,
-                    onSortTapped: { viewModel.openSortOptions() },
                     onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
-                    onRemoveAsset: { asset in viewModel.removeAsset(asset) }
+                    onRemoveAsset: { asset in viewModel.removeAsset(asset) },
+                    onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) }
                 )
-                .padding(.top, AppSpacing.sm)
 
-                // Alerts & Upcoming Events Section
+                // Alerts & Upcoming Events — filtered to this portfolio's tickers.
                 AlertsEventsSection(
-                    alerts: viewModel.alerts,
+                    alerts: viewModel.filteredAlerts,
                     onAlertTapped: { alert in viewModel.viewAlertDetail(alert) }
                 )
 
-                // Portfolio Insights Section
+                // Portfolio Insights — computed locally from the active portfolio.
                 PortfolioInsightsSection(
-                    score: viewModel.diversificationScore,
+                    score: viewModel.portfolioDiversificationScore,
                     isEnabled: $viewModel.isInsightsEnabled,
                     onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
                 )
@@ -312,7 +328,7 @@ struct AssetsTabContent: View {
         // Auto-open the config sheet the first time the user enables the
         // section without any holding data — saves them a tap.
         .onChange(of: viewModel.isInsightsEnabled) { _, isOn in
-            if isOn && viewModel.diversificationScore == nil {
+            if isOn && viewModel.portfolioDiversificationScore == nil {
                 viewModel.openPortfolioConfigSheet()
             }
         }
@@ -980,10 +996,18 @@ struct AddAssetSheet: View {
                     endpoint: .addToWatchlist(stockId: result.ticker)
                 )
                 print("[AddAsset] ✅ Added \(result.ticker) to watchlist")
+                // Watchlist add succeeded — also push the ticker into the
+                // active portfolio so the user sees it immediately. Best-
+                // effort: a sync failure here just means a refresh repairs it.
+                try? await PortfolioStore.shared.addTicker(result.ticker)
                 onAssetAdded?(result.ticker)
                 onDismiss?()
             } catch {
                 print("[AddAsset] ❌ Failed to add \(result.ticker): \(error)")
+                // Most common failure: the ticker is already on the master
+                // watchlist. Either way, push it into the active portfolio —
+                // the user clearly wants it here. The store call is idempotent.
+                try? await PortfolioStore.shared.addTicker(result.ticker)
                 addError = "Failed to add \(result.ticker). It may already be in your watchlist."
                 isAdding = false
             }
@@ -1121,7 +1145,7 @@ struct PortfolioConfigSheet: View {
                 AppColors.background
                     .ignoresSafeArea()
 
-                if viewModel.trackedAssets.isEmpty {
+                if viewModel.filteredAssets.isEmpty {
                     emptyState
                 } else {
                     ScrollView {
@@ -1176,9 +1200,9 @@ struct PortfolioConfigSheet: View {
         .onAppear { syncRows() }
         // The sheet can auto-open before the first /tracking/assets fetch
         // resolves (toggle flips → sheet shows immediately), so re-sync when
-        // the asset list arrives. Watching the count keeps the dependency
+        // the filtered list arrives. Watching the count keeps the dependency
         // Equatable without making TrackedAsset itself Equatable.
-        .onChange(of: viewModel.trackedAssets.count) { _, _ in
+        .onChange(of: viewModel.filteredAssets.count) { _, _ in
             syncRows()
         }
     }
@@ -1198,13 +1222,14 @@ struct PortfolioConfigSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Reconcile `rows` with `viewModel.trackedAssets`. Adds rows for new
-    /// tickers and drops rows for tickers that vanished from the watchlist;
+    /// Reconcile `rows` with the active portfolio's tickers. Adds rows for
+    /// new tickers and drops rows for tickers no longer in the portfolio;
     /// preserves any in-progress input the user already typed for tickers
-    /// that still exist.
+    /// that still exist. Scoped to the active portfolio so the user only
+    /// sees inputs for the tickers they're actually viewing.
     private func syncRows() {
         let existingByTicker = Dictionary(uniqueKeysWithValues: rows.map { ($0.ticker, $0) })
-        rows = viewModel.trackedAssets.map { asset in
+        rows = viewModel.filteredAssets.map { asset in
             existingByTicker[asset.ticker] ?? PortfolioConfigRow(asset: asset)
         }
     }

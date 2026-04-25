@@ -1033,6 +1033,362 @@ struct SortOptionsSheet: View {
     }
 }
 
+// MARK: - Add Holding Sheet
+//
+// Inlined here (rather than in Views/Sheets/) so the sheet's types are picked
+// up by the existing TrackingView.swift entry in the Xcode project. The Sheets
+// folder is brand new in this checkout and Xcode's file-system-sync sometimes
+// doesn't pick up newly-created subfolders until a project reopen — keeping
+// the sheet next to AddAssetSheet avoids that footgun.
+
+private enum HoldingInputMode: String, CaseIterable {
+    case shares = "Shares"
+    case dollars = "Dollar amount"
+
+    var helperText: String {
+        switch self {
+        case .shares:
+            return "Value updates as the price moves."
+        case .dollars:
+            return "Stored as a static amount."
+        }
+    }
+}
+
+struct AddHoldingSheet: View {
+    @ObservedObject var viewModel: TrackingViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    // Search state
+    @State private var searchText: String = ""
+    @State private var searchResults: [StockSearchResult] = []
+    @State private var isSearching: Bool = false
+    @State private var searchTask: Task<Void, Never>?
+
+    // Selection + form state
+    @State private var selected: StockSearchResult?
+    @State private var inputMode: HoldingInputMode = .shares
+    @State private var sharesInput: String = ""
+    @State private var dollarsInput: String = ""
+
+    // Submission state
+    @State private var isSubmitting: Bool = false
+    @State private var formError: String?
+
+    private let stockRepository = StockRepository.shared
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
+
+                VStack(spacing: AppSpacing.lg) {
+                    if let pinned = selected {
+                        AddHoldingSelectedHeader(result: pinned) {
+                            selected = nil
+                        }
+                        .padding(.horizontal, AppSpacing.lg)
+
+                        inputForm(for: pinned)
+                            .padding(.horizontal, AppSpacing.lg)
+
+                        Spacer()
+                    } else {
+                        SearchBar(text: $searchText, placeholder: "Search ticker or name…")
+                            .padding(.horizontal, AppSpacing.lg)
+
+                        searchBody
+                    }
+                }
+                .padding(.top, AppSpacing.lg)
+            }
+            .navigationTitle("Add Holding")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onChange(of: searchText) { _, newValue in
+            debounceSearch(newValue)
+        }
+    }
+
+    // MARK: - Search Results
+
+    @ViewBuilder
+    private var searchBody: some View {
+        if searchText.isEmpty {
+            searchEmptyState(
+                icon: "magnifyingglass",
+                title: "Search for a ticker to add to your portfolio"
+            )
+        } else if isSearching {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if searchResults.isEmpty {
+            searchEmptyState(
+                icon: "magnifyingglass",
+                title: "No results for \"\(searchText)\""
+            )
+        } else {
+            ScrollView {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(searchResults) { result in
+                        Button {
+                            selectResult(result)
+                        } label: {
+                            AddHoldingResultRow(result: result)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+            }
+        }
+    }
+
+    private func searchEmptyState(icon: String, title: String) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: icon)
+                .font(AppTypography.iconHero)
+                .foregroundColor(AppColors.textMuted)
+
+            Text(title)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    // MARK: - Input Form
+
+    @ViewBuilder
+    private func inputForm(for result: StockSearchResult) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            Picker("Input mode", selection: $inputMode) {
+                ForEach(HoldingInputMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                if inputMode == .shares {
+                    TextField("e.g. 25", text: $sharesInput)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    TextField("e.g. 12500", text: $dollarsInput)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Text(inputMode.helperText)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+
+            if let error = formError {
+                Text(error)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.bearish)
+            }
+
+            Button {
+                submit(for: result)
+            } label: {
+                HStack {
+                    if isSubmitting {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                    }
+                    Text(isSubmitting ? "Adding…" : "Add to Portfolio")
+                        .font(AppTypography.bodyEmphasis)
+                        .foregroundColor(.white)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
+                .background(canSubmit ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
+                .cornerRadius(AppCornerRadius.medium)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSubmit || isSubmitting)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var canSubmit: Bool {
+        switch inputMode {
+        case .shares:
+            return Double(sharesInput).map { $0 > 0 } ?? false
+        case .dollars:
+            return Double(dollarsInput).map { $0 > 0 } ?? false
+        }
+    }
+
+    private func selectResult(_ result: StockSearchResult) {
+        selected = result
+        searchText = ""
+        searchResults = []
+        formError = nil
+    }
+
+    private func submit(for result: StockSearchResult) {
+        formError = nil
+        let shares: Double?
+        let marketValue: Double?
+        switch inputMode {
+        case .shares:
+            shares = Double(sharesInput)
+            marketValue = nil
+        case .dollars:
+            shares = nil
+            marketValue = Double(dollarsInput)
+        }
+
+        let assetType = mapAssetType(result.type)
+
+        isSubmitting = true
+        Task { @MainActor in
+            do {
+                try await viewModel.addHolding(
+                    ticker: result.ticker,
+                    companyName: result.companyName,
+                    shares: shares,
+                    marketValue: marketValue,
+                    assetType: assetType
+                )
+                isSubmitting = false
+                dismiss()
+            } catch {
+                print("[AddHoldingSheet] ❌ Add failed: \(error)")
+                formError = "Couldn't add \(result.ticker). It may already be in your portfolio."
+                isSubmitting = false
+            }
+        }
+    }
+
+    private func mapAssetType(_ type: String?) -> String {
+        switch type?.lowercased() {
+        case "crypto":      return "Crypto"
+        case "etf":         return "ETF"
+        case "trust":       return "ETF"
+        default:            return "Stock"
+        }
+    }
+
+    private func debounceSearch(_ query: String) {
+        searchTask?.cancel()
+        formError = nil
+
+        guard !query.isEmpty else {
+            searchResults = []
+            return
+        }
+
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+            guard !Task.isCancelled else { return }
+
+            isSearching = true
+            do {
+                searchResults = try await stockRepository.searchStocks(query: query, limit: 10)
+            } catch {
+                print("[AddHoldingSheet] Search failed: \(error)")
+                searchResults = []
+            }
+            isSearching = false
+        }
+    }
+}
+
+private struct AddHoldingSelectedHeader: View {
+    let result: StockSearchResult
+    var onClear: () -> Void
+
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text(result.ticker)
+                    .font(AppTypography.headingSmall)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(result.companyName)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button {
+                onClear()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(AppTypography.iconLarge)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
+/// File-private row used by AddHoldingSheet's ticker picker. Named distinctly
+/// from `Views/Molecules/SearchResultRow.swift` so the call site picks the
+/// right one without ambiguity (the global `SearchResultRow` takes a different
+/// `item:` argument shape, so a same-named private struct here causes the
+/// compiler to mis-resolve the call).
+private struct AddHoldingResultRow: View {
+    let result: StockSearchResult
+
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                Text(result.ticker)
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(result.companyName)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if let exchange = result.exchange {
+                Text(exchange)
+                    .font(AppTypography.captionSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.horizontal, AppSpacing.sm)
+                    .padding(.vertical, AppSpacing.xxs)
+                    .background(AppColors.cardBackgroundLight)
+                    .cornerRadius(AppCornerRadius.small)
+            }
+
+            Image(systemName: "plus.circle.fill")
+                .font(AppTypography.iconLarge)
+                .foregroundColor(AppColors.primaryBlue)
+        }
+        .padding(AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+}
+
 // MARK: - Preview
 #Preview {
     TrackingContentView()

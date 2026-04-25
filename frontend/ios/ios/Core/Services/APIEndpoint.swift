@@ -98,9 +98,10 @@ enum APIEndpoint: Sendable {
     // MARK: - Tracking
     case getTrackingAssets
     case getHoldings
-    case addHolding(ticker: String, companyName: String?, marketValue: Double, assetType: String?)
-    case updateHolding(ticker: String, marketValue: Double)
+    case addHolding(ticker: String, companyName: String?, shares: Double?, marketValue: Double?, assetType: String?)
+    case updateHolding(ticker: String, shares: Double?, marketValue: Double?)
     case deleteHolding(ticker: String)
+    case getPortfolioInsights
 
     // MARK: - Research
     case generateResearch(stockId: String, persona: String)
@@ -261,10 +262,12 @@ enum APIEndpoint: Sendable {
             return "/api/v1/tracking/holdings"
         case .addHolding:
             return "/api/v1/tracking/holdings"
-        case .updateHolding(let ticker, _):
+        case .updateHolding(let ticker, _, _):
             return "/api/v1/tracking/holdings/\(ticker)"
         case .deleteHolding(let ticker):
             return "/api/v1/tracking/holdings/\(ticker)"
+        case .getPortfolioInsights:
+            return "/api/v1/tracking/portfolio-insights"
 
         // Research
         case .generateResearch:
@@ -470,11 +473,17 @@ enum APIEndpoint: Sendable {
         case .chatWithTickerReport(let ticker, let message, let persona):
             return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
 
-        case .addHolding(let ticker, let companyName, let marketValue, let assetType):
-            return AddHoldingRequestBody(ticker: ticker, companyName: companyName, marketValue: marketValue, assetType: assetType)
+        case .addHolding(let ticker, let companyName, let shares, let marketValue, let assetType):
+            return AddHoldingRequestBody(
+                ticker: ticker,
+                companyName: companyName,
+                shares: shares,
+                marketValue: marketValue,
+                assetType: assetType
+            )
 
-        case .updateHolding(_, let marketValue):
-            return UpdateHoldingRequestBody(marketValue: marketValue)
+        case .updateHolding(_, let shares, let marketValue):
+            return UpdateHoldingRequestBody(shares: shares, marketValue: marketValue)
 
         case .enrichStockNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
@@ -615,12 +624,27 @@ nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {
 nonisolated struct AddHoldingRequestBody: Encodable, Sendable {
     let ticker: String
     let companyName: String?
-    let marketValue: Double
+    let shares: Double?
+    let marketValue: Double?
     let assetType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker
+        case companyName = "company_name"
+        case shares
+        case marketValue = "market_value"
+        case assetType = "asset_type"
+    }
 }
 
 nonisolated struct UpdateHoldingRequestBody: Encodable, Sendable {
-    let marketValue: Double
+    let shares: Double?
+    let marketValue: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case shares
+        case marketValue = "market_value"
+    }
 }
 
 nonisolated struct EnrichStockNewsRequest: Encodable, Sendable {

@@ -53,6 +53,7 @@ class TrackingViewModel: ObservableObject {
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
+    @Published var showAddHoldingSheet: Bool = false
 
     // Navigation States
     @Published var selectedAssetNavigation: SearchSelection?
@@ -65,14 +66,6 @@ class TrackingViewModel: ObservableObject {
 
     init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
-
-        // Recalculate diversification score whenever holdings change
-        $portfolioHoldings
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] holdings in
-                self?.recalculateDiversification(holdings)
-            }
-            .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .whaleFollowStateChanged)
             .receive(on: RunLoop.main)
@@ -90,10 +83,6 @@ class TrackingViewModel: ObservableObject {
 
     deinit {
         priceRefreshTask?.cancel()
-    }
-
-    private func recalculateDiversification(_ holdings: [PortfolioHolding]) {
-        diversificationScore = DiversificationCalculator.calculate(holdings: holdings)
     }
 
     // MARK: - Computed Properties
@@ -118,8 +107,21 @@ class TrackingViewModel: ObservableObject {
         case .change:
             assets.sort { sortAscending ? $0.changePercent < $1.changePercent : $0.changePercent > $1.changePercent }
         case .marketCap:
-            // For now, sort by price as proxy for market cap
-            assets.sort { sortAscending ? $0.price < $1.price : $0.price > $1.price }
+            // Assets without a market cap (e.g. crypto, indices) sort to the
+            // bottom in ascending order, top in descending — matches how the
+            // Watchlist screen handles missing fundamentals.
+            assets.sort { lhs, rhs in
+                switch (lhs.marketCap, rhs.marketCap) {
+                case let (l?, r?):
+                    return sortAscending ? l < r : l > r
+                case (nil, _?):
+                    return !sortAscending
+                case (_?, nil):
+                    return sortAscending
+                case (nil, nil):
+                    return sortAscending ? lhs.ticker < rhs.ticker : lhs.ticker > rhs.ticker
+                }
+            }
         case .dateAdded:
             // Keep original order from backend (added_at desc)
             if !sortAscending { assets.reverse() }
@@ -140,12 +142,13 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets, holdings, AND whale data in parallel
+        // Load assets, holdings, insights, AND whale data in parallel
         async let feedTask: () = loadTrackingFeed()
         async let holdingsTask: () = loadHoldings()
+        async let insightsTask: () = loadPortfolioInsights()
         async let whalesTask: () = loadWhaleData()
 
-        _ = await (feedTask, holdingsTask, whalesTask)
+        _ = await (feedTask, holdingsTask, insightsTask, whalesTask)
     }
 
     private func loadTrackingFeed() async {
@@ -182,6 +185,30 @@ class TrackingViewModel: ObservableObject {
             if portfolioHoldings.isEmpty {
                 portfolioHoldings = PortfolioHolding.sampleData
                 print("[TrackingVM] ⚠️ Using sample holdings as fallback")
+            }
+        }
+    }
+
+    /// Fetch the server-computed Portfolio Insights payload (diversification
+    /// score, sector breakdown, sub-scores). The backend returns ``null`` when
+    /// the user has fewer than the minimum number of holdings — we map that to
+    /// ``nil`` so the UI shows its empty state.
+    private func loadPortfolioInsights() async {
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .getPortfolioInsights,
+                responseType: PortfolioInsightsDTO?.self
+            )
+            self.diversificationScore = dto?.toDiversificationScore()
+            print("[TrackingVM] ✅ Loaded portfolio insights (score=\(dto?.score ?? -1))")
+        } catch {
+            print("[TrackingVM] ❌ Portfolio insights load failed: \(error)")
+            // Dev fallback: if we're showing sample holdings, compute locally
+            // so the preview card still renders. In production this branch is
+            // a no-op because real holdings get a real server response.
+            if portfolioHoldings.elementsEqual(PortfolioHolding.sampleData, by: { $0.ticker == $1.ticker }) {
+                diversificationScore = DiversificationCalculator.calculate(holdings: portfolioHoldings)
+                print("[TrackingVM] ⚠️ Using local diversification calc on sample data")
             }
         }
     }
@@ -245,14 +272,25 @@ class TrackingViewModel: ObservableObject {
             )
             let activities = dtos.map { $0.toWhaleTradeGroupActivity() }
 
-            // Group into timeline sections
-            self.groupedWhaleTrades = activities.map { activity in
-                GroupedWhaleTrades(
-                    sectionTitle: activity.formattedDate,
-                    activities: [activity]
-                )
+            // Bucket consecutive same-date activities into a single section
+            // so a date header isn't repeated for every whale who traded that
+            // day. The feed is already sorted desc by date on the backend.
+            var grouped: [GroupedWhaleTrades] = []
+            for activity in activities {
+                if let last = grouped.last, last.sectionTitle == activity.formattedDate {
+                    grouped[grouped.count - 1] = GroupedWhaleTrades(
+                        sectionTitle: last.sectionTitle,
+                        activities: last.activities + [activity]
+                    )
+                } else {
+                    grouped.append(GroupedWhaleTrades(
+                        sectionTitle: activity.formattedDate,
+                        activities: [activity]
+                    ))
+                }
             }
-            self.allWhaleTrades = self.groupedWhaleTrades
+            self.groupedWhaleTrades = grouped
+            self.allWhaleTrades = grouped
 
             print("[TrackingVM] ✅ Loaded \(activities.count) whale activity items from API")
         } catch {
@@ -330,6 +368,53 @@ class TrackingViewModel: ObservableObject {
             } catch {
                 print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from watchlist: \(error)")
                 // Could re-add on failure, but for now just log
+            }
+        }
+    }
+
+    // MARK: - Holding Actions
+
+    func openAddHoldingSheet() {
+        showAddHoldingSheet = true
+    }
+
+    /// Add a holding by share count (preferred — ``marketValue`` will track
+    /// the live FMP price) or by static dollar amount. After the upsert,
+    /// re-fetches holdings + insights so the score updates.
+    func addHolding(
+        ticker: String,
+        companyName: String?,
+        shares: Double?,
+        marketValue: Double?,
+        assetType: String?
+    ) async throws {
+        try await apiClient.request(
+            endpoint: .addHolding(
+                ticker: ticker,
+                companyName: companyName,
+                shares: shares,
+                marketValue: marketValue,
+                assetType: assetType
+            )
+        )
+        await loadHoldings()
+        await loadPortfolioInsights()
+    }
+
+    /// Remove a holding. Optimistically pulls it from the local list and
+    /// re-fetches insights so the score updates without a full reload.
+    func removeHolding(_ holding: PortfolioHolding) {
+        portfolioHoldings.removeAll { $0.id == holding.id }
+        Task {
+            do {
+                try await apiClient.request(
+                    endpoint: .deleteHolding(ticker: holding.ticker)
+                )
+                await loadPortfolioInsights()
+                print("[TrackingVM] ✅ Removed \(holding.ticker) from holdings")
+            } catch {
+                print("[TrackingVM] ❌ Failed to remove \(holding.ticker) from holdings: \(error)")
+                await loadHoldings() // restore on failure
             }
         }
     }
@@ -468,92 +553,11 @@ class TrackingViewModel: ObservableObject {
     }
 
     func viewTradeGroupDetail(_ activity: WhaleTradeGroupActivity) {
-        let tradeGroup = WhaleTradeGroup(
-            id: UUID().uuidString,
-            date: activity.date,
-            tradeCount: activity.tradeCount,
-            netAction: activity.action == .bought ? .bought : .sold,
-            netAmount: parseAmount(activity.totalAmount),
-            summary: activity.summary,
-            insights: generateInsights(for: activity),
-            trades: generateSampleTrades(for: activity)
-        )
-
-        selectedTradeGroup = TradeGroupNavigation(tradeGroup: tradeGroup, whaleName: activity.entityName)
-    }
-
-    private func parseAmount(_ amountString: String) -> Double {
-        let cleaned = amountString.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "")
-
-        if let value = Double(cleaned.dropLast()) {
-            let suffix = cleaned.last
-            switch suffix {
-            case "B": return value * 1_000_000_000
-            case "M": return value * 1_000_000
-            case "K": return value * 1_000
-            default: return Double(cleaned) ?? 0
-            }
-        }
-        return 0
-    }
-
-    private func generateInsights(for activity: WhaleTradeGroupActivity) -> [String] {
-        var insights: [String] = []
-
-        if activity.tradeCount > 5 {
-            insights.append("High trading activity detected")
-        }
-
-        if activity.action == .bought {
-            insights.append("Bullish positioning in this sector")
-        } else {
-            insights.append("Portfolio rebalancing activity")
-        }
-
-        return insights
-    }
-
-    private func generateSampleTrades(for activity: WhaleTradeGroupActivity) -> [WhaleTrade] {
-        let tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"]
-        let companies = ["Apple Inc.", "Microsoft", "Alphabet Inc.", "Amazon", "Tesla", "NVIDIA"]
-
-        return (0..<min(activity.tradeCount, 6)).map { index in
-            let tradeType: WhaleTradeType = {
-                let random = Int.random(in: 0...3)
-                switch random {
-                case 0: return .new
-                case 1: return .increased
-                case 2: return .decreased
-                default: return .closed
-                }
-            }()
-
-            let previousAllocation = Double.random(in: 0...15)
-            let newAllocation: Double
-
-            switch tradeType {
-            case .new:
-                newAllocation = Double.random(in: 1...10)
-            case .increased:
-                newAllocation = previousAllocation + Double.random(in: 1...5)
-            case .decreased:
-                newAllocation = max(0, previousAllocation - Double.random(in: 1...5))
-            case .closed:
-                newAllocation = 0
-            }
-
-            return WhaleTrade(
-                id: UUID().uuidString,
-                ticker: tickers[index % tickers.count],
-                companyName: companies[index % companies.count],
-                action: activity.action == .bought ? .bought : .sold,
-                tradeType: tradeType,
-                amount: Double.random(in: 1000000...50000000),
-                previousAllocation: previousAllocation,
-                newAllocation: newAllocation,
-                date: activity.date
-            )
-        }
+        // The destination view fetches the real trades + insights from
+        // GET /whales/{whaleId}/trade-groups/{groupId} on appear. We just
+        // hand it the activity so the header can render while the fetch
+        // is in flight.
+        selectedTradeGroup = TradeGroupNavigation(activity: activity)
     }
 
 }

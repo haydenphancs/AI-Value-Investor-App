@@ -9,14 +9,34 @@ import SwiftUI
 
 struct PortfolioInsightsSection: View {
     let score: DiversificationScore?
+    var onAddHoldingTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Section Header
-            Text("Portfolio Insights")
-                .font(AppTypography.heading)
-                .foregroundColor(AppColors.textPrimary)
-                .padding(.horizontal, AppSpacing.lg)
+            HStack {
+                Text("Portfolio Insights")
+                    .font(AppTypography.heading)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer()
+
+                if onAddHoldingTapped != nil {
+                    Button {
+                        onAddHoldingTapped?()
+                    } label: {
+                        HStack(spacing: AppSpacing.xxs) {
+                            Image(systemName: "plus")
+                                .font(AppTypography.iconXS).fontWeight(.semibold)
+                            Text("Add holding")
+                                .font(AppTypography.bodySmallEmphasis)
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, AppSpacing.lg)
 
             // Diversification Card
             if let score = score {
@@ -29,9 +49,27 @@ struct PortfolioInsightsSection: View {
                         .font(AppTypography.iconDisplay)
                         .foregroundColor(AppColors.textMuted)
 
-                    Text("Add more assets to see insights")
+                    Text("Add holdings to see your diversification score")
                         .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, AppSpacing.lg)
+
+                    if let onAddHoldingTapped = onAddHoldingTapped {
+                        Button {
+                            onAddHoldingTapped()
+                        } label: {
+                            Text("Add Holding")
+                                .font(AppTypography.bodySmallEmphasis)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, AppSpacing.xl)
+                                .padding(.vertical, AppSpacing.sm)
+                                .background(AppColors.primaryBlue)
+                                .cornerRadius(AppCornerRadius.pill)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, AppSpacing.xs)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.xxl)
@@ -45,8 +83,14 @@ struct PortfolioInsightsSection: View {
 
 #Preview {
     VStack(spacing: AppSpacing.xxl) {
-        PortfolioInsightsSection(score: DiversificationScore.sampleData)
-        PortfolioInsightsSection(score: nil)
+        PortfolioInsightsSection(
+            score: DiversificationScore.sampleData,
+            onAddHoldingTapped: {}
+        )
+        PortfolioInsightsSection(
+            score: nil,
+            onAddHoldingTapped: {}
+        )
     }
     .padding(.vertical)
     .background(AppColors.background)

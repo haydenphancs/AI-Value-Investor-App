@@ -50,6 +50,9 @@ struct PortfolioHolding: Identifiable, Codable {
     let ticker: String
     let companyName: String
     let marketValue: Double
+    /// Number of shares the user owns. Optional — when set, the backend
+    /// recomputes ``marketValue`` from the live FMP price on every read.
+    let shares: Double?
     let sector: String?
     let assetType: AssetType
     let country: String
@@ -58,7 +61,7 @@ struct PortfolioHolding: Identifiable, Codable {
     var weight: Double = 0.0
 
     enum CodingKeys: String, CodingKey {
-        case id, ticker
+        case id, ticker, shares
         case companyName = "company_name"
         case marketValue = "market_value"
         case sector
@@ -84,6 +87,7 @@ struct PortfolioHolding: Identifiable, Codable {
         ticker = try container.decode(String.self, forKey: .ticker)
         companyName = try container.decode(String.self, forKey: .companyName)
         marketValue = try container.decode(Double.self, forKey: .marketValue)
+        shares = try container.decodeIfPresent(Double.self, forKey: .shares)
         sector = try container.decodeIfPresent(String.self, forKey: .sector)
 
         let assetTypeStr = try container.decodeIfPresent(String.self, forKey: .assetType) ?? "Stock"
@@ -100,6 +104,7 @@ struct PortfolioHolding: Identifiable, Codable {
         ticker: String,
         companyName: String,
         marketValue: Double,
+        shares: Double? = nil,
         sector: String? = nil,
         assetType: AssetType = .stock,
         country: String = "US"
@@ -108,6 +113,7 @@ struct PortfolioHolding: Identifiable, Codable {
         self.ticker = ticker
         self.companyName = companyName
         self.marketValue = marketValue
+        self.shares = shares
         self.sector = sector
         self.assetType = assetType
         self.country = country

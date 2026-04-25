@@ -70,6 +70,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
     func toWhaleTradeGroupActivity() -> WhaleTradeGroupActivity {
         WhaleTradeGroupActivity(
             id: id,
+            whaleId: whaleId,
             entityName: entityName,
             entityAvatarName: entityAvatarName,
             category: category.map { WhaleCategory.fromBackend($0) },

@@ -27,6 +27,7 @@ struct AllRecentTradesView: View {
 
                             WhaleTradeTimelineRow(
                                 activity: activity,
+                                showDate: activityIndex == 0,
                                 isFirst: isFirst,
                                 isLast: isLast,
                                 onTapped: { viewModel.viewTradeGroupDetail(activity) }

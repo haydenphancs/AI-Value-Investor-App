@@ -1173,7 +1173,14 @@ struct PortfolioConfigSheet: View {
                 }
             }
         }
-        .onAppear { initRowsIfNeeded() }
+        .onAppear { syncRows() }
+        // The sheet can auto-open before the first /tracking/assets fetch
+        // resolves (toggle flips → sheet shows immediately), so re-sync when
+        // the asset list arrives. Watching the count keeps the dependency
+        // Equatable without making TrackedAsset itself Equatable.
+        .onChange(of: viewModel.trackedAssets.count) { _, _ in
+            syncRows()
+        }
     }
 
     private var emptyState: some View {
@@ -1191,11 +1198,15 @@ struct PortfolioConfigSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func initRowsIfNeeded() {
-        // Only initialize on first appear — re-rendering shouldn't blow away
-        // the user's in-progress edits.
-        guard rows.isEmpty else { return }
-        rows = viewModel.trackedAssets.map(PortfolioConfigRow.init)
+    /// Reconcile `rows` with `viewModel.trackedAssets`. Adds rows for new
+    /// tickers and drops rows for tickers that vanished from the watchlist;
+    /// preserves any in-progress input the user already typed for tickers
+    /// that still exist.
+    private func syncRows() {
+        let existingByTicker = Dictionary(uniqueKeysWithValues: rows.map { ($0.ticker, $0) })
+        rows = viewModel.trackedAssets.map { asset in
+            existingByTicker[asset.ticker] ?? PortfolioConfigRow(asset: asset)
+        }
     }
 
     private func save() {

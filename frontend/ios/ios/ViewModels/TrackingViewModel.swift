@@ -65,10 +65,13 @@ class TrackingViewModel: ObservableObject {
     @Published var showNewPortfolioSheet: Bool = false
     @Published var showEditPortfolioSheet: Bool = false
 
-    /// Tickers the user just added via the in-sheet star button. Tracked
-    /// optimistically so the star fills immediately, before the next
-    /// `/tracking/assets` refresh reflects the new row in `trackedAssets`.
-    @Published var recentlyAddedTickers: Set<String> = []
+    /// Tickers the user just added via the in-sheet star button, keyed by
+    /// the portfolio they were added to. Used to fill the star instantly
+    /// while the server round-trip is in flight; cleared per-entry once the
+    /// real `portfolioStore.activePortfolio.tickers` reflects the new row.
+    /// Per-portfolio scoping prevents an optimistic add to "Holdings" from
+    /// leaking into the star state when the user switches to "Tech".
+    @Published var recentlyAddedTickers: [String: Set<String>] = [:]
 
     // Navigation States
     @Published var selectedAssetNavigation: SearchSelection?
@@ -431,13 +434,16 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
-    /// Whether the ticker is on the master watchlist (or was just added in
-    /// this session). Used by the search sheet's star icon to render the
-    /// filled state immediately after a tap, before the next refresh lands.
+    /// Whether the ticker is in the *active portfolio* (or was just added to
+    /// it in this session). Used by the search sheet's star icon — filled
+    /// means "already in this portfolio", empty means "tap to add here".
+    /// Master-watchlist membership is intentionally NOT what this checks:
+    /// the user's mental model is portfolio-scoped, not watchlist-scoped.
     func isOnWatchlist(_ ticker: String) -> Bool {
         let upper = ticker.uppercased()
-        if recentlyAddedTickers.contains(upper) { return true }
-        return trackedAssets.contains { $0.ticker.uppercased() == upper }
+        guard let activeId = portfolioStore.activePortfolioId else { return false }
+        if recentlyAddedTickers[activeId]?.contains(upper) == true { return true }
+        return portfolioStore.activePortfolio?.tickers.contains(upper) ?? false
     }
 
     /// Add a ticker to the master watchlist + active portfolio from the in-sheet
@@ -447,9 +453,36 @@ class TrackingViewModel: ObservableObject {
     /// the star while looking at this portfolio.
     func addTickerFromSearch(_ result: StockSearchResult) {
         let symbol = result.ticker.uppercased()
-        recentlyAddedTickers.insert(symbol)
 
         Task { @MainActor in
+            // Self-heal: if the user taps the star before portfolios have
+            // loaded (or the initial load silently failed — e.g. backend
+            // missing the new endpoint), try reloading once and create a
+            // default "Holdings" portfolio if the list is still empty.
+            // Without this the tap looks like a dead button.
+            if portfolioStore.activePortfolioId == nil {
+                print("[TrackingVM] ⚠️ No active portfolio for \(symbol); attempting recovery…")
+                await portfolioStore.loadPortfolios()
+                if portfolioStore.portfolios.isEmpty {
+                    do {
+                        _ = try await portfolioStore.createPortfolio(named: "Holdings")
+                        print("[TrackingVM] ✅ Created default Holdings portfolio")
+                    } catch {
+                        print("[TrackingVM] ❌ Couldn't create default portfolio: \(error). Check that backend migrations 038+039 are applied and /api/v1/portfolios is deployed.")
+                        return
+                    }
+                }
+            }
+
+            guard let portfolioId = portfolioStore.activePortfolioId else {
+                print("[TrackingVM] ❌ Still no active portfolio after recovery; aborting add for \(symbol)")
+                return
+            }
+            // Capture the portfolio at this point — if the user switches mid-
+            // flight, we still target the one they were looking at when they
+            // tapped (and the optimistic star fills only on that portfolio).
+            recentlyAddedTickers[portfolioId, default: []].insert(symbol)
+
             do {
                 try await apiClient.request(
                     endpoint: .addToWatchlist(stockId: result.ticker)
@@ -461,8 +494,14 @@ class TrackingViewModel: ObservableObject {
                 // it in the active portfolio.
                 print("[TrackingVM] ⚠️ Watchlist add failed for \(symbol) (likely already present): \(error)")
             }
-            try? await portfolioStore.addTicker(symbol)
+            try? await portfolioStore.addTicker(symbol, to: portfolioId)
             await refresh()
+            // Real portfolio.tickers now carries the truth — drop the
+            // optimistic marker so future state reads from authoritative data.
+            recentlyAddedTickers[portfolioId]?.remove(symbol)
+            if recentlyAddedTickers[portfolioId]?.isEmpty == true {
+                recentlyAddedTickers.removeValue(forKey: portfolioId)
+            }
         }
     }
 

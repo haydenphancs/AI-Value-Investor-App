@@ -468,7 +468,7 @@ class TrackingViewModel: ObservableObject {
                         _ = try await portfolioStore.createPortfolio(named: "Holdings")
                         print("[TrackingVM] ✅ Created default Holdings portfolio")
                     } catch {
-                        print("[TrackingVM] ❌ Couldn't create default portfolio: \(error). Check that backend migrations 038+039 are applied and /api/v1/portfolios is deployed.")
+                        print("[TrackingVM] ❌ Couldn't create default portfolio: \(error). Check that backend migration 037 is applied and /api/v1/portfolios is deployed.")
                         return
                     }
                 }

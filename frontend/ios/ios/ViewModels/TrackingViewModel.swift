@@ -262,7 +262,8 @@ class TrackingViewModel: ObservableObject {
 
     /// Diversification score computed locally from the active portfolio's
     /// per-portfolio holdings (`shares` / `marketValue` on each
-    /// `PortfolioItem`). Joined with `trackedAssets` for the price-feed
+    /// `PortfolioItem`). Joined with `trackedAssets` for the live price (so
+    /// share-count entries can be converted to dollars) and the price-feed
     /// metadata (sector, asset_type, country, company name) that the
     /// calculator needs but the per-portfolio item doesn't carry.
     var portfolioDiversificationScore: DiversificationScore? {
@@ -273,6 +274,22 @@ class TrackingViewModel: ObservableObject {
         let holdings: [PortfolioHolding] = active.items.compactMap { item in
             guard item.isHolding else { return nil }
             let asset = assetsByTicker[item.ticker.uppercased()]
+
+            // The user enters EITHER shares OR a dollar amount per ticker.
+            // For shares-only entries we multiply by the live price so the
+            // calculator gets a non-zero dollar weight — without this the
+            // score collapses to nil whenever every holding was entered as
+            // shares (the storage column for market_value stays null).
+            let effectiveMarketValue: Double
+            if let mv = item.marketValue, mv > 0 {
+                effectiveMarketValue = mv
+            } else if let shares = item.shares, shares > 0,
+                      let price = asset?.price, price > 0 {
+                effectiveMarketValue = shares * price
+            } else {
+                effectiveMarketValue = 0
+            }
+
             let assetTypeLower = (asset?.assetType ?? "stock").lowercased()
             let mappedAssetType: AssetType
             switch assetTypeLower {
@@ -286,7 +303,7 @@ class TrackingViewModel: ObservableObject {
             return PortfolioHolding(
                 ticker: item.ticker.uppercased(),
                 companyName: asset?.companyName ?? item.ticker,
-                marketValue: item.marketValue ?? 0,
+                marketValue: effectiveMarketValue,
                 shares: item.shares,
                 sector: asset?.sector,
                 assetType: mappedAssetType,

@@ -147,6 +147,9 @@ enum APIEndpoint: Sendable {
     // MARK: - Personas
     case getPersonas
 
+    // MARK: - Trending
+    case getTrendingAnalyses
+
     // MARK: - Path
 
     nonisolated var path: String {
@@ -342,6 +345,10 @@ enum APIEndpoint: Sendable {
         // Personas
         case .getPersonas:
             return "/api/v1/research/personas"
+
+        // Trending
+        case .getTrendingAnalyses:
+            return "/api/v1/research/trending"
         }
     }
 
@@ -547,6 +554,9 @@ enum APIEndpoint: Sendable {
             return false
         // Personas are public
         case .getPersonas:
+            return false
+        // Trending is public
+        case .getTrendingAnalyses:
             return false
         // Chat endpoints use optional auth (guest access)
         case .listChatSessions, .createChatSession, .sendChatMessage, .getChatHistory,

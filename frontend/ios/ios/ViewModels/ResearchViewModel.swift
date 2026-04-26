@@ -44,6 +44,11 @@ class ResearchViewModel: ObservableObject {
     // Auth gate: set to true when user is signed in
     @Published var showSignInPrompt: Bool = false
 
+    // Sheet presentation flags
+    @Published var showCreditsSheet: Bool = false
+    @Published var showPersonasSheet: Bool = false
+    @Published var showProfileSheet: Bool = false
+
     // MARK: - Dependencies
     private let apiClient: APIClient
     private let stockRepository: StockRepository
@@ -78,12 +83,54 @@ class ResearchViewModel: ObservableObject {
 
     // MARK: - Backend Data Loading
 
-    /// Load real reports + credits from the backend. Falls back to mock on failure.
+    /// Load real reports + credits + trending + personas from the backend.
+    /// Falls back to mock/static defaults on failure.
     private func loadBackendData() async {
-        // Load reports and credits in parallel
         async let reportsTask: () = loadReports()
         async let creditsTask: () = loadCredits()
-        _ = await (reportsTask, creditsTask)
+        async let trendingTask: () = loadTrending()
+        async let personasTask: () = loadPersonas()
+        _ = await (reportsTask, creditsTask, trendingTask, personasTask)
+    }
+
+    /// Fetch active personas from GET /research/personas.
+    func loadPersonas() async {
+        print("👤 ResearchVM: Loading personas from backend...")
+        do {
+            let backend: [BackendPersona] = try await apiClient.request(
+                endpoint: .getPersonas,
+                responseType: [BackendPersona].self
+            )
+            print("✅ ResearchVM: Loaded \(backend.count) personas")
+            let mapped = backend.map(AnalysisPersona.from)
+            guard !mapped.isEmpty else { return }
+            self.personas = mapped
+            // Keep current selection if still present, else default to first.
+            if !mapped.contains(where: { $0.key == self.selectedPersona.key }) {
+                self.selectedPersona = mapped[0]
+            }
+        } catch {
+            print("⚠️ ResearchVM: Failed to load personas — \(error). Keeping fallbacks.")
+        }
+    }
+
+    /// Fetch trending analyses from GET /research/trending.
+    func loadTrending() async {
+        print("📈 ResearchVM: Loading trending analyses from backend...")
+        do {
+            let backendTrending: [BackendTrendingAnalysis] = try await apiClient.request(
+                endpoint: .getTrendingAnalyses,
+                responseType: [BackendTrendingAnalysis].self
+            )
+            print("✅ ResearchVM: Loaded \(backendTrending.count) trending themes")
+            let mapped = backendTrending.map(TrendingAnalysis.from)
+            if !mapped.isEmpty {
+                self.trendingAnalyses = mapped
+            }
+        } catch {
+            print("⚠️ ResearchVM: Failed to load trending — \(error). Keeping current data.")
+            // Keep existing (mock) value
+        }
     }
 
     /// Fetch user's research reports from GET /research/reports
@@ -261,20 +308,15 @@ class ResearchViewModel: ObservableObject {
     }
 
     func addMoreCredits() {
-        print("Add more credits tapped")
-    }
-
-    func exploreTrending() {
-        print("Explore trending tapped")
-    }
-
-    func selectTrendingAnalysis(_ analysis: TrendingAnalysis) {
-        searchText = analysis.title
-        print("Selected trending: \(analysis.title)")
+        showCreditsSheet = true
     }
 
     func viewAllPersonas() {
-        print("View all personas tapped")
+        showPersonasSheet = true
+    }
+
+    func showProfile() {
+        showProfileSheet = true
     }
 
     // MARK: - Reports Tab Actions
@@ -289,11 +331,6 @@ class ResearchViewModel: ObservableObject {
         case .ratingLow:
             reports.sort { ($0.rating ?? 0) < ($1.rating ?? 0) }
         }
-    }
-
-    func openReport(_ report: AnalysisReport) {
-        guard report.status == .ready else { return }
-        print("Opening report: \(report.companyName)")
     }
 
     func retryReport(_ report: AnalysisReport) {

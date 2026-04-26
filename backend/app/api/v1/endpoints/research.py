@@ -16,6 +16,7 @@ Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
+from typing import List
 import asyncio
 import logging
 
@@ -28,6 +29,7 @@ from app.schemas.research import (
     ResearchReportDetail,
     ResearchReportListItem,
     RateReportRequest,
+    TrendingAnalysisResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -284,6 +286,29 @@ async def get_personas(
     ).eq("is_active", True).execute()
 
     return result.data
+
+
+# ── Trending Analyses ────────────────────────────────────────────────────────
+
+
+@router.get("/trending", response_model=List[TrendingAnalysisResponse])
+async def get_trending_analyses():
+    """
+    Get trending sectors based on recent research activity.
+    Aggregates the last 30 days of completed reports, grouped by sector.
+    Returns the top sectors with their most-researched companies.
+    Public endpoint — no auth required.
+    """
+    from app.services.trending_service import TrendingService
+
+    service = TrendingService()
+    themes = await service.get_trending()
+
+    # Strip internal `raw_count` field before returning
+    return [
+        {k: v for k, v in theme.items() if k != "raw_count"}
+        for theme in themes
+    ]
 
 
 # ── Background Task ──────────────────────────────────────────────────────────

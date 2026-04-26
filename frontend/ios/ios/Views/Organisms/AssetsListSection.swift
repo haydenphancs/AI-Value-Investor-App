@@ -20,9 +20,10 @@ struct AssetsListSection: View {
         // Assets List with swipe-to-delete. The PortfolioHeaderBar above
         // already shows the active portfolio name + "..." menu (which is where
         // sorting now lives); this section is just the rows.
-        // InsetGroupedListStyle adds its own ~20pt top inset we can't
-        // control; negative top padding cancels it so the gap below the
-        // PortfolioHeaderBar visually matches the gap above it.
+        // InsetGroupedListStyle adds its own ~20pt top AND bottom inset we
+        // can't control; negative padding on both sides cancels them so the
+        // gaps to the PortfolioHeaderBar above and the next section below
+        // visually match the rest of the LazyVStack spacing.
         List {
             Section {
                 ForEach(Array(assets.enumerated()), id: \.element.id) { index, asset in
@@ -58,6 +59,7 @@ struct AssetsListSection: View {
         .scrollDisabled(true)
         .padding(.top, -AppSpacing.md)
         .frame(height: CGFloat(assets.count) * 72 + 8)
+        .padding(.bottom, -AppSpacing.xxl)
     }
 }
 

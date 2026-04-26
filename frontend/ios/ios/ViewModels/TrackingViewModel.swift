@@ -64,6 +64,7 @@ class TrackingViewModel: ObservableObject {
     @Published var showPortfolioConfigSheet: Bool = false
     @Published var showNewPortfolioSheet: Bool = false
     @Published var showEditPortfolioSheet: Bool = false
+    @Published var showManageTickersSheet: Bool = false
 
     /// Tickers the user just added via the in-sheet star button, keyed by
     /// the portfolio they were added to. Used to fill the star instantly
@@ -311,6 +312,20 @@ class TrackingViewModel: ObservableObject {
             )
         }
         return DiversificationCalculator.calculate(holdings: holdings)
+    }
+
+    /// Caption shown next to the diversification score telling the user how
+    /// many of the active portfolio's tickers actually contributed to it
+    /// (i.e. have shares or a dollar amount). Nil when there's no active
+    /// portfolio or it has no tickers — the score itself is also nil in
+    /// those cases, so the caption simply hides with the card.
+    var portfolioInsightsCoverageNote: String? {
+        guard let active = portfolioStore.activePortfolio,
+              !active.items.isEmpty else { return nil }
+        let used = active.items.filter { $0.isHolding }.count
+        let total = active.items.count
+        let noun = total == 1 ? "ticker" : "tickers"
+        return "Based on \(used) of \(total) \(noun)"
     }
 
     var filteredWhaleActivities: [WhaleActivity] {
@@ -628,6 +643,10 @@ class TrackingViewModel: ObservableObject {
 
     func openEditPortfolioSheet() {
         showEditPortfolioSheet = true
+    }
+
+    func openManageTickersSheet() {
+        showManageTickersSheet = true
     }
 
     @discardableResult

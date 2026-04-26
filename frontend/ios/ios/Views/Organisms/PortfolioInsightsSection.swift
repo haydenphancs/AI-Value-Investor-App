@@ -14,6 +14,7 @@ import SwiftUI
 
 struct PortfolioInsightsSection: View {
     let score: DiversificationScore?
+    var coverageNote: String? = nil
     @Binding var isEnabled: Bool
     var onConfigureTapped: (() -> Void)?
 
@@ -45,7 +46,7 @@ struct PortfolioInsightsSection: View {
             collapsedHint
         } else if let score = score {
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                DiversificationCard(score: score)
+                DiversificationCard(score: score, coverageNote: coverageNote)
 
                 if onConfigureTapped != nil {
                     Button {

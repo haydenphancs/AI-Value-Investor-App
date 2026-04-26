@@ -2,13 +2,11 @@
 //  PortfolioHeaderBar.swift
 //  ios
 //
-//  Molecule: row at the top of the Assets tab that shows the active
-//  portfolio's name on the left (tap → portfolio switcher) and a "..."
-//  management menu on the right (sort, switch, new, edit).
-//
-//  Replaces the old standalone Sort button. Modeled on Apple Stocks: the
-//  left-side "Holdings ⌄" chip switches portfolios in one tap; the right-
-//  side ellipsis is the catch-all management surface.
+//  Molecule: row at the top of the Assets tab. Modeled on Apple Stocks.
+//  The left-side "Holdings ⌄" chip is the portfolio surface — switch the
+//  active portfolio, create a new one, or open Edit Portfolios. The
+//  right-side "..." menu is scoped to the active portfolio (sort + open
+//  Manage Tickers to reorder/remove its tickers).
 //
 
 import SwiftUI
@@ -50,6 +48,12 @@ struct PortfolioHeaderBar: View {
             } label: {
                 Label("New Portfolio", systemImage: "plus")
             }
+
+            Button {
+                viewModel.openEditPortfolioSheet()
+            } label: {
+                Label("Edit Portfolios", systemImage: "pencil")
+            }
         } label: {
             HStack(spacing: AppSpacing.xs) {
                 Text(viewModel.portfolioStore.activePortfolio?.name ?? "Holdings")
@@ -69,15 +73,21 @@ struct PortfolioHeaderBar: View {
 
     private var optionsMenu: some View {
         Menu {
-            // Sort
-            Menu {
-                Picker("Sort", selection: sortOptionBinding) {
-                    ForEach(AssetSortOption.allCases, id: \.self) { option in
-                        Text(option.displayName).tag(option)
+            // Sort options inline (no nested submenu) so the menu has a
+            // single surface — iOS stacks nested submenus with a slight
+            // offset that can't be aligned to the parent.
+            Section("Sort By") {
+                ForEach(AssetSortOption.allCases, id: \.self) { option in
+                    Button {
+                        viewModel.selectSortOption(option)
+                    } label: {
+                        if option == viewModel.sortOption {
+                            Label(option.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(option.displayName)
+                        }
                     }
                 }
-
-                Divider()
 
                 Button {
                     viewModel.toggleSort()
@@ -87,37 +97,19 @@ struct PortfolioHeaderBar: View {
                         systemImage: viewModel.sortAscending ? "arrow.down" : "arrow.up"
                     )
                 }
-            } label: {
-                Label("Sort By", systemImage: "arrow.up.arrow.down")
             }
 
             Divider()
 
             Button {
-                viewModel.openNewPortfolioSheet()
+                viewModel.openManageTickersSheet()
             } label: {
-                Label("New Portfolio", systemImage: "plus")
+                Label("Manage Tickers", systemImage: "line.3.horizontal")
             }
-
-            Button {
-                viewModel.openEditPortfolioSheet()
-            } label: {
-                Label("Edit Portfolios", systemImage: "pencil")
-            }
+            .disabled(viewModel.portfolioStore.activePortfolio == nil)
         } label: {
             MoreOptionsButton()
         }
-    }
-
-    // MARK: - Bindings
-
-    /// Two-way binding so the SwiftUI Picker can mutate the VM's persisted
-    /// sort option through the existing `selectSortOption` setter.
-    private var sortOptionBinding: Binding<AssetSortOption> {
-        Binding(
-            get: { viewModel.sortOption },
-            set: { viewModel.selectSortOption($0) }
-        )
     }
 }
 

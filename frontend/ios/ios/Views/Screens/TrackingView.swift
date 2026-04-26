@@ -100,6 +100,9 @@ struct TrackingContentView: View {
             .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
                 EditPortfolioSheet(viewModel: viewModel)
             }
+            .sheet(isPresented: $viewModel.showManageTickersSheet) {
+                ManageTickersSheet(viewModel: viewModel)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection)
             }
@@ -225,6 +228,9 @@ struct TrackingContentViewWithBinding: View {
             .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
                 EditPortfolioSheet(viewModel: viewModel)
             }
+            .sheet(isPresented: $viewModel.showManageTickersSheet) {
+                ManageTickersSheet(viewModel: viewModel)
+            }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection, onNavigateToResearch: {
                     researchTickerSymbol = selection.symbol
@@ -317,6 +323,7 @@ struct AssetsTabContent: View {
                 // Portfolio Insights — computed locally from the active portfolio.
                 PortfolioInsightsSection(
                     score: viewModel.portfolioDiversificationScore,
+                    coverageNote: viewModel.portfolioInsightsCoverageNote,
                     isEnabled: $viewModel.isInsightsEnabled,
                     onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
                 )
@@ -1121,6 +1128,37 @@ private struct PortfolioConfigRow: Identifiable {
         return String(value)
     }
 
+    /// Round to a fixed decimal precision before formatting, so a shares→
+    /// dollars→shares round-trip lands cleanly on the original integer
+    /// instead of accumulating floating-point dust like 9.99999999.
+    private static func formatRounded(_ value: Double, places: Int) -> String {
+        let multiplier = pow(10.0, Double(places))
+        let rounded = (value * multiplier).rounded() / multiplier
+        return formatNumber(rounded)
+    }
+
+    /// Switch input mode and convert the entered value across, using the
+    /// live ticker price. We only convert when the price is usable and the
+    /// source field actually parses to a positive number; otherwise the
+    /// destination field is left untouched and the user just sees a mode
+    /// flip — never a silent zeroing.
+    mutating func setInputMode(_ newMode: HoldingInputMode, price: Double?) {
+        guard newMode != inputMode else { return }
+        if let price, price > 0 {
+            switch newMode {
+            case .dollars:
+                if let shares = Double(sharesInput), shares > 0 {
+                    dollarsInput = Self.formatRounded(shares * price, places: 2)
+                }
+            case .shares:
+                if let dollars = Double(dollarsInput), dollars > 0 {
+                    sharesInput = Self.formatRounded(dollars / price, places: 4)
+                }
+            }
+        }
+        inputMode = newMode
+    }
+
     /// Build the wire payload for this row. A row with empty inputs becomes
     /// a clear (both fields nil) on the server.
     func toUpdateItem() -> HoldingUpdateItem {
@@ -1162,8 +1200,13 @@ struct PortfolioConfigSheet: View {
                                 .padding(.horizontal, AppSpacing.lg)
 
                             VStack(spacing: AppSpacing.sm) {
+                                let priceByTicker = Dictionary(uniqueKeysWithValues:
+                                    viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.price) })
                                 ForEach($rows) { $row in
-                                    PortfolioConfigRowView(row: $row)
+                                    PortfolioConfigRowView(
+                                        row: $row,
+                                        price: priceByTicker[$row.wrappedValue.ticker.uppercased()]
+                                    )
                                 }
                             }
                             .padding(.horizontal, AppSpacing.lg)
@@ -1275,6 +1318,7 @@ struct PortfolioConfigSheet: View {
 
 private struct PortfolioConfigRowView: View {
     @Binding var row: PortfolioConfigRow
+    let price: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -1292,7 +1336,7 @@ private struct PortfolioConfigRowView: View {
 
                 Spacer()
 
-                Picker("Input mode", selection: $row.inputMode) {
+                Picker("Input mode", selection: inputModeBinding) {
                     ForEach(HoldingInputMode.allCases, id: \.self) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
@@ -1314,6 +1358,15 @@ private struct PortfolioConfigRowView: View {
         .padding(AppSpacing.md)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.medium)
+    }
+
+    /// Routes the picker through `setInputMode` so the destination field
+    /// gets the converted value at the moment the user toggles.
+    private var inputModeBinding: Binding<HoldingInputMode> {
+        Binding(
+            get: { row.inputMode },
+            set: { row.setInputMode($0, price: price) }
+        )
     }
 }
 

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct DiversificationCard: View {
     let score: DiversificationScore
+    var coverageNote: String? = nil
 
     // Color palette for sector segments
     private static let sectorColors: [Color] = [
@@ -67,6 +68,12 @@ struct DiversificationCard: View {
                 Text(score.formattedScore)
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.accentCyan)
+            }
+
+            if let coverageNote {
+                Text(coverageNote)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
             }
 
             // Description

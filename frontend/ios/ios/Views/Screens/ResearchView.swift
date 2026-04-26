@@ -72,6 +72,20 @@ struct ResearchContentView: View {
             } message: {
                 Text("Please sign in to generate research reports.")
             }
+            .sheet(isPresented: $viewModel.showCreditsSheet) {
+                CreditsPricingSheet(currentBalance: viewModel.creditBalance.credits)
+            }
+            .sheet(isPresented: $viewModel.showPersonasSheet) {
+                PersonasSheet(
+                    personas: viewModel.personas,
+                    selectedPersona: $viewModel.selectedPersona
+                )
+            }
+            .fullScreenCover(isPresented: $viewModel.showProfileSheet) {
+                ProfileView()
+                    .environment(appState)
+                    .environment(\.appState, appState)
+            }
             .onAppear {
                 viewModel.setAuthCheck { [weak appState] in
                     appState?.auth.isAuthenticated ?? false
@@ -174,7 +188,6 @@ struct ResearchContentView: View {
                 // Trending Analyses Section
                 TrendingAnalysesSection(
                     analyses: viewModel.trendingAnalyses,
-                    onExploreTapped: handleExploreTrending,
                     onAnalysisTapped: handleTrendingAnalysisTapped
                 )
 
@@ -201,14 +214,9 @@ struct ResearchContentView: View {
                 )
                 .padding(.top, AppSpacing.sm)
 
-                // Community Insights Section
-                CommunityInsightsSection(
-                    insights: viewModel.communityInsights,
-                    onJoinDiscussion: handleJoinDiscussion,
-                    onLike: handleLikeInsight,
-                    onComment: handleCommentInsight,
-                    onShare: handleShareInsight
-                )
+                // Community Insights — deferred. Backend feature pending; the
+                // mock data + stub handlers are kept in the codebase for the
+                // future read/write feed.
 
                 // Bottom padding for tab bar
                 Spacer()
@@ -222,7 +230,7 @@ struct ResearchContentView: View {
 
     // MARK: - Research Tab Action Handlers
     private func handleProfileTapped() {
-        print("Profile tapped")
+        viewModel.showProfile()
     }
 
     private func handleTickerSelected(_ ticker: QuickTicker) {
@@ -249,10 +257,6 @@ struct ResearchContentView: View {
         viewModel.addMoreCredits()
     }
 
-    private func handleExploreTrending() {
-        viewModel.exploreTrending()
-    }
-
     private func handleTrendingAnalysisTapped(_ analysis: TrendingAnalysis) {
         navigationPath.append(analysis)
     }
@@ -265,22 +269,6 @@ struct ResearchContentView: View {
 
     private func handleRetryTapped(_ report: AnalysisReport) {
         viewModel.retryReport(report)
-    }
-
-    private func handleJoinDiscussion() {
-        viewModel.joinDiscussion()
-    }
-
-    private func handleLikeInsight(_ insight: CommunityInsight) {
-        viewModel.likeInsight(insight)
-    }
-
-    private func handleCommentInsight(_ insight: CommunityInsight) {
-        viewModel.commentOnInsight(insight)
-    }
-
-    private func handleShareInsight(_ insight: CommunityInsight) {
-        viewModel.shareInsight(insight)
     }
 }
 

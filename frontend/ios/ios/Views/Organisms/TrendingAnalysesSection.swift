@@ -9,7 +9,6 @@ import SwiftUI
 
 struct TrendingAnalysesSection: View {
     let analyses: [TrendingAnalysis]
-    var onExploreTapped: (() -> Void)?
     var onAnalysisTapped: ((TrendingAnalysis) -> Void)?
 
     var body: some View {

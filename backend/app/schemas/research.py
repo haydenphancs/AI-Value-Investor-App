@@ -153,3 +153,22 @@ class PersonaResponse(BaseModel):
     focus: Optional[str] = None
     famous_quotes: Optional[List[str]] = None
     is_active: bool = True
+
+
+# ── Trending Analyses ────────────────────────────────────────────────────────
+
+
+class TrendingCompanyResponse(BaseModel):
+    ticker: str
+    name: str
+    price: Optional[str] = None
+    market_cap: Optional[str] = None
+
+
+class TrendingAnalysisResponse(BaseModel):
+    title: str
+    description: str
+    companies: List[TrendingCompanyResponse]
+    interest_percent: int
+    system_icon_name: str
+    icon_background_color: str  # hex without leading '#'

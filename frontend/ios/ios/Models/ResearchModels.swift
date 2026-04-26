@@ -37,72 +37,129 @@ struct QuickTicker: Identifiable, Equatable {
 }
 
 // MARK: - Analysis Persona
-enum AnalysisPersona: String, CaseIterable, Identifiable {
-    case warrenBuffett = "Warren Buffett"
-    case cathieWood = "Cathie Wood"
-    case peterLynch = "Peter Lynch"
-    case billAckman = "Bill Ackman"
 
-    var id: String { rawValue }
+/// Persona used to drive AI research. Originally an enum; now a struct so the
+/// list can be hot-swapped from the backend `agent_personas` table without an
+/// app release. Static instances + `allCases` preserve enum-style ergonomics.
+struct AnalysisPersona: Identifiable, Hashable {
+    let key: String           // snake_case backend key (e.g. "warren_buffett")
+    let name: String          // display name (e.g. "Warren Buffett")
+    let tagline: String
+    let iconName: String
+    let systemIconName: String
+    let accentColorHex: String
+    let description: String
 
-    /// Snake_case key sent to the backend API
-    var backendKey: String {
-        switch self {
-        case .warrenBuffett: return "warren_buffett"
-        case .cathieWood: return "cathie_wood"
-        case .peterLynch: return "peter_lynch"
-        case .billAckman: return "bill_ackman"
-        }
+    var id: String { key }
+
+    /// Backwards-compat alias — many call-sites use `persona.rawValue`.
+    var rawValue: String { name }
+
+    /// Backwards-compat alias — call-sites used `persona.backendKey`.
+    var backendKey: String { key }
+
+    var accentColor: Color { Color(hex: accentColorHex) }
+
+    static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {
+        lhs.key == rhs.key
     }
 
-    var tagline: String {
-        switch self {
-        case .warrenBuffett: return "Safe, Long-term Value"
-        case .cathieWood: return "Disruptive Innovation"
-        case .peterLynch: return "Growth at Value"
-        case .billAckman: return "Activist Value"
-        }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(key)
     }
 
-    var iconName: String {
-        switch self {
-        case .warrenBuffett: return "icon_persona_buffett"
-        case .cathieWood: return "icon_persona_wood"
-        case .peterLynch: return "icon_persona_lynch"
-        case .billAckman: return "icon_persona_ackman"
-        }
-    }
+    // ── Hardcoded fallbacks ──────────────────────────────────────────────
+    // Used when the backend fetch fails so the UI still works offline.
 
-    var systemIconName: String {
-        switch self {
-        case .warrenBuffett: return "building.columns.fill"
-        case .cathieWood: return "bolt.fill"
-        case .peterLynch: return "chart.line.uptrend.xyaxis"
-        case .billAckman: return "megaphone.fill"
-        }
-    }
+    static let warrenBuffett = AnalysisPersona(
+        key: "warren_buffett",
+        name: "Warren Buffett",
+        tagline: "Safe, Long-term Value",
+        iconName: "icon_persona_buffett",
+        systemIconName: "building.columns.fill",
+        accentColorHex: "3B82F6",
+        description: "Focuses on fundamental value, strong moats, consistent earnings, and long-term competitive advantages. Ideal for conservative investors."
+    )
 
-    var accentColor: Color {
-        switch self {
-        case .warrenBuffett: return Color(hex: "3B82F6") // Blue
-        case .cathieWood: return Color(hex: "A855F7")    // Purple
-        case .peterLynch: return Color(hex: "06B6D4")    // Cyan
-        case .billAckman: return Color(hex: "F97316")    // Orange
-        }
-    }
+    static let cathieWood = AnalysisPersona(
+        key: "cathie_wood",
+        name: "Cathie Wood",
+        tagline: "Disruptive Innovation",
+        iconName: "icon_persona_wood",
+        systemIconName: "bolt.fill",
+        accentColorHex: "A855F7",
+        description: "Emphasizes disruptive innovation, emerging technologies, and high-growth potential companies that could reshape industries."
+    )
 
-    var description: String {
-        switch self {
-        case .warrenBuffett:
-            return "Focuses on fundamental value, strong moats, consistent earnings, and long-term competitive advantages. Ideal for conservative investors."
-        case .cathieWood:
-            return "Emphasizes disruptive innovation, emerging technologies, and high-growth potential companies that could reshape industries."
-        case .peterLynch:
-            return "Looks for growth at a reasonable price (GARP), with focus on companies you understand and can spot in everyday life."
-        case .billAckman:
-            return "Takes concentrated positions in high-quality businesses, uses activist strategies to unlock value, and focuses on companies with durable competitive advantages."
-        }
+    static let peterLynch = AnalysisPersona(
+        key: "peter_lynch",
+        name: "Peter Lynch",
+        tagline: "Growth at Value",
+        iconName: "icon_persona_lynch",
+        systemIconName: "chart.line.uptrend.xyaxis",
+        accentColorHex: "06B6D4",
+        description: "Looks for growth at a reasonable price (GARP), with focus on companies you understand and can spot in everyday life."
+    )
+
+    static let billAckman = AnalysisPersona(
+        key: "bill_ackman",
+        name: "Bill Ackman",
+        tagline: "Activist Value",
+        iconName: "icon_persona_ackman",
+        systemIconName: "megaphone.fill",
+        accentColorHex: "F97316",
+        description: "Takes concentrated positions in high-quality businesses, uses activist strategies to unlock value, and focuses on companies with durable competitive advantages."
+    )
+
+    static let allCases: [AnalysisPersona] = [
+        .warrenBuffett, .cathieWood, .peterLynch, .billAckman
+    ]
+
+    static let fallbacks: [AnalysisPersona] = allCases
+
+    /// Build an `AnalysisPersona` from a backend `agent_personas` row.
+    /// Falls back to the matching hardcoded persona's fields when the backend
+    /// returns null/empty for icon/color/description.
+    static func from(_ backend: BackendPersona) -> AnalysisPersona {
+        let fallback = allCases.first { $0.key == backend.key }
+        return AnalysisPersona(
+            key: backend.key,
+            name: backend.name,
+            tagline: backend.tagline ?? fallback?.tagline ?? "",
+            iconName: fallback?.iconName ?? "icon_persona_default",
+            systemIconName: backend.iconName?.nonEmpty
+                ?? fallback?.systemIconName
+                ?? "person.crop.circle",
+            accentColorHex: backend.accentColor?.nonEmpty
+                ?? fallback?.accentColorHex
+                ?? "3B82F6",
+            description: backend.description ?? fallback?.description ?? ""
+        )
     }
+}
+
+// MARK: - Backend Persona DTO
+
+struct BackendPersona: Decodable, Sendable {
+    let id: String
+    let key: String
+    let name: String
+    let tagline: String?
+    let description: String?
+    let iconName: String?
+    let accentColor: String?
+    let isActive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, key, name, tagline, description
+        case iconName = "icon_name"
+        case accentColor = "accent_color"
+        case isActive = "is_active"
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Analysis Feature
@@ -438,16 +495,10 @@ enum ReportSortOption: String, CaseIterable {
 extension AnalysisReport {
     /// Map a backend report list item to a local AnalysisReport for UI.
     static func from(_ item: BackendReportListItem) -> AnalysisReport {
-        // Map backend persona key to enum
-        let persona: AnalysisPersona = {
-            switch item.investorPersona {
-            case "warren_buffett": return .warrenBuffett
-            case "cathie_wood": return .cathieWood
-            case "peter_lynch": return .peterLynch
-            case "bill_ackman": return .billAckman
-            default: return .warrenBuffett
-            }
-        }()
+        // Look up persona by backend key; default to first fallback if unknown.
+        let persona = AnalysisPersona.allCases.first {
+            $0.key == item.investorPersona
+        } ?? .warrenBuffett
 
         // Map backend status string to enum
         let status: ReportStatus = {
@@ -518,5 +569,59 @@ extension CreditBalance {
         }()
 
         return CreditBalance(credits: response.remaining, renewalDate: renewalDate)
+    }
+}
+
+// MARK: - Backend Trending Analysis DTOs
+
+/// Decodable DTO matching backend GET /research/trending response items.
+struct BackendTrendingCompany: Decodable, Sendable {
+    let ticker: String
+    let name: String
+    let price: String?
+    let marketCap: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticker, name, price
+        case marketCap = "market_cap"
+    }
+}
+
+struct BackendTrendingAnalysis: Decodable, Sendable {
+    let title: String
+    let description: String
+    let companies: [BackendTrendingCompany]
+    let interestPercent: Int
+    let systemIconName: String
+    let iconBackgroundColor: String
+
+    enum CodingKeys: String, CodingKey {
+        case title, description, companies
+        case interestPercent = "interest_percent"
+        case systemIconName = "system_icon_name"
+        case iconBackgroundColor = "icon_background_color"
+    }
+}
+
+extension TrendingAnalysis {
+    /// Map a backend trending analysis to a local TrendingAnalysis for UI.
+    static func from(_ item: BackendTrendingAnalysis) -> TrendingAnalysis {
+        let companies = item.companies.map { c in
+            TrendingCompany(
+                ticker: c.ticker,
+                name: c.name,
+                price: c.price ?? "",
+                marketCap: c.marketCap ?? ""
+            )
+        }
+        return TrendingAnalysis(
+            title: item.title,
+            description: item.description,
+            companies: companies,
+            interestPercent: item.interestPercent,
+            iconName: "",
+            systemIconName: item.systemIconName,
+            iconBackgroundColor: Color(hex: item.iconBackgroundColor)
+        )
     }
 }

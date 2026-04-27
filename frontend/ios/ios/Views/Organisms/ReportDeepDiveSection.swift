@@ -16,7 +16,11 @@ struct ReportDeepDiveSection<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header row (tappable)
-            Button(action: onToggle) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    onToggle()
+                }
+            }) {
                 HStack(spacing: AppSpacing.md) {
                     Image(systemName: module.iconName)
                         .font(.system(size: module.iconName == "dollarsign.circle" ? 22 : 16))
@@ -44,6 +48,7 @@ struct ReportDeepDiveSection<Content: View>: View {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
+                    .transition(.opacity)
             }
 
             Divider()

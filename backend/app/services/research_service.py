@@ -12,10 +12,11 @@ Upgraded from single-pass Gemini prompt to a true agentic pipeline:
 On ANY failure → status = "failed", error_message saved to DB.
 """
 
+import asyncio
 import logging
 import json
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -25,6 +26,15 @@ from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
 
 logger = logging.getLogger(__name__)
+
+# Shared cross-user cache for deep ticker_report_data. When any user has
+# completed a Generate Analysis for the same (ticker, persona) within this
+# window, subsequent Generate Analysis runs reuse that JSONB instead of
+# re-running the agent. Each user still gets their own research_reports
+# row and is still charged credits — credits buy access to premium
+# analysis, not raw compute. Backed by idx_reports_ticker_persona_completed
+# (added in migration 039).
+SHARED_CACHE_TTL_HOURS = 6
 
 
 class ResearchService:
@@ -55,24 +65,51 @@ class ResearchService:
             # Mark as processing
             self._update_status(report_id, "processing", 2, "Initializing research agent...")
 
-            # Create the agent
-            agent = ResearchAgent(
-                persona_key=persona_key,
-                fmp=self.fmp,
-                gemini=self.gemini,
-            )
-
             persona = get_persona_config(persona_key)
 
-            # Progress callback bound to this report
-            async def on_progress(progress: int, step: str):
-                self._update_status(report_id, "processing", progress, step)
-
-            # Run the full agentic pipeline
-            ticker_report_data = await agent.run(
-                ticker=ticker,
-                progress_cb=on_progress,
+            # ── Shared cross-user cache lookup ────────────────────────
+            # If any user has a fresh completed report for this exact
+            # (ticker, persona), reuse the ticker_report_data JSONB
+            # instead of running the agent again. The new row is still
+            # owned by `user_id` and credits still get decremented below
+            # — only the expensive AI/FMP work is deduplicated.
+            self._update_status(
+                report_id, "processing", 5, "Checking shared cache..."
             )
+            cached = await self._lookup_shared_cache(ticker, persona_key)
+
+            if cached is not None:
+                logger.info(
+                    f"Shared cache HIT for {ticker}/{persona_key} — "
+                    f"reusing existing analysis (report {report_id}, "
+                    f"user {user_id})"
+                )
+                self._update_status(
+                    report_id, "processing", 90, "Loading cached analysis..."
+                )
+                ticker_report_data = cached
+            else:
+                logger.info(
+                    f"Shared cache MISS for {ticker}/{persona_key} — "
+                    f"running fresh agent (report {report_id})"
+                )
+
+                # Create the agent
+                agent = ResearchAgent(
+                    persona_key=persona_key,
+                    fmp=self.fmp,
+                    gemini=self.gemini,
+                )
+
+                # Progress callback bound to this report
+                async def on_progress(progress: int, step: str):
+                    self._update_status(report_id, "processing", progress, step)
+
+                # Run the full agentic pipeline
+                ticker_report_data = await agent.run(
+                    ticker=ticker,
+                    progress_cb=on_progress,
+                )
 
             # Extract legacy fields for backward compatibility
             self._update_status(report_id, "processing", 92, "Saving report...")
@@ -88,10 +125,18 @@ class ResearchService:
                 # Full TickerReportResponse stored as JSONB
                 "ticker_report_data": ticker_report_data,
 
-                # Legacy fields for list view + backward compatibility
+                # Legacy fields for list view + backward compatibility.
+                # `full_report` is the raw research_findings from the agent's
+                # tool-calling phase. On a cache hit we don't have an agent
+                # instance to read from, so fall back to None — the cached
+                # ticker_report_data is the source of truth either way.
                 "title": self._extract_title(ticker_report_data, ticker, persona),
                 "executive_summary": ticker_report_data.get("executive_summary_text"),
-                "full_report": agent.research_findings[:10000] if agent.research_findings else None,
+                "full_report": (
+                    agent.research_findings[:10000]
+                    if cached is None and agent.research_findings
+                    else None
+                ),
 
                 # Extract structured components from the report
                 "investment_thesis": self._extract_thesis(ticker_report_data),
@@ -158,6 +203,61 @@ class ResearchService:
             ).execute()
         except Exception as e:
             logger.error(f"Status update failed for {report_id}: {e}")
+
+    # ── Shared Cross-User Cache ───────────────────────────────────────────
+
+    async def _lookup_shared_cache(
+        self, ticker: str, persona_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return any user's completed ticker_report_data for (ticker, persona)
+        within SHARED_CACHE_TTL_HOURS, or None.
+
+        This is the cross-user dedup path: when User B requests Generate
+        Analysis for the same ticker+persona that User A just paid for,
+        User B reuses A's expensive AI/FMP output instead of re-running
+        the agent. User B still gets a fresh research_reports row owned
+        by them, and is still charged credits.
+
+        Backed by `idx_reports_ticker_persona_completed` (migration 039).
+        Runs the synchronous Supabase call in a thread to avoid blocking
+        the event loop.
+        """
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=SHARED_CACHE_TTL_HOURS)
+        ).isoformat()
+
+        def _query():
+            try:
+                result = self.supabase.table("research_reports").select(
+                    "ticker_report_data, completed_at"
+                ).eq(
+                    "ticker", ticker
+                ).eq(
+                    "investor_persona", persona_key
+                ).eq(
+                    "status", "completed"
+                ).gte(
+                    "completed_at", cutoff
+                ).not_.is_(
+                    "ticker_report_data", "null"
+                ).order(
+                    "completed_at", desc=True
+                ).limit(1).execute()
+
+                if result.data and result.data[0].get("ticker_report_data"):
+                    return result.data[0]["ticker_report_data"]
+                return None
+            except Exception as e:
+                # Cache lookup failures should never block generation —
+                # log and fall through to a fresh agent run.
+                logger.warning(
+                    f"Shared cache lookup failed for {ticker}/{persona_key}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return None
+
+        return await asyncio.to_thread(_query)
 
     # ── Legacy Field Extractors ───────────────────────────────────────────
     # These extract simplified fields from the full TickerReportResponse

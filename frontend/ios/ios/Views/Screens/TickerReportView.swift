@@ -16,6 +16,13 @@ struct TickerReportView: View {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
     }
 
+    /// Init from a Reports-tab AnalysisReport. Carries the backend
+    /// row ID + the persona used to generate the report so the view
+    /// model can fetch the cached ticker_report_data instantly.
+    init(report: AnalysisReport) {
+        _viewModel = StateObject(wrappedValue: TickerReportViewModel(report: report))
+    }
+
     /// Preview-only initializer: skips async loading for faster previews.
     fileprivate init(preloadedReport: TickerReportData) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(

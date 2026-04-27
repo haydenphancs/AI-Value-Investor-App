@@ -16,7 +16,7 @@ Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
-from typing import List
+from typing import List, Optional
 import asyncio
 import logging
 
@@ -76,14 +76,17 @@ async def generate_research_report(
 
     ticker = request.stock_id.upper()
 
-    # Resolve company name from FMP (non-blocking best-effort)
+    # Resolve company name + industry from FMP (non-blocking best-effort).
+    # Industry is surfaced on the Reports list card ("TSLA • Automotive").
     company_name = ticker
+    industry: Optional[str] = None
     try:
         from app.integrations.fmp import get_fmp_client
         fmp = get_fmp_client()
         profile = await fmp.get_company_profile(ticker)
         if profile:
             company_name = profile.get("companyName", ticker)
+            industry = profile.get("industry") or profile.get("sector")
     except Exception:
         pass
 
@@ -92,6 +95,7 @@ async def generate_research_report(
         "user_id": user["id"],
         "ticker": ticker,
         "company_name": company_name,
+        "industry": industry,
         "investor_persona": request.investor_persona,
         "status": "pending",
         "progress": 0,
@@ -213,11 +217,16 @@ async def get_my_reports(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Get current user's research reports (lightweight list)."""
+    """Get current user's research reports (lightweight list).
+
+    `industry` and `current_step` are surfaced so the iOS Reports tab
+    card can render the industry subtitle and the live progress text
+    while a report is in-flight.
+    """
     result = supabase.table("research_reports").select(
-        "id, ticker, company_name, investor_persona, status, title, "
+        "id, ticker, company_name, industry, investor_persona, status, title, "
         "executive_summary, overall_score, fair_value_estimate, progress, "
-        "created_at, completed_at, user_rating"
+        "current_step, created_at, completed_at, user_rating"
     ).eq("user_id", user["id"]).neq(
         "status", "deleted"
     ).order(
@@ -327,14 +336,21 @@ async def _run_research_task(
         service = ResearchService()
         await service.generate_report(report_id, ticker, persona_key, user_id)
     except Exception as e:
-        logger.error(f"Research task failed for {report_id}: {e}", exc_info=True)
+        # Include the exception type so future debugging shows e.g.
+        # "KeyError: profile" instead of just "profile" — the type is
+        # what tells you whether it's an FMP miss, a JSON parse, etc.
+        logger.error(
+            f"Research task failed for {report_id} ({ticker}/{persona_key}): "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
         try:
             from app.database import get_supabase
 
             supabase = get_supabase()
             supabase.table("research_reports").update({
                 "status": "failed",
-                "error_message": str(e)[:500],
+                "error_message": f"{type(e).__name__}: {str(e)[:450]}",
                 "progress": 0,
             }).eq("id", report_id).execute()
         except Exception:

@@ -88,6 +88,7 @@ class ResearchReportDetail(BaseModel):
     stock_id: Optional[str] = None  # mirrors ticker for iOS stockId
     ticker: str
     company_name: Optional[str] = None
+    industry: Optional[str] = None  # populated from FMP profile at insert time
     investor_persona: str
     status: str
 
@@ -122,11 +123,18 @@ class ResearchReportDetail(BaseModel):
 
 
 class ResearchReportListItem(BaseModel):
-    """Lightweight model for the reports list (GET /research/reports)."""
+    """Lightweight model for the reports list (GET /research/reports).
+
+    `industry` and `current_step` are required by the iOS Reports tab
+    card to render the industry subtitle and the live "Analyzing
+    fundamentals..." text under the progress bar while a report is
+    in-flight.
+    """
     id: str
     stock_id: Optional[str] = None
     ticker: str
     company_name: Optional[str] = None
+    industry: Optional[str] = None
     investor_persona: str
     status: str
     title: Optional[str] = None
@@ -134,6 +142,7 @@ class ResearchReportListItem(BaseModel):
     overall_score: Optional[float] = None
     fair_value_estimate: Optional[float] = None
     progress: Optional[int] = None
+    current_step: Optional[str] = None
     created_at: str
     completed_at: Optional[str] = None
     user_rating: Optional[int] = None

@@ -294,6 +294,20 @@ struct ResearchViewWithBinding: View {
             }
             .preferredColorScheme(.dark)
         }
+        .sheet(isPresented: $viewModel.showCreditsSheet) {
+            CreditsPricingSheet(currentBalance: viewModel.creditBalance.credits)
+        }
+        .sheet(isPresented: $viewModel.showPersonasSheet) {
+            PersonasSheet(
+                personas: viewModel.personas,
+                selectedPersona: $viewModel.selectedPersona
+            )
+        }
+        .sheet(isPresented: $viewModel.showTargetSearchSheet) {
+            TargetSearchSheet { result in
+                viewModel.selectTarget(result)
+            }
+        }
     }
 
     // MARK: - Research Tab Content
@@ -302,10 +316,10 @@ struct ResearchViewWithBinding: View {
             LazyVStack(spacing: AppSpacing.xxl) {
                 // Target Selection Section
                 TargetSelectionSection(
-                    searchText: $viewModel.searchText,
-                    quickTickers: viewModel.quickTickers,
-                    onTickerSelected: handleTickerSelected,
-                    onSearchSubmit: handleSearchSubmit
+                    selectedTarget: viewModel.selectedTarget,
+                    fallbackTicker: viewModel.searchText,
+                    onTapSearch: { viewModel.openTargetSearch() },
+                    onClearTarget: { viewModel.clearTarget() }
                 )
                 .padding(.top, AppSpacing.md)
 
@@ -338,7 +352,6 @@ struct ResearchViewWithBinding: View {
                 // Trending Analyses Section
                 TrendingAnalysesSection(
                     analyses: viewModel.trendingAnalyses,
-                    onExploreTapped: handleExploreTrending,
                     onAnalysisTapped: handleTrendingAnalysisTapped
                 )
 
@@ -365,14 +378,9 @@ struct ResearchViewWithBinding: View {
                 )
                 .padding(.top, AppSpacing.sm)
 
-                // Community Insights Section
-                CommunityInsightsSection(
-                    insights: viewModel.communityInsights,
-                    onJoinDiscussion: handleJoinDiscussion,
-                    onLike: handleLikeInsight,
-                    onComment: handleCommentInsight,
-                    onShare: handleShareInsight
-                )
+                // Community Insights — deferred. Backend feature pending; the
+                // mock data + stub handlers are kept in the codebase for the
+                // future read/write feed.
 
                 // Bottom padding for tab bar
                 Spacer()
@@ -389,14 +397,6 @@ struct ResearchViewWithBinding: View {
         showProfile = true
     }
 
-    private func handleTickerSelected(_ ticker: QuickTicker) {
-        viewModel.selectQuickTicker(ticker)
-    }
-
-    private func handleSearchSubmit() {
-        print("Search submitted: \(viewModel.searchText)")
-    }
-
     private func handleViewAllPersonas() {
         viewModel.viewAllPersonas()
     }
@@ -409,40 +409,17 @@ struct ResearchViewWithBinding: View {
         viewModel.addMoreCredits()
     }
 
-    private func handleExploreTrending() {
-        viewModel.exploreTrending()
-    }
-
     private func handleTrendingAnalysisTapped(_ analysis: TrendingAnalysis) {
         selectedTrendingAnalysis = analysis
     }
 
     private func handleReportTapped(_ report: AnalysisReport) {
-        guard report.status == .ready else {
-            viewModel.openReport(report)
-            return
-        }
+        guard report.status == .ready else { return }
         selectedReportTicker = ReportTickerNavigation(ticker: report.ticker)
     }
 
     private func handleRetryTapped(_ report: AnalysisReport) {
         viewModel.retryReport(report)
-    }
-
-    private func handleJoinDiscussion() {
-        viewModel.joinDiscussion()
-    }
-
-    private func handleLikeInsight(_ insight: CommunityInsight) {
-        viewModel.likeInsight(insight)
-    }
-
-    private func handleCommentInsight(_ insight: CommunityInsight) {
-        viewModel.commentOnInsight(insight)
-    }
-
-    private func handleShareInsight(_ insight: CommunityInsight) {
-        viewModel.shareInsight(insight)
     }
 }
 

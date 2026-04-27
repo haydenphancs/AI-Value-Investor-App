@@ -48,6 +48,11 @@ class ResearchViewModel: ObservableObject {
     @Published var showCreditsSheet: Bool = false
     @Published var showPersonasSheet: Bool = false
     @Published var showProfileSheet: Bool = false
+    @Published var showTargetSearchSheet: Bool = false
+
+    /// Currently chosen company. Constraint: only one ticker at a time.
+    /// Setting this also drives `searchText` so `generateAnalysis()` keeps working.
+    @Published var selectedTarget: StockSearchResult?
 
     // MARK: - Dependencies
     private let apiClient: APIClient
@@ -55,6 +60,7 @@ class ResearchViewModel: ObservableObject {
     private let pollingManager: TaskPollingManager
     private var isAuthenticated: () -> Bool = { false }
     private var searchTask: Task<Void, Never>?
+    private var reportsPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
@@ -72,8 +78,7 @@ class ResearchViewModel: ObservableObject {
         features = AnalysisFeature.allFeatures
         trendingAnalyses = TrendingAnalysis.mockTrending
 
-        // Set up debounced search as user types
-        setupSearchDebounce()
+        // Search is handled by the dedicated TargetSearchSheet — no debounce here.
 
         // Fetch real data from backend
         Task { [weak self] in
@@ -175,6 +180,35 @@ class ResearchViewModel: ObservableObject {
         isLoading = false
     }
 
+    // MARK: - Reports Tab Live Polling
+
+    /// Poll the reports list every 5s while any report is in-flight.
+    /// Called when the user switches to the Reports tab. Self-terminates
+    /// once no processing/pending reports remain — no need to cancel
+    /// manually in that case.
+    func startReportsPolling() {
+        stopReportsPolling()
+        reportsPollTask = Task { [weak self] in
+            // 5s cadence balances "card animates" with FMP/Supabase load.
+            // Each tick is a single Supabase query — no FMP cost.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if Task.isCancelled { return }
+                guard let self = self else { return }
+                let hasInflight = self.reports.contains { $0.status == .processing }
+                if !hasInflight {
+                    return
+                }
+                await self.loadReports()
+            }
+        }
+    }
+
+    func stopReportsPolling() {
+        reportsPollTask?.cancel()
+        reportsPollTask = nil
+    }
+
     // MARK: - Auth Configuration
     func setAuthCheck(_ check: @escaping () -> Bool) {
         self.isAuthenticated = check
@@ -240,6 +274,31 @@ class ResearchViewModel: ObservableObject {
         searchText = ticker.symbol
         searchResults = []
         showSearchResults = false
+        selectedTarget = StockSearchResult(
+            ticker: ticker.symbol,
+            companyName: ticker.symbol,
+            exchange: nil,
+            sector: nil,
+            logoUrl: nil,
+            type: "stock"
+        )
+    }
+
+    // MARK: - Target Selection
+
+    func openTargetSearch() {
+        showTargetSearchSheet = true
+    }
+
+    func selectTarget(_ result: StockSearchResult) {
+        selectedTarget = result
+        searchText = result.ticker
+        showTargetSearchSheet = false
+    }
+
+    func clearTarget() {
+        selectedTarget = nil
+        searchText = ""
     }
 
     func generateAnalysis() {
@@ -273,16 +332,33 @@ class ResearchViewModel: ObservableObject {
                     persona: personaKey
                 )
 
+                // Track the last percent we used to refresh the list,
+                // so we don't hammer the backend on every tick.
+                var lastListRefreshPercent = -1
+
                 for try await progress in stream {
                     switch progress {
                     case .started(let taskId):
                         print("🔬 ResearchVM: Research started — report ID: \(taskId)")
                         self.generationStep = "Research initiated..."
+                        // Surface the new pending row in the Reports list
+                        // immediately so the Tesla-style processing card
+                        // appears the moment the user switches tabs.
+                        await self.loadReports()
 
                     case .progress(let percent, let step):
                         print("🔬 ResearchVM: Progress \(percent)% — \(step)")
                         self.generationProgress = percent
                         self.generationStep = step
+                        // Refresh the list at 25% boundaries so the card
+                        // animates without spamming Supabase. The poller
+                        // in startReportsPolling() is the steady-state
+                        // updater; this is a coarser belt-and-braces.
+                        let bucket = (percent / 25) * 25
+                        if bucket > lastListRefreshPercent {
+                            lastListRefreshPercent = bucket
+                            await self.loadReports()
+                        }
 
                     case .completed(let report):
                         print("✅ ResearchVM: Research complete for \(ticker) — \(report.title ?? "Untitled")")
@@ -294,13 +370,15 @@ class ResearchViewModel: ObservableObject {
                         await self.loadCredits()
 
                     case .failed(let appError):
-                        print("❌ ResearchVM: Research failed — \(appError.message)")
+                        print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
                         self.isGeneratingAnalysis = false
                         self.error = appError.message
+                        // Refresh so the failed card appears in the list
+                        await self.loadReports()
                     }
                 }
             } catch {
-                print("❌ ResearchVM: Research stream error — \(error)")
+                print("❌ ResearchVM: Research stream error — \(type(of: error)): \(error)")
                 self.isGeneratingAnalysis = false
                 self.error = error.localizedDescription
             }

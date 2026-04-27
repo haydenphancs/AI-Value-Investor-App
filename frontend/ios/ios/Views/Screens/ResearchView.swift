@@ -51,6 +51,14 @@ struct ResearchContentView: View {
                     generationProgressOverlay
                 }
             }
+            // Tap a ready Reports-tab card → push the AnalysisReport,
+            // which carries the backend report ID + persona so the
+            // detail view can hit the cached ticker_report_data.
+            .navigationDestination(for: AnalysisReport.self) { report in
+                TickerReportView(report: report)
+            }
+            // Trending analyses still navigate by ticker String (no
+            // backend report row exists for those entries).
             .navigationDestination(for: String.self) { ticker in
                 TickerReportView(ticker: ticker)
             }
@@ -81,6 +89,11 @@ struct ResearchContentView: View {
                     selectedPersona: $viewModel.selectedPersona
                 )
             }
+            .sheet(isPresented: $viewModel.showTargetSearchSheet) {
+                TargetSearchSheet { result in
+                    viewModel.selectTarget(result)
+                }
+            }
             .fullScreenCover(isPresented: $viewModel.showProfileSheet) {
                 ProfileView()
                     .environment(appState)
@@ -89,6 +102,21 @@ struct ResearchContentView: View {
             .onAppear {
                 viewModel.setAuthCheck { [weak appState] in
                     appState?.auth.isAuthenticated ?? false
+                }
+                // If we land directly on the Reports tab (e.g. via deep
+                // link or preserved state), start polling immediately.
+                if viewModel.selectedTab == .reports {
+                    viewModel.startReportsPolling()
+                }
+            }
+            .onDisappear {
+                viewModel.stopReportsPolling()
+            }
+            .onChange(of: viewModel.selectedTab) { _, newTab in
+                if newTab == .reports {
+                    viewModel.startReportsPolling()
+                } else {
+                    viewModel.stopReportsPolling()
                 }
             }
         }
@@ -148,14 +176,10 @@ struct ResearchContentView: View {
             LazyVStack(spacing: AppSpacing.xxl) {
                 // Target Selection Section
                 TargetSelectionSection(
-                    searchText: $viewModel.searchText,
-                    quickTickers: viewModel.quickTickers,
-                    searchResults: viewModel.searchResults,
-                    isSearching: viewModel.isSearching,
-                    showSearchResults: viewModel.showSearchResults,
-                    onTickerSelected: handleTickerSelected,
-                    onSearchSubmit: handleSearchSubmit,
-                    onResultSelected: handleSearchResultSelected
+                    selectedTarget: viewModel.selectedTarget,
+                    fallbackTicker: viewModel.searchText,
+                    onTapSearch: { viewModel.openTargetSearch() },
+                    onClearTarget: { viewModel.clearTarget() }
                 )
                 .padding(.top, AppSpacing.md)
 
@@ -233,18 +257,6 @@ struct ResearchContentView: View {
         viewModel.showProfile()
     }
 
-    private func handleTickerSelected(_ ticker: QuickTicker) {
-        viewModel.selectQuickTicker(ticker)
-    }
-
-    private func handleSearchSubmit() {
-        viewModel.dismissSearchResults()
-    }
-
-    private func handleSearchResultSelected(_ result: StockSearchResult) {
-        viewModel.selectSearchResult(result)
-    }
-
     private func handleViewAllPersonas() {
         viewModel.viewAllPersonas()
     }
@@ -264,7 +276,10 @@ struct ResearchContentView: View {
     // MARK: - Reports Tab Action Handlers
     private func handleReportTapped(_ report: AnalysisReport) {
         guard report.status == .ready else { return }
-        navigationPath.append(report.ticker)
+        // Push the full AnalysisReport (not just the ticker) so the
+        // detail view receives backendId + persona and can short-circuit
+        // to the cached ticker_report_data.
+        navigationPath.append(report)
     }
 
     private func handleRetryTapped(_ report: AnalysisReport) {

@@ -25,9 +25,6 @@ class TickerReportViewModel: ObservableObject {
     @Published var chatUserQuestion: String?
     @Published var showChatResponse: Bool = false
 
-    // Deep Dive Section Expansion States
-    @Published var expandedSections: Set<DeepDiveModuleType> = []
-
     // MARK: - Private Properties
     private let ticker: String
     private let persona: String
@@ -154,19 +151,6 @@ class TickerReportViewModel: ObservableObject {
             self.error = self.userFriendlyError(error)
             // Don't set reportData — let the error view show with retry button
         }
-    }
-
-    // MARK: - Section Toggle
-    func toggleSection(_ type: DeepDiveModuleType) {
-        if expandedSections.contains(type) {
-            expandedSections.remove(type)
-        } else {
-            expandedSections.insert(type)
-        }
-    }
-
-    func isSectionExpanded(_ type: DeepDiveModuleType) -> Bool {
-        expandedSections.contains(type)
     }
 
     // MARK: - Actions

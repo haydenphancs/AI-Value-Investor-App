@@ -9,17 +9,18 @@ import SwiftUI
 
 struct ReportDeepDiveSection<Content: View>: View {
     let module: DeepDiveModule
-    let isExpanded: Bool
-    let onToggle: () -> Void
     @ViewBuilder let content: () -> Content
+
+    // Local state — toggling does NOT cascade into a parent re-render,
+    // so other expanded sections are not forced to re-evaluate their
+    // (chart-heavy) bodies. Mirrors SnapshotCard.
+    @State private var isExpanded: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
             // Header row (tappable)
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    onToggle()
-                }
+                isExpanded.toggle()
             }) {
                 HStack(spacing: AppSpacing.md) {
                     Image(systemName: module.iconName)
@@ -34,21 +35,23 @@ struct ReportDeepDiveSection<Content: View>: View {
 
                     Spacer()
 
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    Image(systemName: "chevron.down")
                         .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                        .animation(.easeInOut(duration: 0.2), value: isExpanded)
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.lg)
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Expanded content - only built when visible
+            // Expanded content - only built when visible.
             if isExpanded {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
-                    .transition(.opacity)
+                    .transition(.opacity.animation(.easeOut(duration: 0.18)))
             }
 
             Divider()
@@ -65,9 +68,7 @@ struct ReportDeepDiveSection<Content: View>: View {
                 title: "Fundamentals & Growth",
                 iconName: "chart.bar.fill",
                 type: .fundamentalsGrowth
-            ),
-            isExpanded: true,
-            onToggle: {}
+            )
         ) {
             Text("Content goes here")
                 .foregroundColor(AppColors.textSecondary)
@@ -77,9 +78,7 @@ struct ReportDeepDiveSection<Content: View>: View {
                 title: "Recent Price Movement",
                 iconName: "chart.xyaxis.line",
                 type: .recentPriceMovement
-            ),
-            isExpanded: false,
-            onToggle: {}
+            )
         ) {
             EmptyView()
         }

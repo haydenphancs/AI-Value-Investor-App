@@ -283,18 +283,111 @@ async def delete_report(
 
 # ── List Personas ────────────────────────────────────────────────────────────
 
+# Hardcoded fallback that mirrors the iOS AnalysisPersona.allCases keys
+# (warren_buffett / cathie_wood / peter_lynch / bill_ackman). Returned when
+# the agent_personas Supabase query fails so the iOS app keeps working
+# instead of falling back to its own offline defaults. Field names are
+# snake_case to match the iOS BackendPersona CodingKeys.
+_FALLBACK_PERSONAS: List[dict] = [
+    {
+        "id": "fallback-warren_buffett",
+        "key": "warren_buffett",
+        "name": "Warren Buffett",
+        "tagline": "Safe, Long-term Value",
+        "description": (
+            "Focuses on fundamental value, strong moats, consistent earnings, "
+            "and long-term competitive advantages. Ideal for conservative investors."
+        ),
+        "icon_name": "building.columns.fill",
+        "accent_color": "3B82F6",
+        "is_active": True,
+    },
+    {
+        "id": "fallback-cathie_wood",
+        "key": "cathie_wood",
+        "name": "Cathie Wood",
+        "tagline": "Disruptive Innovation",
+        "description": (
+            "Emphasizes disruptive innovation, emerging technologies, and "
+            "high-growth potential companies that could reshape industries."
+        ),
+        "icon_name": "bolt.fill",
+        "accent_color": "A855F7",
+        "is_active": True,
+    },
+    {
+        "id": "fallback-peter_lynch",
+        "key": "peter_lynch",
+        "name": "Peter Lynch",
+        "tagline": "Growth at Value",
+        "description": (
+            "Looks for growth at a reasonable price (GARP), with focus on "
+            "companies you understand and can spot in everyday life."
+        ),
+        "icon_name": "chart.line.uptrend.xyaxis",
+        "accent_color": "06B6D4",
+        "is_active": True,
+    },
+    {
+        "id": "fallback-bill_ackman",
+        "key": "bill_ackman",
+        "name": "Bill Ackman",
+        "tagline": "Activist Value",
+        "description": (
+            "Takes concentrated positions in high-quality businesses, uses "
+            "activist strategies to unlock value, and focuses on companies "
+            "with durable competitive advantages."
+        ),
+        "icon_name": "megaphone.fill",
+        "accent_color": "F97316",
+        "is_active": True,
+    },
+]
+
 
 @router.get("/personas")
 async def get_personas(
     supabase: Client = Depends(get_supabase),
 ):
-    """Get all active investor personas (no auth required)."""
-    result = supabase.table("agent_personas").select(
-        "id, key, name, title, tagline, style, description, "
-        "key_principles, accent_color, icon_name, focus, famous_quotes, is_active"
-    ).eq("is_active", True).execute()
+    """Get all active investor personas (no auth required).
 
-    return result.data
+    Resilient to DB failures: if the Supabase query throws (missing
+    column, RLS deny, network blip), the endpoint logs the underlying
+    error verbatim and returns the static fallback list so the iOS app
+    keeps rendering valid persona keys instead of seeing a 500.
+
+    The SELECT lists only the 8 columns iOS actually consumes (matches
+    BackendPersona Decodable in ResearchModels.swift). Don't add
+    columns here unless iOS reads them — every extra column widens the
+    "column does not exist" failure surface on production.
+    """
+    try:
+        result = supabase.table("agent_personas").select(
+            "id, key, name, tagline, description, "
+            "icon_name, accent_color, is_active"
+        ).eq("is_active", True).execute()
+
+        if result.data:
+            return result.data
+
+        # Table reachable but empty — log + serve fallback so iOS still
+        # gets the four core personas. Common when production DB hasn't
+        # been seeded yet.
+        logger.warning(
+            "agent_personas query returned no active rows — serving "
+            "hardcoded fallback list. Seed the table to make this go away."
+        )
+        return _FALLBACK_PERSONAS
+
+    except Exception as e:
+        # Verbose logging so Railway logs show the real cause (missing
+        # column, RLS, etc.) rather than a generic 500.
+        logger.error(
+            f"agent_personas query failed: {type(e).__name__}: {e} — "
+            f"serving hardcoded fallback list",
+            exc_info=True,
+        )
+        return _FALLBACK_PERSONAS
 
 
 # ── Trending Analyses ────────────────────────────────────────────────────────

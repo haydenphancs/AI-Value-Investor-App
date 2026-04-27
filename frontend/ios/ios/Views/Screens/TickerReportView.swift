@@ -161,20 +161,16 @@ struct TickerReportView: View {
     // MARK: - Deep Dive Modules
 
     private func deepDiveModulesSection(_ report: TickerReportData) -> some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             Text("Deep Dive Modules")
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.bottom, AppSpacing.md)
 
-            LazyVStack(spacing: 0) {
+            VStack(spacing: 0) {
                 ForEach(viewModel.deepDiveModules) { module in
-                    ReportDeepDiveSection(
-                        module: module,
-                        isExpanded: viewModel.isSectionExpanded(module.type),
-                        onToggle: { viewModel.toggleSection(module.type) }
-                    ) {
+                    ReportDeepDiveSection(module: module) {
                         deepDiveContent(for: module.type, report: report)
                     }
                 }

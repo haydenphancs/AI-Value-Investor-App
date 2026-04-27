@@ -52,7 +52,9 @@ struct ReportDeepDiveMetricCard: View {
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
                             .lineLimit(1)
-                        Spacer()
+                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.7)
+                        Spacer(minLength: 4)
                         HStack(spacing: 2) {
                             if let trend = metric.trend {
                                 Image(systemName: trend.iconName)
@@ -63,6 +65,7 @@ struct ReportDeepDiveMetricCard: View {
                                 .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
+                                .lineLimit(1)
                         }
                     }
                 }

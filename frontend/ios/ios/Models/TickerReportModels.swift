@@ -1174,35 +1174,44 @@ extension TickerReportData {
                 title: "Profitability",
                 starRating: 5,
                 metrics: [
-                    DeepDiveMetric(label: "Gross Margin", value: "70%", trend: nil),
-                    DeepDiveMetric(label: "Net Margin", value: "25%", trend: nil)
+                    DeepDiveMetric(label: "Operating Margin", value: "30.7%", trend: nil),
+                    DeepDiveMetric(label: "Net Margin", value: "25.3%", trend: nil),
+                    DeepDiveMetric(label: "Return on Equity (ROE)", value: "65.4%", trend: nil),
+                    DeepDiveMetric(label: "Return on Assets (ROA)", value: "8.5%", trend: nil)
                 ],
                 qualityLabel: "A Cash Machine"
-            ),
-            DeepDiveMetricCard(
-                title: "Valuation",
-                starRating: 3,
-                metrics: [
-                    DeepDiveMetric(label: "P/E Ratio", value: "25x", trend: nil),
-                    DeepDiveMetric(label: "P/B Ratio", value: "1.2", trend: nil)
-                ],
-                qualityLabel: "Priced for perfection"
             ),
             DeepDiveMetricCard(
                 title: "Growth",
                 starRating: 4,
                 metrics: [
-                    DeepDiveMetric(label: "Revenue ROII", value: "+18%", trend: .up),
-                    DeepDiveMetric(label: "EPS Growth", value: "+22%", trend: .up)
+                    DeepDiveMetric(label: "Revenue Growth (YoY)", value: "+18.0%", trend: .up),
+                    DeepDiveMetric(label: "EPS Growth", value: "+22.0%", trend: .up),
+                    DeepDiveMetric(label: "Free Cash Flow Growth (YoY)", value: "-8.2%", trend: .down),
+                    DeepDiveMetric(label: "Operating Income Growth", value: "+11.4%", trend: .up)
                 ],
                 qualityLabel: "Accelerating"
             ),
             DeepDiveMetricCard(
-                title: "Health",
+                title: "Price",
+                starRating: 3,
+                metrics: [
+                    DeepDiveMetric(label: "P/E", value: "25.1", trend: nil),
+                    DeepDiveMetric(label: "P/S", value: "7.2", trend: nil),
+                    DeepDiveMetric(label: "P/FCF", value: "24.0", trend: nil),
+                    DeepDiveMetric(label: "EV/EBITDA", value: "18.4", trend: nil)
+                ],
+                qualityLabel: "Priced for perfection"
+            ),
+            DeepDiveMetricCard(
+                title: "Financial Health",
                 starRating: 2,
                 metrics: [
-                    DeepDiveMetric(label: "Current Ratio", value: "0.8", trend: .down),
-                    DeepDiveMetric(label: "Debt/Equity", value: "4.5x", trend: .up)
+                    DeepDiveMetric(label: "Altman Z-Score", value: "1.7", trend: nil),
+                    DeepDiveMetric(label: "Interest Coverage", value: "3.2x", trend: nil),
+                    DeepDiveMetric(label: "Cash to Debt", value: "0.18", trend: nil),
+                    DeepDiveMetric(label: "Free Cash Flow Margin", value: "-2.1%", trend: nil),
+                    DeepDiveMetric(label: "Asset Turnover", value: "0.45", trend: nil)
                 ],
                 qualityLabel: "Heavy Debt Load"
             )

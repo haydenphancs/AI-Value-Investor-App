@@ -357,14 +357,23 @@ enum ReportStatus: String {
 }
 
 // MARK: - Analysis Report
-struct AnalysisReport: Identifiable {
+struct AnalysisReport: Identifiable, Hashable {
     let id = UUID()
+    /// Backend `research_reports.id` UUID. Optional because mock data
+    /// (and any UI-only AnalysisReport) won't have one. Used by
+    /// TickerReportViewModel to fetch the cached `ticker_report_data`
+    /// JSONB instead of regenerating via /stocks/{ticker}/report.
+    let backendId: String?
     let companyName: String
     let ticker: String
     let industry: String
     let persona: AnalysisPersona
     let status: ReportStatus
     let progress: Double? // 0.0 to 1.0, only for processing
+    /// Live progress text from `research_reports.current_step` (e.g.
+    /// "Analyzing fundamentals..."). Rendered under the progress bar
+    /// while a report is in-flight.
+    let currentStep: String?
     let rating: Double?   // 0-100, only for ready
     let ratingLabel: String? // e.g. "Strong Quality Business", only for ready
     let date: Date
@@ -375,69 +384,87 @@ struct AnalysisReport: Identifiable {
     }
 
     var tickerAndIndustry: String {
-        "\(ticker) • \(industry)"
+        industry.isEmpty ? ticker : "\(ticker) • \(industry)"
     }
 
     var progressPercent: Int {
         Int((progress ?? 0) * 100)
     }
 
+    static func == (lhs: AnalysisReport, rhs: AnalysisReport) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
     static let mockReports: [AnalysisReport] = [
         AnalysisReport(
+            backendId: nil,
             companyName: "Oracle Corporation",
             ticker: "ORCL",
             industry: "Enterprise Software",
             persona: .warrenBuffett,
             status: .ready,
             progress: nil,
+            currentStep: nil,
             rating: 82,
             ratingLabel: "Strong Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 7)) ?? Date(),
             isRefunded: false
         ),
         AnalysisReport(
+            backendId: nil,
             companyName: "Tesla Inc.",
             ticker: "TSLA",
             industry: "Automotive",
             persona: .cathieWood,
             status: .processing,
             progress: 0.67,
+            currentStep: "Analyzing fundamentals...",
             rating: nil,
             ratingLabel: nil,
             date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 20)) ?? Date(),
             isRefunded: false
         ),
         AnalysisReport(
+            backendId: nil,
             companyName: "Meta Platforms",
             ticker: "META",
             industry: "Social Media",
             persona: .billAckman,
             status: .failed,
             progress: nil,
+            currentStep: nil,
             rating: nil,
             ratingLabel: nil,
             date: Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 19)) ?? Date(),
             isRefunded: true
         ),
         AnalysisReport(
+            backendId: nil,
             companyName: "Apple Inc.",
             ticker: "AAPL",
             industry: "Technology",
             persona: .warrenBuffett,
             status: .ready,
             progress: nil,
+            currentStep: nil,
             rating: 90,
             ratingLabel: "Excellent Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 24)) ?? Date(),
             isRefunded: false
         ),
         AnalysisReport(
+            backendId: nil,
             companyName: "NVIDIA Corp.",
             ticker: "NVDA",
             industry: "Semiconductors",
             persona: .peterLynch,
             status: .ready,
             progress: nil,
+            currentStep: nil,
             rating: 95,
             ratingLabel: "Excellent Quality Business",
             date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 23)) ?? Date(),
@@ -540,12 +567,14 @@ extension AnalysisReport {
         }()
 
         return AnalysisReport(
+            backendId: item.id,
             companyName: item.companyName ?? item.ticker,
             ticker: item.ticker,
-            industry: "",
+            industry: item.industry ?? "",
             persona: persona,
             status: status,
             progress: progress,
+            currentStep: item.currentStep,
             rating: item.overallScore,
             ratingLabel: ratingLabel,
             date: date,

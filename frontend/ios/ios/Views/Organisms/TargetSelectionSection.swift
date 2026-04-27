@@ -2,127 +2,138 @@
 //  TargetSelectionSection.swift
 //  ios
 //
-//  Organism: Target selection with search bar, live search results, and quick ticker chips
+//  Organism: Target selection. Shows a tap-to-search button when no target
+//  is chosen, or a "selected company" chip with an x-to-clear when one is.
+//  Constraint: only one ticker at a time.
 //
 
 import SwiftUI
 
 struct TargetSelectionSection: View {
-    @Binding var searchText: String
-    let quickTickers: [QuickTicker]
-    var searchResults: [StockSearchResult] = []
-    var isSearching: Bool = false
-    var showSearchResults: Bool = false
-    var onTickerSelected: ((QuickTicker) -> Void)?
-    var onSearchSubmit: (() -> Void)?
-    var onResultSelected: ((StockSearchResult) -> Void)?
+    /// Currently selected company. `nil` → show the search-bar prompt.
+    let selectedTarget: StockSearchResult?
+    /// Fallback ticker text when `selectedTarget` is nil but a ticker was set
+    /// from a non-search path (e.g. a trending analysis tap).
+    let fallbackTicker: String
+
+    var onTapSearch: (() -> Void)?
+    var onClearTarget: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section header
             Text("Select Your Target:")
                 .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
 
-            // Search bar
-            SearchBar(
-                text: $searchText,
-                placeholder: "Find a company...",
-                onSubmit: onSearchSubmit
-            )
-
-            // Search results dropdown
-            if showSearchResults && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                searchResultsView
+            if let target = selectedTarget {
+                selectedChip(
+                    ticker: target.ticker,
+                    companyName: target.companyName,
+                    exchange: target.exchange
+                )
+            } else if !fallbackTicker.isEmpty {
+                selectedChip(
+                    ticker: fallbackTicker,
+                    companyName: fallbackTicker,
+                    exchange: nil
+                )
+            } else {
+                searchPrompt
             }
         }
         .padding(.horizontal, AppSpacing.lg)
     }
 
-    // MARK: - Search Results Dropdown
-    @ViewBuilder
-    private var searchResultsView: some View {
-        VStack(spacing: 0) {
-            if isSearching {
-                HStack(spacing: AppSpacing.sm) {
-                    ProgressView()
-                        .tint(AppColors.textMuted)
-                        .scaleEffect(0.8)
-                    Text("Searching...")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textMuted)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.md)
-            } else if searchResults.isEmpty {
-                Text("No companies found")
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-            } else {
-                ForEach(searchResults) { result in
-                    Button {
-                        onResultSelected?(result)
-                    } label: {
-                        searchResultRow(result)
-                    }
-                    .buttonStyle(.plain)
+    // MARK: - Search prompt (no selection yet)
 
-                    if result.id != searchResults.last?.id {
-                        Divider()
-                            .background(AppColors.textMuted.opacity(0.2))
-                    }
-                }
+    private var searchPrompt: some View {
+        Button(action: { onTapSearch?() }) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "magnifyingglass")
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
+                    .foregroundColor(AppColors.textMuted)
+                Text("Find a company…")
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textMuted)
+                Spacer()
             }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.md)
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.medium)
+            .contentShape(Rectangle())
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .buttonStyle(.plain)
     }
 
-    private func searchResultRow(_ result: StockSearchResult) -> some View {
-        HStack(spacing: AppSpacing.sm) {
-            // Ticker badge
-            Text(result.ticker)
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.accentCyan)
-                .frame(width: 60, alignment: .leading)
+    // MARK: - Selected chip (one target at a time)
 
-            // Company name
-            Text(result.companyName)
-                .font(AppTypography.bodySmall)
+    private func selectedChip(ticker: String, companyName: String, exchange: String?) -> some View {
+        HStack(spacing: AppSpacing.md) {
+            // Ticker badge
+            Text(ticker)
+                .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-                .lineLimit(1)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                        .fill(AppColors.primaryBlue.opacity(0.2))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                .stroke(AppColors.primaryBlue.opacity(0.5), lineWidth: 1)
+                        )
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(companyName)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(1)
+                if let exchange {
+                    Text(exchange)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
 
             Spacer()
 
-            // Exchange
-            if let exchange = result.exchange {
-                Text(exchange)
-                    .font(AppTypography.caption)
+            Button(action: { onClearTarget?() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 22))
                     .foregroundColor(AppColors.textMuted)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear selected company")
         }
         .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
+        .padding(.vertical, AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.medium)
     }
 }
 
 #Preview {
-    VStack {
+    VStack(spacing: AppSpacing.xl) {
         TargetSelectionSection(
-            searchText: .constant("App"),
-            quickTickers: QuickTicker.defaults,
-            searchResults: [
-                StockSearchResult(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", sector: nil, logoUrl: nil, type: nil),
-                StockSearchResult(ticker: "APLE", companyName: "Apple Hospitality REIT Inc.", exchange: "NYSE", sector: nil, logoUrl: nil, type: nil),
-            ],
-            isSearching: false,
-            showSearchResults: true
+            selectedTarget: nil,
+            fallbackTicker: ""
+        )
+        TargetSelectionSection(
+            selectedTarget: StockSearchResult(
+                ticker: "AAPL",
+                companyName: "Apple Inc.",
+                exchange: "NASDAQ",
+                sector: nil,
+                logoUrl: nil,
+                type: "stock"
+            ),
+            fallbackTicker: ""
         )
         Spacer()
     }
+    .padding(.top, AppSpacing.lg)
     .background(AppColors.background)
     .preferredColorScheme(.dark)
 }

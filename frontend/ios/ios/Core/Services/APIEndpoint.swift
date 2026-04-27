@@ -113,6 +113,10 @@ enum APIEndpoint: Sendable {
     case generateResearch(stockId: String, persona: String)
     case getResearchStatus(reportId: String)
     case getResearchReport(reportId: String)
+    /// Returns the full TickerReportResponse cached in `ticker_report_data`
+    /// for a completed research report. Faster than /stocks/{ticker}/report
+    /// and preserves the persona used at generation time.
+    case getResearchTickerReport(reportId: String)
     case getMyReports(limit: Int)
     case rateReport(reportId: String, rating: Int, feedback: String?)
     case deleteReport(reportId: String)
@@ -291,6 +295,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/research/reports/\(reportId)/status"
         case .getResearchReport(let reportId):
             return "/api/v1/research/reports/\(reportId)"
+        case .getResearchTickerReport(let reportId):
+            return "/api/v1/research/reports/\(reportId)/ticker-report"
         case .getMyReports:
             return "/api/v1/research/reports"
         case .rateReport(let reportId, _, _):

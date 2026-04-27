@@ -31,6 +31,10 @@ class TickerReportViewModel: ObservableObject {
     // MARK: - Private Properties
     private let ticker: String
     private let persona: String
+    /// Backend research_reports row ID. When present, the fetch path
+    /// prefers the cached `ticker_report_data` JSONB (instant) over a
+    /// fresh /stocks/{ticker}/report call (~30-60s + FMP cost).
+    private let reportId: String?
     private var loadAttempts: Int = 0
 
     // Deep Dive Modules - stored once to avoid regenerating UUIDs on every access
@@ -49,6 +53,17 @@ class TickerReportViewModel: ObservableObject {
     init(ticker: String, persona: String = "warren_buffett") {
         self.ticker = ticker
         self.persona = persona
+        self.reportId = nil
+        loadReport()
+    }
+
+    /// Init from a Reports-tab `AnalysisReport`. Carries the backend
+    /// row ID so we can hit the cached ticker_report_data JSONB and
+    /// preserves the persona the report was generated with.
+    init(report: AnalysisReport) {
+        self.ticker = report.ticker
+        self.persona = report.persona.backendKey
+        self.reportId = report.backendId
         loadReport()
     }
 
@@ -56,6 +71,7 @@ class TickerReportViewModel: ObservableObject {
     init(ticker: String, preloadedReport: TickerReportData) {
         self.ticker = ticker
         self.persona = "warren_buffett"
+        self.reportId = nil
         self.reportData = preloadedReport
         self.isLoading = false
     }
@@ -83,6 +99,31 @@ class TickerReportViewModel: ObservableObject {
         let attempt = self.loadAttempts
         print("📊 [TickerReport] Loading report for \(self.ticker) with persona \(self.persona) (attempt \(attempt))...")
 
+        // Path A — cached JSONB on a known research_reports row.
+        // This is the fast path when navigating from the Reports tab:
+        // the report was already generated, the full TickerReportResponse
+        // is stored in ticker_report_data, and this returns instantly
+        // with zero new FMP/Gemini calls.
+        if let reportId = self.reportId {
+            do {
+                let response: TickerReportAPIResponse = try await APIClient.shared.request(
+                    endpoint: .getResearchTickerReport(reportId: reportId),
+                    responseType: TickerReportAPIResponse.self
+                )
+                print("✅ [TickerReport] Cache hit via report \(reportId) for \(response.symbol) (persona=\(self.persona))")
+                self.reportData = response.toTickerReportData()
+                self.error = nil
+                self.isLoading = false
+                return
+            } catch {
+                // Most common: 409 (report not yet completed) or 404
+                // (data column was empty). Fall through to live fetch.
+                print("⚠️ [TickerReport] Cached ticker_report_data unavailable for \(reportId): \(type(of: error)): \(error.localizedDescription). Falling back to live fetch.")
+            }
+        }
+
+        // Path B — generate (or hit the 24h ticker_report_data cache
+        // by ticker+persona) via the public ticker-report endpoint.
         do {
             let response: TickerReportAPIResponse = try await APIClient.shared.request(
                 endpoint: .getTickerReport(ticker: self.ticker, persona: self.persona),
@@ -101,7 +142,9 @@ class TickerReportViewModel: ObservableObject {
             self.isLoading = false
 
         } catch {
-            print("❌ [TickerReport] Failed to load report: \(error)")
+            // Surface the underlying error type so future debugging
+            // can distinguish APIError.notFound vs decoding vs network.
+            print("❌ [TickerReport] Failed to load report: \(type(of: error)): \(error)")
             if let apiError = error as? APIError {
                 print("   API Error: \(apiError)")
             }

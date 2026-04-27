@@ -99,11 +99,20 @@ struct ReportCard: View {
                     // Status-specific content for non-ready reports
                     switch report.status {
                     case .processing:
-                        // Progress bar
-                        ProgressBar(
-                            progress: report.progress ?? 0,
-                            color: AppColors.primaryBlue
-                        )
+                        // Progress bar + live step text from current_step
+                        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                            ProgressBar(
+                                progress: report.progress ?? 0,
+                                color: AppColors.primaryBlue
+                            )
+                            if let step = report.currentStep, !step.isEmpty {
+                                Text(step)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
 
                     case .failed:
                         // Retry button

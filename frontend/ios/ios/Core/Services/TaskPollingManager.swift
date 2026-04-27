@@ -475,6 +475,7 @@ struct BackendReportListItem: Sendable {
     let stockId: String?
     let ticker: String
     let companyName: String?
+    let industry: String?
     let investorPersona: String
     let status: String
     let title: String?
@@ -482,6 +483,7 @@ struct BackendReportListItem: Sendable {
     let overallScore: Double?
     let fairValueEstimate: Double?
     let progress: Int?
+    let currentStep: String?
     let createdAt: String
     let completedAt: String?
     let userRating: Int?
@@ -491,12 +493,14 @@ struct BackendReportListItem: Sendable {
         case stockId = "stock_id"
         case ticker
         case companyName = "company_name"
+        case industry
         case investorPersona = "investor_persona"
         case status, title
         case executiveSummary = "executive_summary"
         case overallScore = "overall_score"
         case fairValueEstimate = "fair_value_estimate"
         case progress
+        case currentStep = "current_step"
         case createdAt = "created_at"
         case completedAt = "completed_at"
         case userRating = "user_rating"
@@ -510,6 +514,7 @@ extension BackendReportListItem: Decodable {
         self.stockId = try container.decodeIfPresent(String.self, forKey: .stockId)
         self.ticker = try container.decode(String.self, forKey: .ticker)
         self.companyName = try container.decodeIfPresent(String.self, forKey: .companyName)
+        self.industry = try container.decodeIfPresent(String.self, forKey: .industry)
         self.investorPersona = try container.decode(String.self, forKey: .investorPersona)
         self.status = try container.decode(String.self, forKey: .status)
         self.title = try container.decodeIfPresent(String.self, forKey: .title)
@@ -517,6 +522,7 @@ extension BackendReportListItem: Decodable {
         self.overallScore = try container.decodeIfPresent(Double.self, forKey: .overallScore)
         self.fairValueEstimate = try container.decodeIfPresent(Double.self, forKey: .fairValueEstimate)
         self.progress = try container.decodeIfPresent(Int.self, forKey: .progress)
+        self.currentStep = try container.decodeIfPresent(String.self, forKey: .currentStep)
         self.createdAt = try container.decode(String.self, forKey: .createdAt)
         self.completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         self.userRating = try container.decodeIfPresent(Int.self, forKey: .userRating)

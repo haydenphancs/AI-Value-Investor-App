@@ -24,6 +24,7 @@ from app.integrations.fmp import get_fmp_client
 from app.services.user_service import UserService
 from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
+from app.services.ticker_report_cache import upsert_cached_report
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,12 @@ class ResearchService:
             self.supabase.table("research_reports").update(update_data).eq(
                 "id", report_id
             ).execute()
+
+            # Seed the direct-path cache so /stocks/{ticker}/report users
+            # benefit from this expensive agentic run for the next 24h.
+            # Best-effort — failures inside upsert_cached_report are logged
+            # but never raised, so a Supabase blip can't fail the report.
+            await upsert_cached_report(ticker, persona_key, ticker_report_data)
 
             # Decrement credits
             user_service = UserService()

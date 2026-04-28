@@ -11,7 +11,7 @@ Key alignment points:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Literal, Optional, List, Dict, Any
 
 
 # ── Request Models ───────────────────────────────────────────────────────────
@@ -20,6 +20,18 @@ from typing import Optional, List, Dict, Any
 class GenerateResearchRequest(BaseModel):
     stock_id: str = Field(description="Ticker symbol (e.g. AAPL)")
     investor_persona: str = Field(description="Persona key (e.g. warren_buffett)")
+    # Phase 3 forward-compat: lets iOS opt into a faster Stage A+B-only
+    # generation path (no agentic deep-research loop). Today the
+    # backend treats both values the same, but the field shape is
+    # locked so a future fast-path doesn't require an iOS rebuild.
+    priority: Literal["fast", "deep"] = Field(
+        default="deep",
+        description=(
+            "Depth/latency tradeoff. 'deep' runs the full agentic loop "
+            "(~60s, default). 'fast' is reserved for a future Stage A+B "
+            "only path (~15s) and currently behaves the same as 'deep'."
+        ),
+    )
 
 
 class RateReportRequest(BaseModel):
@@ -43,6 +55,11 @@ class ResearchStatusResponse(BaseModel):
     progress: int = 0
     current_step: Optional[str] = None
     error_message: Optional[str] = None
+    # Phase 3: machine-readable code split out of error_message so iOS
+    # can route to a specific UI (retry, upgrade, check-symbol, etc.)
+    # without parsing the human string. Null on success; null for
+    # legacy failure rows that pre-date this contract.
+    error_code: Optional[str] = None
     estimated_time_remaining: Optional[int] = None
 
 

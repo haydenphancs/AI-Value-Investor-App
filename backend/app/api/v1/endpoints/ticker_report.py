@@ -2,9 +2,20 @@
 Ticker Report Endpoints — generates a comprehensive stock analysis report
 for the TickerReportView screen, plus a chat endpoint for follow-up Q&A.
 
-Cache Layer: Checks for recent completed research reports before generating
-a fresh report. If a deep-research report was generated in the last 24 hours
-for the same ticker+persona, returns the cached ticker_report_data instantly.
+Cache layer:
+  - `ticker_report_cache` table (24h TTL, keyed by ticker+persona) is
+    consulted inside `TickerReportService.generate_ticker_report`.
+  - Legacy fallback below also peeks at recent completed
+    `research_reports` rows so reports generated before the new cache
+    table existed still serve instantly during the migration window.
+
+Phase 3 error contract:
+  All non-200 responses use the structured shape from
+  `app.api.error_response` so iOS sees `{error_code, message,
+  user_message, action, details}` instead of "HTTP 502". Endpoint code
+  delegates exception classification to `error_response_from_exception`
+  which inspects exception class + message keywords (FMP rate limits,
+  Gemini quota, ValueError "no profile", etc.).
 
 Endpoints:
   GET  /stocks/{ticker}/report?persona=warren_buffett
@@ -14,11 +25,18 @@ Endpoints:
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
-from app.services.ticker_report_service import TickerReportService
-from app.schemas.ticker_report import TickerReportResponse
+
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+)
 from app.database import get_supabase
+from app.schemas.ticker_report import TickerReportResponse
+from app.services.ticker_report_service import TickerReportService
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +44,12 @@ router = APIRouter()
 
 VALID_PERSONAS = {"warren_buffett", "cathie_wood", "peter_lynch", "bill_ackman"}
 
-# Cache TTL: serve cached research report data for this duration
-CACHE_TTL_HOURS = 24
+# Legacy cache TTL (kept for back-compat with older research_reports rows
+# that pre-date the dedicated `ticker_report_cache` table).
+LEGACY_CACHE_TTL_HOURS = 24
 
 
-@router.get("/{ticker}/report", response_model=TickerReportResponse)
+@router.get("/{ticker}/report")
 async def get_ticker_report(
     ticker: str,
     persona: str = Query("warren_buffett", description="Investor persona key"),
@@ -38,82 +57,114 @@ async def get_ticker_report(
     """
     Generate a comprehensive ticker report.
 
-    Cache strategy: First checks for a recent completed research report
-    with ticker_report_data. If found and fresh (< 24h), returns it
-    instantly. Otherwise generates a fresh report via FMP + Gemini.
+    Cache strategy: `TickerReportService` consults `ticker_report_cache`
+    (24h TTL) internally. This endpoint additionally falls back to a
+    recent completed `research_reports` row so legacy reports surface
+    during the migration window.
 
     No auth required — allows quick access from any screen.
     """
     ticker = ticker.upper().strip()
 
     if not ticker or len(ticker) > 10:
-        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
-
-    if persona not in VALID_PERSONAS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid persona. Must be one of: {', '.join(VALID_PERSONAS)}",
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid ticker symbol: {ticker!r}",
+            details={"ticker": ticker},
         )
 
-    # ── Check cache: recent research report with full ticker_report_data
+    if persona not in VALID_PERSONAS:
+        return make_error_response(
+            ErrorCode.INVALID_PERSONA,
+            message=f"Unsupported persona key: {persona!r}",
+            details={"persona": persona, "valid": sorted(VALID_PERSONAS)},
+        )
+
+    # ── Legacy back-compat cache: recent completed research_reports row
     try:
-        cached = await _check_report_cache(ticker, persona)
+        cached = await _check_legacy_report_cache(ticker, persona)
         if cached:
-            logger.info(f"Cache HIT for {ticker}/{persona} — serving stored report")
+            logger.info(
+                f"Legacy cache HIT for {ticker}/{persona} — serving stored report"
+            )
             return cached
     except Exception as e:
-        logger.warning(f"Cache check failed for {ticker}: {e}")
+        # Cache lookup failures must never break the request — log and
+        # fall through to fresh generation.
+        logger.warning(
+            f"Legacy cache check failed for {ticker}: "
+            f"{type(e).__name__}: {e}"
+        )
 
-    # ── Cache miss: generate fresh report
+    # ── Cache miss: generate fresh report (TickerReportService also
+    # checks ticker_report_cache itself before any FMP/Gemini calls).
     try:
         service = TickerReportService()
         report = await service.generate_ticker_report(ticker, persona)
-
-        # Validate through Pydantic before returning to catch schema issues early
-        try:
-            validated = TickerReportResponse(**report)
-            return validated
-        except ValidationError as ve:
-            logger.error(f"Report schema validation failed for {ticker}: {ve}")
-            # Return the raw dict and let FastAPI's response_model handle it
-            # (it may fill defaults for Optional fields)
-            return report
-
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        # Collector raises ValueError when FMP profile lookup is empty —
+        # that's a "ticker not found" condition, not a server error.
+        logger.info(
+            f"Ticker {ticker} rejected at collector (profile lookup empty): {e}"
+        )
+        return error_response_from_exception(
+            e, ticker=ticker, persona=persona, step="collector",
+        )
     except Exception as e:
-        logger.error(f"Ticker report generation failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Report generation failed: {str(e)[:200]}",
+        logger.error(
+            f"Ticker report generation failed for {ticker}/{persona}: "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(
+            e, ticker=ticker, persona=persona, step="report_generation",
+        )
+
+    # Validate the dict the service returned. If schema drift sneaks in
+    # we return a structured 502 instead of a Pydantic 500 stack trace.
+    try:
+        validated = TickerReportResponse(**report)
+        return validated.model_dump()
+    except ValidationError as ve:
+        logger.error(
+            f"Report schema validation failed for {ticker}/{persona}: {ve}"
+        )
+        return make_error_response(
+            ErrorCode.DATA_INCOMPLETE,
+            message=f"Report shape failed validation: {ve.error_count()} issues",
+            details={
+                "ticker": ticker,
+                "persona": persona,
+                "step": "schema_validation",
+                "issues": ve.error_count(),
+            },
         )
 
 
-async def _check_report_cache(ticker: str, persona: str):
-    """
-    Check research_reports for a recent completed report with ticker_report_data.
-    Returns the cached TickerReportResponse dict if found, else None.
+async def _check_legacy_report_cache(ticker: str, persona: str):
+    """Legacy fallback that reads `research_reports` directly.
 
-    Runs the synchronous Supabase call in a thread to avoid blocking the event loop.
+    Used only as a back-compat bridge for reports generated before the
+    dedicated `ticker_report_cache` table existed. The new cache lives
+    inside `TickerReportService` and `ResearchService`.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=CACHE_TTL_HOURS)).isoformat()
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=LEGACY_CACHE_TTL_HOURS)
+    ).isoformat()
 
     def _query():
         supabase = get_supabase()
-        result = supabase.table("research_reports").select(
-            "ticker_report_data, completed_at"
-        ).eq(
-            "ticker", ticker
-        ).eq(
-            "investor_persona", persona
-        ).eq(
-            "status", "completed"
-        ).gte(
-            "completed_at", cutoff
-        ).order(
-            "completed_at", desc=True
-        ).limit(1).execute()
-
+        result = (
+            supabase.table("research_reports")
+            .select("ticker_report_data, completed_at")
+            .eq("ticker", ticker)
+            .eq("investor_persona", persona)
+            .eq("status", "completed")
+            .gte("completed_at", cutoff)
+            .order("completed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
         if result.data and result.data[0].get("ticker_report_data"):
             return result.data[0]["ticker_report_data"]
         return None
@@ -135,7 +186,7 @@ class TickerReportChatResponseModel(BaseModel):
     ticker: str
 
 
-@router.post("/{ticker}/report/chat", response_model=TickerReportChatResponseModel)
+@router.post("/{ticker}/report/chat")
 async def chat_with_ticker_report(
     ticker: str,
     body: TickerReportChatRequest,
@@ -143,36 +194,60 @@ async def chat_with_ticker_report(
     """
     Ask a follow-up question about a stock using the same persona.
 
-    This is a lightweight AI Q&A endpoint — it fetches a quick snapshot of
-    FMP data and sends the user's question to Gemini with the persona context.
-    Much faster than a full report (5-15 seconds).
+    This is a lightweight AI Q&A endpoint — it fetches a quick snapshot
+    of FMP data and sends the user's question to Gemini with the
+    persona context. Much faster than a full report (5-15 seconds).
     """
     ticker = ticker.upper().strip()
 
     if not ticker or len(ticker) > 10:
-        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid ticker symbol: {ticker!r}",
+            details={"ticker": ticker},
+        )
 
     persona = body.persona
     if persona not in VALID_PERSONAS:
+        # Soft-coerce for chat — keep the prior behavior of falling back
+        # to Buffett rather than rejecting outright. Logged so we still
+        # see the bad request in production.
+        logger.info(
+            f"chat_with_ticker_report: unknown persona {persona!r}, "
+            f"falling back to warren_buffett"
+        )
         persona = "warren_buffett"
 
     message = body.message.strip()
     if not message:
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="Empty chat message",
+            user_message="Type a question to send.",
+        )
 
     if len(message) > 2000:
-        raise HTTPException(status_code=400, detail="Message too long (max 2000 chars)")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Chat message too long ({len(message)} chars > 2000)",
+            user_message="Your message is too long — keep it under 2000 characters.",
+            details={"length": len(message), "limit": 2000},
+        )
 
     try:
         service = TickerReportService()
         reply = await service.chat_about_ticker(ticker, message, persona)
-        return TickerReportChatResponseModel(reply=reply, ticker=ticker)
-
+        return TickerReportChatResponseModel(reply=reply, ticker=ticker).model_dump()
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        return error_response_from_exception(
+            e, ticker=ticker, persona=persona, step="chat_collector",
+        )
     except Exception as e:
-        logger.error(f"Ticker report chat failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Chat failed: {str(e)[:200]}",
+        logger.error(
+            f"Ticker report chat failed for {ticker}/{persona}: "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(
+            e, ticker=ticker, persona=persona, step="chat_generation",
         )

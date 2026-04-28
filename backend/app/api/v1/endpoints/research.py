@@ -16,10 +16,16 @@ Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import asyncio
+import json
 import logging
 
+from app.api.error_response import (
+    ErrorCode,
+    error_body_from_exception,
+    make_error_response,
+)
 from app.database import get_supabase
 from app.dependencies import get_current_user, StandardRateLimit
 from app.schemas.research import (
@@ -58,9 +64,10 @@ async def generate_research_report(
     ).eq("user_id", user["id"]).single().execute()
 
     if not credits.data or credits.data["remaining"] < 1:
-        raise HTTPException(
-            status_code=403,
-            detail="Insufficient credits. Upgrade your tier or wait for monthly reset.",
+        return make_error_response(
+            ErrorCode.INSUFFICIENT_CREDITS,
+            message="User has 0 credits remaining",
+            details={"user_id": user["id"]},
         )
 
     # Validate persona exists
@@ -69,9 +76,10 @@ async def generate_research_report(
     ).eq("is_active", True).execute()
 
     if not persona_check.data:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid persona: {request.investor_persona}",
+        return make_error_response(
+            ErrorCode.INVALID_PERSONA,
+            message=f"Unknown persona key: {request.investor_persona!r}",
+            details={"persona": request.investor_persona},
         )
 
     ticker = request.stock_id.upper()
@@ -104,7 +112,11 @@ async def generate_research_report(
 
     result = supabase.table("research_reports").insert(report_data).execute()
     if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to create report")
+        return make_error_response(
+            ErrorCode.REPORT_GENERATION_FAILED,
+            message="Failed to insert research_reports row",
+            details={"ticker": ticker, "step": "db_insert"},
+        )
 
     report = result.data[0]
 
@@ -132,7 +144,13 @@ async def get_research_status(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Poll report generation status (frontend calls every ~3s)."""
+    """Poll report generation status (frontend calls every ~3s).
+
+    `error_message` may be either a plain string (legacy rows) or a
+    JSON-encoded structured error blob written by `_run_research_task`.
+    We split it into `error_code` + a human `error_message` here so iOS
+    sees a stable contract even though the DB column is a single TEXT.
+    """
     result = supabase.table("research_reports").select(
         "id, status, progress, current_step, error_message, estimated_time_remaining"
     ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
@@ -140,13 +158,53 @@ async def get_research_status(
     if not result.data:
         raise HTTPException(status_code=404, detail="Report not found")
 
+    raw_error = result.data.get("error_message")
+    error_code, human_error = _split_structured_error(raw_error)
+
     return ResearchStatusResponse(
         report_id=result.data["id"],
         status=result.data["status"],
         progress=result.data.get("progress", 0),
         current_step=result.data.get("current_step"),
-        error_message=result.data.get("error_message"),
+        error_message=human_error,
+        error_code=error_code,
         estimated_time_remaining=result.data.get("estimated_time_remaining"),
+    )
+
+
+def _split_structured_error(
+    raw: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Decode `error_message` into (error_code, human_message).
+
+    Phase 3 stores failures as JSON like
+    `{"error_code": "...", "user_message": "..."}` so iOS gets a
+    machine-readable code without needing a new DB column. Legacy rows
+    that pre-date this change are plain strings — we pass them through
+    as `(None, raw)` so the iOS UI keeps showing whatever was recorded.
+    """
+    if not raw:
+        return None, None
+    if not isinstance(raw, str):
+        return None, str(raw)
+    stripped = raw.strip()
+    if not stripped.startswith("{"):
+        return None, raw
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None, raw
+    if not isinstance(parsed, dict):
+        return None, raw
+    code = parsed.get("error_code")
+    msg = (
+        parsed.get("user_message")
+        or parsed.get("message")
+        or raw
+    )
+    return (
+        code if isinstance(code, str) else None,
+        msg if isinstance(msg, str) else raw,
     )
 
 
@@ -187,22 +245,38 @@ async def get_research_ticker_report(
     Get the full TickerReportResponse data from a completed research report.
     This endpoint returns the same JSON shape as GET /stocks/{ticker}/report,
     enabling the iOS app to display it in TickerReportView.
+
+    Errors return the structured `APIErrorResponse` shape so iOS can
+    distinguish "still generating" (REPORT_NOT_READY → poll again)
+    from "doesn't exist" (REPORT_NOT_FOUND).
     """
     result = supabase.table("research_reports").select(
         "id, status, ticker_report_data"
     ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
 
     if not result.data:
-        raise HTTPException(status_code=404, detail="Report not found")
+        return make_error_response(
+            ErrorCode.REPORT_NOT_FOUND,
+            message=f"No research_reports row for id={report_id}",
+            details={"report_id": report_id},
+        )
 
     if result.data["status"] != "completed":
-        raise HTTPException(status_code=409, detail="Report is not yet completed")
+        return make_error_response(
+            ErrorCode.REPORT_NOT_READY,
+            message=f"Report status={result.data['status']!r}",
+            details={
+                "report_id": report_id,
+                "status": result.data["status"],
+            },
+        )
 
     ticker_report = result.data.get("ticker_report_data")
     if not ticker_report:
-        raise HTTPException(
-            status_code=404,
-            detail="Full ticker report data not available for this report",
+        return make_error_response(
+            ErrorCode.DATA_INCOMPLETE,
+            message="ticker_report_data column was empty for completed report",
+            details={"report_id": report_id, "step": "db_lookup"},
         )
 
     return ticker_report
@@ -421,7 +495,10 @@ async def _run_research_task(
 ):
     """
     Async background task: runs the full multi-agent research pipeline.
-    If anything fails, marks the report as 'failed' with error_message.
+    If anything fails, marks the report as 'failed' and persists a
+    JSON-encoded structured error blob into `error_message` so the
+    polling endpoint can return both `error_code` and a friendly
+    `error_message` to iOS without a new DB column.
     """
     try:
         from app.services.research_service import ResearchService
@@ -437,14 +514,27 @@ async def _run_research_task(
             f"{type(e).__name__}: {e}",
             exc_info=True,
         )
+        # Build a structured error blob (error_code, user_message,
+        # underlying, etc.) and stash it as JSON in error_message.
+        # `_split_structured_error` in the status endpoint unpacks it.
+        body = error_body_from_exception(
+            e,
+            ticker=ticker,
+            persona=persona_key,
+            step="research_task",
+            extra_details={"report_id": report_id},
+        )
         try:
             from app.database import get_supabase
 
             supabase = get_supabase()
             supabase.table("research_reports").update({
                 "status": "failed",
-                "error_message": f"{type(e).__name__}: {str(e)[:450]}",
+                "error_message": json.dumps(body),
                 "progress": 0,
             }).eq("id", report_id).execute()
-        except Exception:
-            logger.error(f"Failed to update error status for {report_id}")
+        except Exception as inner:
+            logger.error(
+                f"Failed to update error status for {report_id}: "
+                f"{type(inner).__name__}: {inner}"
+            )

@@ -211,14 +211,65 @@ class TickerReportViewModel: ObservableObject {
             switch apiError {
             case .networkError:
                 return "Network error. Check your connection and make sure the backend is running."
+
+            // Phase 3: backend now emits {error_code, user_message, …}
+            // on the report-pipeline endpoints, surfaced as
+            // .businessError. Route by code so users see actionable
+            // copy (retry vs. wait vs. check symbol) and our logs
+            // carry the underlying cause.
+            case .businessError(let code, let message):
+                switch code {
+                case "TICKER_NOT_FOUND":
+                    return "Ticker '\(ticker)' wasn't found. Check the symbol and try again."
+                case "INVALID_PERSONA":
+                    return "That investor persona isn't supported."
+                case "INVALID_INPUT":
+                    return message.isEmpty
+                        ? "The request was invalid. Please try again."
+                        : message
+                case "FMP_RATE_LIMITED":
+                    return "Market data is rate-limited right now. Please try again in a minute."
+                case "FMP_UNAVAILABLE":
+                    return "Our market data provider is temporarily unavailable. Try again shortly."
+                case "GEMINI_QUOTA_EXCEEDED":
+                    return "AI analysis quota exceeded. Please try again in a few minutes."
+                case "GEMINI_UNAVAILABLE":
+                    return "The AI analysis engine is temporarily unavailable. Try again shortly."
+                case "DATA_INCOMPLETE":
+                    return "We couldn't gather enough data for \(ticker) to produce a full report."
+                case "REPORT_GENERATION_FAILED":
+                    return "Report generation failed. Please try again."
+                case "REPORT_NOT_FOUND":
+                    return "That report no longer exists."
+                case "REPORT_NOT_READY":
+                    return "The report is still generating. Try again in a few seconds."
+                case "INSUFFICIENT_CREDITS":
+                    return "You're out of credits. Upgrade your tier or wait for the monthly reset."
+                default:
+                    // Unknown code — show backend's user_message
+                    // verbatim so we still surface the cause without
+                    // shipping an iOS update.
+                    return message.isEmpty
+                        ? "Something went wrong. Please try again."
+                        : message
+                }
+
             case .serverError(let code):
                 return "Server error (\(code)). The AI report generation may have timed out. Try again."
             case .notFound:
                 return "Ticker '\(ticker)' was not found. Check the symbol and try again."
             case .decodingError:
                 return "Received unexpected data from the server. This is a bug — please report it."
-            default:
-                return "Something went wrong. Please try again."
+            case .rateLimited(let retryAfter):
+                return "You've hit a request limit. Try again in \(retryAfter)s."
+            case .unauthorized:
+                return "Your session expired. Please sign in again."
+            case .forbidden:
+                return "You don't have access to this. If this seems wrong, contact support."
+            case .unknown(let message):
+                return message.isEmpty
+                    ? "Something went wrong. Please try again."
+                    : message
             }
         }
         return "Could not load report. Please check your connection and try again."

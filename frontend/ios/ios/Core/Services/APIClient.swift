@@ -273,7 +273,7 @@ actor APIClient {
             throw APIError.unauthorized
 
         case 403:
-            // Check for specific error codes
+            // Check for specific error codes (Phase 3 contract)
             if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
                 throw APIError.businessError(
                     code: errorResponse.errorCode,
@@ -283,6 +283,15 @@ actor APIClient {
             throw APIError.forbidden
 
         case 404:
+            // Phase 3: backend may return structured REPORT_NOT_FOUND /
+            // TICKER_NOT_FOUND. Fall back to .notFound when the body
+            // is a plain {"detail": "..."} (legacy endpoints).
+            if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
+                throw APIError.businessError(
+                    code: errorResponse.errorCode,
+                    message: errorResponse.userMessage
+                )
+            }
             throw APIError.notFound
 
         case 422:
@@ -301,9 +310,29 @@ actor APIClient {
             throw APIError.rateLimited(retryAfter: retryAfter)
 
         case 500...599:
+            // Phase 3: report-pipeline endpoints emit
+            // {error_code, user_message, details, …} on 5xx so the UI can
+            // route to a specific message (FMP_RATE_LIMITED,
+            // GEMINI_QUOTA_EXCEEDED, DATA_INCOMPLETE, etc.) instead of
+            // a generic "Server error". Fall back to .serverError when
+            // the body is plain text or empty (legacy responses).
+            if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
+                throw APIError.businessError(
+                    code: errorResponse.errorCode,
+                    message: errorResponse.userMessage
+                )
+            }
             throw APIError.serverError(statusCode: response.statusCode)
 
         default:
+            // 400 / 409 land here. Phase 3 backend may include a
+            // structured body on these too (REPORT_NOT_READY, etc.).
+            if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
+                throw APIError.businessError(
+                    code: errorResponse.errorCode,
+                    message: errorResponse.userMessage
+                )
+            }
             throw APIError.unknown(message: "HTTP \(response.statusCode)")
         }
     }

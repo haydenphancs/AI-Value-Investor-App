@@ -32,6 +32,11 @@ class PersonaConfig:
     system_prompt: str
     extra_data: List[str] = field(default_factory=list)
     analysis_focus: Dict[str, str] = field(default_factory=dict)
+    # Short lens phrase (under ~12 words) injected into Stage-B narrative
+    # prompts so each insight reads in this persona's voice. Kept terse so
+    # it fits inside an already-long prompt without diluting the field's
+    # specific length brief.
+    narrative_lens: str = ""
 
     def __post_init__(self):
         self.system_prompt = _IDENTITY_RULE + self.system_prompt
@@ -95,6 +100,9 @@ _BUFFETT_CONFIG = PersonaConfig(
         "financial_health": "Owner earnings, consistent FCF, low leverage",
         "management": "Capital allocation track record, insider ownership",
     },
+    narrative_lens=(
+        "moat durability, owner earnings, predictability, decade-long compounding"
+    ),
 )
 
 
@@ -158,6 +166,9 @@ _WOOD_CONFIG = PersonaConfig(
         "competitive": "Data moats, platform economics, R&D intensity",
         "valuation": "Forward-looking EV/Revenue, 5-year growth trajectory",
     },
+    narrative_lens=(
+        "platform convergence, Wright's Law cost curves, S-curve adoption, TAM expansion"
+    ),
 )
 
 
@@ -233,6 +244,9 @@ _LYNCH_CONFIG = PersonaConfig(
         "story": "Simple investment thesis anyone can understand",
         "balance_sheet": "Net cash position, insider buying, institutional ownership",
     },
+    narrative_lens=(
+        "stock category (fast-grower / stalwart / cyclical), PEG, what you understand"
+    ),
 )
 
 
@@ -306,6 +320,9 @@ _ACKMAN_CONFIG = PersonaConfig(
         "downside": "Worst-case scenario analysis and floor valuation",
         "business_quality": "Barriers to entry, pricing power, recession resilience",
     },
+    narrative_lens=(
+        "FCF quality, downside protection, activist catalysts, capital allocation"
+    ),
 )
 
 

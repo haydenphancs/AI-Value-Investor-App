@@ -46,6 +46,8 @@ from app.schemas.analyst import (
     AnalystConsensus,
 )
 from app.schemas.holders import HoldersResponse
+from app.schemas.revenue_breakdown import RevenueBreakdownResponse
+from app.schemas.stock_overview import SnapshotItemResponse
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,13 @@ class CollectedTickerData:
     analyst_analysis: Optional[AnalystAnalysisResponse] = None
     holders_response: Optional[HoldersResponse] = None
 
+    # ── Snapshot services (parity with TickerDetailView Financials tab) ──
+    snap_profitability: Optional[SnapshotItemResponse] = None
+    snap_health: Optional[SnapshotItemResponse] = None
+    snap_growth: Optional[SnapshotItemResponse] = None
+    snap_valuation: Optional[SnapshotItemResponse] = None
+    revenue_breakdown: Optional[RevenueBreakdownResponse] = None
+
     # ── Computed metrics (real numbers / None) ────────────────────────
     computed: Dict[str, Any] = field(default_factory=dict)
 
@@ -128,6 +137,7 @@ class CollectedTickerData:
     price_action_partial: Dict[str, Any] = field(default_factory=dict)
     revenue_engine_partial: Dict[str, Any] = field(default_factory=dict)
     wall_street_consensus_partial: Dict[str, Any] = field(default_factory=dict)
+    fundamental_metrics_partial: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -175,6 +185,21 @@ class TickerReportDataCollector:
         # which we don't want at module-import time in tests).
         from app.services.analyst_service import AnalystService
         from app.services.holders_service import HoldersService
+        from app.services.profitability_snapshot_service import (
+            get_profitability_snapshot_service,
+        )
+        from app.services.health_snapshot_service import (
+            get_health_snapshot_service,
+        )
+        from app.services.growth_snapshot_service import (
+            get_growth_snapshot_service,
+        )
+        from app.services.valuation_snapshot_service import (
+            get_valuation_snapshot_service,
+        )
+        from app.services.revenue_breakdown_service import (
+            get_revenue_breakdown_service,
+        )
 
         analyst_service = AnalystService()
         holders_service = HoldersService()
@@ -201,6 +226,34 @@ class TickerReportDataCollector:
             ("earnings_dates", self.fmp.get_historical_earnings_dates(ticker), []),
             ("analyst_analysis", analyst_service.get_analysis(ticker), None),
             ("holders_response", holders_service.get_holders(ticker), None),
+            # Snapshot services — same data the Financials tab shows in
+            # TickerDetailView. Fetching here gives the report cards the
+            # exact same numbers the user already sees on the other view.
+            (
+                "snap_profitability",
+                get_profitability_snapshot_service().get_profitability_snapshot(ticker),
+                None,
+            ),
+            (
+                "snap_health",
+                get_health_snapshot_service().get_health_snapshot(ticker),
+                None,
+            ),
+            (
+                "snap_growth",
+                get_growth_snapshot_service().get_growth_snapshot(ticker),
+                None,
+            ),
+            (
+                "snap_valuation",
+                get_valuation_snapshot_service().get_valuation_snapshot(ticker),
+                None,
+            ),
+            (
+                "revenue_breakdown",
+                get_revenue_breakdown_service().get_revenue_breakdown(ticker),
+                None,
+            ),
         ]
 
         results = await asyncio.gather(
@@ -282,6 +335,11 @@ class TickerReportDataCollector:
             ):
                 c[k] = None
 
+        # Earnings Yield = 1/PE * 100. None for negative or zero PE — a
+        # negative E/Y from negative earnings is meaningless and would
+        # mislead the user; surface as "N/A" downstream.
+        c["earnings_yield"] = compute_earnings_yield(c)
+
         # ── Fair value from FMP DCF + upside ──────────────────────────
         dcf = _num_or_none(profile.get("dcf"))
         c["fair_value"] = dcf if dcf and dcf > 0 else None
@@ -289,13 +347,17 @@ class TickerReportDataCollector:
             if c["fair_value"] is not None else None
 
         # ── Analyst forecast CAGRs ────────────────────────────────────
+        # Sort by ISO date string ascending so start=oldest, end=newest
+        # regardless of FMP's response order (newest-first vs oldest-first
+        # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            n = len(estimates)
-            est0_rev = _safe_float(estimates[0], "estimatedRevenueAvg")
-            estn_rev = _safe_float(estimates[-1], "estimatedRevenueAvg")
+            sorted_est = sorted(estimates, key=lambda e: (e.get("date") or ""))
+            n = len(sorted_est)
+            est0_rev = _safe_float(sorted_est[0], "estimatedRevenueAvg")
+            estn_rev = _safe_float(sorted_est[-1], "estimatedRevenueAvg")
             c["revenue_cagr"] = _safe_cagr(est0_rev, estn_rev, n)
-            est0_eps = _safe_float(estimates[0], "estimatedEpsAvg")
-            estn_eps = _safe_float(estimates[-1], "estimatedEpsAvg")
+            est0_eps = _safe_float(sorted_est[0], "estimatedEpsAvg")
+            estn_eps = _safe_float(sorted_est[-1], "estimatedEpsAvg")
             c["eps_cagr"] = _safe_cagr(est0_eps, estn_eps, n)
         else:
             c["revenue_cagr"] = None
@@ -345,7 +407,7 @@ class TickerReportDataCollector:
 
         # ── Valuation vital ───────────────────────────────────────────
         out.valuation_vital = _build_valuation_vital(
-            current_price, fair_value, upside
+            current_price, fair_value, upside, out.snap_valuation
         )
 
         # ── Financial health vital ────────────────────────────────────
@@ -354,7 +416,11 @@ class TickerReportDataCollector:
         )
 
         # ── Revenue vital — top segment hooked from real segments ─────
-        segments_built = _build_revenue_segments(out.segments_raw)
+        # Prefer RevenueBreakdownService (parity with TickerDetailView's
+        # Financials tab) and fall back to direct FMP segmentation.
+        segments_built = _segments_from_breakdown(out.revenue_breakdown)
+        if not segments_built:
+            segments_built = _build_revenue_segments(out.segments_raw)
         top_segment_name = (
             segments_built[0]["name"] if segments_built else "Primary"
         )
@@ -419,6 +485,17 @@ class TickerReportDataCollector:
             out.estimates, c.get("revenue_cagr"), c.get("eps_cagr")
         )
 
+        # ── Fundamental metrics (4 cards) — deterministic from the
+        #    same snapshot services that power TickerDetailView's
+        #    Financials tab. AI's Stage A version is discarded. ────────
+        out.fundamental_metrics_partial = _build_fundamental_metrics_from_snapshots(
+            profitability=out.snap_profitability,
+            growth=out.snap_growth,
+            valuation=out.snap_valuation,
+            health=out.snap_health,
+            earnings_yield=c.get("earnings_yield"),
+        )
+
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
 
     def assemble_report(
@@ -438,6 +515,24 @@ class TickerReportDataCollector:
 
         # ── Quality score ─────────────────────────────────────────────
         quality_score = _coerce_score(ai.get("quality_score"), default=50.0)
+
+        # ── Overall assessment ─ numerics deterministic from cards;
+        #    text comes from Stage B narrative or AI fallback. ────────
+        ai_assessment = ai.get("overall_assessment") if isinstance(
+            ai.get("overall_assessment"), dict
+        ) else {}
+        ai_assessment_text = (ai_assessment or {}).get("text") if ai_assessment else None
+        if out.fundamental_metrics_partial:
+            overall_assessment = _overall_assessment_from_cards(
+                out.fundamental_metrics_partial, ai_assessment_text,
+            )
+        else:
+            overall_assessment = ai_assessment or {
+                "text": "Data unavailable for this ticker.",
+                "average_rating": 0.0,
+                "strong_count": 0,
+                "weak_count": 0,
+            }
 
         # ── Insider sentiment / ownership note (AI sets sentiment too,
         #    but we trust real net dollar volume from the collector). ─
@@ -564,13 +659,11 @@ class TickerReportDataCollector:
 
             "core_thesis": _sanitize_thesis(ai.get("core_thesis")),
 
-            "fundamental_metrics": list(ai.get("fundamental_metrics") or []),
-            "overall_assessment": ai.get("overall_assessment") or {
-                "text": "Data unavailable for this ticker.",
-                "average_rating": 0.0,
-                "strong_count": 0,
-                "weak_count": 0,
-            },
+            # fundamental_metrics is now collector-derived (matches the
+            # snapshot data the user sees in TickerDetailView's
+            # Financials tab). AI's array is intentionally discarded.
+            "fundamental_metrics": list(out.fundamental_metrics_partial or []),
+            "overall_assessment": overall_assessment,
 
             "revenue_forecast": revenue_forecast,
             "insider_data": insider_data,
@@ -620,6 +713,18 @@ def _pct_or_none(v: Any) -> Optional[float]:
     """FMP returns ratios as fractions (0.32 = 32%); convert to display %."""
     n = _num_or_none(v)
     return round(n * 100, 1) if n is not None else None
+
+
+def compute_earnings_yield(computed: Dict[str, Any]) -> Optional[float]:
+    """Earnings Yield = 1/PE * 100. None when PE is missing or non-positive.
+
+    A negative PE (negative earnings) produces a meaningless negative
+    yield, so we surface None and let the renderer show "N/A" instead.
+    """
+    pe = computed.get("pe_ratio")
+    if pe is None or pe <= 0:
+        return None
+    return round(100.0 / pe, 2)
 
 
 def _safe_pct_change(
@@ -785,19 +890,63 @@ def _format_pct(v: Optional[float]) -> str:
     return f"{v:.2f}%"
 
 
+_VALUATION_STATUS_LEVEL = {
+    "deep_undervalued": 4,
+    "underpriced": 3,
+    "fair_value": 2,
+    "overpriced": 1,
+}
+_LEVEL_TO_STATUS = {v: k for k, v in _VALUATION_STATUS_LEVEL.items()}
+
+
+def _snapshot_to_valuation_status(rating: int) -> Tuple[str, float]:
+    """Map a 1-5 snapshot rating to a (status, upside_potential) pair."""
+    if rating >= 5:
+        return "underpriced", 10.0
+    if rating == 4:
+        return "underpriced", 5.0
+    if rating == 3:
+        return "fair_value", 0.0
+    if rating == 2:
+        return "overpriced", -5.0
+    if rating == 1:
+        return "overpriced", -15.0
+    return "fair_value", 0.0  # rating=0 → unavailable, neutral default
+
+
 def _build_valuation_vital(
-    current_price: float, fair_value: Optional[float], upside: Optional[float]
+    current_price: float,
+    fair_value: Optional[float],
+    upside: Optional[float],
+    valuation_snapshot: Optional[SnapshotItemResponse] = None,
 ) -> Dict[str, Any]:
-    """Sets status from real DCF upside; honest 0.0s when DCF missing."""
+    """Sets status from real DCF upside, with multi-metric snapshot as
+    a tiebreaker. When DCF is missing, snapshot rating drives the
+    decision instead of defaulting to "fair_value" with 0% upside.
+    """
+    snap_rating = int(valuation_snapshot.rating) if (
+        valuation_snapshot is not None and valuation_snapshot.rating
+    ) else 0
+
     if upside is None or fair_value is None:
-        # No DCF → fair_value reuses current_price so the badge shows
-        # "fair value" rather than a phantom "deep undervalued".
+        # No DCF — defer to the multi-metric snapshot when available.
+        if snap_rating > 0:
+            status, snap_upside = _snapshot_to_valuation_status(snap_rating)
+            return {
+                "status": status,
+                "current_price": round(current_price, 2),
+                "fair_value": round(current_price, 2),
+                "upside_potential": snap_upside,
+            }
+        # Neither DCF nor snapshot — keep the honest fair_value default.
         return {
             "status": "fair_value",
             "current_price": round(current_price, 2),
             "fair_value": round(current_price, 2),
             "upside_potential": 0.0,
         }
+
+    # DCF present — pick the DCF-implied status first.
     if upside >= 30:
         status = "deep_undervalued"
     elif upside >= 10:
@@ -806,6 +955,21 @@ def _build_valuation_vital(
         status = "fair_value"
     else:
         status = "overpriced"
+
+    # Reconcile with the snapshot when both signals are available. If
+    # the multi-metric snapshot disagrees by ≥2 levels (e.g., DCF says
+    # deep_undervalued but P/E + EV/EBITDA + P/FCF say overpriced),
+    # downgrade one level milder rather than silently trusting a stale
+    # DCF.
+    if snap_rating > 0:
+        snap_status, _ = _snapshot_to_valuation_status(snap_rating)
+        dcf_level = _VALUATION_STATUS_LEVEL.get(status, 2)
+        snap_level = _VALUATION_STATUS_LEVEL.get(snap_status, 2)
+        if abs(dcf_level - snap_level) >= 2:
+            # Move one level toward the snapshot — never wholesale flip.
+            adjusted = dcf_level + (1 if snap_level > dcf_level else -1)
+            status = _LEVEL_TO_STATUS.get(adjusted, status)
+
     return {
         "status": status,
         "current_price": round(current_price, 2),
@@ -1150,6 +1314,135 @@ def _build_revenue_segments(
     ]
 
 
+def _format_earnings_yield(ey: Optional[float]) -> str:
+    """Render earnings yield for a DeepDiveMetric.value cell."""
+    if ey is None:
+        return "N/A"
+    return f"{ey:.2f}%"
+
+
+def _snapshot_to_card(
+    title: str,
+    snap: Optional[SnapshotItemResponse],
+    extra_metrics: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Map a SnapshotItemResponse onto a FundamentalMetricCardResponse dict.
+
+    Honest fallback when the snapshot is missing: star_rating=0, empty
+    metrics, quality_label="Data unavailable" — Pydantic still validates
+    and the iOS card simply shows the unavailable state.
+    """
+    if snap is None:
+        metrics = list(extra_metrics or [])
+        return {
+            "title": title,
+            "star_rating": 0,
+            "metrics": metrics,
+            "quality_label": "Data unavailable",
+        }
+
+    metrics = [
+        {"label": m.name, "value": m.value, "trend": None}
+        for m in snap.metrics
+    ]
+    if extra_metrics:
+        metrics.extend(extra_metrics)
+    return {
+        "title": title,
+        "star_rating": int(snap.rating or 0),
+        "metrics": metrics,
+        "quality_label": "",  # Stage B narrative writes this
+    }
+
+
+def _build_fundamental_metrics_from_snapshots(
+    profitability: Optional[SnapshotItemResponse],
+    growth: Optional[SnapshotItemResponse],
+    valuation: Optional[SnapshotItemResponse],
+    health: Optional[SnapshotItemResponse],
+    earnings_yield: Optional[float],
+) -> List[Dict[str, Any]]:
+    """Build the 4 fundamental cards from the same snapshot services
+    TickerDetailView's Financials tab uses, so the values match exactly.
+
+    Order matches the existing iOS card order: Profitability, Growth,
+    Valuation, Health. Earnings Yield is appended to the Valuation card.
+    """
+    valuation_extras = [
+        {
+            "label": "Earnings Yield",
+            "value": _format_earnings_yield(earnings_yield),
+            "trend": None,
+        }
+    ]
+    return [
+        _snapshot_to_card("Profitability", profitability),
+        _snapshot_to_card("Growth", growth),
+        _snapshot_to_card("Valuation", valuation, extra_metrics=valuation_extras),
+        _snapshot_to_card("Health", health),
+    ]
+
+
+def _overall_assessment_from_cards(
+    cards: List[Dict[str, Any]], ai_text: Optional[str],
+) -> Dict[str, Any]:
+    """Recompute the four numeric fields from the deterministic cards.
+
+    text comes from AI/Stage B narrative when present, otherwise an
+    honest sentinel. The numerics are always recomputed so they can't
+    contradict the per-card star ratings.
+    """
+    ratings = [int(c.get("star_rating") or 0) for c in cards]
+    valid = [r for r in ratings if r > 0]
+    avg = round(sum(valid) / len(valid), 1) if valid else 0.0
+    strong = sum(1 for r in ratings if r >= 4)
+    weak = sum(1 for r in ratings if 0 < r <= 2)
+    return {
+        "text": ai_text or "Data unavailable for this ticker.",
+        "average_rating": avg,
+        "strong_count": strong,
+        "weak_count": weak,
+    }
+
+
+def _segments_from_breakdown(
+    breakdown: Optional[RevenueBreakdownResponse],
+) -> List[Dict[str, Any]]:
+    """Use RevenueBreakdownService output for cross-view parity.
+
+    Returns [] when the service either hit no data or fell back to its
+    single "Total Revenue" placeholder — caller then falls back to the
+    direct FMP segmentation path. previous_revenue stays 0.0 because
+    the breakdown service doesn't expose prior-period segments; the iOS
+    revenue_engine view renders current-period bars primarily.
+    """
+    if breakdown is None or not breakdown.revenue_sources:
+        return []
+
+    sources = [
+        s for s in breakdown.revenue_sources
+        if s.name and s.name != "Total Revenue" and s.value > 0
+    ]
+    if not sources:
+        return []
+
+    total = sum(s.value for s in sources)
+    if total <= 0:
+        return []
+
+    # Sort largest first, mirror the FMP-direct path's contract.
+    sources.sort(key=lambda s: s.value, reverse=True)
+    return [
+        {
+            "name": s.name,
+            "current_revenue": float(s.value),
+            "previous_revenue": 0.0,
+            "total_revenue": float(total),
+        }
+        for s in sources
+    ]
+
+
 def _segment_growth_pct(
     segments: List[Dict[str, Any]],
 ) -> Optional[float]:
@@ -1205,15 +1498,30 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
 ) -> Dict[str, Any]:
+    # Sort estimates oldest→newest so the chart reads left-to-right in time.
+    sorted_estimates = sorted(estimates, key=lambda e: (e.get("date") or ""))[:3]
+
+    # Pick a single divisor across all bars so they're visually comparable.
+    revs = [
+        _safe_float(est, "estimatedRevenueAvg") for est in sorted_estimates
+    ]
+    max_rev = max(revs) if revs else 0.0
+    if max_rev >= 1e12:
+        divisor = 1e12
+    elif max_rev >= 1e9:
+        divisor = 1e9
+    else:
+        divisor = 1e6
+
     projections: List[Dict[str, Any]] = []
-    for i, est in enumerate(estimates[:3]):
+    for i, est in enumerate(sorted_estimates):
         date_str = est.get("date") or ""
         period = date_str[:4] if len(date_str) >= 4 else f"FY{i}"
         rev = _safe_float(est, "estimatedRevenueAvg")
         eps = _safe_float(est, "estimatedEpsAvg")
         projections.append({
             "period": period,
-            "revenue": round(rev / 1e9, 1) if rev else 0.0,
+            "revenue": round(rev / divisor, 2) if rev else 0.0,
             "revenue_label": _format_revenue(rev),
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps else "$0",
@@ -1615,6 +1923,10 @@ def build_financial_context(out: CollectedTickerData) -> str:
     parts.append(f"\nAltman Z-Score: {_fmt_or_na(c.get('altman_z'))}")
     parts.append(
         f"Revenue Growth YoY: {_fmt_pct_or_na(c.get('revenue_growth_yoy'))}"
+    )
+    ey = c.get("earnings_yield")
+    parts.append(
+        f"Earnings Yield: {_fmt_pct_or_na(ey) if ey is not None else 'N/A — negative or missing earnings'}"
     )
     parts.append(f"Gross Margin: {_fmt_pct_or_na(c.get('gross_margin'))}")
     parts.append(f"Net Margin: {_fmt_pct_or_na(c.get('net_margin'))}")

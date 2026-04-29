@@ -138,6 +138,11 @@ class ResearchReportDetail(BaseModel):
     user_rating: Optional[int] = None
     user_feedback: Optional[str] = None
 
+    # Credit lifecycle (migration 041): drives the iOS "[Refunded]"
+    # chip on failed cards. Always False on completed reports.
+    is_refunded: bool = False
+    credits_charged: int = 5
+
 
 class ResearchReportListItem(BaseModel):
     """Lightweight model for the reports list (GET /research/reports).
@@ -163,6 +168,9 @@ class ResearchReportListItem(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
     user_rating: Optional[int] = None
+    # Credit lifecycle (migration 041): drives the iOS "[Refunded]"
+    # chip on failed cards.
+    is_refunded: bool = False
 
 
 class PersonaResponse(BaseModel):

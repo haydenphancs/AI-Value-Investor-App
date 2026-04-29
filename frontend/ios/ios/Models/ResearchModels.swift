@@ -578,7 +578,7 @@ extension AnalysisReport {
             rating: item.overallScore,
             ratingLabel: ratingLabel,
             date: date,
-            isRefunded: false
+            isRefunded: item.isRefunded ?? false
         )
     }
 }

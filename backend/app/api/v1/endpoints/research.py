@@ -37,6 +37,7 @@ from app.schemas.research import (
     RateReportRequest,
     TrendingAnalysisResponse,
 )
+from app.services.credit_service import CreditService
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +59,8 @@ async def generate_research_report(
     Validates credits + persona, inserts a 'pending' DB row,
     launches an async background task, and returns immediately.
     """
-    # Check credits
-    credits = supabase.table("user_credits").select(
-        "remaining"
-    ).eq("user_id", user["id"]).single().execute()
-
-    if not credits.data or credits.data["remaining"] < 1:
-        return make_error_response(
-            ErrorCode.INSUFFICIENT_CREDITS,
-            message="User has 0 credits remaining",
-            details={"user_id": user["id"]},
-        )
-
-    # Validate persona exists
+    # Validate persona exists BEFORE charging — a bad persona key is
+    # caller error and should never burn credits.
     persona_check = supabase.table("agent_personas").select("key").eq(
         "key", request.investor_persona
     ).eq("is_active", True).execute()
@@ -80,6 +70,27 @@ async def generate_research_report(
             ErrorCode.INVALID_PERSONA,
             message=f"Unknown persona key: {request.investor_persona!r}",
             details={"persona": request.investor_persona},
+        )
+
+    # Atomic 5-credit charge. The Postgres function returns the new
+    # `remaining` balance, or NULL when the user has fewer than 5
+    # credits available. NULL → INSUFFICIENT_CREDITS, no row was
+    # mutated (no race window between check and decrement).
+    credit_service = CreditService()
+    new_remaining = credit_service.try_charge(
+        user["id"], CreditService.DEEP_RESEARCH_COST
+    )
+    if new_remaining is None:
+        return make_error_response(
+            ErrorCode.INSUFFICIENT_CREDITS,
+            message=(
+                f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
+                f"credits remaining"
+            ),
+            details={
+                "user_id": user["id"],
+                "required": CreditService.DEEP_RESEARCH_COST,
+            },
         )
 
     ticker = request.stock_id.upper()
@@ -98,7 +109,10 @@ async def generate_research_report(
     except Exception:
         pass
 
-    # Insert pending report row
+    # Insert pending report row. credits_charged stamps how much we
+    # debited so a future tier change can't lose track of historical
+    # billing; is_refunded starts False and is flipped by
+    # _run_research_task on failure.
     report_data = {
         "user_id": user["id"],
         "ticker": ticker,
@@ -108,10 +122,15 @@ async def generate_research_report(
         "status": "pending",
         "progress": 0,
         "current_step": "Initializing research...",
+        "credits_charged": CreditService.DEEP_RESEARCH_COST,
+        "is_refunded": False,
     }
 
     result = supabase.table("research_reports").insert(report_data).execute()
     if not result.data:
+        # DB insert failed AFTER we charged credits — refund immediately
+        # so the user isn't out 5 credits for a row that never existed.
+        credit_service.refund(user["id"], CreditService.DEEP_RESEARCH_COST)
         return make_error_response(
             ErrorCode.REPORT_GENERATION_FAILED,
             message="Failed to insert research_reports row",
@@ -300,7 +319,7 @@ async def get_my_reports(
     result = supabase.table("research_reports").select(
         "id, ticker, company_name, industry, investor_persona, status, title, "
         "executive_summary, overall_score, fair_value_estimate, progress, "
-        "current_step, created_at, completed_at, user_rating"
+        "current_step, created_at, completed_at, user_rating, is_refunded"
     ).eq("user_id", user["id"]).neq(
         "status", "deleted"
     ).order(
@@ -495,10 +514,11 @@ async def _run_research_task(
 ):
     """
     Async background task: runs the full multi-agent research pipeline.
-    If anything fails, marks the report as 'failed' and persists a
-    JSON-encoded structured error blob into `error_message` so the
-    polling endpoint can return both `error_code` and a friendly
-    `error_message` to iOS without a new DB column.
+
+    On failure: marks the report 'failed', persists a structured error
+    blob, refunds the 5 credits charged in /generate, and flips
+    `is_refunded` so iOS renders the "[Refunded]" chip. This is the
+    single refund site — every failure path lands here.
     """
     try:
         from app.services.research_service import ResearchService
@@ -524,6 +544,18 @@ async def _run_research_task(
             step="research_task",
             extra_details={"report_id": report_id},
         )
+        # Refund + mark failed in one row update so the iOS UI flips
+        # to "Failed [Refunded]" atomically. Refund call is wrapped
+        # because a Supabase outage during refund must not mask the
+        # original research error.
+        try:
+            credit_service = CreditService()
+            credit_service.refund(user_id, CreditService.DEEP_RESEARCH_COST)
+        except Exception as refund_err:
+            logger.error(
+                f"Refund failed for {report_id} (user {user_id}): "
+                f"{type(refund_err).__name__}: {refund_err}"
+            )
         try:
             from app.database import get_supabase
 
@@ -532,6 +564,7 @@ async def _run_research_task(
                 "status": "failed",
                 "error_message": json.dumps(body),
                 "progress": 0,
+                "is_refunded": True,
             }).eq("id", report_id).execute()
         except Exception as inner:
             logger.error(

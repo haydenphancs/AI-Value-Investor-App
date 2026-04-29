@@ -21,9 +21,9 @@ from datetime import datetime, timezone, timedelta
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
 from app.integrations.fmp import get_fmp_client
-from app.services.user_service import UserService
 from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
+from app.services.agents.persona_scoring import compute_quality_score
 from app.services.ticker_report_cache import upsert_cached_report
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,15 @@ class ResearchService:
             # Extract legacy fields for backward compatibility
             self._update_status(report_id, "processing", 92, "Saving report...")
 
+            # Persona-weighted overall score (deterministic, server-side).
+            # Overrides whatever quality_score the AI emitted in Stage A so
+            # the headline number is reproducible and reflects this persona's
+            # weighting philosophy, not LLM variance. Mutating
+            # ticker_report_data here keeps the cached JSONB consistent —
+            # iOS reads quality_score from the same dict.
+            persona_score = compute_quality_score(persona_key, ticker_report_data)
+            ticker_report_data["quality_score"] = persona_score
+
             generation_time = int((datetime.now(timezone.utc) - start).total_seconds())
 
             # Build update payload
@@ -172,9 +181,10 @@ class ResearchService:
             # but never raised, so a Supabase blip can't fail the report.
             await upsert_cached_report(ticker, persona_key, ticker_report_data)
 
-            # Decrement credits
-            user_service = UserService()
-            await user_service.decrement_credits(user_id, 1)
+            # Credits were charged upfront in /research/generate (5 credits
+            # via CreditService.try_charge). No deduction here. Refunds on
+            # failure are handled by _run_research_task in research.py —
+            # this function only ever signals success.
 
             logger.info(
                 f"Report {report_id} completed in {generation_time}s "

@@ -38,6 +38,7 @@ from app.schemas.research import (
     TrendingAnalysisResponse,
 )
 from app.services.credit_service import CreditService
+from app.services.agents.persona_config import PERSONA_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +62,15 @@ async def generate_research_report(
     """
     # Validate persona exists BEFORE charging — a bad persona key is
     # caller error and should never burn credits.
-    persona_check = supabase.table("agent_personas").select("key").eq(
-        "key", request.investor_persona
-    ).eq("is_active", True).execute()
-
-    if not persona_check.data:
+    #
+    # Source of truth is the hardcoded PERSONA_KEYS registry — the same
+    # set the research agent dispatches on. Don't gate on agent_personas
+    # DB rows: that table is decorative metadata for the iOS persona
+    # picker, can be empty in fresh environments, and /personas already
+    # serves a hardcoded fallback when it is. Gating /generate on a DB
+    # row that /personas papers over would silently break the whole
+    # feature whenever the table is unseeded or grants drift.
+    if request.investor_persona not in PERSONA_KEYS:
         return make_error_response(
             ErrorCode.INVALID_PERSONA,
             message=f"Unknown persona key: {request.investor_persona!r}",

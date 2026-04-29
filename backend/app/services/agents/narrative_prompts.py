@@ -760,18 +760,6 @@ Return ONLY valid JSON (no markdown fences):
     "bull_case": ["<MAX 4 sentences, IDEALLY 2-3, each ≤18 words>"],
     "bear_case": ["<MAX 4 sentences, IDEALLY 2-3, each ≤18 words>"]
   }},
-  "fundamental_metrics": [
-    {{"title": "Profitability", "star_rating": 1, "metrics": [{{"label": "Gross Margin", "value": "...", "trend": "up|down|flat|null"}}], "quality_label": ""}},
-    {{"title": "Valuation",     "star_rating": 1, "metrics": [{{"label": "P/E Ratio",  "value": "...", "trend": null}}], "quality_label": ""}},
-    {{"title": "Growth",        "star_rating": 1, "metrics": [{{"label": "Revenue Growth", "value": "...", "trend": "up|down|flat"}}], "quality_label": ""}},
-    {{"title": "Health",        "star_rating": 1, "metrics": [{{"label": "Current Ratio", "value": "...", "trend": null}}], "quality_label": ""}}
-  ],
-  "overall_assessment": {{
-    "text": "",
-    "average_rating": 3.0,
-    "strong_count": 0,
-    "weak_count": 0
-  }},
   "revenue_forecast": {{
     "management_guidance": "raised|maintained|lowered",
     "guidance_quote": null
@@ -831,7 +819,6 @@ Return ONLY valid JSON (no markdown fences):
 
 RULES:
 - quality_score: integer 0-100 reflecting your conviction on this stock
-- star_rating: integer 1-5 per fundamental card
 - moat dimension scores 0.0-10.0
 - macro impact 0.0-1.0
 - 3-4 executive_summary_bullets (don't pad to 5)
@@ -839,8 +826,8 @@ RULES:
 - 3-6 macro risk_factors (skip ones that don't materially affect this company)
 - 2-4 critical_factors
 - 3-5 competitors, ranked by relevance
-- For fundamental_metrics values: REUSE the real numbers from the data block above (don't restate them rounded)
-- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "hedge_fund_note" / "quality_label" field as the placeholder shown above. Those will be written by a separate prose pass.
+- DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
+- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "hedge_fund_note" field as the placeholder shown above. Those will be written by a separate prose pass.
 - Return raw JSON only — no markdown fences, no commentary
 """
 

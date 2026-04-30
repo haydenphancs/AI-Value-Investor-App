@@ -8,7 +8,7 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_or_guest  # TEMP: guest fallback
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ async def get_current_user_info(
 
 @router.get("/me/credits", response_model=UserCreditsResponse)
 async def get_user_credits(
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's credit balance from user_credits table."""

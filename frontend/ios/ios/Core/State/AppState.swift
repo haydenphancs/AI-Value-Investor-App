@@ -134,6 +134,34 @@ final class AppState {
         research = ResearchState()
     }
 
+    /// Sign in. Throws on failure so the SignInView can render the error inline.
+    func signIn(email: String, password: String) async throws {
+        auth.status = .loading
+        do {
+            let profile = try await authService.signIn(email: email, password: password)
+            self.user.profile = profile
+            auth.status = .authenticated
+        } catch {
+            auth.status = .unauthenticated
+            throw error
+        }
+    }
+
+    /// Sign up. Throws on failure so the SignInView can render the error inline.
+    func signUp(email: String, password: String, displayName: String) async throws {
+        auth.status = .loading
+        do {
+            let profile = try await authService.signUp(
+                email: email, password: password, displayName: displayName
+            )
+            self.user.profile = profile
+            auth.status = .authenticated
+        } catch {
+            auth.status = .unauthenticated
+            throw error
+        }
+    }
+
     // MARK: - Error Handling
 
     func handleError(_ error: Error) {

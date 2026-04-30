@@ -85,7 +85,11 @@ async def get_optional_user_id(
             return None
 
 
-GUEST_USER_ID = "00000000-0000-0000-0000-000000000000"
+# TEMP: shared guest user used by research/credits endpoints while the
+# iOS login UI is not yet built. Backed by a real auth.users row +
+# public.users row + user_credits row (50 credits seeded). Switch back
+# to strict get_current_user once SignInView is wired into RootView.
+GUEST_USER_ID = "00000000-0000-4000-8000-00000000dead"
 
 
 async def get_current_user_or_guest(
@@ -122,8 +126,16 @@ class RateLimitChecker:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    async def __call__(self, user_id: str = Depends(get_current_user_id)):
-        if not rate_limiter.is_allowed(user_id, self.max_requests, self.window_seconds):
+    async def __call__(
+        self,
+        user_id: Optional[str] = Depends(get_optional_user_id),  # TEMP: guest fallback
+    ):
+        # TEMP: while research/credits endpoints accept the GUEST_USER_ID,
+        # the rate limit must not 401 on missing auth. Bucket all
+        # unauthenticated callers together under "guest" so a single
+        # abusive guest can't drown out everyone else.
+        key = user_id or f"guest:{GUEST_USER_ID}"
+        if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit exceeded. Please try again later.",

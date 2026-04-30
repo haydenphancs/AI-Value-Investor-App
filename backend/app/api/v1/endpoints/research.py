@@ -27,7 +27,11 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.database import get_supabase
-from app.dependencies import get_current_user, StandardRateLimit
+from app.dependencies import (
+    get_current_user,
+    get_current_user_or_guest,  # TEMP: guest fallback while login UI not built
+    StandardRateLimit,
+)
 from app.schemas.research import (
     GenerateResearchRequest,
     ResearchGenerationResponse,
@@ -51,7 +55,7 @@ router = APIRouter()
 @router.post("/generate", response_model=ResearchGenerationResponse)
 async def generate_research_report(
     request: GenerateResearchRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
     _rate_limit=StandardRateLimit,
 ):
@@ -165,7 +169,7 @@ async def generate_research_report(
 @router.get("/reports/{report_id}/status", response_model=ResearchStatusResponse)
 async def get_research_status(
     report_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Poll report generation status (frontend calls every ~3s).
@@ -238,7 +242,7 @@ def _split_structured_error(
 @router.get("/reports/{report_id}", response_model=ResearchReportDetail)
 async def get_research_report(
     report_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Fetch the full research report. RLS enforced via user_id check."""
@@ -262,7 +266,7 @@ async def get_research_report(
 @router.get("/reports/{report_id}/ticker-report")
 async def get_research_ticker_report(
     report_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -312,7 +316,7 @@ async def get_research_ticker_report(
 @router.get("/reports")
 async def get_my_reports(
     limit: int = Query(20, le=100),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's research reports (lightweight list).
@@ -347,7 +351,7 @@ async def get_my_reports(
 async def rate_report(
     report_id: str,
     request: RateReportRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Rate a research report (1-5 stars with optional feedback)."""
@@ -368,7 +372,7 @@ async def rate_report(
 @router.delete("/reports/{report_id}")
 async def delete_report(
     report_id: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
     supabase: Client = Depends(get_supabase),
 ):
     """Soft-delete a research report (sets status = 'deleted')."""

@@ -97,8 +97,10 @@ struct RootView: View {
                 SplashView()
 
             case .unauthenticated:
-                // For now, go straight to main app (no auth required yet)
-                // Later: Show onboarding/login
+                // TEMP: login UI not built yet — fall through to main app.
+                // Backend research/credits endpoints fall back to the
+                // GUEST_USER_ID row so charge/refund still work end-to-end.
+                // Restore SignInView() here once the proper login flow ships.
                 RootContainerView()
 
             case .authenticated:

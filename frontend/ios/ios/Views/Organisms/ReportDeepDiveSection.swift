@@ -12,12 +12,6 @@ struct ReportDeepDiveSection<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     @State private var isExpanded: Bool = false
-    // Deferred content build: keeps the tap responsive when the inner
-    // section contains heavy charts (Canvas, SwiftUI Charts, GeometryReader).
-    // Without this, opening a 2nd/3rd section synchronously builds a chart
-    // tree during the same layout pass that resizes the parent — long enough
-    // to look like a freeze.
-    @State private var contentReady: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,7 +41,7 @@ struct ReportDeepDiveSection<Content: View>: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            if isExpanded && contentReady {
+            if isExpanded {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
@@ -57,14 +51,6 @@ struct ReportDeepDiveSection<Content: View>: View {
                 .background(AppColors.textMuted.opacity(0.15))
         }
         .background(AppColors.cardBackground)
-        .task(id: isExpanded) {
-            if isExpanded {
-                await Task.yield()
-                contentReady = true
-            } else {
-                contentReady = false
-            }
-        }
     }
 }
 

@@ -11,10 +11,13 @@ struct ReportDeepDiveSection<Content: View>: View {
     let module: DeepDiveModule
     @ViewBuilder let content: () -> Content
 
-    // Local state — toggling does NOT cascade into a parent re-render,
-    // so other expanded sections are not forced to re-evaluate their
-    // (chart-heavy) bodies. Mirrors SnapshotCard.
     @State private var isExpanded: Bool = false
+    // Deferred content build: keeps the tap responsive when the inner
+    // section contains heavy charts (Canvas, SwiftUI Charts, GeometryReader).
+    // Without this, opening a 2nd/3rd section synchronously builds a chart
+    // tree during the same layout pass that resizes the parent — long enough
+    // to look like a freeze.
+    @State private var contentReady: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,29 +38,33 @@ struct ReportDeepDiveSection<Content: View>: View {
 
                     Spacer()
 
-                    Image(systemName: "chevron.down")
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(AppTypography.iconXS).fontWeight(.semibold)
                         .foregroundColor(AppColors.textMuted)
-                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                        .animation(.easeInOut(duration: 0.2), value: isExpanded)
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.lg)
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Expanded content - only built when visible.
-            if isExpanded {
+            if isExpanded && contentReady {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
-                    .transition(.opacity.animation(.easeOut(duration: 0.18)))
             }
 
             Divider()
                 .background(AppColors.textMuted.opacity(0.15))
         }
         .background(AppColors.cardBackground)
+        .task(id: isExpanded) {
+            if isExpanded {
+                await Task.yield()
+                contentReady = true
+            } else {
+                contentReady = false
+            }
+        }
     }
 }
 

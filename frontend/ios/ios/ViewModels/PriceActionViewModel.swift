@@ -40,6 +40,20 @@ class PriceActionViewModel: ObservableObject {
         let prices = data.prices
         let current = data.currentPrice
 
+        // Empty prices would crash the index math below.
+        guard !prices.isEmpty else {
+            return PriceActionContext(
+                tag: "Normal",
+                displayPercentage: "0.0%",
+                percentValue: 0,
+                timeLabel: "No data",
+                chartData: [],
+                eventIndex: nil,
+                narrative: data.narrative,
+                isPositive: true
+            )
+        }
+
         // 1) Event-driven: calculate change from event date
         if let event = data.event, event.index >= 0, event.index < prices.count {
             let eventPrice = prices[event.index]

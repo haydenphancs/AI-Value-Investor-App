@@ -73,7 +73,7 @@ struct TickerReportView: View {
 
             ZStack(alignment: .bottom) {
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xxl) {
+                    VStack(spacing: AppSpacing.xxl) {
                         // Agent Badge + Score
                         agentScoreSection(report)
 
@@ -175,7 +175,6 @@ struct TickerReportView: View {
                     }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
             .padding(.horizontal, AppSpacing.lg)
         }
     }

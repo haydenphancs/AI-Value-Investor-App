@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     COINGECKO_API_KEY: str = ""
     COINGECKO_BASE_URL: str = "https://api.coingecko.com/api/v3"
 
+    # FRED (Federal Reserve Economic Data) — free tier ~120 req/min.
+    # Used to ground the Macro module in real CPI / Fed Funds / yield-curve
+    # data. When unset, the FRED-backed risk factors silently degrade
+    # rather than crash the report (see app/integrations/fred.py).
+    FRED_API_KEY: str = ""
+    FRED_BASE_URL: str = "https://api.stlouisfed.org/fred"
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

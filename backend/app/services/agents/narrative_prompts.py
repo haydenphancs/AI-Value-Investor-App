@@ -331,19 +331,33 @@ def _price_action_narrative_prompt(
     event = pa.get("event") or {}
     event_str = (
         f"event: {event.get('tag')} on {event.get('date')}"
-        if event else "no notable earnings event in the last ~30 days"
+        if event else "no notable catalyst event in the last ~30 days"
     )
+    # Real news headlines from `out.news` matched against the keyword
+    # classifier, surfaced via `price_action._news_headlines` in the
+    # collector. Ground the narrative in these so the AI cites real
+    # articles instead of speculating about why the stock moved.
+    headlines = pa.get("_news_headlines") or []
+    if headlines:
+        headlines_str = "\n".join(
+            f"- [{h.get('date')}] {h.get('tag')}: {h.get('title')} "
+            f"({h.get('site') or 'wire'})"
+            for h in headlines[:5]
+        )
+        headlines_block = f"\nRECENT MATCHED HEADLINES (within the chart window):\n{headlines_str}\n"
+    else:
+        headlines_block = ""
     return f"""Explain the recent 20-day price movement in two sentences.
 
 CHART CONTEXT: {event_str}
-
+{headlines_block}
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Tie price action to a real catalyst (earnings, news, sector move) when possible. If the chart is flat, say so directly — don't invent a story."""
+Tie price action to a real catalyst (earnings, news, sector move) when possible — when matched headlines are listed above, cite the most relevant one by name rather than inventing a generic reason. If the chart is flat, say so directly. Never fabricate a catalyst that isn't in the data above."""
 
 
 def _revenue_engine_analysis_note_prompt(
@@ -604,18 +618,11 @@ def build_narrative_jobs(
         ))
 
     # ── revenue_forecast.guidance_quote ──────────────────────────────
-    rf = shell.get("revenue_forecast")
-    if isinstance(rf, dict):
-        jobs.append(NarrativeJob(
-            label="revenue_forecast_guidance_quote",
-            prompt=_revenue_forecast_guidance_quote_prompt(
-                persona, evidence, shell
-            ),
-            word_cap=34,
-            apply=_setter_with_null(rf, "guidance_quote"),
-            fallback_value=FALLBACK["guidance_quote"],
-            nullable=True,
-        ))
+    # PR 6 — extraction moved to Stage A (verbatim from transcript with
+    # speaker / period attribution). The previous Stage B paraphrase
+    # job overwrote Stage A's verbatim quote with a free-text rewrite,
+    # which defeated the anti-fabrication design. No-op here; Stage A's
+    # output flows through `assemble_report` unchanged.
 
     # ── key_management.ownership_insight ─────────────────────────────
     km = shell.get("key_management")
@@ -762,7 +769,9 @@ Return ONLY valid JSON (no markdown fences):
   }},
   "revenue_forecast": {{
     "management_guidance": "raised|maintained|lowered",
-    "guidance_quote": null
+    "guidance_quote": null,
+    "guidance_speaker": null,
+    "guidance_period": null
   }},
   "insider_analysis": {{
     "ownership_note": null,
@@ -786,7 +795,8 @@ Return ONLY valid JSON (no markdown fences):
       "future_tam": 0,
       "current_year": "2025",
       "future_year": "2030",
-      "lifecycle_phase": "emerging|secular_growth|mature|declining"
+      "lifecycle_phase": "emerging|secular_growth|mature|declining",
+      "tam_source_quote": ""
     }},
     "dimensions": [
       {{"name": "Switching Costs",  "score": 0.0, "peer_score": 0.0}},
@@ -828,6 +838,18 @@ RULES:
 - 3-5 competitors, ranked by relevance
 - DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
 - Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "hedge_fund_note" field as the placeholder shown above. Those will be written by a separate prose pass.
+- moat_competition.market_dynamics.concentration AND moat_competition.competitors are RECOMPUTED downstream from real FMP peer + sector data — your values for those fields are discarded. You may still fill them as best-guess for sanity, but accuracy doesn't matter there.
+- moat_competition.market_dynamics.current_tam / future_tam: STRICT EXTRACTION ONLY. Set to a USD-denominated number (e.g. 150000000000 for $150B) **only when the EARNINGS-CALL TRANSCRIPT EXCERPT or the company description above contains an explicit, quoted TAM/addressable-market figure**. Set both to 0 when no figure is disclosed. Do NOT estimate from sector context, competitor data, or your training-data knowledge of the industry. Forced fabrication here is the highest-cost failure mode for this product.
+- moat_competition.market_dynamics.tam_source_quote: when current_tam > 0, paste the verbatim sentence from the transcript / description that contains the figure (≤ 200 chars). When current_tam = 0, return "".
+- moat_competition.market_dynamics.future_year: when future_tam > 0, set to the year in which the projection is stated (e.g. "2030"). Otherwise leave the default.
+- revenue_forecast.management_guidance + guidance_quote: STRICT EXTRACTION ONLY from the EARNINGS-CALL TRANSCRIPT EXCERPT above.
+  * Set `management_guidance` to "raised" only when the transcript contains explicit raise language ("we now expect", "we are raising our outlook", "we increased our full-year guidance", "guidance was lifted", etc.).
+  * "lowered" only on explicit cut language ("we are lowering", "we now see", "guidance was reduced", "below prior outlook", etc.).
+  * "maintained" otherwise (including when the transcript wasn't supplied or didn't mention guidance — this is the safe default).
+  * Do NOT infer status from sentiment, tone, or your training-data knowledge.
+- revenue_forecast.guidance_quote: when management_guidance is "raised" or "lowered", paste the verbatim sentence containing the guidance language (≤ 280 chars, single line, exact transcript words). When "maintained" or no quote available → return null.
+- revenue_forecast.guidance_speaker: when guidance_quote is non-null, set to "CFO" | "CEO" | "IR" based on who said it in the transcript. Null otherwise.
+- revenue_forecast.guidance_period: when guidance_quote is non-null and the speaker referenced a period (e.g. "Q4 2025", "FY 2026", "next quarter"), set to that period string ≤ 30 chars. Null when not specified.
 - Return raw JSON only — no markdown fences, no commentary
 """
 

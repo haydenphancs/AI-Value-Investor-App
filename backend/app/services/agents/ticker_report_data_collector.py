@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
@@ -48,6 +48,14 @@ from app.schemas.analyst import (
 from app.schemas.holders import HoldersResponse
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.stock_overview import SnapshotItemResponse
+from app.services._insider_common import (
+    classify_insider_transaction,
+    is_informative,
+)
+from app.services.sector_aggregates_service import (
+    SectorAggregates,
+    get_sector_aggregates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +85,105 @@ _SEGMENT_META_KEYS = {
     "acceptedDate", "calendarYear", "period", "link", "finalLink",
     "fiscalYear", "data",
 }
+
+
+# ── Macro indicators (PR 4) ───────────────────────────────────────────
+#
+# Per-request snapshot of the FMP-tradeable macro signals that anchor
+# the Macro & Geopolitical module's risk factors. Symbol formats follow
+# FMP conventions (commodities: <BASE>USD, FX: <BASE><QUOTE>, indices:
+# ^<TICKER>). Symbols that FMP can't resolve gracefully degrade — the
+# `_build_macro_risk_factors_from_indicators` builder skips any whose
+# `change_1m_pct` we couldn't fetch, rather than emitting a fake risk.
+#
+# Roughly ordered by signal strength for the average equity holder:
+#   * WTI crude — energy costs, inflation pass-through
+#   * Gold — flight-to-safety, real-rate / dollar pressure proxy
+#   * Copper — global industrial demand
+#   * VIX — market volatility regime
+#   * 10Y Treasury — risk-free rate, the discount denominator
+#   * USD Index — multinational FX translation
+_MACRO_SYMBOLS: Tuple[str, ...] = (
+    "CLUSD",  # WTI Crude oil
+    "GCUSD",  # Gold
+    "HGUSD",  # Copper
+    "SIUSD",  # Silver
+    "^VIX",   # CBOE Volatility Index
+    "^TNX",   # 10-year Treasury yield
+    "DXY",    # USD index
+    "EURUSD", "USDJPY", "USDCNY",  # Major FX
+)
+
+
+# ── News catalyst classification ──────────────────────────────────────
+#
+# Module-scope keyword map so a future PR can swap to a smarter
+# classifier (or model-based extractor) without touching the price-action
+# builder. Match is case-insensitive substring against `title + " " + text`.
+# Order matters within a tag — the first match wins, so longer / more
+# specific phrases come first.
+NEWS_CATALYST_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("FDA Approval", (
+        "fda approval", "fda approved", "fda clears",
+        "approved by fda", "approval to market", "phase 3 success",
+    )),
+    ("FDA Rejection", (
+        "fda rejects", "rejection letter",
+        "complete response letter", "fda denied",
+    )),
+    ("M&A", (
+        "to acquire", "acquisition of", "merger with",
+        "buyout", "agreed to be acquired", "takeover bid",
+    )),
+    ("Analyst Upgrade", (
+        "upgrades to", "raises price target",
+        "raises rating", "analyst upgrade",
+    )),
+    ("Analyst Downgrade", (
+        "downgrades to", "cuts price target",
+        "lowers rating", "analyst downgrade",
+    )),
+    ("Guidance Raised", (
+        "raises guidance", "raises full-year",
+        "boosts outlook", "raises forecast",
+    )),
+    ("Guidance Cut", (
+        "lowers guidance", "cuts outlook",
+        "lowers forecast", "warns of",
+    )),
+    ("Lawsuit", (
+        "lawsuit", "class action", "files suit",
+        "sec investigation", "doj probe",
+    )),
+    ("Buyback", (
+        "share buyback", "stock repurchase",
+        "authorizes repurchase", "expands buyback",
+    )),
+    ("Dividend", (
+        "raises dividend", "dividend increase", "special dividend",
+    )),
+    ("Layoffs", (
+        "layoffs", "to cut jobs",
+        "workforce reduction", "restructuring",
+    )),
+]
+
+
+def _classify_news_catalyst(title: str, text: str) -> Optional[str]:
+    """Return the catalyst tag for a headline, or None if nothing matches.
+
+    Lowercases once; iterates the module-level keyword map in order so
+    more-specific tags (FDA Rejection) take priority over less-specific
+    ones (Layoffs) if both somehow matched. First match wins.
+    """
+    blob = f"{title or ''} {text or ''}".lower()
+    if not blob.strip():
+        return None
+    for tag, phrases in NEWS_CATALYST_KEYWORDS:
+        for phrase in phrases:
+            if phrase in blob:
+                return tag
+    return None
 
 
 # ── Output dataclass ──────────────────────────────────────────────────
@@ -118,6 +225,33 @@ class CollectedTickerData:
     snap_growth: Optional[SnapshotItemResponse] = None
     snap_valuation: Optional[SnapshotItemResponse] = None
     revenue_breakdown: Optional[RevenueBreakdownResponse] = None
+
+    # ── Peer + sector data for the Moat module (PR 2) ───────────────────
+    # `peer_tickers` is fetched in pass 1 (alongside FMP financial calls).
+    # `peer_profiles` and `sector_aggregates` are fetched in pass 2 since
+    # they depend on `peer_tickers` and `profile.sector` resolving first.
+    peer_tickers: List[str] = field(default_factory=list)
+    peer_profiles: List[Dict[str, Any]] = field(default_factory=list)
+    sector_aggregates: Optional[SectorAggregates] = None
+
+    # ── Earnings call transcript (PR 3 — TAM extraction; PR 6 — guidance) ──
+    # Latest available quarterly transcript text from FMP. Empty string when
+    # the ticker has no transcripts (e.g. small-cap, foreign listings).
+    transcript: str = ""
+
+    # ── Macro indicators for the Macro module (PR 4) ────────────────────
+    # Per-symbol dict: {symbol, current_price, change_1m_pct, change_1y_pct}
+    # for commodities / FX / VIX / Treasury. Empty list when FMP is
+    # unreachable — the Macro module then renders only AI-derived
+    # geopolitical / regulatory factors.
+    macro_indicators: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ── FRED snapshots for the Macro module (PR 5) ──────────────────────
+    # Per-series snapshot: {series_id, latest, as_of, yoy_pct, ...}
+    # for CPI, Fed Funds, 10Y Treasury, 10Y-2Y spread. Empty list when
+    # FRED_API_KEY is missing or the API errors — risk factors derived
+    # from these series simply don't appear; AI-driven factors still do.
+    fred_indicators: List[Dict[str, Any]] = field(default_factory=list)
 
     # ── Computed metrics (real numbers / None) ────────────────────────
     computed: Dict[str, Any] = field(default_factory=dict)
@@ -254,6 +388,24 @@ class TickerReportDataCollector:
                 get_revenue_breakdown_service().get_revenue_breakdown(ticker),
                 None,
             ),
+            # Peer ticker list — needed by pass 2 to fan out for peer
+            # profiles. Cheap (single FMP call); kept in pass 1 so we
+            # don't pay an extra round-trip when peers are empty.
+            ("peer_tickers", self.fmp.get_stock_peers(ticker), []),
+            # Earnings-call transcript — primary source for TAM extraction
+            # (PR 3) and management-guidance extraction (PR 6). Two FMP
+            # calls under the hood (list + content) but small payloads.
+            ("transcript", self.fmp.get_earning_call_transcript(ticker), ""),
+            # Macro indicators (PR 4) — commodities + FX + VIX + 10Y.
+            # One FMP call per symbol via stock-price-change which already
+            # returns 1D / 5D / 1M / 1Y % changes; no historical fetch
+            # needed. Total ~10 extra parallel calls per request.
+            ("macro_indicators", self._fetch_macro_indicators(), []),
+            # FRED indicators (PR 5) — CPI / Fed Funds / 10Y / yield curve.
+            # 4 FRED API calls behind a 6h in-memory cache, so usually 0
+            # network calls per request after a worker warms up. No-op
+            # when FRED_API_KEY is missing.
+            ("fred_indicators", self._fetch_fred_indicators(), []),
         ]
 
         results = await asyncio.gather(
@@ -269,6 +421,136 @@ class TickerReportDataCollector:
                 setattr(out, attr, default)
             else:
                 setattr(out, attr, result if result is not None else default)
+
+        # ── Pass 2: fetches that depend on pass-1 results ─────────────
+        # peer_profiles needs peer_tickers; sector_aggregates needs
+        # profile.sector. Both can run in parallel within the second pass.
+        await self._fetch_dependent(out)
+
+    async def _fetch_fred_indicators(self) -> List[Dict[str, Any]]:
+        """Fetch FRED snapshots (CPI, Fed Funds, 10Y, T10Y2Y) in parallel.
+
+        Returns dicts mirroring `FREDSeriesSnapshot` shape so downstream
+        code can stay JSON-friendly without importing the dataclass.
+        Empty list when the FRED API key is missing — caller treats that
+        as "FRED unavailable" and skips the corresponding risk factors.
+        """
+        # Lazy import — keeps the FRED dependency out of test paths that
+        # don't exercise the macro module (e.g. schema-parity tests).
+        from app.integrations.fred import (
+            MACRO_SERIES,
+            FREDSeriesSnapshot,
+            get_fred_client,
+        )
+
+        client = get_fred_client()
+        if not client.is_configured:
+            return []
+
+        async def _one(series_id: str) -> Optional[FREDSeriesSnapshot]:
+            try:
+                return await client.get_snapshot(series_id)
+            except Exception as e:
+                logger.warning(
+                    f"FRED snapshot failed for {series_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return None
+
+        snaps = await asyncio.gather(
+            *[_one(sid) for sid in MACRO_SERIES.keys()]
+        )
+        out: List[Dict[str, Any]] = []
+        for snap in snaps:
+            if snap is None:
+                continue
+            out.append({
+                "series_id": snap.series_id,
+                "latest": snap.latest,
+                "as_of": snap.as_of,
+                "yoy_pct": snap.yoy_pct,
+                "change_6mo_pct": snap.change_6mo_pct,
+                "change_6mo_relative_pct": snap.change_6mo_relative_pct,
+            })
+        return out
+
+    async def _fetch_macro_indicators(self) -> List[Dict[str, Any]]:
+        """Fetch the latest 1M/1Y change for every macro symbol in one pass.
+
+        Each lookup is a single FMP `stock-price-change` call that
+        returns intraday + multi-period percentages, so we don't pay
+        for a separate historical fetch per symbol. Failures degrade
+        silently — missing symbols just drop out of the output list
+        rather than corrupt the parallel gather.
+        """
+        async def _one(sym: str) -> Optional[Dict[str, Any]]:
+            try:
+                row = await self.fmp.get_stock_price_change(sym)
+                if not isinstance(row, dict) or not row:
+                    return None
+                # FMP returns numeric % changes already — no math here.
+                return {
+                    "symbol": sym,
+                    "change_1m_pct": _num_or_none(row.get("1M")),
+                    "change_1y_pct": _num_or_none(row.get("1Y")),
+                    "change_5d_pct": _num_or_none(row.get("5D")),
+                }
+            except Exception as e:
+                logger.warning(
+                    f"macro indicator fetch failed for {sym}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return None
+
+        results = await asyncio.gather(*[_one(s) for s in _MACRO_SYMBOLS])
+        return [r for r in results if r is not None]
+
+    async def _fetch_dependent(self, out: CollectedTickerData) -> None:
+        """Second-pass fetches that depend on first-pass data resolving.
+
+        Kept separate so the first pass stays a flat parallel gather
+        (easy to reason about, no per-task ordering bugs). Both
+        sub-tasks here degrade gracefully — peer profiles missing
+        means the Moat module's competitor list is empty, sector
+        aggregates missing means market_dynamics renders honest
+        defaults.
+        """
+        ticker = out.ticker
+        # Cap peer fan-out to keep FMP costs bounded; iOS only renders
+        # up to ~6 competitors anyway.
+        peers = (out.peer_tickers or [])[:8]
+        sector = (out.profile or {}).get("sector")
+
+        peer_profiles_task = (
+            self.fmp.get_company_profiles_batch(peers)
+            if peers else asyncio.sleep(0, result=[])
+        )
+        sector_agg_task = (
+            get_sector_aggregates(sector)
+            if sector else asyncio.sleep(0, result=None)
+        )
+
+        peer_profiles, sector_agg = await asyncio.gather(
+            peer_profiles_task, sector_agg_task, return_exceptions=True,
+        )
+
+        if isinstance(peer_profiles, Exception):
+            logger.warning(
+                f"Collector pass 2: peer_profiles failed for {ticker}: "
+                f"{type(peer_profiles).__name__}: {peer_profiles}"
+            )
+            out.peer_profiles = []
+        else:
+            out.peer_profiles = peer_profiles or []
+
+        if isinstance(sector_agg, Exception):
+            logger.warning(
+                f"Collector pass 2: sector_aggregates failed for {ticker}: "
+                f"{type(sector_agg).__name__}: {sector_agg}"
+            )
+            out.sector_aggregates = None
+        else:
+            out.sector_aggregates = sector_agg
 
     # ── Phase 2: derived metrics with edge-case correctness ───────────
 
@@ -468,11 +750,12 @@ class TickerReportDataCollector:
             out.insider_roster, profile
         )
 
-        # ── Price action: deterministic earnings event detection ──────
+        # ── Price action: deterministic earnings + news-catalyst event ──
         out.price_action_partial = _build_price_action(
             c.get("recent_prices") or [],
             current_price,
             out.earnings_dates,
+            out.news,
         )
 
         # ── Revenue engine segments ───────────────────────────────────
@@ -573,33 +856,52 @@ class TickerReportDataCollector:
         ai_re = ai.get("revenue_engine") or {}
         revenue_engine["analysis_note"] = ai_re.get("analysis_note")
 
-        # ── Revenue forecast: AI provides guidance + quote ───────────
+        # ── Revenue forecast: AI extracts guidance from transcript (PR 6).
+        # Anti-fabrication overlay mirrors the TAM logic — when AI
+        # claims "raised"/"lowered" without a verbatim source quote,
+        # we coerce to "maintained" and null the attribution metadata.
+        # This matches the Stage A prompt rule that requires a quote
+        # for any non-default status.
         revenue_forecast = dict(out.revenue_forecast_partial)
         ai_rf = ai.get("revenue_forecast") or {}
-        revenue_forecast["management_guidance"] = (
-            ai_rf.get("management_guidance") or "maintained"
-        )
-        revenue_forecast["guidance_quote"] = ai_rf.get("guidance_quote")
+        _overlay_ai_guidance(revenue_forecast, ai_rf)
 
         # ── Wall Street consensus: AI fills only hedge_fund_note ─────
         wall_street_consensus = dict(out.wall_street_consensus_partial)
         ai_ws = ai.get("wall_street") or {}
         wall_street_consensus["hedge_fund_note"] = ai_ws.get("hedge_fund_note")
 
-        # ── Moat: AI provides dimensions + market_dynamics + ─────────
-        # competitors + insight + durability_note. We then derive the
-        # moat *vital* (overall_rating, primary_source, tags, labels)
-        # from the real dimension scores.
+        # ── Moat: dimensions, durability_note, competitive_insight come ─
+        # from Stage A AI (qualitative). market_dynamics + competitors
+        # are now collector-derived from real FMP data — AI's versions
+        # are intentionally discarded for parity with the rest of the
+        # "real data wins" policy that already governs fundamental_metrics
+        # and the wall-street consensus.
         ai_moat = ai.get("moat_competition") or {}
         moat_dims = list(ai_moat.get("dimensions") or [])
+        deterministic_market_dynamics = _build_market_dynamics(
+            out.profile, out.sector_aggregates,
+        )
+        # PR 3 — overlay the AI-extracted TAM from the transcript onto
+        # the deterministic market_dynamics. AI was instructed to set
+        # current_tam / future_tam ONLY when the transcript or company
+        # description contained an explicit quoted figure; otherwise it
+        # returns 0 and we keep the deterministic 0.0 placeholder.
+        _overlay_ai_tam(deterministic_market_dynamics, ai_moat.get("market_dynamics"))
+        deterministic_competitors = _build_competitors(
+            my_ticker=out.ticker,
+            my_ratios=out.ratios,
+            my_revenue_growth=c.get("revenue_growth_yoy"),
+            peer_profiles=out.peer_profiles,
+        )
         moat_competition = {
-            "market_dynamics": ai_moat.get("market_dynamics") or _default_market_dynamics(out.profile),
+            "market_dynamics": deterministic_market_dynamics,
             "dimensions": moat_dims,
             "durability_note": (
                 ai_moat.get("durability_note")
                 or "Data unavailable for this ticker."
             ),
-            "competitors": list(ai_moat.get("competitors") or []),
+            "competitors": deterministic_competitors,
             "competitive_insight": (
                 ai_moat.get("competitive_insight")
                 or "Data unavailable for this ticker."
@@ -607,11 +909,27 @@ class TickerReportDataCollector:
         }
         moat_vital = _derive_moat_vital(moat_dims)
 
-        # ── Macro: AI provides risk_factors + threat_level + brief ───
+        # ── Macro: deterministic numeric factors merge into AI's qualitative
+        # ones. Order of priority (real data wins on category collision):
+        #   1. FRED snapshots (CPI / Fed Funds / yield curve) — PR 5
+        #   2. FMP commodities/FX/VIX/rates — PR 4
+        #   3. AI-generated geopolitical / regulatory / sector factors
+        # FRED comes first because the underlying series are the most
+        # authoritative (BLS / Treasury) and least noisy.
         ai_macro = ai.get("macro_data") or {}
-        risk_factors = [
+        ai_risk_factors = [
             _sanitize_risk_factor(rf) for rf in (ai_macro.get("risk_factors") or [])
         ]
+        fred_factors = _build_macro_risk_factors_from_fred(out.fred_indicators)
+        fmp_factors = _build_macro_risk_factors_from_indicators(
+            out.macro_indicators
+        )
+        # Two-pass merge: FRED first (most authoritative), then FMP
+        # commodities, then AI. The merge helper already de-dupes by
+        # category, so a FRED `interest_rates` entry will block both an
+        # FMP yield-curve factor and an AI rate-policy factor.
+        merged_after_fred = _merge_macro_risk_factors(fred_factors, fmp_factors)
+        risk_factors = _merge_macro_risk_factors(merged_after_fred, ai_risk_factors)
         threat_level = ai_macro.get("overall_threat_level") or "low"
         macro_data = {
             "overall_threat_level": threat_level,
@@ -1118,8 +1436,8 @@ def _build_wall_street_sections(
     wall_street_vital = {
         "score": {"value": 7.0, "status": ws_status},
         "consensus_rating": consensus_rating,
-        "price_target": round(target_price if target_price > 0 else (fair_value or 0.0), 0),
-        "current_price": round(current_price, 0),
+        "price_target": round(target_price if target_price > 0 else (fair_value or 0.0), 2),
+        "current_price": round(current_price, 2),
         "upgrades": upgrades,
         "downgrades": downgrades,
     }
@@ -1129,6 +1447,16 @@ def _build_wall_street_sections(
         {"month": p["month"], "price": p["price"]}
         for p in monthly_prices
     ]
+    # Pin the last (most recent) point to live `current_price` so the chart
+    # line terminates exactly where the iOS `$<currentPrice>` badge sits —
+    # otherwise the line ends at the prior month's close while the badge is
+    # at currentPrice.y, leaving a visible gap. Preserves 12-point parity
+    # with `hf_flow_data`.
+    if hf_price_data and current_price > 0:
+        hf_price_data[-1] = {
+            "month": hf_price_data[-1]["month"],
+            "price": round(current_price, 2),
+        }
     hf_flow_data = _hedge_fund_flow_from_holders(holders, monthly_prices)
 
     # ── Valuation status uses DCF upside (model-implied), distinct ───
@@ -1156,10 +1484,10 @@ def _build_wall_street_sections(
 
     consensus_partial = {
         "rating": consensus_rating,
-        "current_price": round(current_price, 0),
-        "target_price": round(target_price if target_price > 0 else (fair_value or current_price), 0),
-        "low_target": round(low_target if low_target > 0 else current_price * 0.85, 0),
-        "high_target": round(high_target if high_target > 0 else (fair_value or current_price) * 1.3, 0),
+        "current_price": round(current_price, 2),
+        "target_price": round(target_price if target_price > 0 else (fair_value or current_price), 2),
+        "low_target": round(low_target if low_target > 0 else current_price * 0.85, 2),
+        "high_target": round(high_target if high_target > 0 else (fair_value or current_price) * 1.3, 2),
         "valuation_status": val_status,
         "discount_percent": max(0.0, discount_pct),
         "hedge_fund_note": None,  # filled by AI in assemble_report
@@ -1525,14 +1853,18 @@ def _build_revenue_forecast_partial(
             "revenue_label": _format_revenue(rev),
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps else "$0",
-            "is_forecast": i > 0,
+            # FMP `analyst-estimates` is forward-looking only — every entry
+            # is a future-period analyst estimate, never an actual.
+            "is_forecast": True,
         })
     return {
         "cagr": revenue_cagr if revenue_cagr is not None else 0.0,
         "eps_growth": eps_cagr if eps_cagr is not None else 0.0,
-        "management_guidance": "maintained",  # AI overrides
+        "management_guidance": "maintained",  # AI overrides via Stage A
         "projections": projections,
-        "guidance_quote": None,  # AI fills
+        "guidance_quote": None,         # AI fills via Stage A (PR 6)
+        "guidance_speaker": None,       # AI fills via Stage A (PR 6)
+        "guidance_period": None,        # AI fills via Stage A (PR 6)
     }
 
 
@@ -1564,19 +1896,25 @@ def _build_insider_sections(
 
     recent = [t for t in insider_trades if _is_in_window(t)]
 
+    # Match HoldersService Smart Money classification: keep only common-stock
+    # rows + only Informative trades (open-market P-Purchase / pure S-Sale).
+    # Drops RSU vesting, option exercises, tax withholding, gifts — i.e.
+    # compensation mechanics that don't carry sentiment signal. Without
+    # this, the report's buy/sell counts disagree with the Holders tab.
     buys: List[Dict[str, Any]] = []
     sells: List[Dict[str, Any]] = []
     for t in recent:
-        # FMP marks Form-4 acquisitions/dispositions in
-        # `acquisitionOrDisposition` ("A"/"D"). Fall back to
-        # transactionType prefix when missing.
-        ad = (t.get("acquisitionOrDisposition") or "").upper()
-        if not ad:
-            tx_type = (t.get("transactionType") or "").upper()
-            ad = "A" if tx_type.startswith("P") else "D" if tx_type.startswith("S") else ""
-        if ad == "A":
+        sec = (t.get("securityName") or "").lower()
+        if sec and "common stock" not in sec:
+            continue
+        classification = classify_insider_transaction(
+            t.get("transactionType") or ""
+        )
+        if not is_informative(classification):
+            continue
+        if classification == "Informative Buy":
             buys.append(t)
-        elif ad == "D":
+        else:  # "Informative Sell"
             sells.append(t)
 
     def _aggregate(rows: List[Dict[str, Any]]) -> Tuple[float, float]:
@@ -1691,25 +2029,120 @@ def _build_key_management(
     }
 
 
+def _price_change_at_index(
+    recent_prices: List[float], idx: int,
+) -> float:
+    """Percent change at the given chart index using the same
+    `(after - before) / before * 100` formula the earnings path uses
+    so the two candidate types are scored on equal terms.
+
+    Returns 0.0 when `before` is missing/zero so we don't accidentally
+    score a divide-by-zero as a giant move.
+    """
+    if not recent_prices or idx < 0 or idx >= len(recent_prices):
+        return 0.0
+    before = recent_prices[max(0, idx - 1)]
+    after = recent_prices[min(len(recent_prices) - 1, idx + 1)]
+    if not before:
+        return 0.0
+    return (after - before) / before * 100
+
+
+def _index_for_date(
+    target: date, today: date, recent_prices: List[float],
+) -> int:
+    """Map a calendar date to a chart-array index.
+
+    The chart's right edge is "today", so days_ago=0 → last index, and
+    older dates step backwards. Clamps to the array bounds rather than
+    raising for off-by-one robustness.
+    """
+    days_ago = (today - target).days
+    return max(0, min(len(recent_prices) - 1, len(recent_prices) - days_ago - 1))
+
+
+def _detect_news_catalysts(
+    news: List[Dict[str, Any]],
+    recent_prices: List[float],
+    today: date,
+    window_start: date,
+) -> List[Dict[str, Any]]:
+    """Scan FMP news within the chart window and return scored candidates.
+
+    Each candidate carries `tag/date/index/abs_move_pct/title/site/url`
+    so the price-action builder can compare against an earnings event
+    and also so the narrative prompt can cite real headlines.
+
+    Pass-through items missing a parseable date are skipped (rather than
+    snapped to "today") because a misdated catalyst would corrupt the
+    priority comparison with the earnings event.
+    """
+    if not news or not recent_prices:
+        return []
+    candidates: List[Dict[str, Any]] = []
+    for item in news:
+        title = item.get("title") or ""
+        text = item.get("text") or ""
+        tag = _classify_news_catalyst(title, text)
+        if tag is None:
+            continue
+        published = item.get("publishedDate") or item.get("date") or ""
+        try:
+            d = datetime.strptime(published[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if not (window_start <= d <= today):
+            continue
+        idx = _index_for_date(d, today, recent_prices)
+        move = _price_change_at_index(recent_prices, idx)
+        candidates.append({
+            "tag": tag,
+            "date": d,
+            "index": idx,
+            "abs_move_pct": abs(move),
+            "title": title,
+            "site": item.get("site") or "",
+            "url": item.get("url") or "",
+        })
+    return candidates
+
+
 def _build_price_action(
     recent_prices: List[float],
     current_price: float,
     earnings_dates: List[str],
+    news: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """20-day chart + deterministic earnings event detection.
+    """20-day chart + deterministic event detection (earnings + news catalysts).
 
-    Walks `earnings_dates` looking for one within the last ~30 calendar
-    days, then classifies the price reaction (>+3% = beat, <-3% =
-    miss, otherwise = reaction). When no earnings event falls in
-    window, `event` is None and the iOS chart skips the marker.
+    Two candidate sources are scored against each other:
+      1. Earnings dates within the last 30 days — classified by reaction
+         (>+3% = beat, <-3% = miss, else = reaction).
+      2. News headlines within the same window — classified by keyword
+         match into catalyst tags (FDA Approval, M&A, Buyback, etc.).
+
+    Priority rule: when both fire, the candidate with the larger
+    absolute price move at its date-mapped index wins. Ties go to
+    earnings (date is higher-confidence than headline string-match).
+    Ties between catalysts go to the more recent one.
+
+    Also emits `_news_headlines` (top 5 most-recent matched headlines,
+    minus the priority winner if it came from news) so Stage B can
+    ground the narrative in real articles instead of speculating. The
+    underscore prefix flags it as Pydantic-ignored — `PriceActionResponse`
+    silently drops it before serializing to iOS.
     """
     if not recent_prices:
-        recent_prices = [current_price] * 20 if current_price > 0 else []
+        # Honest empty state — a flat 20-point line at current_price would
+        # misrepresent reality. iOS skips render when the array is empty.
+        recent_prices = []
 
-    event = None
+    today = datetime.now(timezone.utc).date()
+    window_start = today - timedelta(days=30)
+
+    # ── Earnings candidate (existing logic, unchanged) ────────────────
+    earnings_candidate: Optional[Dict[str, Any]] = None
     if recent_prices and earnings_dates:
-        today = datetime.now(timezone.utc).date()
-        window_start = today - timedelta(days=30)
         for ed in earnings_dates:
             try:
                 d = datetime.strptime(ed[:10], "%Y-%m-%d").date()
@@ -1717,33 +2150,99 @@ def _build_price_action(
                 continue
             if not (window_start <= d <= today):
                 continue
-            days_ago = (today - d).days
-            idx = max(0, min(len(recent_prices) - 1, len(recent_prices) - days_ago - 1))
-            before = recent_prices[max(0, idx - 1)]
-            after = recent_prices[min(len(recent_prices) - 1, idx + 1)]
-            change = ((after - before) / before * 100) if before else 0.0
+            idx = _index_for_date(d, today, recent_prices)
+            change = _price_change_at_index(recent_prices, idx)
             if change > 3:
                 tag = "Earnings Beat"
             elif change < -3:
                 tag = "Earnings Miss"
             else:
                 tag = "Earnings Reaction"
-            event = {
+            earnings_candidate = {
                 "tag": tag,
                 "date": d.strftime("%b ") + str(d.day),
                 "index": idx,
+                "abs_move_pct": abs(change),
+                "_source": "earnings",
             }
             break
+
+    # ── News-catalyst candidates ──────────────────────────────────────
+    news_candidates = _detect_news_catalysts(
+        news or [], recent_prices, today, window_start,
+    )
+
+    # ── Priority rule: pick the largest absolute price move ──────────
+    # Earnings ties → earnings (higher confidence). Catalyst ties →
+    # most recent date.
+    chosen_event: Optional[Dict[str, Any]] = None
+    best_news: Optional[Dict[str, Any]] = None
+    if news_candidates:
+        # Sort: largest move desc, then most recent date desc.
+        news_candidates.sort(
+            key=lambda c: (c["abs_move_pct"], c["date"]),
+            reverse=True,
+        )
+        best_news = news_candidates[0]
+
+    if earnings_candidate and best_news:
+        if best_news["abs_move_pct"] > earnings_candidate["abs_move_pct"]:
+            chosen_event = {
+                "tag": best_news["tag"],
+                "date": best_news["date"].strftime("%b ") + str(best_news["date"].day),
+                "index": best_news["index"],
+            }
+        else:
+            chosen_event = {
+                k: v for k, v in earnings_candidate.items()
+                if k in ("tag", "date", "index")
+            }
+    elif earnings_candidate:
+        chosen_event = {
+            k: v for k, v in earnings_candidate.items()
+            if k in ("tag", "date", "index")
+        }
+    elif best_news:
+        chosen_event = {
+            "tag": best_news["tag"],
+            "date": best_news["date"].strftime("%b ") + str(best_news["date"].day),
+            "index": best_news["index"],
+        }
+
+    # ── Headlines for the narrative prompt ───────────────────────────
+    # Top 5 most recent matched headlines. Pydantic strips this before
+    # serializing to iOS (the `PriceActionResponse` schema doesn't
+    # declare `_news_headlines`, so `extra="ignore"` drops it).
+    headline_evidence = sorted(
+        news_candidates, key=lambda c: c["date"], reverse=True,
+    )[:5]
+    evidence_payload = [
+        {
+            "tag": c["tag"],
+            "date": c["date"].isoformat(),
+            "title": c["title"],
+            "site": c["site"],
+        }
+        for c in headline_evidence
+    ]
 
     return {
         "prices": recent_prices,
         "current_price": round(current_price, 2),
-        "event": event,
+        "event": chosen_event,
         "narrative": None,  # AI fills
+        "_news_headlines": evidence_payload,  # Pydantic-ignored
     }
 
 
 def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Honest fallback when no `SectorAggregates` row is available.
+
+    Concentration defaults to `fragmented` (rather than the more
+    pessimistic `mature` cycle phase) because absence-of-data should
+    not look like presence-of-bad-data. iOS will render these as a
+    placeholder card and the user knows the batch hasn't populated yet.
+    """
     now_year = datetime.now(timezone.utc).year
     return {
         "industry": profile.get("industry") or "Unknown",
@@ -1754,7 +2253,676 @@ def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
         "current_year": str(now_year),
         "future_year": str(now_year + 5),
         "lifecycle_phase": "mature",
+        "tam_source_quote": None,
     }
+
+
+# ── Macro risk-factor derivation (PR 4) ──────────────────────────────
+
+
+def _classify_macro_severity(
+    abs_change: float, mild: float, elevated: float, severe: float,
+) -> Tuple[str, float]:
+    """Return (severity_enum, impact_0_to_1) for a |%| change.
+
+    Banded thresholds keep the iOS color coding stable: a 0.1% bump
+    won't flip a card from "low" to "high". Impact is a 0-1 score the
+    iOS view uses to set bar fill width — saturating at the top band
+    so a one-week oil shock still maxes out the indicator.
+    """
+    a = abs(abs_change)
+    if a >= severe:
+        return "severe", 1.0
+    if a >= elevated:
+        return "high", min(1.0, 0.5 + (a - elevated) / max(severe - elevated, 1e-6) * 0.5)
+    if a >= mild:
+        return "elevated", 0.4
+    return "low", 0.2
+
+
+def _macro_trend(change_pct: Optional[float]) -> str:
+    """Map a signed 1M change into the iOS trend enum.
+
+    Positive change → 'worsening' for risk-shaped indicators (oil,
+    gold rallying, VIX spiking). Caller may invert when the indicator
+    semantics are reversed (e.g. copper: a decline is the worry).
+    """
+    if change_pct is None:
+        return "stable"
+    if change_pct > 1.0:
+        return "worsening"
+    if change_pct < -1.0:
+        return "improving"
+    return "stable"
+
+
+def _build_macro_risk_factors_from_indicators(
+    indicators: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Translate the macro indicator snapshot into MacroRiskFactor entries.
+
+    Per-indicator thresholds are calibrated to the typical month-over-
+    month behavior of each series — an 8% oil move is normal noise,
+    a 25% move is a regime shift. Indicators with unavailable 1M data
+    are skipped (no fabricated risks).
+
+    Returns a list of dicts shaped for `MacroRiskFactorResponse`. The
+    `assemble_report` step merges these with AI-generated qualitative
+    factors (geopolitical events, regulation), with deterministic
+    factors winning when the categories collide.
+    """
+    if not indicators:
+        return []
+
+    by_sym = {row["symbol"]: row for row in indicators}
+    out: List[Dict[str, Any]] = []
+
+    def _add(*, symbol: str, factor: Dict[str, Any]) -> None:
+        row = by_sym.get(symbol)
+        if not row or row.get("change_1m_pct") is None:
+            return
+        out.append(factor)
+
+    # ── WTI Crude oil ───────────────────────────────────────────────
+    oil = by_sym.get("CLUSD")
+    if oil and oil.get("change_1m_pct") is not None:
+        change = float(oil["change_1m_pct"])
+        sev, impact = _classify_macro_severity(
+            change, mild=5.0, elevated=15.0, severe=30.0,
+        )
+        out.append({
+            "category": "energy",
+            "title": "Oil Price Pressure",
+            "impact": round(impact, 2),
+            "trend": _macro_trend(change),
+            "severity": sev if change > 0 else ("low" if sev == "low" else "elevated"),
+            "description": (
+                f"WTI crude is {'+' if change >= 0 else ''}{change:.1f}% over the "
+                f"last month. {'Energy costs feed CPI and weigh on margin.' if change > 5 else 'Energy backdrop neutral.'}"
+            ),
+        })
+
+    # ── Gold (flight-to-safety / real-rate / dollar-weakness proxy) ──
+    gold = by_sym.get("GCUSD")
+    if gold and gold.get("change_1m_pct") is not None:
+        change = float(gold["change_1m_pct"])
+        if abs(change) >= 3.0:  # below this, gold is just noise
+            sev, impact = _classify_macro_severity(
+                change, mild=3.0, elevated=8.0, severe=15.0,
+            )
+            out.append({
+                "category": "currency",
+                "title": "Gold / Safe-Haven Flow",
+                "impact": round(impact, 2),
+                "trend": "worsening" if change > 0 else "improving",
+                "severity": sev,
+                "description": (
+                    f"Gold is {'+' if change >= 0 else ''}{change:.1f}% MoM — "
+                    f"{'classic flight-to-safety signal.' if change > 3 else 'risk appetite improving.'}"
+                ),
+            })
+
+    # ── Copper (global industrial demand) ───────────────────────────
+    copper = by_sym.get("HGUSD")
+    if copper and copper.get("change_1m_pct") is not None:
+        change = float(copper["change_1m_pct"])
+        if change <= -5.0:
+            sev, impact = _classify_macro_severity(
+                change, mild=5.0, elevated=10.0, severe=20.0,
+            )
+            out.append({
+                "category": "supply_chain",
+                "title": "Industrial Demand Weakness",
+                "impact": round(impact, 2),
+                "trend": "worsening",
+                "severity": sev,
+                "description": (
+                    f"Copper {change:.1f}% MoM — Dr. Copper signaling slowing "
+                    f"industrial activity."
+                ),
+            })
+
+    # ── VIX (volatility regime) ──────────────────────────────────────
+    vix = by_sym.get("^VIX")
+    if vix and vix.get("change_1m_pct") is not None:
+        change = float(vix["change_1m_pct"])
+        # VIX cares about absolute level too, but stock-price-change
+        # gives us only deltas. A large positive 1M move is the signal.
+        if change >= 15.0:
+            sev, impact = _classify_macro_severity(
+                change, mild=15.0, elevated=30.0, severe=60.0,
+            )
+            out.append({
+                "category": "regulation",  # closest enum slot for "market regime"
+                "title": "Volatility Spike",
+                "impact": round(impact, 2),
+                "trend": "worsening",
+                "severity": sev,
+                "description": (
+                    f"VIX up {change:.1f}% MoM — equity volatility regime "
+                    f"shifting risk-off."
+                ),
+            })
+
+    # ── 10Y Treasury (rates / discount rate) ─────────────────────────
+    tnx = by_sym.get("^TNX")
+    if tnx and tnx.get("change_1m_pct") is not None:
+        change = float(tnx["change_1m_pct"])
+        if abs(change) >= 5.0:
+            sev, impact = _classify_macro_severity(
+                change, mild=5.0, elevated=12.0, severe=25.0,
+            )
+            out.append({
+                "category": "interest_rates",
+                "title": "Yield Curve Move",
+                "impact": round(impact, 2),
+                "trend": "worsening" if change > 0 else "improving",
+                "severity": sev,
+                "description": (
+                    f"10Y Treasury yield {'+' if change >= 0 else ''}{change:.1f}% MoM. "
+                    f"{'Higher rates pressure equity multiples.' if change > 0 else 'Lower rates support multiples.'}"
+                ),
+            })
+
+    # ── USD index (multinational FX translation risk) ────────────────
+    dxy = by_sym.get("DXY")
+    if dxy and dxy.get("change_1m_pct") is not None:
+        change = float(dxy["change_1m_pct"])
+        if abs(change) >= 2.0:
+            sev, impact = _classify_macro_severity(
+                change, mild=2.0, elevated=4.0, severe=8.0,
+            )
+            out.append({
+                "category": "currency",
+                "title": "USD Strength" if change > 0 else "USD Weakness",
+                "impact": round(impact, 2),
+                "trend": "worsening" if change > 0 else "improving",
+                "severity": sev,
+                "description": (
+                    f"DXY {'+' if change >= 0 else ''}{change:.1f}% MoM — "
+                    f"{'foreign revenue translation drag.' if change > 0 else 'tailwind for international revenue.'}"
+                ),
+            })
+
+    return out
+
+
+def _build_macro_risk_factors_from_fred(
+    fred: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Translate FRED snapshots into MacroRiskFactor entries.
+
+    Each snapshot becomes at most one factor — silenced entirely when
+    the latest value isn't actionable (e.g. CPI YoY in the 0-2% normal
+    range). Embeds the actual number in `description` so iOS users see
+    the source figure ("CPI: 4.2% YoY").
+
+    Calibration:
+      * CPI YoY > 4% → high (cost-of-capital / margin compression)
+      * CPI YoY 2.5-4% → elevated
+      * Fed Funds 6-month rise >= 100 bps → elevated (tightening cycle)
+      * 10Y-2Y spread < 0 → severe (recession signal historically reliable)
+      * 10Y-2Y 0-0.5% → elevated (warning band)
+      * 10Y yield > 5% → elevated (discount-rate pressure)
+    """
+    if not fred:
+        return []
+    by_id: Dict[str, Dict[str, Any]] = {row["series_id"]: row for row in fred}
+    out: List[Dict[str, Any]] = []
+
+    # ── CPI (CPIAUCSL) ──────────────────────────────────────────────
+    cpi = by_id.get("CPIAUCSL")
+    if cpi and cpi.get("yoy_pct") is not None:
+        yoy = float(cpi["yoy_pct"])
+        if yoy >= 4.0:
+            sev, impact, label = "high", min(1.0, 0.5 + (yoy - 4.0) / 4.0), "Elevated Inflation"
+        elif yoy >= 2.5:
+            sev, impact, label = "elevated", 0.5, "Above-Target Inflation"
+        else:
+            sev, impact, label = None, None, None
+        if sev is not None:
+            out.append({
+                "category": "inflation",
+                "title": label,
+                "impact": round(impact, 2),
+                "trend": "worsening" if yoy >= 4 else "stable",
+                "severity": sev,
+                "description": (
+                    f"CPI is +{yoy:.1f}% YoY (as of {cpi.get('as_of', 'recent')}) — "
+                    f"{'pressure on margins and consumer spend.' if yoy >= 4 else 'still above the Fed 2% target.'}"
+                ),
+            })
+
+    # ── Fed Funds (FEDFUNDS): rate of change matters ────────────────
+    ff = by_id.get("FEDFUNDS")
+    if ff and ff.get("change_6mo_pct") is not None:
+        delta = float(ff["change_6mo_pct"])
+        latest = float(ff.get("latest") or 0.0)
+        if abs(delta) >= 1.0:
+            sev = "elevated" if abs(delta) < 2.0 else "high"
+            out.append({
+                "category": "interest_rates",
+                "title": "Fed Funds Tightening" if delta > 0 else "Fed Funds Easing",
+                "impact": min(1.0, 0.4 + abs(delta) / 4.0),
+                "trend": "worsening" if delta > 0 else "improving",
+                "severity": sev,
+                "description": (
+                    f"Effective Fed Funds Rate is {latest:.2f}% — "
+                    f"{'+' if delta >= 0 else ''}{delta:.2f}pp over the last 6 months."
+                ),
+            })
+
+    # ── 10Y-2Y Treasury spread: inversion = recession signal ────────
+    spread = by_id.get("T10Y2Y")
+    if spread and spread.get("latest") is not None:
+        s = float(spread["latest"])
+        if s < 0:
+            out.append({
+                "category": "interest_rates",
+                "title": "Inverted Yield Curve",
+                "impact": min(1.0, 0.7 + abs(s) / 2.0),
+                "trend": "worsening",
+                "severity": "severe",
+                "description": (
+                    f"10Y-2Y spread at {s:+.2f}% — historically a leading "
+                    f"recession indicator."
+                ),
+            })
+        elif s < 0.5:
+            out.append({
+                "category": "interest_rates",
+                "title": "Flat Yield Curve",
+                "impact": 0.5,
+                "trend": "worsening",
+                "severity": "elevated",
+                "description": (
+                    f"10Y-2Y spread at {s:+.2f}% — flattening curve signals "
+                    f"slowdown risk."
+                ),
+            })
+
+    # ── 10Y Treasury level (DGS10): only emit when very high ────────
+    tnx = by_id.get("DGS10")
+    if tnx and tnx.get("latest") is not None:
+        level = float(tnx["latest"])
+        if level >= 5.0:
+            out.append({
+                "category": "interest_rates",
+                "title": "High Long-Term Rates",
+                "impact": min(1.0, 0.4 + (level - 5.0) / 2.0),
+                "trend": "stable",
+                "severity": "elevated",
+                "description": (
+                    f"10Y Treasury yield at {level:.2f}% — discount-rate "
+                    f"pressure on equity multiples."
+                ),
+            })
+
+    return out
+
+
+def _merge_macro_risk_factors(
+    deterministic: List[Dict[str, Any]],
+    ai_factors: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Combine the two risk-factor lists; deterministic wins on overlap.
+
+    Deterministic factors come first (tradeable / numeric). AI-generated
+    factors are appended only when they don't duplicate a category we
+    already covered with real numbers — this prevents the AI from
+    overwriting a sourced "Oil Price Pressure" entry with a vaguer
+    "energy market dynamics" one. Caps total at 6 (iOS shows up to 6).
+    """
+    out: List[Dict[str, Any]] = list(deterministic)
+    seen_categories = {f.get("category") for f in deterministic}
+    for f in ai_factors or []:
+        if not isinstance(f, dict):
+            continue
+        cat = f.get("category")
+        if cat in seen_categories:
+            continue
+        out.append(f)
+        seen_categories.add(cat)
+        if len(out) >= 6:
+            break
+    return out[:6]
+
+
+_VALID_GUIDANCE_STATUSES = ("raised", "maintained", "lowered")
+_VALID_GUIDANCE_SPEAKERS = ("CFO", "CEO", "IR")
+
+
+def _overlay_ai_guidance(
+    revenue_forecast: Dict[str, Any], ai_rf: Optional[Dict[str, Any]],
+) -> None:
+    """Mutate `revenue_forecast` in place with the AI-extracted guidance fields.
+
+    Anti-fabrication rules (mirror the TAM overlay design):
+      1. Status defaults to "maintained" — the safe, low-information
+         answer. We only escalate to "raised"/"lowered" when AI provided
+         BOTH a non-default status AND a non-empty source quote.
+      2. `guidance_quote` is required for non-default status. Without
+         it, the entire attribution payload is rejected — speaker /
+         period drop to null and status falls back to "maintained".
+      3. Quote is truncated at 280 chars (transcript sentences can
+         get long; iOS bubble caps at this width).
+      4. `guidance_speaker` is normalized to one of the iOS-supported
+         labels ("CFO" / "CEO" / "IR"). Anything else → null.
+      5. `guidance_period` is taken at face value (any short string)
+         and capped at 30 chars.
+    """
+    if not isinstance(ai_rf, dict):
+        # No AI output → keep collector defaults (maintained / nulls).
+        return
+
+    raw_status = ai_rf.get("management_guidance")
+    status = (
+        raw_status.lower().strip()
+        if isinstance(raw_status, str) else "maintained"
+    )
+    if status not in _VALID_GUIDANCE_STATUSES:
+        status = "maintained"
+
+    raw_quote = ai_rf.get("guidance_quote")
+    quote: Optional[str] = None
+    if isinstance(raw_quote, str):
+        cleaned = raw_quote.strip()
+        if cleaned and cleaned.lower() not in ("null", "none", "n/a"):
+            quote = cleaned[:280]
+
+    # Anti-fabrication: a non-default status without a quote is a hallucination.
+    if status in ("raised", "lowered") and not quote:
+        status = "maintained"
+        quote = None
+
+    speaker_raw = ai_rf.get("guidance_speaker")
+    speaker: Optional[str] = None
+    if isinstance(speaker_raw, str):
+        s = speaker_raw.strip().upper()
+        if s in _VALID_GUIDANCE_SPEAKERS:
+            speaker = s
+
+    period_raw = ai_rf.get("guidance_period")
+    period: Optional[str] = None
+    if isinstance(period_raw, str):
+        p = period_raw.strip()
+        if p and p.lower() not in ("null", "none", "n/a"):
+            period = p[:30]
+
+    # Speaker / period only meaningful when we actually have a quote.
+    if quote is None:
+        speaker = None
+        period = None
+
+    revenue_forecast["management_guidance"] = status
+    revenue_forecast["guidance_quote"] = quote
+    revenue_forecast["guidance_speaker"] = speaker
+    revenue_forecast["guidance_period"] = period
+
+
+def _overlay_ai_tam(
+    market_dynamics: Dict[str, Any], ai_md: Optional[Dict[str, Any]],
+) -> None:
+    """Mutate `market_dynamics` in place with TAM fields the AI extracted.
+
+    AI is instructed (Stage A prompt) to fill `current_tam`/`future_tam`
+    only when an explicit, quoted figure appears in the earnings-call
+    transcript excerpt or the company description; otherwise it returns
+    0 and we keep the deterministic 0.0 placeholder.
+
+    Defenses:
+      - Negative or non-numeric values are ignored (treated as 0).
+      - `tam_source_quote` is required (and non-empty) for any positive
+        TAM to be applied — if AI provides a number without a source
+        quote, it's discarded as fabrication.
+      - `future_year` is only overridden when it parses as a 4-digit
+        year string (so AI typos don't break the iOS chart axis).
+    """
+    if not isinstance(ai_md, dict):
+        return
+    quote = ai_md.get("tam_source_quote")
+    if not isinstance(quote, str):
+        quote = ""
+    quote = quote.strip()
+    if not quote:
+        # No source citation → reject any TAM number as un-grounded.
+        return
+
+    def _safe_positive(v: Any) -> Optional[float]:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0 else None
+
+    current = _safe_positive(ai_md.get("current_tam"))
+    future = _safe_positive(ai_md.get("future_tam"))
+
+    if current is None and future is None:
+        return
+
+    if current is not None:
+        market_dynamics["current_tam"] = round(current, 0)
+    if future is not None:
+        market_dynamics["future_tam"] = round(future, 0)
+    market_dynamics["tam_source_quote"] = quote[:200]
+
+    fy = ai_md.get("future_year")
+    if isinstance(fy, (int, str)):
+        s = str(fy).strip()
+        if s.isdigit() and len(s) == 4:
+            market_dynamics["future_year"] = s
+
+
+def _build_market_dynamics(
+    profile: Dict[str, Any],
+    sector_agg: Optional[SectorAggregates],
+) -> Dict[str, Any]:
+    """Real `MarketDynamicsResponse` payload from sector aggregates.
+
+    Concentration enum (Swift `MarketConcentration`):
+      - `monopoly`  — top firm > 50% sector market cap
+      - `duopoly`   — top 2 firms > 70% combined
+      - `oligopoly` — HHI >= 1500 (DOJ "moderately concentrated")
+      - `fragmented`— everything else
+
+    Lifecycle enum (Swift `LifecyclePhase`):
+      - `secular_growth` — sector 5Y CAGR > 15%
+      - `declining`      — CAGR < 0
+      - `emerging`       — fewer than 5 sector constituents
+      - `mature`         — default
+
+    TAM stays 0.0 here — extracted from 10-K MD&A in PR 3.
+    """
+    if sector_agg is None:
+        return _default_market_dynamics(profile)
+
+    now_year = datetime.now(timezone.utc).year
+    industry = profile.get("industry") or "Unknown"
+
+    # Structural concentration: prioritize top-N share thresholds
+    # because they capture market shape (one dominant firm vs. duopoly)
+    # better than HHI alone, which can fail to distinguish a 1×80%/19×1%
+    # market from a 5×40% one.
+    if sector_agg.top1_share_pct > 50.0:
+        concentration = "monopoly"
+    elif sector_agg.top2_share_pct > 70.0:
+        concentration = "duopoly"
+    elif sector_agg.hhi >= 1500.0:
+        concentration = "oligopoly"
+    else:
+        concentration = "fragmented"
+
+    cagr = sector_agg.cagr_5yr_pct
+    if sector_agg.num_constituents > 0 and sector_agg.num_constituents < 5:
+        lifecycle = "emerging"
+    elif cagr > 15.0:
+        lifecycle = "secular_growth"
+    elif cagr < 0.0:
+        lifecycle = "declining"
+    else:
+        lifecycle = "mature"
+
+    return {
+        "industry": industry,
+        "concentration": concentration,
+        "cagr_5yr": round(cagr, 1),
+        # TAM defaults to 0; `assemble_report` overlays the AI-extracted
+        # value (PR 3) when the earnings transcript or company description
+        # contained an explicit, quoted TAM figure.
+        "current_tam": 0.0,
+        "future_tam": 0.0,
+        "current_year": str(now_year),
+        "future_year": str(now_year + 5),
+        "lifecycle_phase": lifecycle,
+        "tam_source_quote": None,
+    }
+
+
+def _peer_score(
+    op_margin: Optional[float],
+    roe: Optional[float],
+    revenue_growth: Optional[float],
+) -> Optional[float]:
+    """Composite signal for a peer's competitive strength.
+
+    Combines profitability (operating margin), capital efficiency (ROE),
+    and momentum (revenue growth). Each component contributes equally
+    after percentile-clamping so a single outlier doesn't dominate.
+
+    Returns None when all three inputs are missing — the peer can't
+    be ranked and is shown without a score downstream.
+    """
+    parts: List[float] = []
+    if op_margin is not None:
+        parts.append(max(-50.0, min(50.0, op_margin)))
+    if roe is not None:
+        parts.append(max(-50.0, min(50.0, roe)))
+    if revenue_growth is not None:
+        parts.append(max(-50.0, min(50.0, revenue_growth)))
+    if not parts:
+        return None
+    return sum(parts) / len(parts)
+
+
+def _normalize_to_0_10(values: List[float]) -> List[float]:
+    """Map an arbitrary numeric list onto a 0-10 scale by min-max scaling.
+
+    Used to project the peer-score distribution onto the iOS moat-score
+    range (0-10). When all peers tie or only one peer exists, every
+    score is 5.0 (the neutral midpoint) — neither the chart nor the
+    threat-level math benefits from spurious differentiation.
+    """
+    if not values:
+        return []
+    if len(values) == 1:
+        return [5.0]
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:
+        return [5.0] * len(values)
+    return [round(((v - lo) / (hi - lo)) * 10.0, 1) for v in values]
+
+
+def _build_competitors(
+    my_ticker: str,
+    my_ratios: List[Dict[str, Any]],
+    my_revenue_growth: Optional[float],
+    peer_profiles: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Real competitor list from FMP peer profiles.
+
+    Each entry:
+      - `name`, `ticker` from the peer profile
+      - `market_share_percent` from peer market cap / total peer market cap
+      - `moat_score` from min-max scaling of the peer-score signal onto 0-10
+      - `threat_level` from moat-score delta vs. the focal ticker's own
+        score in the same scaled space ("high" if peer >= focal+1.5,
+        "low" if peer <= focal-1.5, "moderate" otherwise)
+
+    Returns [] when peer profiles are missing — iOS handles the empty
+    list and the AI Stage A still writes the qualitative competitive
+    insight prose around it.
+    """
+    if not peer_profiles:
+        return []
+
+    # ── Score the focal ticker so we can compute threat-level deltas ──
+    my_op_margin = None
+    my_roe = None
+    if my_ratios:
+        r0 = my_ratios[0]
+        omp = r0.get("operatingProfitMargin")
+        if omp is not None:
+            my_op_margin = float(omp) * 100  # ratios endpoint uses 0-1
+        roe = r0.get("returnOnEquity")
+        if roe is not None:
+            my_roe = float(roe) * 100
+    my_raw_score = _peer_score(
+        my_op_margin, my_roe,
+        (my_revenue_growth * 100) if my_revenue_growth is not None else None,
+    )
+
+    # ── Score each peer from its profile (margins/ROE not in profile;
+    # fall back to whatever ratio-shaped fields the profile carries) ──
+    peer_data: List[Dict[str, Any]] = []
+    for p in peer_profiles:
+        sym = (p.get("symbol") or "").upper()
+        if not sym or sym == my_ticker.upper():
+            continue
+        mkt_cap = float(p.get("mktCap") or 0.0)
+        # FMP's profile carries `range`, `volAvg`, `lastDiv`, etc. but
+        # not margins. Use what's there: change-percentage as a weak
+        # momentum proxy when nothing better is available.
+        change_pct = p.get("changes")
+        peer_score_raw = _peer_score(
+            None, None,
+            float(change_pct) if change_pct is not None else None,
+        )
+        peer_data.append({
+            "name": p.get("companyName") or sym,
+            "ticker": sym,
+            "mkt_cap": mkt_cap,
+            "score_raw": peer_score_raw,
+        })
+
+    # Build the score distribution with the focal ticker included so
+    # min-max scaling places the focal somewhere on the same line. Then
+    # extract the focal's scaled score to compute threat-level deltas.
+    raw_scores: List[float] = []
+    for p in peer_data:
+        raw_scores.append(p["score_raw"] if p["score_raw"] is not None else 0.0)
+    raw_scores.append(my_raw_score if my_raw_score is not None else 0.0)
+    scaled = _normalize_to_0_10(raw_scores)
+    my_scaled = scaled[-1] if scaled else 5.0
+    peer_scaled = scaled[:-1]
+
+    total_peer_cap = sum(p["mkt_cap"] for p in peer_data) or 0.0
+
+    out: List[Dict[str, Any]] = []
+    for i, p in enumerate(peer_data):
+        moat_score = peer_scaled[i] if i < len(peer_scaled) else 5.0
+        share_pct = (
+            round((p["mkt_cap"] / total_peer_cap) * 100, 1)
+            if total_peer_cap > 0 else 0.0
+        )
+        delta = moat_score - my_scaled
+        if delta >= 1.5:
+            threat = "high"
+        elif delta <= -1.5:
+            threat = "low"
+        else:
+            threat = "moderate"
+        out.append({
+            "name": p["name"],
+            "ticker": p["ticker"],
+            "moat_score": moat_score,
+            "market_share_percent": share_pct,
+            "threat_level": threat,
+        })
+
+    # Largest peers first — iOS shows the top 4-5 competitors.
+    out.sort(key=lambda c: c["market_share_percent"], reverse=True)
+    return out
 
 
 def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2025,7 +3193,74 @@ def build_financial_context(out: CollectedTickerData) -> str:
             if title:
                 parts.append(f"  [{date}] {title[:120]}")
 
+    # Earnings-call transcript excerpt for TAM extraction (PR 3) and
+    # guidance extraction (PR 6 — landing later). We send the *first
+    # 2K chars* (prepared remarks where executives front-load the
+    # company's TAM/market-size story) plus *every paragraph that
+    # contains a TAM keyword* up to 3K more chars. That gives the AI
+    # the high-signal portion of the call without inflating the prompt
+    # with the Q&A section, which is rarely where a clean TAM lives.
+    if out.transcript:
+        excerpt = _extract_tam_relevant_excerpt(out.transcript)
+        if excerpt:
+            parts.append("\n\nEARNINGS-CALL TRANSCRIPT EXCERPT (verbatim — use only quoted figures):")
+            parts.append(excerpt)
+
     return "\n".join(parts)
+
+
+_TAM_KEYWORDS = (
+    "addressable market",
+    "total addressable market",
+    "tam",
+    "sam",  # serviceable addressable market
+    "market opportunity",
+    "market size",
+    "billion-dollar market",
+    "billion market",
+    "trillion market",
+    "industry size",
+    "market is estimated",
+    "market is projected",
+)
+
+
+def _extract_tam_relevant_excerpt(transcript: str, head_chars: int = 2000) -> str:
+    """Build a compact transcript excerpt focused on TAM-relevant content.
+
+    Returns the first ``head_chars`` characters (prepared remarks) plus
+    every paragraph that contains a TAM keyword (so the Q&A section's
+    market-size signal isn't lost), capped at ~5K chars total. This is
+    a heuristic snippet — strict prompt rules in Stage A guard against
+    fabrication when no real TAM appears.
+    """
+    if not transcript:
+        return ""
+    text = transcript.strip()
+    head = text[:head_chars]
+
+    # Pull paragraphs containing TAM keywords from the rest of the call.
+    rest = text[head_chars:]
+    paragraphs = rest.split("\n")
+    extra_chunks: List[str] = []
+    extra_budget = 3000
+    spent = 0
+    lower = lambda s: s.lower()
+    for para in paragraphs:
+        if spent >= extra_budget:
+            break
+        ll = lower(para)
+        if any(kw in ll for kw in _TAM_KEYWORDS):
+            chunk = para.strip()
+            if not chunk:
+                continue
+            extra_chunks.append(chunk)
+            spent += len(chunk) + 1
+
+    body = head
+    if extra_chunks:
+        body += "\n\n[TAM-mention paragraphs from later in the call]\n" + "\n\n".join(extra_chunks)
+    return body[:5000]
 
 
 def _fmt_or_na(v: Any) -> str:

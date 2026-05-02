@@ -452,6 +452,10 @@ struct ReportRevenueForecast {
     let managementGuidance: ManagementGuidance
     let projections: [RevenueProjection]
     let guidanceQuote: String?
+    // Attribution metadata for `guidanceQuote` (PR 6 — verbatim from
+    // earnings transcript). Both nil when no quote was extracted.
+    let guidanceSpeaker: String?       // "CFO" | "CEO" | "IR"
+    let guidancePeriod: String?        // "Q4 2025" | "FY 2026"
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
@@ -459,6 +463,18 @@ struct ReportRevenueForecast {
 
     var formattedEPSGrowth: String {
         "+\(String(format: "%.0f", epsGrowth))% CAGR"
+    }
+
+    /// Compose the iOS attribution caption shown beneath the quote bubble.
+    /// Returns nil when neither speaker nor period is available — the
+    /// view should hide the caption row entirely in that case.
+    var formattedGuidanceAttribution: String? {
+        switch (guidanceSpeaker, guidancePeriod) {
+        case let (s?, p?): return "\(s), \(p)"
+        case let (s?, nil): return s
+        case let (nil, p?): return p
+        case (nil, nil): return nil
+        }
     }
 }
 
@@ -762,6 +778,10 @@ struct MarketDynamics {
     let currentYear: String                 // "2025"
     let futureYear: String                  // "2030"
     let lifecyclePhase: LifecyclePhase      // .secularGrowth
+    // Verbatim quote from the earnings transcript / company description
+    // that the AI used to derive `currentTAM` / `futureTAM`. Nil when
+    // TAM was not extracted from real text (TAM stays 0 in that case).
+    let tamSourceQuote: String?
 
     var formattedCAGR: String {
         let sign = cagr5Yr >= 0 ? "+" : ""
@@ -1231,7 +1251,9 @@ extension TickerReportData {
                 RevenueProjection(period: "2027", revenue: 132, revenueLabel: "$132B", eps: 5.10, epsLabel: "$5.10", isForecast: true),
                 RevenueProjection(period: "2028", revenue: 145, revenueLabel: "$145B", eps: 6.20, epsLabel: "$6.20", isForecast: true)
             ],
-            guidanceQuote: "CFO expects accelerating cloud demand in Q3"
+            guidanceQuote: "CFO expects accelerating cloud demand in Q3",
+            guidanceSpeaker: "CFO",
+            guidancePeriod: "Q3 2026"
         ),
         insiderData: ReportInsiderData(
             sentiment: .negative,
@@ -1273,7 +1295,8 @@ extension TickerReportData {
                 futureTAM: 1600,
                 currentYear: "2025",
                 futureYear: "2030",
-                lifecyclePhase: .secularGrowth
+                lifecyclePhase: .secularGrowth,
+                tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030."
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

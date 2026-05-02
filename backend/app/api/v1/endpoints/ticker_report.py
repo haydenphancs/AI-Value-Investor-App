@@ -36,6 +36,7 @@ from app.api.error_response import (
 )
 from app.database import get_supabase
 from app.schemas.ticker_report import TickerReportResponse
+from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR
 from app.services.ticker_report_service import TickerReportService
 
 logger = logging.getLogger(__name__)
@@ -148,9 +149,13 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
     dedicated `ticker_report_cache` table existed. The new cache lives
     inside `TickerReportService` and `ResearchService`.
     """
-    cutoff = (
+    # Honor the same schema floor as `ticker_report_cache`: when the floor
+    # is more recent than the 24h TTL cutoff, use it instead so legacy rows
+    # generated under an older payload shape don't get served.
+    ttl_cutoff = (
         datetime.now(timezone.utc) - timedelta(hours=LEGACY_CACHE_TTL_HOURS)
-    ).isoformat()
+    )
+    cutoff = max(ttl_cutoff, CACHE_SCHEMA_FLOOR).isoformat()
 
     def _query():
         supabase = get_supabase()

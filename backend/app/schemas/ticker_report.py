@@ -158,6 +158,13 @@ class RevenueForecastResponse(BaseModel):
     management_guidance: str  # "raised" | "maintained" | "lowered"
     projections: List[RevenueProjectionResponse]
     guidance_quote: Optional[str] = None
+    # Attribution metadata for the quote — only populated when the AI
+    # extracted a verbatim quote from the earnings-call transcript.
+    # `guidance_speaker`: one of "CFO" | "CEO" | "IR" or null.
+    # `guidance_period`: the period the quote covers, e.g. "Q4 2025" |
+    # "FY 2026" | null when the speaker didn't tag a period.
+    guidance_speaker: Optional[str] = None
+    guidance_period: Optional[str] = None
 
 
 # ── Deep Dive: Insider & Management ───────────────────────────────────────────
@@ -235,6 +242,10 @@ class MarketDynamicsResponse(BaseModel):
     current_year: str
     future_year: str
     lifecycle_phase: str  # "emerging" | "secular_growth" | "mature" | "declining"
+    # Verbatim sentence from the earnings transcript / company description
+    # that the AI used to derive `current_tam`/`future_tam`. Empty string
+    # when no source quote was found (TAM stays 0 in that case).
+    tam_source_quote: Optional[str] = None
 
 
 class MoatDimensionResponse(BaseModel):

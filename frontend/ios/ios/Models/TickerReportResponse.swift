@@ -324,6 +324,8 @@ struct RevenueForecastDTO: Codable {
     let managementGuidance: String
     let projections: [RevenueProjectionDTO]
     let guidanceQuote: String?
+    let guidanceSpeaker: String?
+    let guidancePeriod: String?
 
     enum CodingKeys: String, CodingKey {
         case cagr
@@ -331,6 +333,8 @@ struct RevenueForecastDTO: Codable {
         case managementGuidance = "management_guidance"
         case projections
         case guidanceQuote = "guidance_quote"
+        case guidanceSpeaker = "guidance_speaker"
+        case guidancePeriod = "guidance_period"
     }
 }
 
@@ -449,6 +453,7 @@ struct MarketDynamicsDTO: Codable {
     let currentYear: String
     let futureYear: String
     let lifecyclePhase: String
+    let tamSourceQuote: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -458,6 +463,7 @@ struct MarketDynamicsDTO: Codable {
         case currentYear = "current_year"
         case futureYear = "future_year"
         case lifecyclePhase = "lifecycle_phase"
+        case tamSourceQuote = "tam_source_quote"
     }
 }
 
@@ -800,7 +806,9 @@ extension TickerReportAPIResponse {
                     epsLabel: p.epsLabel, isForecast: p.isForecast
                 )
             },
-            guidanceQuote: revenueForecast.guidanceQuote
+            guidanceQuote: revenueForecast.guidanceQuote,
+            guidanceSpeaker: revenueForecast.guidanceSpeaker,
+            guidancePeriod: revenueForecast.guidancePeriod
         )
 
         // Insider Data
@@ -857,7 +865,8 @@ extension TickerReportAPIResponse {
                 futureTAM: moatCompetition.marketDynamics.futureTam,
                 currentYear: moatCompetition.marketDynamics.currentYear,
                 futureYear: moatCompetition.marketDynamics.futureYear,
-                lifecyclePhase: Self.mapLifecycle(moatCompetition.marketDynamics.lifecyclePhase)
+                lifecyclePhase: Self.mapLifecycle(moatCompetition.marketDynamics.lifecyclePhase),
+                tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

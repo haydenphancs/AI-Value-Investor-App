@@ -291,6 +291,67 @@ class FMPClient:
             logger.warning(f"earning_calendar_full failed for {symbol}: {e}")
             return []
 
+    async def get_earning_call_transcript(
+        self, ticker: str, year: Optional[int] = None, quarter: Optional[int] = None,
+    ) -> str:
+        """Return the most recent earnings-call transcript text for a ticker.
+
+        FMP exposes the transcript at `/earning_call_transcript`. The
+        `year` and `quarter` params are required by the v3 endpoint, so
+        when they're not supplied we list available transcripts via
+        `earning-call-transcript-list` (newer endpoint) and pick the
+        latest. Returns "" on any failure — the caller treats that as
+        "transcript unavailable" and falls back to AI-without-transcript.
+
+        Used by:
+          - Stage A AI for TAM extraction (PR 3)
+          - Stage B guidance/quote extraction (PR 6)
+        """
+        symbol = ticker.upper()
+        # Resolve latest year/quarter when not provided.
+        if year is None or quarter is None:
+            try:
+                listing = await self._make_request(
+                    "earning-call-transcript-list", params={"symbol": symbol}
+                )
+                if isinstance(listing, list) and listing:
+                    # Newest first by (year desc, quarter desc).
+                    listing.sort(
+                        key=lambda x: (
+                            int(x.get("year") or 0),
+                            int(x.get("quarter") or 0),
+                        ),
+                        reverse=True,
+                    )
+                    head = listing[0]
+                    year = int(head.get("year") or 0)
+                    quarter = int(head.get("quarter") or 0)
+            except Exception as e:
+                logger.warning(
+                    f"earning-call-transcript-list failed for {symbol}: {e}"
+                )
+                return ""
+            if not year or not quarter:
+                return ""
+        try:
+            data = await self._make_request(
+                "earning_call_transcript",
+                params={"symbol": symbol, "year": year, "quarter": quarter},
+            )
+            if isinstance(data, list) and data:
+                # FMP returns [{symbol, quarter, year, date, content}, ...]
+                content = data[0].get("content") or ""
+                return content if isinstance(content, str) else ""
+            if isinstance(data, dict):
+                content = data.get("content") or ""
+                return content if isinstance(content, str) else ""
+        except Exception as e:
+            logger.warning(
+                f"earning_call_transcript failed for {symbol} "
+                f"({year}Q{quarter}): {e}"
+            )
+        return ""
+
     async def get_historical_earnings_dates(
         self, ticker: str
     ) -> List[str]:

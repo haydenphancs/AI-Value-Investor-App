@@ -315,6 +315,7 @@ class ResearchViewModel: ObservableObject {
         }
 
         isGeneratingAnalysis = true
+        selectedTab = .reports
         generationProgress = 0
         generationStep = "Starting analysis..."
         error = nil

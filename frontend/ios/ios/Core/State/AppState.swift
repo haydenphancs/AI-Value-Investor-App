@@ -102,28 +102,11 @@ final class AppState {
     // MARK: - Auth Actions
 
     private func restoreAuthState() async {
-        guard let token = authService.getStoredToken() else {
-            auth.status = .unauthenticated
-            return
-        }
-
-        // Set token on API client BEFORE making any authenticated request
-        await apiClient.setAuthToken(token)
-        auth.status = .loading
-
-        do {
-            let user = try await apiClient.request(
-                endpoint: .getCurrentUser,
-                responseType: UserProfile.self
-            )
-            self.user.profile = user
-            auth.status = .authenticated
-        } catch {
-            // Token invalid, clear it
-            authService.clearToken()
-            await apiClient.setAuthToken(nil)
-            auth.status = .unauthenticated
-        }
+        // DEV: auth disabled. Backend's research/credits endpoints already
+        // have a guest fallback (GUEST_USER_ID) — requests without a Bearer
+        // token are attributed to that guest. We force `.authenticated` so
+        // the iOS auth guards (e.g. ResearchViewModel.generateAnalysis) pass.
+        auth.status = .authenticated
     }
 
     func signOut() {

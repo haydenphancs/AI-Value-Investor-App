@@ -221,3 +221,5 @@ DerivedData/
 .vscode/settings.json
 
 .claude
+CLAUDE.md
+CLAUDE.local.md

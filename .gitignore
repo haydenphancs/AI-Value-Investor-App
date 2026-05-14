@@ -226,3 +226,4 @@ CLAUDE.local.md
 
 # Supabase CLI local cache
 supabase/.temp/
+dump.rdb

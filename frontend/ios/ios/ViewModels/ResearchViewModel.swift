@@ -302,14 +302,18 @@ class ResearchViewModel: ObservableObject {
     }
 
     func generateAnalysis() {
-        guard isAuthenticated() else {
-            showSignInPrompt = true
-            return
-        }
+        print("🔬 ResearchVM: generateAnalysis() tapped — searchText='\(searchText)', persona=\(selectedPersona.backendKey), credits=\(creditBalance.credits)")
+
+        // DEV: auth disabled — backend handles unauthenticated callers as guest.
 
         let ticker = searchText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !ticker.isEmpty else { return }
+        guard !ticker.isEmpty else {
+            print("⚠️ ResearchVM: bailed — ticker is empty after trimming. Surfacing error.")
+            error = "Please select a ticker first."
+            return
+        }
         guard creditBalance.credits >= analysisCost.credits else {
+            print("⚠️ ResearchVM: bailed — insufficient credits (\(creditBalance.credits) < \(analysisCost.credits)).")
             error = "Insufficient credits"
             return
         }

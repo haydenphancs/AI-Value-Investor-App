@@ -223,3 +223,6 @@ DerivedData/
 .claude
 CLAUDE.md
 CLAUDE.local.md
+
+# Supabase CLI local cache
+supabase/.temp/

@@ -45,11 +45,6 @@ struct ResearchContentView: View {
                 if viewModel.isLoading {
                     LoadingOverlay()
                 }
-
-                // Generation progress overlay
-                if viewModel.isGeneratingAnalysis {
-                    generationProgressOverlay
-                }
             }
             // Tap a ready Reports-tab card → push the AnalysisReport,
             // which carries the backend report ID + persona so the
@@ -120,54 +115,6 @@ struct ResearchContentView: View {
                 }
             }
         }
-    }
-
-    // MARK: - Generation Progress Overlay
-    private var generationProgressOverlay: some View {
-        VStack(spacing: AppSpacing.lg) {
-            Spacer()
-
-            VStack(spacing: AppSpacing.md) {
-                // Animated sparkle icon
-                Image(systemName: "sparkles")
-                    .font(.system(size: 32))
-                    .foregroundColor(.cyan)
-                    .symbolEffect(.pulse)
-
-                Text("Generating Analysis")
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                // Progress bar
-                ProgressView(value: Double(viewModel.generationProgress), total: 100)
-                    .progressViewStyle(LinearProgressViewStyle(tint: .cyan))
-                    .frame(maxWidth: 240)
-
-                // Progress percentage
-                Text("\(viewModel.generationProgress)%")
-                    .font(.title2.bold())
-                    .foregroundColor(.cyan)
-
-                // Current step
-                Text(viewModel.generationStep)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-            }
-            .padding(AppSpacing.xxl)
-            .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(.ultraThinMaterial)
-            )
-            .padding(.horizontal, AppSpacing.xxl)
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.5))
-        .ignoresSafeArea()
-        .animation(.easeInOut, value: viewModel.generationProgress)
     }
 
     // MARK: - Research Tab Content

@@ -402,11 +402,19 @@ struct PriceActionDTO: Codable {
     let currentPrice: Double
     let event: PriceEventDTO?
     let narrative: String
+    let changePct: Double
+    let direction: String
+    let windowLabel: String
+    let tag: String
 
     enum CodingKeys: String, CodingKey {
         case prices
         case currentPrice = "current_price"
         case event, narrative
+        case changePct = "change_pct"
+        case direction
+        case windowLabel = "window_label"
+        case tag
     }
 }
 
@@ -836,7 +844,11 @@ extension TickerReportAPIResponse {
             event: priceAction.event.map { e in
                 PriceEvent(tag: e.tag, date: e.date, index: e.index)
             },
-            narrative: priceAction.narrative
+            narrative: priceAction.narrative,
+            changePct: priceAction.changePct,
+            direction: priceAction.direction,
+            windowLabel: priceAction.windowLabel,
+            tag: priceAction.tag
         )
 
         // Revenue Engine

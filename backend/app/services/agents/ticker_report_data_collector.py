@@ -2225,11 +2225,47 @@ def _build_price_action(
         for c in headline_evidence
     ]
 
+    # ── Ground truth: direction / magnitude / window / tag ────────────
+    # Single source of truth for both the AI narrative prompt (Stage B)
+    # and the iOS renderer. Without this, iOS computed its own window
+    # client-side and the AI wrote contradicting narratives ("dip" vs
+    # +12% chart).
+    change_pct = 0.0
+    if recent_prices:
+        if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
+            ref_price = recent_prices[chosen_event["index"]]
+        else:
+            ref_price = recent_prices[0]
+        if ref_price:
+            change_pct = (current_price - ref_price) / ref_price * 100
+
+    change_pct = round(change_pct, 1)
+    if abs(change_pct) < 1.0:
+        direction = "flat"
+    elif change_pct > 0:
+        direction = "up"
+    else:
+        direction = "down"
+
+    if chosen_event:
+        window_label = f"Since {chosen_event['date']}"
+        tag = chosen_event["tag"]
+    else:
+        window_label = "Last 30 Days"
+        if abs(change_pct) > 10:
+            tag = "Momentum" if direction == "up" else "Correction"
+        else:
+            tag = "Normal"
+
     return {
         "prices": recent_prices,
         "current_price": round(current_price, 2),
         "event": chosen_event,
         "narrative": None,  # AI fills
+        "change_pct": change_pct,
+        "direction": direction,
+        "window_label": window_label,
+        "tag": tag,
         "_news_headlines": evidence_payload,  # Pydantic-ignored
     }
 

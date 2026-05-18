@@ -74,7 +74,64 @@ TABLE_NAME = "ticker_report_cache"
 #   * New `revenue_forecast.guidance_speaker` ("CFO" / "CEO" / "IR")
 #     and `revenue_forecast.guidance_period` ("Q4 2025" / "FY 2026")
 #     for iOS attribution.
-CACHE_SCHEMA_FLOOR = datetime(2026, 5, 2, 23, 0, 0, tzinfo=timezone.utc)
+CACHE_SCHEMA_FLOOR = datetime(2026, 5, 18, 23, 0, 0, tzinfo=timezone.utc)
+
+
+def patch_legacy_price_action(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Backfill the ground-truth fields onto a `price_action` block stored
+    before change_pct / direction / window_label / tag were added.
+
+    Reports stored in `research_reports.ticker_report_data` are not
+    invalidated by CACHE_SCHEMA_FLOOR — they're the user's history. We
+    patch them on read so iOS's strict decoder doesn't crash. The math
+    mirrors `_build_price_action` in the data collector exactly.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    pa = payload.get("price_action")
+    if not isinstance(pa, dict):
+        return payload
+    if all(k in pa for k in ("change_pct", "direction", "window_label", "tag")):
+        return payload
+
+    prices = pa.get("prices") or []
+    current_price = pa.get("current_price") or 0.0
+    event = pa.get("event") or {}
+
+    change_pct = 0.0
+    if prices:
+        idx = event.get("index", -1) if isinstance(event, dict) else -1
+        if event and isinstance(idx, int) and 0 <= idx < len(prices):
+            ref = prices[idx]
+        else:
+            ref = prices[0]
+        if ref:
+            change_pct = (current_price - ref) / ref * 100
+    change_pct = round(change_pct, 1)
+
+    if abs(change_pct) < 1.0:
+        direction = "flat"
+    elif change_pct > 0:
+        direction = "up"
+    else:
+        direction = "down"
+
+    if event:
+        window_label = f"Since {event.get('date', '')}".strip()
+        tag = event.get("tag") or "Normal"
+    else:
+        window_label = "Last 30 Days"
+        if abs(change_pct) > 10:
+            tag = "Momentum" if direction == "up" else "Correction"
+        else:
+            tag = "Normal"
+
+    pa.setdefault("change_pct", change_pct)
+    pa.setdefault("direction", direction)
+    pa.setdefault("window_label", window_label)
+    pa.setdefault("tag", tag)
+    payload["price_action"] = pa
+    return payload
 
 
 def _normalize_key(ticker: str, persona: str) -> tuple[str, str]:

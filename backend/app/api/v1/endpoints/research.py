@@ -43,6 +43,7 @@ from app.schemas.research import (
 )
 from app.services.credit_service import CreditService
 from app.services.agents.persona_config import PERSONA_KEYS
+from app.services.ticker_report_cache import patch_legacy_price_action
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +308,7 @@ async def get_research_ticker_report(
             details={"report_id": report_id, "step": "db_lookup"},
         )
 
-    return ticker_report
+    return patch_legacy_price_action(ticker_report)
 
 
 # ── List User Reports ────────────────────────────────────────────────────────

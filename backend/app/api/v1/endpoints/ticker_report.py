@@ -36,7 +36,10 @@ from app.api.error_response import (
 )
 from app.database import get_supabase
 from app.schemas.ticker_report import TickerReportResponse
-from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR
+from app.services.ticker_report_cache import (
+    CACHE_SCHEMA_FLOOR,
+    patch_legacy_price_action,
+)
 from app.services.ticker_report_service import TickerReportService
 
 logger = logging.getLogger(__name__)
@@ -88,7 +91,7 @@ async def get_ticker_report(
             logger.info(
                 f"Legacy cache HIT for {ticker}/{persona} — serving stored report"
             )
-            return cached
+            return patch_legacy_price_action(cached)
     except Exception as e:
         # Cache lookup failures must never break the request — log and
         # fall through to fresh generation.

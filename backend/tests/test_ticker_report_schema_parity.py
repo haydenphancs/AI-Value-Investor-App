@@ -236,6 +236,30 @@ def test_narrative_fallbacks_keep_pydantic_valid():
     TickerReportResponse.model_validate(report)
 
 
+def test_price_action_carries_ground_truth_fields():
+    """price_action must include change_pct/direction/window_label/tag so
+    iOS renders the same direction the AI narrative was grounded in.
+    Without these the Stage B prompt can write 'dip' against a +12% chart."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    report = coll.assemble_report(out, stage_a_fallback())
+    pa = report["price_action"]
+    assert "change_pct" in pa, "iOS PriceActionDTO requires change_pct"
+    assert "direction" in pa, "iOS PriceActionDTO requires direction"
+    assert "window_label" in pa, "iOS PriceActionDTO requires window_label"
+    assert "tag" in pa, "iOS PriceActionDTO requires tag"
+    assert pa["direction"] in {"up", "down", "flat"}, (
+        f"direction must be up/down/flat, got {pa['direction']!r}"
+    )
+    assert isinstance(pa["change_pct"], (int, float))
+    assert isinstance(pa["window_label"], str) and pa["window_label"]
+    assert isinstance(pa["tag"], str) and pa["tag"]
+    # _news_headlines is Pydantic-ignored — must not leak into the serialized response.
+    assert "_news_headlines" not in TickerReportResponse.model_validate(
+        report
+    ).price_action.model_dump()
+
+
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
 def test_every_persona_has_narrative_lens(persona_key):
     """Phase 2 added narrative_lens — each persona must populate it."""

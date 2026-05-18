@@ -210,6 +210,10 @@ class PriceActionResponse(BaseModel):
     current_price: float
     event: Optional[PriceEventResponse] = None
     narrative: str
+    change_pct: float
+    direction: str
+    window_label: str
+    tag: str
 
 
 # ── Deep Dive: Revenue Engine ─────────────────────────────────────────────────

@@ -347,8 +347,27 @@ def _price_action_narrative_prompt(
         headlines_block = f"\nRECENT MATCHED HEADLINES (within the chart window):\n{headlines_str}\n"
     else:
         headlines_block = ""
-    return f"""Explain the recent 20-day price movement in two sentences.
 
+    # Ground truth — direction/magnitude computed deterministically in
+    # _build_price_action. iOS renders these same fields, so the AI
+    # narrative cannot contradict what the user sees on screen.
+    direction = pa.get("direction", "flat")
+    change_pct = pa.get("change_pct", 0.0)
+    window_label = pa.get("window_label", "Last 30 Days")
+    if direction == "flat":
+        ground_truth = (
+            f"The stock is roughly FLAT ({change_pct:+.1f}%) over "
+            f"{window_label.lower()}."
+        )
+    else:
+        ground_truth = (
+            f"The stock is {direction.upper()} {change_pct:+.1f}% over "
+            f"{window_label.lower()}."
+        )
+
+    return f"""Explain WHY the stock moved this way in two sentences.
+
+GROUND TRUTH: {ground_truth}
 CHART CONTEXT: {event_str}
 {headlines_block}
 EVIDENCE:
@@ -357,7 +376,14 @@ EVIDENCE:
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Tie price action to a real catalyst (earnings, news, sector move) when possible — when matched headlines are listed above, cite the most relevant one by name rather than inventing a generic reason. If the chart is flat, say so directly. Never fabricate a catalyst that isn't in the data above."""
+Step 1 — accept the ground-truth direction above. Never contradict it. Do not write "dip", "fell", "decline" when the ground truth is UP; do not write "rally", "surge", "gained" when the ground truth is DOWN. If matched headlines suggest the opposite of the ground truth, treat the move as broader/market-driven rather than stock-specific.
+
+Step 2 — pick the single best catalyst that explains the move's direction and magnitude:
+  - prefer the event (earnings / catalyst) above if listed,
+  - otherwise cite the most relevant matched headline by name,
+  - otherwise attribute it to a broader market/sector move.
+
+If the move is FLAT, say so directly and skip the catalyst hunt. Never fabricate a catalyst that isn't in the data above."""
 
 
 def _revenue_engine_analysis_note_prompt(

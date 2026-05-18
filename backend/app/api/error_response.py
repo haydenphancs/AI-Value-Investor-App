@@ -224,6 +224,12 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             return ErrorCode.GEMINI_QUOTA_EXCEEDED, _DEFAULT_STATUS[ErrorCode.GEMINI_QUOTA_EXCEEDED]
         return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
 
+    # ── FMP typed exceptions (from app.integrations.fmp) ──────────────
+    if "fmpauthexception" in cls or "fmpratelimitexception" in cls or "fmpexception" in cls:
+        if "ratelimit" in cls:
+            return ErrorCode.FMP_RATE_LIMITED, _DEFAULT_STATUS[ErrorCode.FMP_RATE_LIMITED]
+        return ErrorCode.FMP_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.FMP_UNAVAILABLE]
+
     # ── httpx upstream errors (FMP) ───────────────────────────────────
     if "httpx" in cls_module or "httpstatus" in cls or "httperror" in cls:
         # FMP-specific 429 detection

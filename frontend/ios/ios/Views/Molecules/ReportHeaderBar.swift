@@ -2,7 +2,8 @@
 //  ReportHeaderBar.swift
 //  ios
 //
-//  Molecule: Top navigation bar for the report with back, company info, and share
+//  Molecule: Top navigation bar for the report with back, company info,
+//  and an overflow (•••) menu containing share, detailed analysis, delete.
 //
 
 import SwiftUI
@@ -13,6 +14,8 @@ struct ReportHeaderBar: View {
     let exchange: String
     let onBack: () -> Void
     let onShare: () -> Void
+    let onViewDetailedAnalysis: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
@@ -59,10 +62,22 @@ struct ReportHeaderBar: View {
 
             Spacer()
 
-            // Share button
-            Button(action: onShare) {
-                Image(systemName: "square.and.arrow.up")
-                    .font(AppTypography.iconDefault).fontWeight(.medium)
+            // Overflow menu (••• → Share / View Ticker / View Detailed Analysis /
+            // Regenerate / Delete). Destructive role auto-renders Delete in red.
+            Menu {
+                Button(action: onShare) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                Button(action: onViewDetailedAnalysis) {
+                    Label("View Detailed Analysis", systemImage: "doc.text.magnifyingglass")
+                }
+                Divider()
+                Button(role: .destructive, action: onDelete) {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
             }
@@ -78,7 +93,9 @@ struct ReportHeaderBar: View {
         ticker: "ORCL",
         exchange: "Nasdaq",
         onBack: {},
-        onShare: {}
+        onShare: {},
+        onViewDetailedAnalysis: {},
+        onDelete: {}
     )
     .background(AppColors.background)
     .preferredColorScheme(.dark)

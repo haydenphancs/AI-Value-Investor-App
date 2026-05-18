@@ -12,6 +12,9 @@ struct TickerReportView: View {
     @StateObject private var viewModel: TickerReportViewModel
     @Environment(\.dismiss) private var dismiss
 
+    // Overflow-menu UI state (••• menu actions)
+    @State private var showDeleteConfirm: Bool = false
+
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
     }
@@ -48,6 +51,17 @@ struct TickerReportView: View {
         .navigationBarHidden(true)
         .sheet(isPresented: $viewModel.showChatResponse) {
             chatResponseSheet
+        }
+        .alert("Delete this report?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                Task {
+                    let ok = await viewModel.deleteReport()
+                    if ok { dismiss() }
+                }
+            }
+        } message: {
+            Text("This will permanently remove the report from your Reports tab.")
         }
     }
 
@@ -96,9 +110,6 @@ struct TickerReportView: View {
                         // Critical Factors
                         ReportCriticalFactorsSection(factors: report.criticalFactors)
 
-                        // View Detailed Analysis button
-                        detailedAnalysisButton
-
                         // Disclaimer
                         disclaimerSection(report)
 
@@ -131,7 +142,9 @@ struct TickerReportView: View {
                 ticker: report.symbol,
                 exchange: report.exchange,
                 onBack: { dismiss() },
-                onShare: viewModel.shareTapped
+                onShare: viewModel.shareTapped,
+                onViewDetailedAnalysis: viewModel.viewDetailedAnalysis,
+                onDelete: { showDeleteConfirm = true }
             )
 
             Text(report.liveDate)
@@ -139,6 +152,9 @@ struct TickerReportView: View {
                 .foregroundColor(AppColors.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, AppSpacing.lg)
+                // Breathing room so the Live Data line isn't kissing the
+                // separator / next section below.
+                .padding(.bottom, AppSpacing.md)
         }
     }
 
@@ -207,25 +223,6 @@ struct TickerReportView: View {
         case .wallStreetConsensus:
             ReportWallStreetSection(consensus: report.wallStreetConsensus)
         }
-    }
-
-    // MARK: - View Detailed Analysis Button
-
-    private var detailedAnalysisButton: some View {
-        Button(action: viewModel.viewDetailedAnalysis) {
-            HStack(spacing: AppSpacing.sm) {
-                Text("View Detailed Analysis")
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.primaryBlue)
-
-                Image(systemName: "arrow.right")
-                    .font(AppTypography.iconXS).fontWeight(.semibold)
-                    .foregroundColor(AppColors.primaryBlue)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, AppSpacing.lg)
-        }
-        .padding(.horizontal, AppSpacing.lg)
     }
 
     // MARK: - Error View

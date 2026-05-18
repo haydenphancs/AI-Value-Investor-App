@@ -99,6 +99,7 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "roic",                "source": "ratios",    "field": "returnOnCapitalEmployed","type": "direct"},
     # Health Check (direct ratio values)
     {"name": "current_ratio",       "source": "ratios",    "field": "currentRatio",           "type": "direct"},
+    {"name": "quick_ratio",         "source": "ratios",    "field": "quickRatio",             "type": "direct"},
     {"name": "debt_to_equity",      "source": "ratios",    "field": "debtToEquityRatio",      "type": "direct"},
     {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverage",       "type": "direct"},
     {"name": "debt_to_assets",      "source": "ratios",    "field": "debtRatio",              "type": "direct"},
@@ -108,6 +109,7 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
     {"name": "pfcf_ratio",          "source": "ratios",    "field": "priceToFreeCashFlowsRatio", "type": "direct"},
     {"name": "ev_ebitda",           "source": "key_metrics", "field": "enterpriseValueOverEBITDA", "type": "direct"},
+    {"name": "earnings_yield",      "source": "ratios",    "field": "earningsYield",          "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
     {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct"},

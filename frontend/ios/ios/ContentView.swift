@@ -234,7 +234,10 @@ struct ResearchViewWithBinding: View {
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
     let initialSubTab: ResearchTab
-    @State private var selectedReportTicker: ReportTickerNavigation?
+    // Carry the full AnalysisReport (not just ticker) so the detail view
+    // receives backendId + persona and can short-circuit to the cached
+    // ticker_report_data JSONB instead of regenerating.
+    @State private var selectedReport: AnalysisReport?
     @State private var selectedTrendingAnalysis: TrendingAnalysis?
     @State private var showProfile = false
 
@@ -274,9 +277,9 @@ struct ResearchViewWithBinding: View {
         .onAppear {
             viewModel.selectedTab = initialSubTab
         }
-        .fullScreenCover(item: $selectedReportTicker) { nav in
+        .fullScreenCover(item: $selectedReport) { report in
             NavigationStack {
-                TickerReportView(ticker: nav.ticker)
+                TickerReportView(report: report)
             }
             .preferredColorScheme(.dark)
         }
@@ -415,7 +418,9 @@ struct ResearchViewWithBinding: View {
 
     private func handleReportTapped(_ report: AnalysisReport) {
         guard report.status == .ready else { return }
-        selectedReportTicker = ReportTickerNavigation(ticker: report.ticker)
+        // Pass the full report so the detail view receives backendId
+        // (cached JSONB lookup) and persona (correct agent selection).
+        selectedReport = report
     }
 
     private func handleRetryTapped(_ report: AnalysisReport) {

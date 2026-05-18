@@ -187,8 +187,8 @@ async def run_narrative_jobs(
 def _executive_summary_text_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    bull = "; ".join(shell.get("core_thesis", {}).get("bull_case", [])[:3])
-    bear = "; ".join(shell.get("core_thesis", {}).get("bear_case", [])[:3])
+    bull = "; ".join(shell.get("core_thesis", {}).get("bull_case", [])[:4])
+    bear = "; ".join(shell.get("core_thesis", {}).get("bear_case", [])[:4])
     return f"""Write the headline investment thesis for this report.
 
 EVIDENCE:
@@ -764,8 +764,8 @@ Return ONLY valid JSON (no markdown fences):
     {{"category": "Catalyst|Valuation|Risk|Growth|Moat", "sentiment": "positive|neutral|negative", "text": ""}}
   ],
   "core_thesis": {{
-    "bull_case": ["<MAX 4 sentences, IDEALLY 2-3, each ≤18 words>"],
-    "bear_case": ["<MAX 4 sentences, IDEALLY 2-3, each ≤18 words>"]
+    "bull_case": ["<2-4 sentences, each ≤18 words. Count matches the strength of the case — use 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"],
+    "bear_case": ["<2-4 sentences, each ≤18 words. Count matches the strength of the case — use 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"]
   }},
   "revenue_forecast": {{
     "management_guidance": "raised|maintained|lowered",
@@ -832,7 +832,7 @@ RULES:
 - moat dimension scores 0.0-10.0
 - macro impact 0.0-1.0
 - 3-4 executive_summary_bullets (don't pad to 5)
-- MAX 4 bull_case + MAX 4 bear_case (ideally 2-3 each — quality over quantity)
+- 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout.
 - 3-6 macro risk_factors (skip ones that don't materially affect this company)
 - 2-4 critical_factors
 - 3-5 competitors, ranked by relevance

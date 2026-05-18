@@ -162,6 +162,27 @@ class TickerReportViewModel: ObservableObject {
         print("🔍 [TickerReport] View detailed analysis tapped for \(ticker)")
     }
 
+    /// Soft-delete this report via DELETE /research/reports/{id}. Returns
+    /// true on success so the caller can dismiss the screen. No-op when
+    /// the report isn't backed by a research_reports row (reportId is nil
+    /// for ad-hoc fetches from Trending Analyses, where there's nothing
+    /// to delete on the server).
+    func deleteReport() async -> Bool {
+        guard let reportId = self.reportId else {
+            print("🗑️ [TickerReport] Delete tapped but no reportId — skipping")
+            return false
+        }
+        do {
+            try await APIClient.shared.request(endpoint: .deleteReport(reportId: reportId))
+            print("🗑️ [TickerReport] Report \(reportId) deleted")
+            return true
+        } catch {
+            print("❌ [TickerReport] Delete failed: \(error)")
+            self.error = self.userFriendlyError(error)
+            return false
+        }
+    }
+
     func chatWithReport() {
         guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let message = aiInputText

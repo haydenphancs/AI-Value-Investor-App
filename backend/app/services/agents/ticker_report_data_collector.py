@@ -418,6 +418,13 @@ class TickerReportDataCollector:
                     f"Collector: {attr} failed for {ticker}: "
                     f"{type(result).__name__}: {result}"
                 )
+                if attr == "profile":
+                    # Profile is non-recoverable — re-raise so the endpoint's
+                    # classifier sees the real upstream exception (FMPAuthException
+                    # / FMPRateLimitException / httpx error) and maps to
+                    # FMP_UNAVAILABLE / FMP_RATE_LIMITED. Falling through to the
+                    # empty-dict default would masquerade as TICKER_NOT_FOUND.
+                    raise result
                 setattr(out, attr, default)
             else:
                 setattr(out, attr, result if result is not None else default)
@@ -776,7 +783,6 @@ class TickerReportDataCollector:
             growth=out.snap_growth,
             valuation=out.snap_valuation,
             health=out.snap_health,
-            earnings_yield=c.get("earnings_yield"),
         )
 
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
@@ -1688,25 +1694,18 @@ def _build_fundamental_metrics_from_snapshots(
     growth: Optional[SnapshotItemResponse],
     valuation: Optional[SnapshotItemResponse],
     health: Optional[SnapshotItemResponse],
-    earnings_yield: Optional[float],
 ) -> List[Dict[str, Any]]:
     """Build the 4 fundamental cards from the same snapshot services
     TickerDetailView's Financials tab uses, so the values match exactly.
 
     Order matches the existing iOS card order: Profitability, Growth,
-    Valuation, Health. Earnings Yield is appended to the Valuation card.
+    Valuation, Health. Earnings Yield is part of the Valuation snapshot
+    itself (with sector context), so no `extra_metrics` is needed.
     """
-    valuation_extras = [
-        {
-            "label": "Earnings Yield",
-            "value": _format_earnings_yield(earnings_yield),
-            "trend": None,
-        }
-    ]
     return [
         _snapshot_to_card("Profitability", profitability),
         _snapshot_to_card("Growth", growth),
-        _snapshot_to_card("Valuation", valuation, extra_metrics=valuation_extras),
+        _snapshot_to_card("Valuation", valuation),
         _snapshot_to_card("Health", health),
     ]
 

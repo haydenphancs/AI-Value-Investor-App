@@ -48,7 +48,7 @@ struct ReportDeepDiveMetricCard: View {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 ForEach(data.metrics) { metric in
                     HStack {
-                        Text(metric.label)
+                        Text(metric.displayLabel)
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
                             .lineLimit(1)

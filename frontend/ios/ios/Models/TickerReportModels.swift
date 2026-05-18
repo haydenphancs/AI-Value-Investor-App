@@ -404,6 +404,13 @@ struct DeepDiveMetricCard: Identifiable {
     let starRating: Int         // 1-5
     let metrics: [DeepDiveMetric]
     let qualityLabel: String    // "A Cash Machine", "Priced for perfection", etc.
+
+    /// True when any metric in this card has been compared to the sector
+    /// average (and therefore renders with a trailing " *"). Drives the
+    /// asterisk footnote below the 2x2 grid.
+    var hasSectorComparison: Bool {
+        metrics.contains { $0.displayLabel.hasSuffix(" *") }
+    }
 }
 
 // MARK: - Deep Dive Metric
@@ -413,6 +420,41 @@ struct DeepDiveMetric: Identifiable {
     let label: String
     let value: String
     let trend: MetricTrend?
+
+    /// Compact label suitable for the narrow 2-column metric grid.
+    /// Strips verbose sector-comparison suffix (e.g. "(0.98x sector avg 27)"
+    /// or "(vs sector 4.5)"), drops "(YoY)" boilerplate, and applies common
+    /// abbreviations (ROE, ROA, FCF). When a sector suffix was present, a
+    /// trailing " *" is appended to mark the metric for the footnote.
+    var displayLabel: String {
+        let withoutSector = label.replacingOccurrences(
+            of: #"\s*\([^)]*sector[^)]*\)"#,
+            with: "",
+            options: .regularExpression
+        )
+        let hadSectorSuffix = (withoutSector != label)
+
+        var result = withoutSector.replacingOccurrences(
+            of: #"\s*\(YoY\)"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        let abbreviations: [(String, String)] = [
+            ("Return on Equity (ROE)", "ROE"),
+            ("Return on Assets (ROA)", "ROA"),
+            ("Return on Equity", "ROE"),
+            ("Return on Assets", "ROA"),
+            ("Free Cash Flow", "FCF"),
+            ("Operating Income", "Op Income"),
+        ]
+        for (long, short) in abbreviations {
+            result = result.replacingOccurrences(of: long, with: short)
+        }
+
+        result = result.trimmingCharacters(in: .whitespaces)
+        return hadSectorSuffix ? "\(result) *" : result
+    }
 
     enum MetricTrend {
         case up, down, flat

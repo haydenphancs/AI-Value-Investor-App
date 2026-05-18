@@ -18,6 +18,22 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+class FMPException(Exception):
+    """Base class for typed FMP integration errors."""
+
+
+class FMPAuthException(FMPException):
+    """Raised on 401 Unauthorized — invalid/expired FMP_API_KEY."""
+
+
+class FMPRateLimitException(FMPException):
+    """Raised on 429 — quota exhausted or burst limit hit."""
+
+    def __init__(self, message: str, retry_after: Optional[str] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class FMPClient:
     """
     Client for Financial Modeling Prep API (stable endpoints).
@@ -91,12 +107,26 @@ class FMPClient:
                         f"FMP rate limit low: {remaining}/{limit} remaining"
                     )
 
+            if response.status_code == 401:
+                logger.error(
+                    f"FMP auth failed on {endpoint}: 401 Unauthorized "
+                    f"— check FMP_API_KEY in backend/.env"
+                )
+                raise FMPAuthException(
+                    f"FMP returned 401 Unauthorized for {endpoint} "
+                    f"(check FMP_API_KEY)"
+                )
+
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After", "unknown")
                 logger.error(
                     f"FMP rate limit HIT on {endpoint}. "
                     f"Retry-After: {retry_after}s. "
                     f"Limit: {limit}"
+                )
+                raise FMPRateLimitException(
+                    f"FMP rate limit hit on {endpoint}",
+                    retry_after=retry_after,
                 )
 
             response.raise_for_status()

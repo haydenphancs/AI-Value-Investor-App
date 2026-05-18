@@ -141,6 +141,32 @@ def _metric_name(label: str, val: Optional[float], sector_median: Optional[float
     return label
 
 
+def _fmt_pct(val: Optional[float]) -> str:
+    """Format a decimal-form percentage for display (e.g. 0.0425 → '4.25%')."""
+    if val is None or val <= 0:
+        return "N/A"
+    return f"{val * 100:.2f}%"
+
+
+def _sector_ctx_pct(val: Optional[float], sector_median: Optional[float]) -> str:
+    """Sector context for percentage metrics. Both inputs are decimals
+    (e.g. 0.0425 for 4.25%). Output displays the median as a percent."""
+    if val is None or val <= 0:
+        return ""
+    if sector_median is None or sector_median <= 0:
+        return ""
+    ratio = val / sector_median
+    return f"{ratio:.2f}x sector avg {sector_median * 100:.2f}%"
+
+
+def _metric_name_pct(label: str, val: Optional[float], sector_median: Optional[float]) -> str:
+    """Same as `_metric_name` but for decimal percentage metrics."""
+    ctx = _sector_ctx_pct(val, sector_median)
+    if ctx:
+        return f"{label} ({ctx})"
+    return label
+
+
 # ── Service ───────────────────────────────────────────────────────
 
 class ValuationSnapshotService:
@@ -282,19 +308,52 @@ class ValuationSnapshotService:
         pfcf = _first_valid(_safe_float(fr, "priceToFreeCashFlowsRatio"), _safe_float(km, "pfcfRatio"))
         ev_ebitda = _first_valid(_safe_float(fr, "enterpriseValueOverEBITDA"), _safe_float(km, "enterpriseValueOverEBITDA"))
 
-        # Fallback: compute P/FCF from marketCap / freeCashFlow
+        # Market-cap fallback chain — FMP sometimes omits it from key_metrics
+        # for less-covered tickers. Profile.mktCap and key_metrics.marketCap
+        # are typically identical; profile is the more reliable surface.
+        mcap = _safe_float(km, "marketCap") or _safe_float(profile, "mktCap")
+
+        # Fallback: compute P/FCF from marketCap / freeCashFlow. When FCF is
+        # negative the ratio is meaningless (negative multiples don't compare),
+        # so we leave pfcf as None and the renderer shows "—".
         if pfcf is None:
-            mcap = _safe_float(km, "marketCap")
             fcf = _safe_float(cf, "freeCashFlow")
             if mcap and mcap > 0 and fcf and fcf > 0:
                 pfcf = round(mcap / fcf, 2)
 
-        # Fallback: compute EV/EBITDA from enterpriseValue / ebitda
+        # Fallback: compute EV/EBITDA from enterpriseValue / ebitda. When the
+        # `ebitda` field is missing, reconstruct it from operatingIncome plus
+        # depreciation & amortization — both already on the existing payloads
+        # so no extra FMP call is needed.
         if ev_ebitda is None:
             ev = _safe_float(km, "enterpriseValue")
             ebitda = _safe_float(inc, "ebitda")
+            if ebitda is None or ebitda <= 0:
+                op_income = _safe_float(inc, "operatingIncome")
+                d_and_a = (
+                    _safe_float(cf, "depreciationAndAmortization")
+                    or _safe_float(inc, "depreciationAndAmortization")
+                )
+                if op_income is not None and d_and_a is not None:
+                    ebitda = op_income + d_and_a
             if ev and ev > 0 and ebitda and ebitda > 0:
                 ev_ebitda = round(ev / ebitda, 2)
+
+        # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
+        #   1. ratios.earningsYield
+        #   2. key_metrics.earningsYield
+        #   3. 1/PE  (matches the canonical formula)
+        #   4. netIncome / marketCap
+        ey = _first_valid(
+            _safe_float(fr, "earningsYield"),
+            _safe_float(km, "earningsYield"),
+        )
+        if ey is None and pe is not None and pe > 0:
+            ey = round(1.0 / pe, 4)
+        if ey is None:
+            ni = _safe_float(inc, "netIncome")
+            if ni is not None and ni > 0 and mcap and mcap > 0:
+                ey = round(ni / mcap, 4)
 
         # Get sector for benchmark comparison
         raw_sector = profile.get("sector", "")
@@ -307,7 +366,7 @@ class ValuationSnapshotService:
                 lookup = get_sector_benchmark_lookup()
                 benchmarks = lookup.get_sector_benchmarks(
                     sector,
-                    ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda"],
+                    ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
                     "annual",
                 )
             except Exception as e:
@@ -318,6 +377,7 @@ class ValuationSnapshotService:
         sector_pb = _get_latest_benchmark(benchmarks, "pb_ratio")
         sector_pfcf = _get_latest_benchmark(benchmarks, "pfcf_ratio")
         sector_ev = _get_latest_benchmark(benchmarks, "ev_ebitda")
+        sector_ey = _get_latest_benchmark(benchmarks, "earnings_yield")
 
         # Score each metric against sector median (lower = better)
         score_pe = _valuation_score(pe, sector_pe)
@@ -356,6 +416,13 @@ class ValuationSnapshotService:
             SnapshotMetricResponse(
                 name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),
                 value=_fmt_ratio(ev_ebitda),
+            ),
+            # Earnings Yield: informational — not part of the composite
+            # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
+            # to keep historical ratings comparable.
+            SnapshotMetricResponse(
+                name=_metric_name_pct("Earnings Yield", ey, sector_ey),
+                value=_fmt_pct(ey),
             ),
         ]
 

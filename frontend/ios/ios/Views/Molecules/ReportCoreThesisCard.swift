@@ -54,6 +54,10 @@ struct ReportCoreThesisCard: View {
             }
         }
         .padding(AppSpacing.lg)
+        // Stretch to the container width so Bull and Bear cards always
+        // match — otherwise the VStack sizes to its longest text line
+        // and the shorter case (typically Bull) ends up narrower.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                 .fill(AppColors.cardBackground)

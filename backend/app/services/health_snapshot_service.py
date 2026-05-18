@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +72,14 @@ _DISPLAY_NAMES = {
     "roe": "Return on Equity (ROE)",
     "current_ratio": "Current Ratio",
     "altman_z_score": "Altman Z-Score",
+    "interest_coverage": "Interest Coverage",
+    "quick_ratio": "Quick Ratio",
 }
+
+# Snapshot intentionally hides these — P/E lives in the Valuation card
+# (different domain) and ROE lives in the Profitability card (duplicate).
+# Interest Coverage and Quick Ratio replace them as proper health metrics.
+_HIDE_FROM_SNAPSHOT = {"pe_ratio", "roe"}
 
 # Map health check overall_rating to 1-5 snapshot rating
 _RATING_MAP = {
@@ -284,12 +293,16 @@ class HealthSnapshotService:
         if mcap is None:
             mcap = _safe_float(profile, "marketCap")
 
-        # Build health check metrics
+        # Build health check metrics — filter out pe_ratio (valuation, not
+        # health) and roe (duplicates the Profitability card). Both are
+        # replaced below with proper health metrics.
         health_rating = 3
         metrics: List[SnapshotMetricResponse] = []
         if health is not None:
             health_rating = _RATING_MAP.get(health.overall_rating, 3)
             for m in health.metrics:
+                if m.type in _HIDE_FROM_SNAPSHOT:
+                    continue
                 name = _metric_name(m.type, m.value, m.comparison_value)
                 value = _fmt_value(m.type, m.value)
                 metrics.append(SnapshotMetricResponse(name=name, value=value))
@@ -308,6 +321,57 @@ class HealthSnapshotService:
                 (m.value for m in health.metrics if m.type == "altman_z_score"), None
             )
             z_rating = _zscore_rating(z_val_from_hc)
+
+        # ── Replacement metrics: Interest Coverage + Quick Ratio ──────
+        # Both computed from data already fetched above (no extra FMP call).
+        # Sector context comes from sector_benchmarks; falls back to no
+        # comparison when the benchmark row is missing (e.g. quick_ratio
+        # before the next daily recompute populates it).
+        raw_sector = profile.get("sector", "")
+        sector = _normalize_sector(raw_sector) if raw_sector else ""
+        sector_ic = sector_qr = None
+        if sector:
+            try:
+                bench = get_sector_benchmark_lookup().get_sector_benchmarks(
+                    sector, ["interest_coverage", "quick_ratio"], "annual",
+                )
+                ic_data = bench.get("interest_coverage", {})
+                qr_data = bench.get("quick_ratio", {})
+                if ic_data:
+                    sector_ic = ic_data[max(ic_data.keys())]
+                if qr_data:
+                    sector_qr = qr_data[max(qr_data.keys())]
+            except Exception as e:
+                logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
+
+        # Interest Coverage = EBIT / |Interest Expense|. FMP reports
+        # interestExpense as a positive number (expenses) on the income
+        # statement; abs() is defensive for edge cases.
+        op_income = _safe_float(inc, "operatingIncome")
+        int_expense = _safe_float(inc, "interestExpense")
+        ic = None
+        if op_income is not None and int_expense is not None and abs(int_expense) > 0:
+            ic = round(op_income / abs(int_expense), 2)
+
+        # Quick Ratio = (cash + receivables) / current liabilities. Strict
+        # liquidity check that excludes inventory.
+        cash = _safe_float(bs, "cashAndCashEquivalents")
+        receivables = _safe_float(bs, "netReceivables")
+        curr_liab = _safe_float(bs, "totalCurrentLiabilities")
+        qr = None
+        if curr_liab is not None and curr_liab > 0:
+            qr_numerator = (cash or 0) + (receivables or 0)
+            if qr_numerator > 0:
+                qr = round(qr_numerator / curr_liab, 2)
+
+        metrics.append(SnapshotMetricResponse(
+            name=_metric_name("interest_coverage", ic, sector_ic),
+            value=_fmt_value("interest_coverage", ic),
+        ))
+        metrics.append(SnapshotMetricResponse(
+            name=_metric_name("quick_ratio", qr, sector_qr),
+            value=_fmt_value("quick_ratio", qr),
+        ))
 
         # Blend rating: 60% health check + 40% Z-Score
         rating = max(1, min(5, round(0.6 * health_rating + 0.4 * z_rating)))

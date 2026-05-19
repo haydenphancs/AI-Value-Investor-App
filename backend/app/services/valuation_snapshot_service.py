@@ -81,6 +81,20 @@ def _fmt_ratio(val: Optional[float]) -> str:
     return f"{val:.2f}"
 
 
+def _fmt_pfcf(pfcf: Optional[float], km: Dict[str, Any]) -> str:
+    """P/FCF is undefined when free cash flow is negative. Surface that
+    explicitly as "Neg." so the user knows the company is burning cash —
+    different signal from "data missing" ("—"). Detected via the FMP
+    `freeCashFlowYield` field which carries the sign of FCF.
+    """
+    if pfcf is not None and pfcf > 0:
+        return f"{pfcf:.2f}"
+    fcf_yield = _safe_float(km, "freeCashFlowYield")
+    if fcf_yield is not None and fcf_yield < 0:
+        return "Neg."
+    return "—"
+
+
 def _valuation_score(value: Optional[float], sector_median: Optional[float]) -> int:
     """
     Score 1-5 based on how a company's valuation compares to sector median.
@@ -411,7 +425,7 @@ class ValuationSnapshotService:
             ),
             SnapshotMetricResponse(
                 name=_metric_name("P/FCF", pfcf, sector_pfcf),
-                value=_fmt_ratio(pfcf),
+                value=_fmt_pfcf(pfcf, km),
             ),
             SnapshotMetricResponse(
                 name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),

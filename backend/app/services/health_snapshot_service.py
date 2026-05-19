@@ -329,18 +329,23 @@ class HealthSnapshotService:
         # before the next daily recompute populates it).
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
-        sector_ic = sector_qr = None
+        sector_ic = sector_qr = sector_de = None
         if sector:
             try:
                 bench = get_sector_benchmark_lookup().get_sector_benchmarks(
-                    sector, ["interest_coverage", "quick_ratio"], "annual",
+                    sector,
+                    ["interest_coverage", "quick_ratio", "debt_to_equity"],
+                    "annual",
                 )
                 ic_data = bench.get("interest_coverage", {})
                 qr_data = bench.get("quick_ratio", {})
+                de_data = bench.get("debt_to_equity", {})
                 if ic_data:
                     sector_ic = ic_data[max(ic_data.keys())]
                 if qr_data:
                     sector_qr = qr_data[max(qr_data.keys())]
+                if de_data:
+                    sector_de = de_data[max(de_data.keys())]
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
@@ -371,6 +376,22 @@ class HealthSnapshotService:
         metrics.append(SnapshotMetricResponse(
             name=_metric_name("quick_ratio", qr, sector_qr),
             value=_fmt_value("quick_ratio", qr),
+        ))
+
+        # Debt-to-Equity = total debt / shareholders' equity. Computed from
+        # the balance sheet already fetched above (no extra FMP call). Sector
+        # context comes from sector_benchmarks when populated; otherwise the
+        # label drops the comparison suffix.
+        total_debt = _safe_float(bs, "totalDebt")
+        equity = _safe_float(bs, "totalStockholdersEquity")
+        if equity is None:
+            equity = _safe_float(bs, "totalEquity")
+        de = None
+        if total_debt is not None and equity is not None and equity > 0:
+            de = round(total_debt / equity, 2)
+        metrics.append(SnapshotMetricResponse(
+            name=_metric_name("debt_to_equity", de, sector_de),
+            value=_fmt_value("debt_to_equity", de),
         ))
 
         # Blend rating: 60% health check + 40% Z-Score

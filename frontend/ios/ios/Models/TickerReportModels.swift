@@ -446,7 +446,11 @@ struct DeepDiveMetric: Identifiable {
             ("Return on Equity", "ROE"),
             ("Return on Assets", "ROA"),
             ("Free Cash Flow", "FCF"),
-            ("Operating Income", "Op Income"),
+            // "Operating" → "Op." covers both "Operating Margin" (Profitability
+            // card) and "Operating Income Growth" (Growth card). The latter
+            // still won't fit on one line, which is why the metric label uses
+            // .lineLimit(2) — it wraps to "Op. Income" / "Growth".
+            ("Operating", "Op."),
         ]
         for (long, short) in abbreviations {
             result = result.replacingOccurrences(of: long, with: short)

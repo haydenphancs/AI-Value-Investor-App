@@ -51,7 +51,7 @@ struct ReportDeepDiveMetricCard: View {
                         Text(metric.displayLabel)
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
-                            .lineLimit(1)
+                            .lineLimit(2)
                             .truncationMode(.tail)
                             .minimumScaleFactor(0.9)
                         Spacer(minLength: 4)

@@ -112,14 +112,17 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},
     {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
     {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
-    # P/FCF and EV/EBITDA come from /key-metrics — FMP's annual /ratios drops
-    # `priceToFreeCashFlowsRatio` and `enterpriseValueOverEBITDA` as null for
-    # most of the S&P 500, leaving the recompute below MIN_SAMPLE_SIZE and the
-    # sector_benchmarks table empty for these two metrics (visible as missing
-    # asterisks on the Valuation card). Field name `pfcfRatio` matches what
-    # valuation_snapshot_service reads from /key-metrics-ttm.
-    {"name": "pfcf_ratio",          "source": "key_metrics", "field": "pfcfRatio",                 "type": "direct"},
-    {"name": "ev_ebitda",           "source": "key_metrics", "field": "enterpriseValueOverEBITDA", "type": "direct"},
+    # P/FCF and EV/EBITDA are RECONSTRUCTED from raw fundamentals, not
+    # extracted as pre-computed ratios. FMP's pre-computed `pfcfRatio` and
+    # `enterpriseValueOverEBITDA` fields come back null for too much of the
+    # S&P 500 (across /ratios AND /key-metrics) — sample size per sector
+    # drops below MIN_SAMPLE_SIZE and the table never populates. Computing
+    # from raw `marketCap` / `freeCashFlow` / `enterpriseValue` / `ebitda`
+    # mirrors what valuation_snapshot_service does per-ticker (lines 369–454),
+    # so the sector median and the company's own metric use identical math.
+    # Dispatch is by the "compute" key — see _compute_ratio_values.
+    {"name": "pfcf_ratio",          "type": "computed",      "compute": "pfcf"},
+    {"name": "ev_ebitda",           "type": "computed",      "compute": "ev_ebitda"},
     {"name": "earnings_yield",      "source": "ratios",    "field": "earningsYield",          "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
@@ -266,6 +269,122 @@ def _compute_qoq_for_records(
 def _winsorize(values: List[float], floor: float = WINSORIZE_FLOOR, ceil: float = WINSORIZE_CEIL) -> List[float]:
     """Cap extreme values to prevent outliers from distorting the median."""
     return [max(floor, min(ceil, v)) for v in values]
+
+
+# ── Ratio reconstruction (for "computed" metric type) ────────────
+#
+# FMP's pre-computed pfcfRatio / enterpriseValueOverEBITDA come back null
+# for too much of the S&P 500. Reconstruct from raw building blocks instead.
+# These mirror the per-ticker reconstruction in valuation_snapshot_service.py
+# so a sector median and a company's own ratio use identical arithmetic.
+
+# Cap ratios at a sane upper bound before taking the sector median —
+# multiples above 200 are almost always artefacts of near-zero denominators
+# (e.g. EBITDA approaching zero) and would yank the median upward.
+COMPUTED_RATIO_FLOOR = 0.0
+COMPUTED_RATIO_CEIL = 200.0
+
+
+def _pfcf_from_raw(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
+    """P/FCF = market cap ÷ free cash flow.
+
+    Returns None for non-positive FCF — a negative multiple is meaningless
+    for sector aggregation. This matches valuation_snapshot_service which
+    surfaces "Neg." rather than mixing the sign into the ratio.
+    """
+    mcap = _safe_float(km, "marketCap")
+    fcf = _safe_float(cf, "freeCashFlow")
+    if mcap and mcap > 0 and fcf and fcf > 0:
+        return mcap / fcf
+    return None
+
+
+def _ev_ebitda_from_raw(
+    km: Dict[str, Any], cf: Dict[str, Any], inc: Dict[str, Any],
+) -> Optional[float]:
+    """EV / EBITDA with EBITDA fallback chain.
+
+    Rungs (in order):
+      1. inc.ebitda
+      2. operatingIncome + D&A  (D&A from cf or inc)
+    Returns None when EV or EBITDA can't be derived positively. Matches the
+    rungs valuation_snapshot_service uses for the per-ticker reconstruction.
+    """
+    ev = _safe_float(km, "enterpriseValue")
+    if not ev or ev <= 0:
+        return None
+
+    ebitda = _safe_float(inc, "ebitda")
+    if not ebitda or ebitda <= 0:
+        op_income = _safe_float(inc, "operatingIncome")
+        d_and_a = (
+            _safe_float(cf, "depreciationAndAmortization")
+            or _safe_float(inc, "depreciationAndAmortization")
+        )
+        if op_income is not None and d_and_a is not None:
+            ebitda = op_income + d_and_a
+
+    if ebitda and ebitda > 0:
+        return ev / ebitda
+    return None
+
+
+def _index_by_period(
+    records: List[Dict[str, Any]], period_type: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Key each record by its period label so we can join across endpoints."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for rec in records:
+        label = (
+            _quarterly_period_label(rec) if period_type == "quarterly"
+            else _annual_period_label(rec)
+        )
+        if label:
+            out[label] = rec
+    return out
+
+
+def _compute_ratio_values(
+    all_company_data: List[Dict[str, List]],
+    compute_name: str,
+    period_type: str,
+) -> Dict[str, List[float]]:
+    """Reconstruct a ratio per company per year and bucket by year.
+
+    Returns {period_label: [ratio, ...]} matching the shape that
+    _compute_yoy_for_records / direct extraction produce, so downstream
+    median computation stays identical.
+    """
+    out: Dict[str, List[float]] = {}
+    km_key = f"key_metrics_{period_type}"
+    cf_key = f"cashflow_{period_type}"
+    inc_key = f"income_{period_type}"
+
+    for company in all_company_data:
+        km_by_year = _index_by_period(company.get(km_key, []), period_type)
+        cf_by_year = _index_by_period(company.get(cf_key, []), period_type)
+        inc_by_year = _index_by_period(company.get(inc_key, []), period_type)
+
+        # P/FCF needs km ∩ cf; EV/EBITDA needs km ∩ (inc OR cf-for-D&A).
+        # Union of cf/inc keys is correct for both — the reconstruction
+        # functions return None when a required input is missing.
+        years = set(km_by_year) & (set(cf_by_year) | set(inc_by_year))
+        for year in years:
+            km = km_by_year.get(year, {})
+            cf = cf_by_year.get(year, {})
+            inc = inc_by_year.get(year, {})
+
+            if compute_name == "pfcf":
+                value = _pfcf_from_raw(km, cf)
+            elif compute_name == "ev_ebitda":
+                value = _ev_ebitda_from_raw(km, cf, inc)
+            else:
+                continue
+
+            if value is not None and value > 0:
+                out.setdefault(year, []).append(value)
+
+    return out
 
 
 def _normalize_sector(raw_sector: str) -> str:
@@ -476,8 +595,21 @@ class SectorBenchmarkService:
                         metric_config["name"], period_type, period_label
                     ) in existing_periods:
                         continue
-                    # Winsorize growth percentages to cap extreme outliers
-                    cleaned = _winsorize(values) if metric_type in ("yoy", "qoq") else values
+                    # Winsorize to cap extreme outliers.
+                    #   yoy / qoq → wide bounds (growth % can swing huge)
+                    #   computed ratios (P/FCF, EV/EBITDA) → tight 0–200 bounds:
+                    #     near-zero denominators produce 4-digit multiples that
+                    #     pull the median upward; healthy ratios are <50.
+                    if metric_type in ("yoy", "qoq"):
+                        cleaned = _winsorize(values)
+                    elif metric_type == "computed":
+                        cleaned = _winsorize(
+                            values,
+                            floor=COMPUTED_RATIO_FLOOR,
+                            ceil=COMPUTED_RATIO_CEIL,
+                        )
+                    else:
+                        cleaned = values
                     rows_to_upsert.append({
                         "sector": sector,
                         "metric_name": metric_config["name"],
@@ -541,15 +673,24 @@ class SectorBenchmarkService:
         For a given metric, collect values per period_label across all companies.
         Returns {"2024": [12.5, 8.3, ...], "2023": [...], ...}
         """
-        source = metric_config["source"]   # "income", "cashflow", "ratios"
-        field = metric_config["field"]
-        metric_type = metric_config["type"]  # "yoy", "qoq", or "direct"
+        metric_type = metric_config["type"]  # "yoy", "qoq", "direct", "computed"
         is_quarterly = period_type == "quarterly"
 
         # QoQ metrics only make sense for quarterly data
         if metric_type == "qoq" and not is_quarterly:
             return {}
 
+        # Computed ratios (P/FCF, EV/EBITDA) need a per-company join across
+        # multiple endpoints — delegated to the module-level helper.
+        if metric_type == "computed":
+            return _compute_ratio_values(
+                all_company_data,
+                compute_name=metric_config["compute"],
+                period_type=period_type,
+            )
+
+        source = metric_config["source"]   # "income", "cashflow", "ratios"
+        field = metric_config["field"]
         data_key = f"{source}_{period_type}"
         period_values: Dict[str, List[float]] = {}
 

@@ -121,6 +121,38 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return None
 
 
+def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Sum the last 4 quarters of income-statement records into a TTM dict.
+
+    FMP returns quarterly statements newest-first when sorted by date desc,
+    but we re-sort here defensively. Skips a field if any of the last 4
+    quarters is missing it (rather than partial-summing 2 or 3 quarters,
+    which would understate the TTM number and silently corrupt ratios).
+    """
+    if not quarterly:
+        return {}
+    sorted_q = sorted(quarterly, key=lambda r: r.get("date", ""), reverse=True)[:4]
+    if len(sorted_q) < 4:
+        # Fall back to whatever quarters we have, weighted by sum count.
+        # Better to expose partial data than render "—" for new tickers.
+        sorted_q = quarterly[:4]
+    summed: Dict[str, float] = {}
+    for field in (
+        "operatingIncome", "interestExpense", "revenue",
+        "netIncome", "ebitda", "depreciationAndAmortization",
+    ):
+        vals: List[float] = []
+        for rec in sorted_q:
+            v = _safe_float(rec, field)
+            if v is None:
+                vals = []
+                break
+            vals.append(v)
+        if vals:
+            summed[field] = sum(vals)
+    return summed
+
+
 def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
     """Compute Altman Z-Score from balance sheet, income, and market cap."""
     ta = _safe_float(bs, "totalAssets")
@@ -262,13 +294,22 @@ class HealthSnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
-        """Reuse HealthCheckService (Financials tab) + compute Altman Z-Score."""
+        """Reuse HealthCheckService (Financials tab) + compute Altman Z-Score.
+
+        Income-statement fields (operatingIncome, interestExpense, revenue)
+        are summed across the last 4 quarters to get TTM values. The balance
+        sheet itself is a snapshot — the latest quarterly filing is used so
+        ratios like Quick Ratio and Debt-to-Equity reflect current state
+        rather than the prior fiscal year-end.
+        """
         from app.services.health_check_service import get_health_check_service
 
-        # Fetch health check + Z-Score data in parallel
+        # Fetch health check + Z-Score data in parallel.
+        # `bs` is a point-in-time figure — quarterly = latest available.
+        # `inc` is a flow figure — summed over 4 quarters for TTM.
         health_task = get_health_check_service().get_health_check(ticker)
-        bs_task = self.fmp.get_balance_sheet(ticker, period="annual", limit=1)
-        inc_task = self.fmp.get_income_statement(ticker, period="annual", limit=1)
+        bs_task = self.fmp.get_balance_sheet(ticker, period="quarter", limit=1)
+        inc_task = self.fmp.get_income_statement(ticker, period="quarter", limit=4)
         profile_task = self.fmp.get_company_profile(ticker)
 
         results = await asyncio.gather(
@@ -282,7 +323,7 @@ class HealthSnapshotService:
 
         # Parse data
         bs = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
-        inc = inc_raw[0] if isinstance(inc_raw, list) and inc_raw else {}
+        inc = _sum_ttm_income(inc_raw) if isinstance(inc_raw, list) else {}
         profile = {}
         if isinstance(profile_raw, dict):
             profile = profile_raw

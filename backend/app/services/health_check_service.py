@@ -463,6 +463,30 @@ def _generate_zscore_insight(
         )
 
 
+def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Sum the last 4 quarters of income statement into TTM totals.
+
+    Z-Score uses EBIT and Revenue — both flow figures, so summing the
+    trailing four quarters gives the correct denominator vs. the latest
+    annual fiscal year (which can be 12+ months stale).
+    """
+    if not quarterly:
+        return {}
+    sorted_q = sorted(quarterly, key=lambda r: r.get("date", ""), reverse=True)[:4]
+    summed: Dict[str, float] = {}
+    for field in ("operatingIncome", "interestExpense", "revenue", "netIncome", "ebitda"):
+        vals: List[float] = []
+        for rec in sorted_q:
+            v = _safe_float(rec, field)
+            if v is None:
+                vals = []
+                break
+            vals.append(v)
+        if vals:
+            summed[field] = sum(vals)
+    return summed
+
+
 def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
     """Compute Altman Z-Score from balance sheet, income, and market cap."""
     ta = _safe_float(bs, "totalAssets")
@@ -750,14 +774,19 @@ class HealthCheckService:
     async def _build_health_check(
         self, ticker: str
     ) -> Tuple[HealthCheckResponse, Optional[str]]:
-        # Phase 1: parallel FMP fetch (profile + ratios + key-metrics + earnings calendar + BS + IS for Z-Score)
+        # Phase 1: parallel FMP fetch. TTM endpoints for ratios + key-metrics
+        # so D/E, P/E, ROE reflect the trailing twelve months instead of an
+        # up-to-12-months-stale fiscal year-end. Balance sheet uses the latest
+        # quarterly filing (point-in-time = the most recent number available).
+        # Income statement is fetched as 4 quarters to support TTM Z-Score
+        # later in this method.
         profile, ratios_list, key_metrics_list, ec_raw, bs_raw, inc_raw = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
-            self.fmp.get_financial_ratios(ticker, period="annual", limit=1),
-            self.fmp.get_key_metrics(ticker, period="annual", limit=1),
+            self.fmp.get_ratios_ttm(ticker),
+            self.fmp.get_key_metrics_ttm(ticker),
             self.fmp.get_earning_calendar_full(ticker),
-            self.fmp.get_balance_sheet(ticker, period="annual", limit=1),
-            self.fmp.get_income_statement(ticker, period="annual", limit=1),
+            self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
+            self.fmp.get_income_statement(ticker, period="quarter", limit=4),
             return_exceptions=True,
         )
 
@@ -784,7 +813,9 @@ class HealthCheckService:
         ratios = ratios_list[0] if isinstance(ratios_list, list) and ratios_list else {}
         key_metrics = key_metrics_list[0] if isinstance(key_metrics_list, list) and key_metrics_list else {}
         balance_sheet = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
-        income_stmt = inc_raw[0] if isinstance(inc_raw, list) and inc_raw else {}
+        # Sum 4 quarters into TTM so Z-Score's EBIT and Revenue inputs
+        # reflect the trailing twelve months, not the latest single quarter.
+        income_stmt = _sum_ttm_income(inc_raw) if isinstance(inc_raw, list) else {}
 
         # Extract market cap for Z-Score
         profile_data = profile if isinstance(profile, dict) else (profile[0] if isinstance(profile, list) and profile else {})
@@ -847,7 +878,13 @@ class HealthCheckService:
                 continue
 
             source = ratios if mdef["source"] == "ratios" else key_metrics
-            company_val = _safe_float(source, mdef["fmp_field"])
+            # /ratios-ttm and /key-metrics-ttm return field names suffixed
+            # with "TTM"; try the TTM-suffixed name first, then the legacy
+            # bare name so this still works if FMP rolls the schema back.
+            ttm_field = f"{mdef['fmp_field']}TTM"
+            company_val = _safe_float(source, ttm_field)
+            if company_val is None:
+                company_val = _safe_float(source, mdef["fmp_field"])
             if company_val is None:
                 logger.warning(
                     f"Health check {ticker}: {mdef['type']} — FMP field "

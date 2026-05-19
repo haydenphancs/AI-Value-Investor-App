@@ -406,6 +406,11 @@ struct PriceActionDTO: Codable {
     let direction: String
     let windowLabel: String
     let tag: String
+    // Volatility-aware additions — all optional so older cached reports decode.
+    let tier: String?
+    let zScore: Double?
+    let sigmaDailyPct: Double?
+    let expectedBandPct: Double?
 
     enum CodingKeys: String, CodingKey {
         case prices
@@ -415,6 +420,10 @@ struct PriceActionDTO: Codable {
         case direction
         case windowLabel = "window_label"
         case tag
+        case tier
+        case zScore = "z_score"
+        case sigmaDailyPct = "sigma_daily_pct"
+        case expectedBandPct = "expected_band_pct"
     }
 }
 
@@ -848,7 +857,11 @@ extension TickerReportAPIResponse {
             changePct: priceAction.changePct,
             direction: priceAction.direction,
             windowLabel: priceAction.windowLabel,
-            tag: priceAction.tag
+            tag: priceAction.tag,
+            tier: priceAction.tier,
+            zScore: priceAction.zScore,
+            sigmaDailyPct: priceAction.sigmaDailyPct,
+            expectedBandPct: priceAction.expectedBandPct
         )
 
         // Revenue Engine

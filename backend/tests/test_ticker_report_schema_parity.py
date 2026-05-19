@@ -49,7 +49,11 @@ from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
     _build_fundamental_metrics_from_snapshots,
+    _build_price_action,
+    _compute_price_volatility,
     _snapshot_to_card,
+    _tier_for_z,
+    _z_score_for_window,
     build_financial_context,
 )
 
@@ -433,6 +437,153 @@ def test_fundamentals_section_order_is_stable():
     cards = _build_fundamental_metrics_from_snapshots(snap, snap, snap, snap)
     titles = [c["title"] for c in cards]
     assert titles == ["Profitability", "Growth", "Valuation", "Health"]
+
+
+# ── Price action: volatility math + tier classification ──────────────
+
+
+def _flat_prices(count: int, start: float = 100.0) -> list[float]:
+    """A perfectly-flat baseline — σ_daily should be 0."""
+    return [start] * count
+
+
+def _gentle_walk(count: int, start: float = 100.0, daily_pct: float = 0.005) -> list[float]:
+    """Deterministic ±0.5% alternating walk → ~0.5% daily σ baseline."""
+    out = [start]
+    for i in range(1, count):
+        out.append(out[-1] * (1 + (daily_pct if i % 2 == 0 else -daily_pct)))
+    return out
+
+
+def test_tier_for_z_thresholds():
+    """Z-score → tier mapping must match the design spec exactly."""
+    assert _tier_for_z(None) == "Typical"
+    assert _tier_for_z(0.5) == "Typical"
+    assert _tier_for_z(0.99) == "Typical"
+    assert _tier_for_z(1.0) == "Notable"
+    assert _tier_for_z(1.5) == "Notable"
+    assert _tier_for_z(2.0) == "Unusual"
+    assert _tier_for_z(2.99) == "Unusual"
+    assert _tier_for_z(3.0) == "Extreme"
+    assert _tier_for_z(10.0) == "Extreme"
+
+
+def test_z_score_uses_sqrt_n_scaling():
+    """A 5% move over 7 days vs 30 days must scale by √N — not the same z."""
+    sigma = 0.015  # 1.5% daily
+    z_7 = _z_score_for_window(5.0, sigma, 7)
+    z_30 = _z_score_for_window(5.0, sigma, 30)
+    assert z_7 is not None and z_30 is not None
+    # 7-day band ≈ 1.5 × √7 = 3.97% → z ≈ 5/3.97 ≈ 1.26
+    # 30-day band ≈ 1.5 × √30 = 8.22% → z ≈ 5/8.22 ≈ 0.61
+    assert 1.20 < z_7 < 1.30, f"7-day z out of range: {z_7}"
+    assert 0.55 < z_30 < 0.65, f"30-day z out of range: {z_30}"
+    # The same move is "more unusual" over a shorter window.
+    assert z_7 > z_30
+
+
+def test_z_score_returns_none_for_zero_sigma():
+    assert _z_score_for_window(5.0, 0.0, 30) is None
+    assert _z_score_for_window(5.0, None, 30) is None
+
+
+def test_compute_price_volatility_with_insufficient_history():
+    """Fewer than 30 closes → no σ, default 30-day window, Typical tier."""
+    out = _compute_price_volatility(_flat_prices(20))
+    assert out["sigma_daily"] is None
+    assert out["chosen_window"] == 30
+    assert out["tier"] == "Typical"
+    assert out["windows"] == []
+
+
+def test_compute_price_volatility_with_flat_baseline():
+    """Zero σ (perfectly flat) → no z computable, default window, Typical."""
+    out = _compute_price_volatility(_flat_prices(200))
+    assert out["sigma_daily"] is None or out["sigma_daily"] == 0
+    assert out["chosen_window"] == 30
+    assert out["tier"] == "Typical"
+
+
+def test_compute_price_volatility_picks_most_unusual_window():
+    """Stock with quiet baseline then a single big drop on day 7 should
+    trigger a Notable+ tier on the short window."""
+    # Quiet baseline of 190 closes
+    prices = _gentle_walk(190, start=100.0, daily_pct=0.005)
+    # Now bolt on a 7-day window with a -8% cliff
+    cliff_start = prices[-1]
+    drop_path = [cliff_start * (1 - 0.012 * i) for i in range(1, 11)]
+    prices.extend(drop_path)
+    out = _compute_price_volatility(prices)
+    assert out["sigma_daily"] is not None
+    assert out["sigma_daily"] > 0
+    # Should pick a short window (7 or 15) as most unusual.
+    assert out["chosen_window"] in (7, 15)
+    # Tier should be Notable, Unusual, or Extreme — definitely NOT Typical.
+    assert out["tier"] in {"Notable", "Unusual", "Extreme"}
+
+
+def test_compute_price_volatility_quiet_stock_defaults_to_30():
+    """Stock whose every window is within ±1σ falls back to 30-day default."""
+    prices = _gentle_walk(200, start=100.0, daily_pct=0.005)
+    out = _compute_price_volatility(prices)
+    assert out["sigma_daily"] is not None
+    # All windows should be calm (|z| < 1) — fall through to 30-day default.
+    assert out["chosen_window"] == 30
+    assert out["tier"] == "Typical"
+
+
+def test_build_price_action_emits_new_fields():
+    """The assembled price_action dict must carry the four volatility fields
+    so iOS can render the sub-label. Existing fields must also remain."""
+    prices = _gentle_walk(200, start=100.0, daily_pct=0.005)
+    out = _build_price_action(
+        recent_prices=prices,
+        current_price=prices[-1],
+        earnings_dates=[],
+        news=None,
+    )
+    # Existing contract
+    assert "change_pct" in out
+    assert "direction" in out
+    assert "window_label" in out
+    assert "tag" in out
+    # New volatility fields
+    assert "tier" in out and out["tier"] in {"Typical", "Notable", "Unusual", "Extreme"}
+    assert "z_score" in out
+    assert "sigma_daily_pct" in out
+    assert "expected_band_pct" in out
+    # Sparkline is trimmed to the chosen window (max 46 = 45+1), not the full 200
+    assert len(out["prices"]) <= 46
+
+
+def test_build_price_action_handles_empty_history():
+    """Empty price array → honest empty state, all new fields present as None."""
+    out = _build_price_action(
+        recent_prices=[],
+        current_price=100.0,
+        earnings_dates=[],
+        news=None,
+    )
+    assert out["prices"] == []
+    assert out["tier"] == "Typical"
+    assert out["z_score"] is None
+    assert out["sigma_daily_pct"] is None
+    assert out["expected_band_pct"] is None
+
+
+def test_build_price_action_schema_validates():
+    """Even the empty path must produce a Pydantic-valid PriceActionResponse."""
+    from app.schemas.ticker_report import PriceActionResponse
+    out = _build_price_action(
+        recent_prices=_gentle_walk(200),
+        current_price=110.0,
+        earnings_dates=[],
+        news=None,
+    )
+    # Pydantic strips _news_headlines; that's fine — it's the iOS contract.
+    out_filtered = {k: v for k, v in out.items() if not k.startswith("_")}
+    out_filtered["narrative"] = "test"  # required non-null in schema
+    PriceActionResponse.model_validate(out_filtered)
 
 
 def test_overall_assessment_averages_card_ratings():

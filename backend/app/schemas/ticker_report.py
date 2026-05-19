@@ -214,6 +214,14 @@ class PriceActionResponse(BaseModel):
     direction: str
     window_label: str
     tag: str
+    # Volatility-aware additions (optional so older cached reports decode).
+    # `tier` is the user-facing label (Typical/Notable/Unusual/Extreme).
+    # `z_score`, `sigma_daily_pct`, `expected_band_pct` back the sub-label
+    # "Normal range: ±X% (Y% daily σ)" on iOS.
+    tier: Optional[str] = None
+    z_score: Optional[float] = None
+    sigma_daily_pct: Optional[float] = None
+    expected_band_pct: Optional[float] = None
 
 
 # ── Deep Dive: Revenue Engine ─────────────────────────────────────────────────

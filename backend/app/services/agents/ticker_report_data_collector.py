@@ -349,7 +349,7 @@ class TickerReportDataCollector:
             ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 5), []),
             ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 3), []),
             ("historical", self.fmp.get_historical_prices(ticker), {}),
-            ("news", self.fmp.get_stock_news(ticker, 5), []),
+            ("news", self.fmp.get_stock_news(ticker, 20), []),
             ("insider_trades", self.fmp.get_insider_trading(ticker, limit=200), []),
             ("insider_roster", self.fmp.get_insider_roster(ticker), []),
             (
@@ -653,9 +653,13 @@ class TickerReportDataCollector:
             c["eps_cagr"] = None
 
         # ── Historical price chart data ───────────────────────────────
+        # Pull 200 closes to support the 180-day baseline σ used by the
+        # price-action volatility classifier. The sparkline still renders
+        # only the chosen evaluation window (7/15/30/45 days) — the rest
+        # is baseline data the user never sees but the math needs.
         hist_list = _hist_list(out.historical)
         recent_prices = [
-            p.get("close", 0.0) for p in hist_list[:20]
+            p.get("close", 0.0) for p in hist_list[:200]
             if p.get("close") is not None
         ]
         recent_prices.reverse()
@@ -707,7 +711,9 @@ class TickerReportDataCollector:
         # ── Revenue vital — top segment hooked from real segments ─────
         # Prefer RevenueBreakdownService (parity with TickerDetailView's
         # Financials tab) and fall back to direct FMP segmentation.
-        segments_built = _segments_from_breakdown(out.revenue_breakdown)
+        segments_built = _segments_from_breakdown(
+            out.revenue_breakdown, out.segments_raw,
+        )
         if not segments_built:
             segments_built = _build_revenue_segments(out.segments_raw)
         top_segment_name = (
@@ -1734,14 +1740,19 @@ def _overall_assessment_from_cards(
 
 def _segments_from_breakdown(
     breakdown: Optional[RevenueBreakdownResponse],
+    segments_raw: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Use RevenueBreakdownService output for cross-view parity.
 
     Returns [] when the service either hit no data or fell back to its
     single "Total Revenue" placeholder — caller then falls back to the
-    direct FMP segmentation path. previous_revenue stays 0.0 because
-    the breakdown service doesn't expose prior-period segments; the iOS
-    revenue_engine view renders current-period bars primarily.
+    direct FMP segmentation path.
+
+    `segments_raw` is the per-period FMP product-segmentation list that
+    the collector already fetches alongside the breakdown. We use index
+    [1] (the prior fiscal year) to back-fill `previous_revenue` for each
+    segment — without this, every segment's YoY shows +0% because the
+    cached breakdown is single-period.
     """
     if breakdown is None or not breakdown.revenue_sources:
         return []
@@ -1757,13 +1768,37 @@ def _segments_from_breakdown(
     if total <= 0:
         return []
 
+    # Prior-period lookup from FMP segmentation (newest-first; [1] = prior).
+    # Segment names from the breakdown service match FMP keys verbatim,
+    # so a direct dict lookup is the right join key. Missing prior keys
+    # (e.g. a segment introduced this year) yield previous_revenue=0,
+    # which renders as "YoY n/a" rather than a misleading +∞ growth.
+    prior_lookup: Dict[str, float] = {}
+    if segments_raw and len(segments_raw) >= 2:
+        prior_rec = segments_raw[1]
+        nested = prior_rec.get("data")
+        if isinstance(nested, dict):
+            prior_seg_dict = nested
+        else:
+            prior_seg_dict = prior_rec
+        for k, v in prior_seg_dict.items():
+            if k in _SEGMENT_META_KEYS:
+                continue
+            try:
+                amount = float(v)
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0 or (1900 <= amount <= 2100):
+                continue
+            prior_lookup[k] = amount
+
     # Sort largest first, mirror the FMP-direct path's contract.
     sources.sort(key=lambda s: s.value, reverse=True)
     return [
         {
             "name": s.name,
             "current_revenue": float(s.value),
-            "previous_revenue": 0.0,
+            "previous_revenue": float(prior_lookup.get(s.name, 0.0)),
             "total_revenue": float(total),
         }
         for s in sources
@@ -1784,7 +1819,16 @@ def _segment_growth_pct(
 def _build_revenue_engine(
     segments: List[Dict[str, Any]], now: datetime,
 ) -> Dict[str, Any]:
-    """Pick a display unit and emit segments scaled to that unit."""
+    """Emit segments in MILLIONS — iOS decides how to render (M / B / T).
+
+    Older versions of this function pre-divided by the chosen display unit
+    (1e9 for big-cap, 1e12 for mega-cap), which silently broke the iOS
+    formatter — it assumes millions and infers the user-facing tier from
+    magnitude. Always emitting in millions keeps the API contract single-
+    unit; iOS handles the display branch. `revenue_unit` is still surfaced
+    so the AI insight prompt can phrase magnitudes correctly without doing
+    its own arithmetic.
+    """
     if not segments:
         return {
             "segments": [],
@@ -1796,12 +1840,13 @@ def _build_revenue_engine(
 
     total = sum(s["current_revenue"] for s in segments)
     if total >= 1e12:
-        unit, divisor = "Trillions", 1e12
+        unit = "Trillions"
     elif total >= 1e9:
-        unit, divisor = "Billions", 1e9
+        unit = "Billions"
     else:
-        unit, divisor = "Millions", 1e6
+        unit = "Millions"
 
+    divisor = 1e6  # always emit in millions
     scaled = []
     for s in segments:
         scaled.append({
@@ -2106,48 +2151,181 @@ def _detect_news_catalysts(
     return candidates
 
 
+_EVAL_WINDOWS: Tuple[int, ...] = (7, 15, 30, 45)
+_BASELINE_DAYS: int = 180
+_DEFAULT_WINDOW: int = 30
+
+
+def _daily_returns(prices: List[float]) -> List[float]:
+    """Daily simple returns from a price array (oldest→newest).
+    Skips pairs where the prior close is zero or missing.
+    """
+    out: List[float] = []
+    for i in range(1, len(prices)):
+        prev = prices[i - 1]
+        curr = prices[i]
+        if prev and prev > 0 and curr is not None:
+            out.append((curr - prev) / prev)
+    return out
+
+
+def _std_dev_pop(values: List[float]) -> Optional[float]:
+    """Population standard deviation. None if <2 values."""
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / len(values)
+    return var ** 0.5
+
+
+def _z_score_for_window(
+    move_pct: float, sigma_daily: Optional[float], days: int,
+) -> Optional[float]:
+    """Absolute z-score for an N-day move given the daily-return σ.
+    Uses the random-walk √N scaling rule: σ over N days = σ_daily × √N.
+    """
+    if sigma_daily is None or sigma_daily <= 0 or days <= 0:
+        return None
+    n_day_sigma_pct = sigma_daily * (days ** 0.5) * 100
+    if n_day_sigma_pct <= 0:
+        return None
+    return abs(move_pct) / n_day_sigma_pct
+
+
+def _tier_for_z(z: Optional[float]) -> str:
+    """Map |z| → user-facing tier label."""
+    if z is None:
+        return "Typical"
+    if z >= 3:
+        return "Extreme"
+    if z >= 2:
+        return "Unusual"
+    if z >= 1:
+        return "Notable"
+    return "Typical"
+
+
+def _compute_price_volatility(
+    prices: List[float],
+    baseline_days: int = _BASELINE_DAYS,
+    windows: Tuple[int, ...] = _EVAL_WINDOWS,
+) -> Dict[str, Any]:
+    """Compute the daily-return σ over the baseline plus per-window z-scores.
+
+    Returns a dict with sigma_daily, per-window metrics, the chosen window
+    (argmax |z|, or _DEFAULT_WINDOW when every window is within ±1σ), the
+    tier label, and the chosen-window's move/z/band.
+
+    When fewer than 30 daily returns are available the result still has the
+    same shape but sigma_daily is None and the chosen window stays at the
+    default — callers should treat tier as "Typical" without the σ math.
+    """
+    out: Dict[str, Any] = {
+        "sigma_daily": None,
+        "windows": [],
+        "chosen_window": _DEFAULT_WINDOW,
+        "tier": "Typical",
+        "chosen_z": None,
+        "chosen_move_pct": None,
+        "chosen_band_pct": None,
+    }
+    if len(prices) < 30:
+        return out
+
+    # Use the last `baseline_days + 1` closes so the returns array has
+    # at most `baseline_days` entries. The +1 covers the inter-day diff.
+    baseline_slice = prices[-(baseline_days + 1):]
+    sigma_daily = _std_dev_pop(_daily_returns(baseline_slice))
+    if sigma_daily is None or sigma_daily <= 0:
+        return out
+    out["sigma_daily"] = sigma_daily
+
+    metrics: List[Dict[str, Any]] = []
+    for n in windows:
+        if len(prices) <= n:
+            continue
+        oldest = prices[-(n + 1)]
+        newest = prices[-1]
+        if not oldest or oldest <= 0:
+            continue
+        move_pct = (newest - oldest) / oldest * 100
+        n_day_sigma_pct = sigma_daily * (n ** 0.5) * 100
+        z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
+        metrics.append({
+            "days": n,
+            "move_pct": round(move_pct, 2),
+            "z": round(z, 2),
+            "band_2sigma": round(n_day_sigma_pct * 2, 2),
+        })
+    out["windows"] = metrics
+    if not metrics:
+        return out
+
+    # Pick the most unusual window. If every window is within ±1σ
+    # (genuinely quiet stock-week), default to 30 days so the section
+    # still has something to show — `tier` will be "Typical".
+    most_unusual = max(metrics, key=lambda w: w["z"])
+    if most_unusual["z"] < 1.0:
+        default = next(
+            (w for w in metrics if w["days"] == _DEFAULT_WINDOW), most_unusual,
+        )
+        chosen = default
+    else:
+        chosen = most_unusual
+
+    out["chosen_window"] = chosen["days"]
+    out["chosen_z"] = chosen["z"]
+    out["chosen_move_pct"] = chosen["move_pct"]
+    out["chosen_band_pct"] = chosen["band_2sigma"]
+    out["tier"] = _tier_for_z(chosen["z"])
+    return out
+
+
 def _build_price_action(
     recent_prices: List[float],
     current_price: float,
     earnings_dates: List[str],
     news: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """20-day chart + deterministic event detection (earnings + news catalysts).
+    """Volatility-aware price-movement section with dynamic window selection.
 
-    Two candidate sources are scored against each other:
-      1. Earnings dates within the last 30 days — classified by reaction
-         (>+3% = beat, <-3% = miss, else = reaction).
-      2. News headlines within the same window — classified by keyword
-         match into catalyst tags (FDA Approval, M&A, Buyback, etc.).
+    Pipeline:
+      1. Compute σ_daily over the 180-day baseline, then per-window z-scores
+         for the evaluation windows (7, 15, 30, 45 days).
+      2. If a catalyst event (earnings or news headline) fires within the
+         last 45 days, the chart anchors to the event date and the tier is
+         computed for the exact since-event span. Otherwise, the chart
+         shows the argmax|z| window (or 30 days when nothing is unusual).
+      3. Trim the sparkline to the chosen window's length so iOS renders
+         the right span without needing the full baseline.
 
-    Priority rule: when both fire, the candidate with the larger
-    absolute price move at its date-mapped index wins. Ties go to
-    earnings (date is higher-confidence than headline string-match).
-    Ties between catalysts go to the more recent one.
-
-    Also emits `_news_headlines` (top 5 most-recent matched headlines,
-    minus the priority winner if it came from news) so Stage B can
-    ground the narrative in real articles instead of speculating. The
-    underscore prefix flags it as Pydantic-ignored — `PriceActionResponse`
-    silently drops it before serializing to iOS.
+    Also emits `_news_headlines` (top 20 most-recent matched headlines)
+    so the Stage B narrative prompt can name a real catalyst instead of
+    speculating. The underscore prefix flags it as Pydantic-ignored.
     """
     if not recent_prices:
-        # Honest empty state — a flat 20-point line at current_price would
-        # misrepresent reality. iOS skips render when the array is empty.
-        recent_prices = []
+        return _empty_price_action(current_price)
 
     today = datetime.now(timezone.utc).date()
-    window_start = today - timedelta(days=30)
 
-    # ── Earnings candidate (existing logic, unchanged) ────────────────
+    # ── Volatility & dynamic window selection ─────────────────────────
+    vol = _compute_price_volatility(recent_prices)
+    sigma_daily = vol["sigma_daily"]
+    chosen_window = vol["chosen_window"]
+
+    # ── Scan for catalysts within the larger of (45 days, chosen window)
+    # so we don't miss an old-but-significant event.
+    max_scan = max(45, chosen_window)
+    scan_start = today - timedelta(days=max_scan)
+
     earnings_candidate: Optional[Dict[str, Any]] = None
-    if recent_prices and earnings_dates:
+    if earnings_dates:
         for ed in earnings_dates:
             try:
                 d = datetime.strptime(ed[:10], "%Y-%m-%d").date()
             except (TypeError, ValueError):
                 continue
-            if not (window_start <= d <= today):
+            if not (scan_start <= d <= today):
                 continue
             idx = _index_for_date(d, today, recent_prices)
             change = _price_change_at_index(recent_prices, idx)
@@ -2159,62 +2337,108 @@ def _build_price_action(
                 tag = "Earnings Reaction"
             earnings_candidate = {
                 "tag": tag,
-                "date": d.strftime("%b ") + str(d.day),
+                "date": d,
                 "index": idx,
                 "abs_move_pct": abs(change),
                 "_source": "earnings",
             }
             break
 
-    # ── News-catalyst candidates ──────────────────────────────────────
     news_candidates = _detect_news_catalysts(
-        news or [], recent_prices, today, window_start,
+        news or [], recent_prices, today, scan_start,
     )
 
-    # ── Priority rule: pick the largest absolute price move ──────────
-    # Earnings ties → earnings (higher confidence). Catalyst ties →
-    # most recent date.
-    chosen_event: Optional[Dict[str, Any]] = None
+    # Priority: largest absolute move wins. Ties → earnings (higher
+    # confidence). Catalyst-only ties → most recent date.
     best_news: Optional[Dict[str, Any]] = None
     if news_candidates:
-        # Sort: largest move desc, then most recent date desc.
         news_candidates.sort(
             key=lambda c: (c["abs_move_pct"], c["date"]),
             reverse=True,
         )
         best_news = news_candidates[0]
 
+    chosen_event: Optional[Dict[str, Any]] = None
     if earnings_candidate and best_news:
-        if best_news["abs_move_pct"] > earnings_candidate["abs_move_pct"]:
-            chosen_event = {
-                "tag": best_news["tag"],
-                "date": best_news["date"].strftime("%b ") + str(best_news["date"].day),
-                "index": best_news["index"],
-            }
-        else:
-            chosen_event = {
-                k: v for k, v in earnings_candidate.items()
-                if k in ("tag", "date", "index")
-            }
+        chosen_event = (
+            best_news
+            if best_news["abs_move_pct"] > earnings_candidate["abs_move_pct"]
+            else earnings_candidate
+        )
     elif earnings_candidate:
-        chosen_event = {
-            k: v for k, v in earnings_candidate.items()
-            if k in ("tag", "date", "index")
-        }
+        chosen_event = earnings_candidate
     elif best_news:
-        chosen_event = {
-            "tag": best_news["tag"],
-            "date": best_news["date"].strftime("%b ") + str(best_news["date"].day),
-            "index": best_news["index"],
-        }
+        chosen_event = best_news
 
-    # ── Headlines for the narrative prompt ───────────────────────────
-    # Top 5 most recent matched headlines. Pydantic strips this before
-    # serializing to iOS (the `PriceActionResponse` schema doesn't
-    # declare `_news_headlines`, so `extra="ignore"` drops it).
+    # ── Window choice: event date overrides volatility window ─────────
+    if chosen_event:
+        event_date = chosen_event["date"]
+        event_days_ago = max(1, (today - event_date).days)
+        # Pad the chart with a tiny lead-in so the user can see context
+        # before the event marker.
+        window_days = max(event_days_ago, 7)
+    else:
+        window_days = chosen_window
+
+    # ── Ground truth: change_pct + reference price ────────────────────
+    if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
+        ref_price = recent_prices[chosen_event["index"]]
+        change_days = max(1, (today - chosen_event["date"]).days)
+    else:
+        ref_idx = max(0, len(recent_prices) - (window_days + 1))
+        ref_price = recent_prices[ref_idx]
+        change_days = window_days
+
+    change_pct = 0.0
+    if ref_price:
+        change_pct = (current_price - ref_price) / ref_price * 100
+    change_pct = round(change_pct, 1)
+
+    if abs(change_pct) < 1.0:
+        direction = "flat"
+    elif change_pct > 0:
+        direction = "up"
+    else:
+        direction = "down"
+
+    # ── Tier: based on the actual span the user sees ──────────────────
+    z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
+    tier = _tier_for_z(z_score)
+
+    # ── Tag + window label ────────────────────────────────────────────
+    if chosen_event:
+        date_label = chosen_event["date"].strftime("%b ") + str(chosen_event["date"].day)
+        window_label = f"Since {date_label}"
+        tag = chosen_event["tag"]  # event tag wins over tier tag
+    else:
+        window_label = f"Last {window_days} Days"
+        tag = tier  # Typical / Notable / Unusual / Extreme
+
+    # ── Trim sparkline to the chosen window so iOS doesn't ship 200
+    # closes when the chart only renders ~30.
+    sparkline_len = window_days + 1
+    if len(recent_prices) >= sparkline_len:
+        sparkline = recent_prices[-sparkline_len:]
+        offset = len(recent_prices) - sparkline_len
+    else:
+        sparkline = list(recent_prices)
+        offset = 0
+
+    # Re-index the event marker against the trimmed sparkline.
+    event_out: Optional[Dict[str, Any]] = None
+    if chosen_event:
+        new_idx = chosen_event["index"] - offset
+        if 0 <= new_idx < len(sparkline):
+            event_out = {
+                "tag": chosen_event["tag"],
+                "date": chosen_event["date"].strftime("%b ") + str(chosen_event["date"].day),
+                "index": new_idx,
+            }
+
+    # ── Headlines for the AI narrative prompt — 20 most-recent matches
     headline_evidence = sorted(
         news_candidates, key=lambda c: c["date"], reverse=True,
-    )[:5]
+    )[:20]
     evidence_payload = [
         {
             "tag": c["tag"],
@@ -2225,48 +2449,46 @@ def _build_price_action(
         for c in headline_evidence
     ]
 
-    # ── Ground truth: direction / magnitude / window / tag ────────────
-    # Single source of truth for both the AI narrative prompt (Stage B)
-    # and the iOS renderer. Without this, iOS computed its own window
-    # client-side and the AI wrote contradicting narratives ("dip" vs
-    # +12% chart).
-    change_pct = 0.0
-    if recent_prices:
-        if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
-            ref_price = recent_prices[chosen_event["index"]]
-        else:
-            ref_price = recent_prices[0]
-        if ref_price:
-            change_pct = (current_price - ref_price) / ref_price * 100
-
-    change_pct = round(change_pct, 1)
-    if abs(change_pct) < 1.0:
-        direction = "flat"
-    elif change_pct > 0:
-        direction = "up"
-    else:
-        direction = "down"
-
-    if chosen_event:
-        window_label = f"Since {chosen_event['date']}"
-        tag = chosen_event["tag"]
-    else:
-        window_label = "Last 30 Days"
-        if abs(change_pct) > 10:
-            tag = "Momentum" if direction == "up" else "Correction"
-        else:
-            tag = "Normal"
+    # ── Sigma context exposed to iOS for the sub-label ────────────────
+    sigma_daily_pct = round(sigma_daily * 100, 2) if sigma_daily else None
+    expected_band_pct = None
+    if sigma_daily:
+        expected_band_pct = round(sigma_daily * (change_days ** 0.5) * 100 * 2, 2)
+    z_out = round(z_score, 2) if z_score is not None else None
 
     return {
-        "prices": recent_prices,
+        "prices": sparkline,
         "current_price": round(current_price, 2),
-        "event": chosen_event,
+        "event": event_out,
         "narrative": None,  # AI fills
         "change_pct": change_pct,
         "direction": direction,
         "window_label": window_label,
         "tag": tag,
+        "tier": tier,
+        "z_score": z_out,
+        "sigma_daily_pct": sigma_daily_pct,
+        "expected_band_pct": expected_band_pct,
         "_news_headlines": evidence_payload,  # Pydantic-ignored
+    }
+
+
+def _empty_price_action(current_price: float) -> Dict[str, Any]:
+    """Honest empty state for tickers without enough price history."""
+    return {
+        "prices": [],
+        "current_price": round(current_price, 2) if current_price else 0.0,
+        "event": None,
+        "narrative": None,
+        "change_pct": 0.0,
+        "direction": "flat",
+        "window_label": f"Last {_DEFAULT_WINDOW} Days",
+        "tag": "Typical",
+        "tier": "Typical",
+        "z_score": None,
+        "sigma_daily_pct": None,
+        "expected_band_pct": None,
+        "_news_headlines": [],
     }
 
 

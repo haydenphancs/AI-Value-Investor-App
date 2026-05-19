@@ -14,7 +14,7 @@ import Combine
 // MARK: - Output Context
 
 struct PriceActionContext {
-    let tag: String               // "Earnings Miss", "Momentum", "Normal"
+    let tag: String               // "Earnings Miss", "Notable", "Unusual", etc.
     let displayPercentage: String // "+12.4%"
     let percentValue: Double      // +12.4
     let timeLabel: String         // "Last 30 Days" or "Since Feb 2"
@@ -22,6 +22,10 @@ struct PriceActionContext {
     let eventIndex: Int?          // dot position in chartData (nil = no event)
     let narrative: String
     let isPositive: Bool
+
+    // Volatility context — drives the institutional-rigor sub-label.
+    let tier: String?            // "Typical" | "Notable" | "Unusual" | "Extreme"
+    let volatilitySubLabel: String?  // "Normal range: ±10.2% (1.52% daily σ)"
 
     var trendColor: Color { isPositive ? AppColors.bullish : AppColors.bearish }
 }
@@ -37,6 +41,9 @@ class PriceActionViewModel: ObservableObject {
 
     private static func process(data: PriceActionData) -> PriceActionContext {
         let prices = data.prices
+        let subLabel = volatilitySubLabel(
+            band: data.expectedBandPct, sigma: data.sigmaDailyPct,
+        )
 
         guard !prices.isEmpty else {
             return PriceActionContext(
@@ -47,7 +54,9 @@ class PriceActionViewModel: ObservableObject {
                 chartData: [],
                 eventIndex: nil,
                 narrative: data.narrative,
-                isPositive: true
+                isPositive: true,
+                tier: data.tier,
+                volatilitySubLabel: subLabel
             )
         }
 
@@ -66,7 +75,9 @@ class PriceActionViewModel: ObservableObject {
                 chartData: chartSlice,
                 eventIndex: adjustedEventIdx,
                 narrative: data.narrative,
-                isPositive: data.direction == "up" || data.direction == "flat"
+                isPositive: data.direction == "up" || data.direction == "flat",
+                tier: data.tier,
+                volatilitySubLabel: subLabel
             )
         }
 
@@ -79,11 +90,23 @@ class PriceActionViewModel: ObservableObject {
             chartData: prices,
             eventIndex: nil,
             narrative: data.narrative,
-            isPositive: data.direction == "up" || data.direction == "flat"
+            isPositive: data.direction == "up" || data.direction == "flat",
+            tier: data.tier,
+            volatilitySubLabel: subLabel
         )
     }
 
     private static func formatPercent(_ value: Double) -> String {
         String(format: "%+.1f%%", value)
+    }
+
+    /// User-facing context line under the window label. Returns nil when
+    /// the backend didn't compute a baseline σ (e.g. ticker with < 30 days
+    /// of history). Format: "Normal range: ±10.2% (1.5% daily σ)".
+    private static func volatilitySubLabel(band: Double?, sigma: Double?) -> String? {
+        guard let band = band, let sigma = sigma, band > 0, sigma > 0 else {
+            return nil
+        }
+        return String(format: "Normal range: \u{00B1}%.1f%% (%.1f%% daily \u{03C3})", band, sigma)
     }
 }

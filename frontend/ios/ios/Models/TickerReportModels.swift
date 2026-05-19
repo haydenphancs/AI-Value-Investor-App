@@ -716,10 +716,19 @@ struct PriceActionData {
     let currentPrice: Double
     let event: PriceEvent?    // optional catalyst
     let narrative: String     // short explanation text
-    let changePct: Double     // signed % over the 30-day window (or since event)
+    let changePct: Double     // signed % over the chosen window (or since event)
     let direction: String     // "up" | "down" | "flat" — drives badge + AI grounding
-    let windowLabel: String   // "Last 30 Days" or "Since {event date}"
-    let tag: String           // "Momentum" / "Correction" / "Normal" / event tag
+    let windowLabel: String   // "Last {N} Days" (N dynamic) or "Since {event date}"
+    let tag: String           // "Typical" / "Notable" / "Unusual" / "Extreme" / event tag
+
+    // Volatility context — drives the sub-label "Normal range: ±X% (Y% daily σ)".
+    // All optional so older cached reports decode and so we can render the
+    // section honestly even when the baseline (<30 trading days) is too short
+    // to compute a meaningful σ.
+    let tier: String?            // "Typical" | "Notable" | "Unusual" | "Extreme"
+    let zScore: Double?          // |move| / (σ_daily × √N)
+    let sigmaDailyPct: Double?   // daily return σ, in percent (e.g. 1.52)
+    let expectedBandPct: Double? // ±2σ band for the chosen window, in percent
 }
 
 // MARK: - Price Movement (Legacy)
@@ -1333,11 +1342,15 @@ extension TickerReportData {
             ],
             currentPrice: 142.82,
             event: PriceEvent(tag: "Earnings Miss", date: "Feb 2", index: 7),
-            narrative: "Oracle dropped 12% after reporting Q3 earnings below consensus estimates. Revenue of $13.8B missed the $14.1B forecast, driven by slower-than-expected cloud migration deals. The sell-off intensified on guidance cut for Q4.",
+            narrative: "Oracle dropped 12% after reporting Q3 earnings below consensus estimates. Revenue of $13.8B missed the $14.1B forecast, driven by slower-than-expected cloud migration deals. This reflects a fundamental concern about the pace of cloud migration — next quarter's bookings will decide whether the guidance reset is a one-off.",
             changePct: -10.3,
             direction: "down",
             windowLabel: "Since Feb 2",
-            tag: "Earnings Miss"
+            tag: "Earnings Miss",
+            tier: "Unusual",
+            zScore: 2.3,
+            sigmaDailyPct: 1.52,
+            expectedBandPct: 10.2
         ),
         revenueEngine: ReportRevenueEngineData.sampleOracle,
         moatCompetition: ReportMoatCompetitionData(

@@ -335,27 +335,54 @@ def _price_action_narrative_prompt(
     pa = shell.get("price_action", {}) or {}
     event = pa.get("event") or {}
     event_str = (
-        f"event: {event.get('tag')} on {event.get('date')}"
-        if event else "no notable catalyst event in the last ~30 days"
+        f"{event.get('tag')} on {event.get('date')}"
+        if event else "no specific catalyst flagged in the window"
     )
-    # Real news headlines from `out.news` matched against the keyword
-    # classifier, surfaced via `price_action._news_headlines` in the
-    # collector. Ground the narrative in these so the AI cites real
-    # articles instead of speculating about why the stock moved.
+
+    # Up to 20 most-recent matched headlines (collector bumped FMP news
+    # count 5→20 for this section). Ground the narrative in real articles
+    # rather than letting the AI speculate.
     headlines = pa.get("_news_headlines") or []
     if headlines:
         headlines_str = "\n".join(
             f"- [{h.get('date')}] {h.get('tag')}: {h.get('title')} "
             f"({h.get('site') or 'wire'})"
-            for h in headlines[:5]
+            for h in headlines[:20]
         )
-        headlines_block = f"\nRECENT MATCHED HEADLINES (within the chart window):\n{headlines_str}\n"
+        headlines_block = (
+            f"\nRECENT MATCHED HEADLINES (within the chart window):\n{headlines_str}\n"
+        )
     else:
-        headlines_block = ""
+        headlines_block = "\nRECENT MATCHED HEADLINES: none in window\n"
 
-    # Ground truth — direction/magnitude computed deterministically in
-    # _build_price_action. iOS renders these same fields, so the AI
-    # narrative cannot contradict what the user sees on screen.
+    # Macro context — VIX regime, fed stance, sector rotation, geopolitics.
+    # Already computed for the report's own macro_data section; reuse it
+    # here so the AI can attribute moves like "sector rotation" or "war"
+    # without us paying for a second LLM-grounded search call.
+    macro = shell.get("macro_data") or {}
+    macro_headline = macro.get("headline") or ""
+    macro_brief = macro.get("intelligence_brief") or ""
+    risk_factors = macro.get("risk_factors") or []
+    macro_risks_str = ""
+    if risk_factors:
+        top_risks = [
+            f"  - {r.get('title')} ({r.get('category')}, "
+            f"severity={r.get('severity')}, trend={r.get('trend')})"
+            for r in risk_factors[:4]
+        ]
+        macro_risks_str = "\n" + "\n".join(top_risks)
+    macro_block = ""
+    if macro_headline or macro_brief or macro_risks_str:
+        macro_block = (
+            f"\nMACRO / GEOPOLITICAL CONTEXT:\n"
+            f"  Headline: {macro_headline or 'n/a'}\n"
+            f"  Brief: {macro_brief or 'n/a'}"
+            f"{macro_risks_str}\n"
+        )
+
+    # Ground truth — direction / magnitude / window are computed
+    # deterministically in _build_price_action. iOS renders the same
+    # numbers, so the narrative cannot contradict the chart.
     direction = pa.get("direction", "flat")
     change_pct = pa.get("change_pct", 0.0)
     window_label = pa.get("window_label", "Last 30 Days")
@@ -370,45 +397,158 @@ def _price_action_narrative_prompt(
             f"{window_label.lower()}."
         )
 
-    return f"""Explain WHY the stock moved this way in two sentences.
+    # Volatility posture — biases the conclusion sentence without forcing
+    # the AI to quote σ/z numbers. User wants the prose to focus on WHY,
+    # not on math; the σ math lives in the iOS sub-label.
+    tier = pa.get("tier") or "Typical"
+    z_score = pa.get("z_score")
+    if tier == "Extreme":
+        posture = (
+            "This move is statistically extreme (≈3σ+) for this stock's own "
+            "history. Treat it as a real, meaningful signal — the conclusion "
+            "should lean toward a fundamental change unless the catalyst is "
+            "clearly macro/external (war, fed, oil shock)."
+        )
+    elif tier == "Unusual":
+        posture = (
+            "This move is unusual (≈2σ) for this stock — outside its normal "
+            "monthly range. Lean toward a meaningful read; let the catalyst "
+            "data decide whether it's fundamental or external."
+        )
+    elif tier == "Notable":
+        posture = (
+            "This move is above average but still within ~2σ of normal. "
+            "Let the catalyst data decide — it could be either a real "
+            "business signal or amplified noise."
+        )
+    else:  # Typical
+        posture = (
+            "This move is within the stock's normal range (within ±1σ). "
+            "The default read is short-term noise unless the catalyst data "
+            "above strongly says otherwise."
+        )
+
+    return f"""Explain WHY the stock moved and what kind of signal this is.
 
 GROUND TRUTH: {ground_truth}
-CHART CONTEXT: {event_str}
-{headlines_block}
+CATALYST EVENT IN WINDOW: {event_str}
+{headlines_block}{macro_block}
+POSTURE: {posture}
+
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-{_length_brief(2, 45)}
+{_length_brief(3, 60)}
 
-Step 1 — accept the ground-truth direction above. Never contradict it. Do not write "dip", "fell", "decline" when the ground truth is UP; do not write "rally", "surge", "gained" when the ground truth is DOWN. If matched headlines suggest the opposite of the ground truth, treat the move as broader/market-driven rather than stock-specific.
+WRITE 2-3 SENTENCES:
 
-Step 2 — pick the single best catalyst that explains the move's direction and magnitude:
-  - prefer the event (earnings / catalyst) above if listed,
-  - otherwise cite the most relevant matched headline by name,
-  - otherwise attribute it to a broader market/sector move.
+Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
+  - if there's an EVENT (earnings/news catalyst), lead with it (cite the headline if available)
+  - otherwise lead with the strongest macro/sector driver (sector rotation, fed, yields, war, oil, etc.)
+  - otherwise say plainly that no single catalyst explains it — broader market drift
+  Cite a specific source from the headlines or macro block when you can.
 
-If the move is FLAT, say so directly and skip the catalyst hunt. Never fabricate a catalyst that isn't in the data above."""
+Final sentence — Classify the signal. Use one of these two frames explicitly:
+  A) "This reflects a FUNDAMENTAL change in the business" — when the cause is
+     declining revenue, leadership change, structural cost issue, lost contract,
+     credible guidance reset, deteriorating moat. Be specific about what changed.
+  B) "This is short-term market NOISE" — when the cause is macro fears (rates,
+     war, oil), sector rotation, broad risk-off, routine earnings reaction
+     inside the stock's normal range, or no clear cause at all.
+
+NEVER contradict GROUND TRUTH direction. If headlines suggest the opposite of
+the chart, treat the move as macro-driven (market repricing through this name).
+If everything is FLAT, write one sentence saying so and skip the catalyst hunt.
+
+DO NOT quote σ, z-score, or any volatility math in the prose — that lives in
+the chart sub-label. Focus on the WHY (catalyst) and the WHAT-KIND-OF-SIGNAL
+(fundamental vs. noise)."""
 
 
 def _revenue_engine_analysis_note_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
     re_section = shell.get("revenue_engine", {}) or {}
-    segs = re_section.get("segments", [])
-    seg_str = ", ".join(
-        f"{s.get('name')} {s.get('current_revenue')} (prior {s.get('previous_revenue')})"
-        for s in segs[:5]
-    ) or "no segment breakdown available"
+    segs = re_section.get("segments", []) or []
     unit = re_section.get("revenue_unit", "Millions")
-    return f"""Write a one-line takeaway on the revenue mix.
+
+    # Pre-compute YoY % and share-of-total per segment so the model
+    # doesn't do arithmetic (it's bad at it) and so the prompt can
+    # pick a frame deterministically.
+    enriched: List[Dict[str, Any]] = []
+    for s in segs[:5]:
+        name = s.get("name") or "Unknown"
+        curr = float(s.get("current_revenue") or 0)
+        prior = float(s.get("previous_revenue") or 0)
+        total = float(s.get("total_revenue") or 0)
+        yoy_pct = ((curr - prior) / prior * 100) if prior > 0 else None
+        share_pct = (curr / total * 100) if total > 0 else 0
+        if yoy_pct is None:
+            yoy_label = "YoY n/a"
+        else:
+            yoy_label = f"{yoy_pct:+.1f}% YoY"
+        enriched.append({
+            "name": name, "curr": curr, "prior": prior,
+            "yoy_pct": yoy_pct, "yoy_label": yoy_label,
+            "share_pct": share_pct,
+        })
+
+    if not enriched:
+        seg_str = "no segment breakdown available"
+        frame_hint = "Note the breakdown is unavailable and keep it short."
+    else:
+        seg_str = "; ".join(
+            f"{s['name']} {s['curr']:.0f} ({s['share_pct']:.0f}% of total, {s['yoy_label']})"
+            for s in enriched
+        )
+
+        # Frame hint — pick the most interesting story based on the data.
+        # Rising threshold sits at 10% so mature-large-cap segments (Apple
+        # Services, Oracle Cloud) get tagged; fading at -5% catches a real
+        # decline without flagging noise.
+        rising = [s for s in enriched if s["yoy_pct"] is not None and s["yoy_pct"] >= 10]
+        fading = [s for s in enriched if s["yoy_pct"] is not None and s["yoy_pct"] <= -5]
+        top = enriched[0]
+
+        if rising and fading:
+            frame_hint = (
+                f"There's a clear mix rotation: {rising[0]['name']} is rising "
+                f"({rising[0]['yoy_label']}) while {fading[0]['name']} is fading "
+                f"({fading[0]['yoy_label']}). Lead with the rotation."
+            )
+        elif rising:
+            frame_hint = (
+                f"{rising[0]['name']} is the engine pulling growth forward "
+                f"({rising[0]['yoy_label']}). Lead with what that means for the mix."
+            )
+        elif fading:
+            frame_hint = (
+                f"{fading[0]['name']} is dragging the mix ({fading[0]['yoy_label']}). "
+                f"Lead with the drag and what's compensating."
+            )
+        elif top["share_pct"] >= 70:
+            frame_hint = (
+                f"The engine is concentrated — {top['name']} carries "
+                f"{top['share_pct']:.0f}% of revenue. Name the concentration."
+            )
+        else:
+            frame_hint = (
+                "No segment is breaking out or breaking down. Say the mix is "
+                "steady and what that means for predictability."
+            )
+
+    return f"""Write a one-line takeaway on the revenue engine.
 
 SEGMENTS ({unit}): {seg_str}
 
-{_style_block(persona)}
-{_length_brief(1, 20)}
+FRAME: {frame_hint}
 
-Name where the engine is shifting (which segment is winning or losing) — don't just list the segments."""
+{_style_block(persona)}
+{_length_brief(1, 25)}
+
+Use the YoY numbers above — don't invent them, don't restate them as a list.
+Name what is shifting (or what is concentrated) and what it means for the business."""
 
 
 def _revenue_forecast_guidance_quote_prompt(

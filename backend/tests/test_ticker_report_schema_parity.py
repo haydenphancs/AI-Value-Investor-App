@@ -44,9 +44,12 @@ from app.services.agents.persona_config import (
     PERSONA_KEYS,
     get_persona_config,
 )
+from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
+    _build_fundamental_metrics_from_snapshots,
+    _snapshot_to_card,
     build_financial_context,
 )
 
@@ -357,3 +360,95 @@ def test_split_structured_error_handles_none():
     code, msg = _split_structured_error(None)
     assert code is None
     assert msg is None
+
+
+# ── Fundamentals & Growth snapshot-to-card parity ─────────────────────
+
+
+def test_health_snapshot_carries_five_metrics_to_health_card():
+    """When health snapshot includes Current Ratio (5 visible metrics), the
+    assembled Health card on TickerReportView must surface all five with
+    their exact backend names and values — including the sector-comparison
+    suffix that drives the iOS asterisk."""
+    health_snap = SnapshotItemResponse(
+        category="Financial Health",
+        rating=4,
+        metrics=[
+            SnapshotMetricResponse(name="Altman Z-Score", value="2.10"),
+            SnapshotMetricResponse(name="Debt-to-Equity (vs sector 1.30)", value="4.21"),
+            SnapshotMetricResponse(name="Current Ratio (vs sector 1.50)", value="0.95"),
+            SnapshotMetricResponse(name="Interest Coverage", value="4.77"),
+            SnapshotMetricResponse(name="Quick Ratio", value="1.21"),
+        ],
+        full_report_available=True,
+    )
+    card = _snapshot_to_card("Health", health_snap)
+
+    assert card["star_rating"] == 4
+    labels = [m["label"] for m in card["metrics"]]
+    values = [m["value"] for m in card["metrics"]]
+    assert labels == [
+        "Altman Z-Score",
+        "Debt-to-Equity (vs sector 1.30)",
+        "Current Ratio (vs sector 1.50)",
+        "Interest Coverage",
+        "Quick Ratio",
+    ]
+    assert values == ["2.10", "4.21", "0.95", "4.77", "1.21"]
+
+
+def test_valuation_snapshot_pfcf_neg_passes_through_verbatim():
+    """P/FCF must surface "Neg." verbatim when free cash flow is negative
+    (different signal from missing data → "—"). The sector-comparison
+    suffix should still appear in the label so iOS renders the asterisk."""
+    valuation_snap = SnapshotItemResponse(
+        category="Price",
+        rating=3,
+        metrics=[
+            SnapshotMetricResponse(name="P/E (1.20x sector avg 25)", value="32.50"),
+            SnapshotMetricResponse(name="P/FCF (sector avg 24)", value="Neg."),
+            SnapshotMetricResponse(name="EV/EBITDA (sector avg 18)", value="—"),
+        ],
+        full_report_available=True,
+    )
+    card = _snapshot_to_card("Valuation", valuation_snap)
+
+    pfcf = next(m for m in card["metrics"] if m["label"].startswith("P/FCF"))
+    ev = next(m for m in card["metrics"] if m["label"].startswith("EV/EBITDA"))
+
+    # "Neg." must survive the assembly unchanged
+    assert pfcf["value"] == "Neg."
+    # The sector suffix must remain on the label (iOS regex looks for it)
+    assert "sector" in pfcf["label"], "P/FCF must keep sector suffix so iOS renders '*'"
+    assert ev["value"] == "—"
+    assert "sector" in ev["label"], "EV/EBITDA must keep sector suffix so iOS renders '*'"
+
+
+def test_fundamentals_section_order_is_stable():
+    """The four cards must appear in the order iOS expects:
+    Profitability, Growth, Valuation, Health."""
+    snap = SnapshotItemResponse(
+        category="x", rating=3, metrics=[], full_report_available=False,
+    )
+    cards = _build_fundamental_metrics_from_snapshots(snap, snap, snap, snap)
+    titles = [c["title"] for c in cards]
+    assert titles == ["Profitability", "Growth", "Valuation", "Health"]
+
+
+def test_overall_assessment_averages_card_ratings():
+    """The final score (overall_assessment.average_rating) is the mean of
+    the four card star ratings — recomputed from the deterministic cards,
+    not from any AI output."""
+    from app.services.agents.ticker_report_data_collector import (
+        _overall_assessment_from_cards,
+    )
+    cards = [
+        {"star_rating": 4},  # Profitability
+        {"star_rating": 3},  # Growth
+        {"star_rating": 3},  # Valuation
+        {"star_rating": 5},  # Health  (with new CR-aware blend)
+    ]
+    out = _overall_assessment_from_cards(cards, ai_text=None)
+    assert out["average_rating"] == 3.8
+    assert out["strong_count"] == 2   # Profitability=4 and Health=5
+    assert out["weak_count"] == 0

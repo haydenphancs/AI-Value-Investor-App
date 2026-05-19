@@ -81,13 +81,14 @@ _DISPLAY_NAMES = {
 # Interest Coverage and Quick Ratio replace them as proper health metrics.
 _HIDE_FROM_SNAPSHOT = {"pe_ratio", "roe"}
 
-# Map health check overall_rating to 1-5 snapshot rating
-_RATING_MAP = {
-    "excellent": 5,
-    "good": 4,
-    "mix": 3,
-    "caution": 2,
-    "poor": 1,
+# Metric types that participate in the sector-comparable side of the rating
+# blend. Altman Z-Score is excluded — it has its own anchor weight via
+# `_zscore_rating()` and uses absolute thresholds, not sector comparisons.
+_SECTOR_RATING_TYPES = {
+    "debt_to_equity",
+    "current_ratio",
+    "interest_coverage",
+    "quick_ratio",
 }
 
 # Metrics where the value is a percentage (ROE)
@@ -334,13 +335,18 @@ class HealthSnapshotService:
         if mcap is None:
             mcap = _safe_float(profile, "marketCap")
 
-        # Build health check metrics — filter out pe_ratio (valuation, not
-        # health) and roe (duplicates the Profitability card). Both are
-        # replaced below with proper health metrics.
-        health_rating = 3
+        # Build the snapshot metrics. The happy path reuses HealthCheckService's
+        # metrics directly (it now emits D/E, P/E, ROE, Current Ratio, Altman Z,
+        # Interest Coverage, Quick Ratio — see METRIC_DEFS in
+        # health_check_service.py). P/E and ROE are hidden from the snapshot
+        # because they live in the Valuation and Profitability cards. The
+        # explicit-compute block below is the **fallback** for when the upstream
+        # HealthCheckService call failed — without it we'd silently drop to a
+        # single-metric "Financial Health: —" card.
         metrics: List[SnapshotMetricResponse] = []
+        z_rating = 3
+
         if health is not None:
-            health_rating = _RATING_MAP.get(health.overall_rating, 3)
             for m in health.metrics:
                 if m.type in _HIDE_FROM_SNAPSHOT:
                     continue
@@ -348,95 +354,124 @@ class HealthSnapshotService:
                 value = _fmt_value(m.type, m.value)
                 metrics.append(SnapshotMetricResponse(name=name, value=value))
 
-        # Z-Score now comes from health check metrics (altman_z_score type).
-        # Check if it was included; if not (e.g. insufficient data), compute as fallback.
-        has_zscore = any(m.type == "altman_z_score" for m in (health.metrics if health else []))
-        if not has_zscore:
-            z_score = _compute_z_score(bs, inc, mcap)
-            z_value = f"{z_score}" if z_score is not None else "—"
-            metrics.append(SnapshotMetricResponse(name="Altman Z-Score", value=z_value))
-            z_rating = _zscore_rating(z_score)
-        else:
-            # Extract Z-Score value from health check metrics for rating blend
+            # Z-Score for the rating blend
             z_val_from_hc = next(
                 (m.value for m in health.metrics if m.type == "altman_z_score"), None
             )
             z_rating = _zscore_rating(z_val_from_hc)
+        else:
+            # ── Fallback path: compute D/E, CR, IC, QR + Z-Score locally ──
+            logger.warning(
+                f"HealthCheckService returned None for {ticker} — using local fallback"
+            )
+            raw_sector = profile.get("sector", "")
+            sector = _normalize_sector(raw_sector) if raw_sector else ""
+            sector_ic = sector_qr = sector_de = sector_cr = None
+            if sector:
+                try:
+                    bench = get_sector_benchmark_lookup().get_sector_benchmarks(
+                        sector,
+                        ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
+                        "annual",
+                    )
+                    ic_data = bench.get("interest_coverage", {})
+                    qr_data = bench.get("quick_ratio", {})
+                    de_data = bench.get("debt_to_equity", {})
+                    cr_data = bench.get("current_ratio", {})
+                    if ic_data:
+                        sector_ic = ic_data[max(ic_data.keys())]
+                    if qr_data:
+                        sector_qr = qr_data[max(qr_data.keys())]
+                    if de_data:
+                        sector_de = de_data[max(de_data.keys())]
+                    if cr_data:
+                        sector_cr = cr_data[max(cr_data.keys())]
+                except Exception as e:
+                    logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        # ── Replacement metrics: Interest Coverage + Quick Ratio ──────
-        # Both computed from data already fetched above (no extra FMP call).
-        # Sector context comes from sector_benchmarks; falls back to no
-        # comparison when the benchmark row is missing (e.g. quick_ratio
-        # before the next daily recompute populates it).
-        raw_sector = profile.get("sector", "")
-        sector = _normalize_sector(raw_sector) if raw_sector else ""
-        sector_ic = sector_qr = sector_de = None
-        if sector:
-            try:
-                bench = get_sector_benchmark_lookup().get_sector_benchmarks(
-                    sector,
-                    ["interest_coverage", "quick_ratio", "debt_to_equity"],
-                    "annual",
-                )
-                ic_data = bench.get("interest_coverage", {})
-                qr_data = bench.get("quick_ratio", {})
-                de_data = bench.get("debt_to_equity", {})
-                if ic_data:
-                    sector_ic = ic_data[max(ic_data.keys())]
-                if qr_data:
-                    sector_qr = qr_data[max(qr_data.keys())]
-                if de_data:
-                    sector_de = de_data[max(de_data.keys())]
-            except Exception as e:
-                logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
+            # Z-Score from balance sheet + TTM income + market cap
+            z_score = _compute_z_score(bs, inc, mcap)
+            z_value = f"{z_score}" if z_score is not None else "—"
+            metrics.append(SnapshotMetricResponse(name="Altman Z-Score", value=z_value))
+            z_rating = _zscore_rating(z_score)
 
-        # Interest Coverage = EBIT / |Interest Expense|. FMP reports
-        # interestExpense as a positive number (expenses) on the income
-        # statement; abs() is defensive for edge cases.
-        op_income = _safe_float(inc, "operatingIncome")
-        int_expense = _safe_float(inc, "interestExpense")
-        ic = None
-        if op_income is not None and int_expense is not None and abs(int_expense) > 0:
-            ic = round(op_income / abs(int_expense), 2)
+            # Debt-to-Equity = total debt / shareholders' equity
+            total_debt = _safe_float(bs, "totalDebt")
+            equity = (
+                _safe_float(bs, "totalStockholdersEquity")
+                or _safe_float(bs, "totalEquity")
+            )
+            de = None
+            if total_debt is not None and equity is not None and equity > 0:
+                de = round(total_debt / equity, 2)
+            metrics.append(SnapshotMetricResponse(
+                name=_metric_name("debt_to_equity", de, sector_de),
+                value=_fmt_value("debt_to_equity", de),
+            ))
 
-        # Quick Ratio = (cash + receivables) / current liabilities. Strict
-        # liquidity check that excludes inventory.
-        cash = _safe_float(bs, "cashAndCashEquivalents")
-        receivables = _safe_float(bs, "netReceivables")
-        curr_liab = _safe_float(bs, "totalCurrentLiabilities")
-        qr = None
-        if curr_liab is not None and curr_liab > 0:
-            qr_numerator = (cash or 0) + (receivables or 0)
-            if qr_numerator > 0:
-                qr = round(qr_numerator / curr_liab, 2)
+            # Current Ratio = total current assets / total current liabilities
+            curr_assets = _safe_float(bs, "totalCurrentAssets")
+            curr_liab = _safe_float(bs, "totalCurrentLiabilities")
+            cr = None
+            if curr_assets is not None and curr_liab is not None and curr_liab > 0:
+                cr = round(curr_assets / curr_liab, 2)
+            metrics.append(SnapshotMetricResponse(
+                name=_metric_name("current_ratio", cr, sector_cr),
+                value=_fmt_value("current_ratio", cr),
+            ))
 
-        metrics.append(SnapshotMetricResponse(
-            name=_metric_name("interest_coverage", ic, sector_ic),
-            value=_fmt_value("interest_coverage", ic),
-        ))
-        metrics.append(SnapshotMetricResponse(
-            name=_metric_name("quick_ratio", qr, sector_qr),
-            value=_fmt_value("quick_ratio", qr),
-        ))
+            # Interest Coverage = EBIT / |Interest Expense|. interestExpense
+            # is reported as a positive number on the income statement.
+            op_income = _safe_float(inc, "operatingIncome")
+            int_expense = _safe_float(inc, "interestExpense")
+            ic = None
+            if op_income is not None and int_expense is not None and abs(int_expense) > 0:
+                ic = round(op_income / abs(int_expense), 2)
+            metrics.append(SnapshotMetricResponse(
+                name=_metric_name("interest_coverage", ic, sector_ic),
+                value=_fmt_value("interest_coverage", ic),
+            ))
 
-        # Debt-to-Equity = total debt / shareholders' equity. Computed from
-        # the balance sheet already fetched above (no extra FMP call). Sector
-        # context comes from sector_benchmarks when populated; otherwise the
-        # label drops the comparison suffix.
-        total_debt = _safe_float(bs, "totalDebt")
-        equity = _safe_float(bs, "totalStockholdersEquity")
-        if equity is None:
-            equity = _safe_float(bs, "totalEquity")
-        de = None
-        if total_debt is not None and equity is not None and equity > 0:
-            de = round(total_debt / equity, 2)
-        metrics.append(SnapshotMetricResponse(
-            name=_metric_name("debt_to_equity", de, sector_de),
-            value=_fmt_value("debt_to_equity", de),
-        ))
+            # Quick Ratio = (cash + receivables) / current liabilities
+            cash = _safe_float(bs, "cashAndCashEquivalents")
+            receivables = _safe_float(bs, "netReceivables")
+            qr = None
+            if curr_liab is not None and curr_liab > 0:
+                qr_numerator = (cash or 0) + (receivables or 0)
+                if qr_numerator > 0:
+                    qr = round(qr_numerator / curr_liab, 2)
+            metrics.append(SnapshotMetricResponse(
+                name=_metric_name("quick_ratio", qr, sector_qr),
+                value=_fmt_value("quick_ratio", qr),
+            ))
 
-        # Blend rating: 60% health check + 40% Z-Score
-        rating = max(1, min(5, round(0.6 * health_rating + 0.4 * z_rating)))
+        # ── Rating blend: 40% Altman Z + 60% pass-rate over the 4 sector-
+        # comparable metrics (D/E, Current Ratio, Interest Coverage, Quick
+        # Ratio). Z-Score keeps its anchor weight because Altman thresholds
+        # are calibrated to bankruptcy risk, not sector-relative comparisons.
+        pass_rating = 3
+        if health is not None:
+            positives = sum(
+                1 for m in health.metrics
+                if m.type in _SECTOR_RATING_TYPES and m.status == "positive"
+            )
+            total_sector = sum(
+                1 for m in health.metrics if m.type in _SECTOR_RATING_TYPES
+            )
+            if total_sector > 0:
+                ratio = positives / total_sector
+                if ratio >= 1.0:
+                    pass_rating = 5
+                elif ratio >= 0.75:
+                    pass_rating = 4
+                elif ratio >= 0.5:
+                    pass_rating = 3
+                elif ratio >= 0.25:
+                    pass_rating = 2
+                else:
+                    pass_rating = 1
+
+        rating = max(1, min(5, round(0.4 * z_rating + 0.6 * pass_rating)))
 
         if not metrics:
             metrics.append(SnapshotMetricResponse(name="Financial Health", value="—"))

@@ -81,17 +81,26 @@ def _fmt_ratio(val: Optional[float]) -> str:
     return f"{val:.2f}"
 
 
-def _fmt_pfcf(pfcf: Optional[float], km: Dict[str, Any]) -> str:
+def _fmt_pfcf(
+    pfcf: Optional[float],
+    km: Dict[str, Any],
+    cf: Optional[Dict[str, Any]] = None,
+) -> str:
     """P/FCF is undefined when free cash flow is negative. Surface that
     explicitly as "Neg." so the user knows the company is burning cash —
     different signal from "data missing" ("—"). Detected via the FMP
-    `freeCashFlowYield` field which carries the sign of FCF.
+    `freeCashFlowYield` field which carries the sign of FCF; falls back to
+    the cash-flow statement's `freeCashFlow` when TTM yield is absent.
     """
     if pfcf is not None and pfcf > 0:
         return f"{pfcf:.2f}"
     fcf_yield = _safe_float(km, "freeCashFlowYield")
     if fcf_yield is not None and fcf_yield < 0:
         return "Neg."
+    if cf:
+        fcf = _safe_float(cf, "freeCashFlow")
+        if fcf is not None and fcf < 0:
+            return "Neg."
     return "—"
 
 
@@ -138,11 +147,16 @@ def _get_latest_benchmark(benchmarks: Dict[str, Dict[str, float]], metric: str) 
 
 
 def _sector_ctx(val: Optional[float], sector_median: Optional[float]) -> str:
-    """Build sector context string like '1.2x sector avg 25'. Returns '' if unavailable."""
-    if val is None or val <= 0:
-        return ""
+    """Build sector context string like '1.2x sector avg 25'. When the
+    company's value is missing or non-positive (e.g. P/FCF rendered as
+    "Neg." or EV/EBITDA unavailable) but the sector benchmark exists, we
+    still emit "sector avg N" — iOS's displayLabel regex picks that up to
+    render the "*" footnote marker. Returns '' only when no sector data.
+    """
     if sector_median is None or sector_median <= 0:
         return ""
+    if val is None or val <= 0:
+        return f"sector avg {sector_median:.0f}"
     ratio = val / sector_median
     return f"{ratio:.2f}x sector avg {sector_median:.0f}"
 
@@ -164,11 +178,13 @@ def _fmt_pct(val: Optional[float]) -> str:
 
 def _sector_ctx_pct(val: Optional[float], sector_median: Optional[float]) -> str:
     """Sector context for percentage metrics. Both inputs are decimals
-    (e.g. 0.0425 for 4.25%). Output displays the median as a percent."""
-    if val is None or val <= 0:
-        return ""
+    (e.g. 0.0425 for 4.25%). Output displays the median as a percent.
+    Same fallback as `_sector_ctx`: emit "sector avg X%" when the company
+    value is missing so iOS still adds the asterisk."""
     if sector_median is None or sector_median <= 0:
         return ""
+    if val is None or val <= 0:
+        return f"sector avg {sector_median * 100:.2f}%"
     ratio = val / sector_median
     return f"{ratio:.2f}x sector avg {sector_median * 100:.2f}%"
 
@@ -295,13 +311,16 @@ class ValuationSnapshotService:
 
         # Parallel fetch — TTM-first for valuation ratios, annual cash_flow +
         # income kept only as fallback for the P/FCF / EV/EBITDA reconstruction
-        # paths (FMP doesn't expose TTM cash flow statements directly).
+        # paths (FMP doesn't expose TTM cash flow statements directly). The
+        # latest quarterly balance sheet feeds the EV reconstruction rung
+        # (EV = mcap + totalDebt − cash) when FMP omits enterpriseValue.
         results = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
             self.fmp.get_ratios_ttm(ticker),
             self.fmp.get_key_metrics_ttm(ticker),
             self.fmp.get_cash_flow_statement(ticker, period="annual", limit=1),
             self.fmp.get_income_statement(ticker, period="annual", limit=1),
+            self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
             return_exceptions=True,
         )
 
@@ -317,6 +336,7 @@ class ValuationSnapshotService:
         km = _parse_first(results[2]) if not isinstance(results[2], Exception) else {}
         cf = _parse_first(results[3]) if not isinstance(results[3], Exception) else {}
         inc = _parse_first(results[4]) if not isinstance(results[4], Exception) else {}
+        bs = _parse_first(results[5]) if not isinstance(results[5], Exception) else {}
 
         # Extract valuation metrics. /ratios-ttm uses a `TTM` suffix on field
         # names; /key-metrics-ttm uses a different convention. Cover both
@@ -372,13 +392,21 @@ class ValuationSnapshotService:
             if mcap and mcap > 0 and fcf and fcf > 0:
                 pfcf = round(mcap / fcf, 2)
 
-        # Fallback: compute EV/EBITDA from enterpriseValue / ebitda. When the
-        # `ebitda` field is missing, reconstruct it from operatingIncome plus
-        # depreciation & amortization — both already on the existing payloads
-        # so no extra FMP call is needed.
+        # Fallback chain for EV/EBITDA when both /ratios-ttm and /key-metrics-ttm
+        # return null:
+        #   1. Reconstruct EV/EBITDA from key_metrics.enterpriseValue ÷ inc.ebitda
+        #   2. EBITDA fallback: operatingIncome + D&A from cf or inc
+        #   3. EBITDA last resort: netIncome + interestExpense + incomeTaxExpense + D&A
+        #   4. EV fallback: mcap + totalDebt − cash from latest quarterly balance sheet
+        # Logs which rung succeeded so the next time a ticker drops to "—" we can
+        # see why without rerunning instrumentation.
         if ev_ebitda is None:
             ev = _safe_float(km, "enterpriseValue")
+            ev_source = "key_metrics.enterpriseValue"
+
             ebitda = _safe_float(inc, "ebitda")
+            ebitda_source = "inc.ebitda"
+
             if ebitda is None or ebitda <= 0:
                 op_income = _safe_float(inc, "operatingIncome")
                 d_and_a = (
@@ -387,8 +415,43 @@ class ValuationSnapshotService:
                 )
                 if op_income is not None and d_and_a is not None:
                     ebitda = op_income + d_and_a
+                    ebitda_source = "operatingIncome + D&A"
+
+            if ebitda is None or ebitda <= 0:
+                # Last resort: EBITDA ≈ NI + interest + tax + D&A
+                ni = _safe_float(inc, "netIncome")
+                interest = _safe_float(inc, "interestExpense")
+                tax = _safe_float(inc, "incomeTaxExpense")
+                d_and_a = (
+                    _safe_float(cf, "depreciationAndAmortization")
+                    or _safe_float(inc, "depreciationAndAmortization")
+                )
+                if ni is not None and d_and_a is not None:
+                    ebitda = ni + (interest or 0) + (tax or 0) + d_and_a
+                    ebitda_source = "NI + interest + tax + D&A"
+
+            if (ev is None or ev <= 0) and mcap and mcap > 0:
+                # Reconstruct EV from balance sheet: mcap + totalDebt − cash.
+                total_debt = _safe_float(bs, "totalDebt")
+                cash = (
+                    _safe_float(bs, "cashAndShortTermInvestments")
+                    or _safe_float(bs, "cashAndCashEquivalents")
+                )
+                if total_debt is not None:
+                    ev = mcap + total_debt - (cash or 0)
+                    ev_source = "mcap + totalDebt − cash"
+
             if ev and ev > 0 and ebitda and ebitda > 0:
                 ev_ebitda = round(ev / ebitda, 2)
+                logger.info(
+                    "EV/EBITDA reconstructed for %s via ev=%s, ebitda=%s, ratio=%.2f",
+                    ticker, ev_source, ebitda_source, ev_ebitda,
+                )
+            else:
+                logger.warning(
+                    "EV/EBITDA unavailable for %s — ev=%s (source=%s), ebitda=%s (source=%s)",
+                    ticker, ev, ev_source, ebitda, ebitda_source,
+                )
 
         # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
         #   1. ratios.earningsYield (TTM-suffixed first, then bare name)
@@ -464,7 +527,7 @@ class ValuationSnapshotService:
             ),
             SnapshotMetricResponse(
                 name=_metric_name("P/FCF", pfcf, sector_pfcf),
-                value=_fmt_pfcf(pfcf, km),
+                value=_fmt_pfcf(pfcf, km, cf),
             ),
             SnapshotMetricResponse(
                 name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),

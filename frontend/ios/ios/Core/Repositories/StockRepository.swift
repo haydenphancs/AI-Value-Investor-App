@@ -1681,6 +1681,8 @@ struct HealthCheckResponseDTO: Codable {
             "roe": .returnOnEquity,
             "current_ratio": .currentRatio,
             "altman_z_score": .altmanZScore,
+            "interest_coverage": .interestCoverage,
+            "quick_ratio": .quickRatio,
         ]
 
         let statusMap: [String: HealthCheckMetricStatus] = [

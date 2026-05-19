@@ -35,7 +35,35 @@ def _authorize_admin(
         return
     if user and user.get("email") in _ADMIN_EMAILS:
         return
+    # Log enough to debug without leaking the actual secret.
+    logger.warning(
+        "Admin auth failed: server_token_set=%s, header_present=%s, "
+        "header_len=%d, server_len=%d, user_email=%r",
+        bool(token),
+        bool(x_admin_token),
+        len(x_admin_token or ""),
+        len(token or ""),
+        user.get("email") if user else None,
+    )
     raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@router.get("/auth-debug")
+async def auth_debug(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Public diagnostic: confirms whether ADMIN_TOKEN env var is loaded
+    on the server and whether the token in the request matches. Does NOT
+    reveal either value.
+    """
+    server = settings.ADMIN_TOKEN
+    return {
+        "server_token_configured": server is not None and len(server) > 0,
+        "server_token_length": len(server) if server else 0,
+        "header_token_provided": x_admin_token is not None,
+        "header_token_length": len(x_admin_token) if x_admin_token else 0,
+        "match": bool(server and x_admin_token and server == x_admin_token),
+    }
 
 
 @router.post("/refresh-sector-benchmarks")

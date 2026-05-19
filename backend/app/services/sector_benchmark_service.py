@@ -108,7 +108,11 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
     {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
     {"name": "pfcf_ratio",          "source": "ratios",    "field": "priceToFreeCashFlowsRatio", "type": "direct"},
-    {"name": "ev_ebitda",           "source": "key_metrics", "field": "enterpriseValueOverEBITDA", "type": "direct"},
+    # `enterpriseValueOverEBITDA` is exposed on both /key-metrics and /ratios,
+    # but /key-metrics returns null for too many tickers (most companies on the
+    # FMP free-ish tier expose it under /ratios instead). Source from /ratios
+    # so this populates alongside pe_ratio / pb_ratio / ps_ratio / pfcf_ratio.
+    {"name": "ev_ebitda",           "source": "ratios",      "field": "enterpriseValueOverEBITDA", "type": "direct"},
     {"name": "earnings_yield",      "source": "ratios",    "field": "earningsYield",          "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency

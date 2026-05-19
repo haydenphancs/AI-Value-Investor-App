@@ -74,7 +74,7 @@ TABLE_NAME = "ticker_report_cache"
 #   * New `revenue_forecast.guidance_speaker` ("CFO" / "CEO" / "IR")
 #     and `revenue_forecast.guidance_period` ("Q4 2025" / "FY 2026")
 #     for iOS attribution.
-CACHE_SCHEMA_FLOOR = datetime(2026, 5, 18, 23, 0, 0, tzinfo=timezone.utc)
+CACHE_SCHEMA_FLOOR = datetime(2026, 5, 19, 0, 0, 0, tzinfo=timezone.utc)
 
 
 def patch_legacy_price_action(payload: Dict[str, Any]) -> Dict[str, Any]:

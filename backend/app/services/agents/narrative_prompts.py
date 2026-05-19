@@ -243,7 +243,12 @@ EVIDENCE:
 {_style_block(persona)}
 {_length_brief(1, 25)}
 
-Capture the gestalt — is this a quality compounder, a fixer-upper, a value trap, or something else? Use a concrete metric to anchor it."""
+Capture the gestalt — is this a quality compounder, a fixer-upper, a value trap, or something else? Use one concrete metric to anchor it.
+
+Grounding rules — STRICT:
+1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block in the evidence. NEVER invent or recompute a different value for a metric listed there.
+2. If you reference Altman Z-Score, quote it exactly as shown in the Financial Health card (e.g. "Z-Score of 2.7"), not a separately-computed value from raw inputs.
+3. If a metric shows "—" or "N/A" in the cards, do not invent a number for it — pick a different metric to anchor on."""
 
 
 def _moat_durability_note_prompt(

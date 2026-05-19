@@ -3241,7 +3241,49 @@ def build_financial_context(out: CollectedTickerData) -> str:
             parts.append("\n\nEARNINGS-CALL TRANSCRIPT EXCERPT (verbatim — use only quoted figures):")
             parts.append(excerpt)
 
+    # Card values block — the EXACT numbers iOS renders for the four
+    # Fundamentals & Growth cards. The Insight narrative must cite these
+    # rather than the raw FMP-derived values above, because two parallel
+    # computation paths (snapshot service vs. data collector) can produce
+    # subtly different numbers (e.g. Altman Z manufacturing-formula vs.
+    # universal). When the AI sees both, it cherry-picks; pinning it to
+    # the card values eliminates the contradiction.
+    card_block = _format_snapshot_card_values(out)
+    if card_block:
+        parts.append(card_block)
+
     return "\n".join(parts)
+
+
+def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
+    """Render the four Fundamentals & Growth cards as a single ground-truth
+    block. Returns '' when no snapshot succeeded so we don't waste tokens
+    on an empty header."""
+    snaps = [
+        ("Profitability", out.snap_profitability),
+        ("Growth", out.snap_growth),
+        ("Valuation", out.snap_valuation),
+        ("Financial Health", out.snap_health),
+    ]
+    rendered: List[str] = []
+    for title, snap in snaps:
+        if snap is None or not snap.metrics:
+            continue
+        rendered.append(f"\n{title} ({int(snap.rating or 0)}/5):")
+        for m in snap.metrics:
+            rendered.append(f"  {m.name}: {m.value}")
+    if not rendered:
+        return ""
+    header = (
+        "\n\n========== CARD VALUES (AS DISPLAYED TO USER) ==========\n"
+        "These are the exact values the user sees on the Fundamentals & Growth\n"
+        "cards. The Insight narrative MUST cite numbers from this block — never\n"
+        "invent a different value for a metric listed here."
+    )
+    footer = (
+        "\n========================================================"
+    )
+    return header + "".join(rendered) + footer
 
 
 _TAM_KEYWORDS = (

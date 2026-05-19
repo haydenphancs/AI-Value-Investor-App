@@ -240,24 +240,33 @@ class ProfitabilitySnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
-        """Reuse ProfitPowerService (Financials tab) for margins, FMP for ROE/ROA."""
+        """Reuse ProfitPowerService (Financials tab) for margins, FMP for ROE/ROA.
+
+        Ratios endpoint is fetched in parallel as a fallback: ProfitPowerService
+        depends on revenue being non-zero on the income statement, which silently
+        skips tickers whose latest filing lacks a clean `revenue` field. The
+        FMP `/ratios` direct fields (`operatingProfitMargin` etc.) avoid that
+        silent-skip and keep the card populated.
+        """
         from app.services.profit_power_service import get_profit_power_service
 
-        # Fetch margins from profit_power (same data as Financials tab) + ROE/ROA from FMP key-metrics
         pp_task = get_profit_power_service().get_profit_power(ticker)
         km_task = self.fmp.get_key_metrics(ticker, period="annual", limit=1)
         profile_task = self.fmp.get_company_profile(ticker)
+        ratios_task = self.fmp.get_financial_ratios(ticker, period="annual", limit=1)
 
         results = await asyncio.gather(
-            pp_task, km_task, profile_task, return_exceptions=True
+            pp_task, km_task, profile_task, ratios_task, return_exceptions=True
         )
 
         # Margins from profit_power (exact same as Financials tab)
         pp = results[0] if not isinstance(results[0], Exception) else None
+        gross_margin = None
         op_margin = None
         net_margin = None
         if pp and pp.annual:
             latest = pp.annual[-1]  # sorted oldest→newest
+            gross_margin = latest.gross_margin
             op_margin = latest.operating_margin
             net_margin = latest.net_margin
 
@@ -283,6 +292,22 @@ class ProfitabilitySnapshotService:
         elif isinstance(profile_raw, list) and profile_raw:
             profile = profile_raw[0]
 
+        # Ratios fallback for margins (when ProfitPowerService skips a record
+        # because of missing/zero revenue). `_to_pct` normalizes decimal vs %.
+        ratios_raw = results[3] if not isinstance(results[3], Exception) else []
+        ratios0: Dict[str, Any] = {}
+        if isinstance(ratios_raw, list) and ratios_raw:
+            ratios0 = ratios_raw[0]
+        elif isinstance(ratios_raw, dict):
+            ratios0 = ratios_raw
+
+        if gross_margin is None:
+            gross_margin = _to_pct(_safe_float(ratios0, "grossProfitMargin"))
+        if op_margin is None:
+            op_margin = _to_pct(_safe_float(ratios0, "operatingProfitMargin"))
+        if net_margin is None:
+            net_margin = _to_pct(_safe_float(ratios0, "netProfitMargin"))
+
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
 
@@ -292,28 +317,39 @@ class ProfitabilitySnapshotService:
                 lookup = get_sector_benchmark_lookup()
                 benchmarks = lookup.get_sector_benchmarks(
                     sector,
-                    ["operating_margin", "net_margin", "roe", "roa"],
+                    ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
                     "annual",
                 )
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
         # Score each metric against sector median
+        sector_gross = _get_latest_benchmark(benchmarks, "gross_margin")
         sector_op = _get_latest_benchmark(benchmarks, "operating_margin")
         sector_net = _get_latest_benchmark(benchmarks, "net_margin")
         sector_roe = _get_latest_benchmark(benchmarks, "roe")
         sector_roa = _get_latest_benchmark(benchmarks, "roa")
 
+        score_gross = _profitability_score(gross_margin, sector_gross)
         score_op = _profitability_score(op_margin, sector_op)
         score_net = _profitability_score(net_margin, sector_net)
         score_roe = _profitability_score(roe, sector_roe)
         score_roa = _profitability_score(roa, sector_roa)
 
-        # Weighted average: Op Margin 25%, Net Margin 25%, ROE 30%, ROA 20%
-        weighted = (score_op * 0.25) + (score_net * 0.25) + (score_roe * 0.30) + (score_roa * 0.20)
+        # Weighted: Gross 15% + Op 20% + Net 25% + ROE 25% + ROA 15% = 100%.
+        # Net and ROE keep the largest share because they reflect bottom-line
+        # efficiency and capital return — the two metrics value investors weight most.
+        weighted = (
+            score_gross * 0.15
+            + score_op * 0.20
+            + score_net * 0.25
+            + score_roe * 0.25
+            + score_roa * 0.15
+        )
         rating = max(1, min(5, round(weighted)))
 
         metrics = [
+            SnapshotMetricResponse(name="Gross Margin", value=_fmt_pct(gross_margin)),
             SnapshotMetricResponse(name="Operating Margin", value=_fmt_pct(op_margin)),
             SnapshotMetricResponse(name="Net Margin", value=_fmt_pct(net_margin)),
             SnapshotMetricResponse(name="Return on Equity (ROE)", value=_fmt_pct(roe)),

@@ -94,7 +94,12 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "gross_margin",        "source": "ratios",    "field": "grossProfitMargin",      "type": "direct"},
     {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct"},
     {"name": "net_margin",          "source": "ratios",    "field": "netProfitMargin",        "type": "direct"},
-    {"name": "roa",                 "source": "ratios",    "field": "returnOnAssets",         "type": "direct"},
+    # ROA and ROE both come from /key-metrics — FMP's /ratios doesn't reliably
+    # expose returnOnAssets across the S&P 500, so sourcing from /ratios drops
+    # the sample size below MIN_SAMPLE_SIZE and the sector_benchmarks table
+    # ends up with no `roa` row (visible as a missing asterisk on the ROA
+    # snapshot row).
+    {"name": "roa",                 "source": "key_metrics", "field": "returnOnAssets",       "type": "direct"},
     {"name": "roe",                 "source": "key_metrics", "field": "returnOnEquity",       "type": "direct"},
     {"name": "roic",                "source": "ratios",    "field": "returnOnCapitalEmployed","type": "direct"},
     # Health Check (direct ratio values)

@@ -133,7 +133,10 @@ METRIC_DEFS = [
     {
         "type": "interest_coverage",
         "source": "ratios",
-        "fmp_field": "interestCoverageRatio",
+        # FMP /stable/ratios-ttm exposes this as `interestCoverageTTM` /
+        # `interestCoverage` (NOT `interestCoverageRatio`). Matches the
+        # field used in sector_benchmark_service METRIC_CONFIGS.
+        "fmp_field": "interestCoverage",
         "benchmark_name": "interest_coverage",
         "lower_is_better": False,
         "is_percentage": False,

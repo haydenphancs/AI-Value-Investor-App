@@ -136,6 +136,26 @@ def _get_latest_benchmark(benchmarks: Dict[str, Dict[str, float]], metric: str) 
     return metric_data[latest_year]
 
 
+def _label_with_sector(
+    label: str, val: Optional[float], sector_decimal: Optional[float],
+) -> str:
+    """Append sector context to a profitability metric label so the iOS
+    `displayLabel` regex picks it up and renders the " *" footnote.
+
+    `val` is the company's value in percentage form (e.g. 30.0 for 30%).
+    `sector_decimal` is the sector median in decimal form (e.g. 0.15 for 15%).
+    Returns the bare label when sector data is missing — iOS then renders
+    no asterisk for that row, matching today's Valuation/Health behaviour.
+    """
+    if val is None or sector_decimal is None or sector_decimal <= 0:
+        return label
+    sector_pct = sector_decimal * 100
+    if sector_pct == 0:
+        return label
+    ratio = val / sector_pct
+    return f"{label} ({ratio:.2f}x sector avg {sector_pct:.1f}%)"
+
+
 # ── Service ───────────────────────────────────────────────────────
 
 class ProfitabilitySnapshotService:
@@ -349,11 +369,26 @@ class ProfitabilitySnapshotService:
         rating = max(1, min(5, round(weighted)))
 
         metrics = [
-            SnapshotMetricResponse(name="Gross Margin", value=_fmt_pct(gross_margin)),
-            SnapshotMetricResponse(name="Operating Margin", value=_fmt_pct(op_margin)),
-            SnapshotMetricResponse(name="Net Margin", value=_fmt_pct(net_margin)),
-            SnapshotMetricResponse(name="Return on Equity (ROE)", value=_fmt_pct(roe)),
-            SnapshotMetricResponse(name="Return on Assets (ROA)", value=_fmt_pct(roa)),
+            SnapshotMetricResponse(
+                name=_label_with_sector("Gross Margin", gross_margin, sector_gross),
+                value=_fmt_pct(gross_margin),
+            ),
+            SnapshotMetricResponse(
+                name=_label_with_sector("Operating Margin", op_margin, sector_op),
+                value=_fmt_pct(op_margin),
+            ),
+            SnapshotMetricResponse(
+                name=_label_with_sector("Net Margin", net_margin, sector_net),
+                value=_fmt_pct(net_margin),
+            ),
+            SnapshotMetricResponse(
+                name=_label_with_sector("Return on Equity (ROE)", roe, sector_roe),
+                value=_fmt_pct(roe),
+            ),
+            SnapshotMetricResponse(
+                name=_label_with_sector("Return on Assets (ROA)", roa, sector_roa),
+                value=_fmt_pct(roa),
+            ),
         ]
 
         return SnapshotItemResponse(

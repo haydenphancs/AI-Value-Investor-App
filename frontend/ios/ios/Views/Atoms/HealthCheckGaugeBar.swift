@@ -66,6 +66,15 @@ struct HealthCheckGaugeBar: View {
                 Color(hex: "84CC16"),
                 AppColors.bullish
             ]
+        case .interestCoverage, .quickRatio:
+            // Higher is better: red -> yellow -> green
+            return [
+                AppColors.bearish,
+                AppColors.alertOrange,
+                AppColors.neutral,
+                Color(hex: "84CC16"),
+                AppColors.bullish
+            ]
         }
     }
 

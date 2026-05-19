@@ -130,6 +130,22 @@ METRIC_DEFS = [
         "lower_is_better": False,
         "is_percentage": False,
     },
+    {
+        "type": "interest_coverage",
+        "source": "ratios",
+        "fmp_field": "interestCoverageRatio",
+        "benchmark_name": "interest_coverage",
+        "lower_is_better": False,
+        "is_percentage": False,
+    },
+    {
+        "type": "quick_ratio",
+        "source": "ratios",
+        "fmp_field": "quickRatio",
+        "benchmark_name": "quick_ratio",
+        "lower_is_better": False,
+        "is_percentage": False,
+    },
     # Altman Z-Score uses absolute thresholds (no sector benchmark)
     # Computed separately from balance sheet + income statement + market cap
     {
@@ -146,10 +162,12 @@ METRIC_DEFS = [
 # For lower_is_better: negative pct_diff = company below sector = good
 # For higher_is_better: positive pct_diff = company above sector = good
 _STATUS_THRESHOLDS = {
-    "debt_to_equity": {"positive_below": -10, "negative_above": 100},
-    "pe_ratio":       {"positive_below": -10, "negative_above": 35},
-    "roe":            {"positive_above": 10,  "negative_below": -20},
-    "current_ratio":  {"positive_above": 10,  "negative_below": -25},
+    "debt_to_equity":    {"positive_below": -10, "negative_above": 100},
+    "pe_ratio":          {"positive_below": -10, "negative_above": 35},
+    "roe":               {"positive_above": 10,  "negative_below": -20},
+    "current_ratio":     {"positive_above": 10,  "negative_below": -25},
+    "interest_coverage": {"positive_above": 50,  "negative_below": -25},
+    "quick_ratio":       {"positive_above": 10,  "negative_below": -25},
     # altman_z_score uses absolute thresholds, not percent difference
 }
 
@@ -415,6 +433,98 @@ def _generate_cr_insight(
         )
 
 
+def _generate_ic_insight(
+    pct_diff: float, value: float, sector: float,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Generate insight text for Interest Coverage (higher is better)."""
+    abs_pct = abs(pct_diff)
+    label = _format_diff_label(abs_pct)
+
+    if pct_diff > 100:
+        return (
+            "sector average. Outsized capacity to service debt.",
+            label,
+            "well above",
+        )
+    elif pct_diff > 50:
+        return (
+            "sector average. Strong debt service coverage.",
+            label,
+            "above",
+        )
+    elif pct_diff > 10:
+        return (
+            "sector average. Comfortable interest coverage.",
+            label,
+            "above",
+        )
+    elif pct_diff >= -25:
+        direction = "above" if pct_diff >= 0 else "below"
+        return (
+            "sector average. Adequate coverage of interest expense.",
+            label,
+            direction,
+        )
+    elif pct_diff >= -50:
+        return (
+            "sector average. Thin coverage of interest expense.",
+            label,
+            "below",
+        )
+    else:
+        return (
+            "sector average. Vulnerable to interest expense pressure.",
+            label,
+            "well below",
+        )
+
+
+def _generate_qr_insight(
+    pct_diff: float, value: float, sector: float,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Generate insight text for Quick Ratio (higher is better)."""
+    abs_pct = abs(pct_diff)
+    label = _format_diff_label(abs_pct)
+
+    if pct_diff > 50:
+        return (
+            "sector average. Strong cash-equivalent liquidity.",
+            label,
+            "well above",
+        )
+    elif pct_diff > 20:
+        return (
+            "sector average. Healthy near-cash coverage.",
+            label,
+            "above",
+        )
+    elif pct_diff > 5:
+        return (
+            "sector average. Solid quick-asset cushion.",
+            label,
+            "above",
+        )
+    elif pct_diff >= -10:
+        direction = "above" if pct_diff >= 0 else "below"
+        return (
+            "sector average. Quick-asset coverage in line with peers.",
+            label,
+            direction,
+        )
+    elif pct_diff >= -25:
+        return (
+            "sector average. Thin near-cash cushion.",
+            label,
+            "below",
+        )
+    else:
+        return (
+            "sector average. Limited quick-asset coverage.",
+            label,
+            "well below",
+        )
+
+
 def _generate_zscore_insight(
     value: float,
 ) -> Tuple[str, Optional[str], Optional[str]]:
@@ -534,6 +644,8 @@ _INSIGHT_GENERATORS = {
     "pe_ratio": _generate_pe_insight,
     "roe": _generate_roe_insight,
     "current_ratio": _generate_cr_insight,
+    "interest_coverage": _generate_ic_insight,
+    "quick_ratio": _generate_qr_insight,
 }
 
 
@@ -553,6 +665,12 @@ def _absolute_gauge(metric_type: str, value: float) -> float:
     elif metric_type == "current_ratio":
         # CR: 0 is bad (0.0), 1.5 is mid (0.5), 3+ is great (1.0)
         return _clamp(value / 3.0, 0.02, 0.98)
+    elif metric_type == "interest_coverage":
+        # IC: 0 is bad (0.0), 5 is mid (0.5), 10+ is great (1.0)
+        return _clamp(value / 10.0, 0.02, 0.98)
+    elif metric_type == "quick_ratio":
+        # QR: 0 is bad (0.0), 1.0 is mid (0.5), 2+ is great (1.0)
+        return _clamp(value / 2.0, 0.02, 0.98)
     elif metric_type == "altman_z_score":
         return _zscore_gauge(value)
     return 0.5
@@ -585,6 +703,18 @@ def _absolute_status(metric_type: str, value: float) -> str:
         elif value > 0.8:
             return "neutral"
         return "negative"
+    elif metric_type == "interest_coverage":
+        if value > 5:
+            return "positive"
+        elif value > 2:
+            return "neutral"
+        return "negative"
+    elif metric_type == "quick_ratio":
+        if value > 1.0:
+            return "positive"
+        elif value > 0.5:
+            return "neutral"
+        return "negative"
     elif metric_type == "altman_z_score":
         return _zscore_status(value)
     return "neutral"
@@ -594,7 +724,8 @@ def _fallback_insight(
     metric_type: str, value: float,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text when no sector benchmark is available."""
-    formatted = f"{value:.2f}" if metric_type in ("debt_to_equity", "current_ratio") else f"{value:.1f}"
+    two_decimal_types = ("debt_to_equity", "current_ratio", "quick_ratio")
+    formatted = f"{value:.2f}" if metric_type in two_decimal_types else f"{value:.1f}"
 
     if metric_type == "debt_to_equity":
         if value < 0.5:
@@ -631,6 +762,24 @@ def _fallback_insight(
         elif value > 0.8:
             return ("Tight liquidity. Adequate but limited cushion.", formatted, "current ratio.")
         return ("Low liquidity. May face short-term payment challenges.", formatted, "current ratio.")
+
+    elif metric_type == "interest_coverage":
+        if value > 10:
+            return ("Outsized capacity to service debt obligations.", formatted, "interest coverage.")
+        elif value > 5:
+            return ("Comfortable headroom over interest expense.", formatted, "interest coverage.")
+        elif value > 2:
+            return ("Adequate coverage of interest expense.", formatted, "interest coverage.")
+        return ("Thin coverage. Sensitive to earnings pressure.", formatted, "interest coverage.")
+
+    elif metric_type == "quick_ratio":
+        if value > 1.5:
+            return ("Ample near-cash assets relative to current obligations.", formatted, "quick ratio.")
+        elif value > 1.0:
+            return ("Healthy quick-asset coverage of liabilities.", formatted, "quick ratio.")
+        elif value > 0.5:
+            return ("Tight near-cash cushion. Limited liquidity slack.", formatted, "quick ratio.")
+        return ("Limited quick-asset coverage of current liabilities.", formatted, "quick ratio.")
 
     elif metric_type == "altman_z_score":
         return _generate_zscore_insight(value)
@@ -833,7 +982,14 @@ class HealthCheckService:
             lookup = get_sector_benchmark_lookup()
             benchmarks = lookup.get_sector_benchmarks(
                 sector,
-                ["debt_to_equity", "pe_ratio", "roe", "current_ratio"],
+                [
+                    "debt_to_equity",
+                    "pe_ratio",
+                    "roe",
+                    "current_ratio",
+                    "interest_coverage",
+                    "quick_ratio",
+                ],
                 "annual",
             )
             logger.info(

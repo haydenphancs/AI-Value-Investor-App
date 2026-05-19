@@ -54,6 +54,8 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
     case returnOnEquity = "Return on Equity"
     case currentRatio = "Current Ratio"
     case altmanZScore = "Altman Z-Score"
+    case interestCoverage = "Interest Coverage"
+    case quickRatio = "Quick Ratio"
 
     var id: String { rawValue }
 
@@ -69,6 +71,10 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Liquidity"
         case .altmanZScore:
             return "Bankruptcy risk"
+        case .interestCoverage:
+            return "Debt service"
+        case .quickRatio:
+            return "Near-cash liquidity"
         }
     }
 
@@ -84,6 +90,10 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Low"
         case .altmanZScore:
             return "Distress"
+        case .interestCoverage:
+            return "Thin"
+        case .quickRatio:
+            return "Tight"
         }
     }
 
@@ -99,6 +109,10 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "High"
         case .altmanZScore:
             return "Safe"
+        case .interestCoverage:
+            return "Strong"
+        case .quickRatio:
+            return "Ample"
         }
     }
 
@@ -115,6 +129,10 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
             return "Measures ability to pay short-term obligations. A ratio above 1.0 indicates good liquidity. Value investors look for financial stability."
         case .altmanZScore:
             return "Predicts bankruptcy probability using five financial ratios. Z > 3.0 is safe, 1.8–3.0 is a grey zone, and below 1.8 signals distress. A key metric for value investors assessing downside risk."
+        case .interestCoverage:
+            return "EBIT divided by interest expense. Higher means the company can comfortably service its debt; a ratio under 2 signals vulnerability to earnings pressure."
+        case .quickRatio:
+            return "Near-cash assets divided by current liabilities. Excludes inventory and prepaid items. Above 1.0 indicates the company can cover short-term debts without selling stock."
         }
     }
 }
@@ -164,6 +182,10 @@ struct HealthCheckMetric: Identifiable {
             return String(format: "%.2f", value)
         case .altmanZScore:
             return String(format: "%.1f", value)
+        case .interestCoverage:
+            return String(format: "%.2f", value)
+        case .quickRatio:
+            return String(format: "%.2f", value)
         }
     }
 
@@ -181,7 +203,7 @@ struct HealthCheckMetric: Identifiable {
         guard let comparison = comparisonValue else { return nil }
 
         switch type {
-        case .debtToEquity, .currentRatio:
+        case .debtToEquity, .currentRatio, .interestCoverage, .quickRatio:
             return "vs \(String(format: "%.2f", comparison))"
         case .peRatio:
             return "vs \(String(format: "%.1f", comparison))"
@@ -211,7 +233,7 @@ struct HealthCheckMetric: Identifiable {
                 AppColors.alertOrange,
                 AppColors.bearish
             ]
-        case .returnOnEquity, .currentRatio, .altmanZScore:
+        case .returnOnEquity, .currentRatio, .altmanZScore, .interestCoverage, .quickRatio:
             // Higher is better: red -> orange -> yellow -> lime -> green
             gradientColors = [
                 AppColors.bearish,

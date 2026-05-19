@@ -134,7 +134,7 @@ struct HealthCheckInfoSheet: View {
 
     private var metricsExplainedSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            Text("The Four Key Metrics")
+            Text("The Key Metrics")
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 

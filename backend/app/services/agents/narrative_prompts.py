@@ -499,14 +499,23 @@ METRICS: {metric_str}
 {_style_block(persona)}
 LENGTH: 3 to 5 words. NO period. Title-case if it reads like a noun phrase, sentence-case otherwise.
 
-Examples of good output:
-  - "A Cash Machine"
-  - "Margin Pressure Building"
-  - "Premium Multiple, Real Growth"
-  - "Leverage Looks Heavy"
-  - "Compounding Quietly"
+PLAIN ENGLISH — STRICT:
+Write for a non-finance reader. Do NOT use these jargon terms or their close synonyms: "Owner Earnings", "Margin of Safety", "Free Cash Flow", "FCF", "Operating Leverage", "Compounding", "Premium Multiple", "Capital Allocation". Translate the concept instead:
+  - "Burning Cash" — not "Negative FCF" / "Owner Earnings Vanishing"
+  - "Pricey Stock" / "Too Pricey vs. Sector" — not "Premium Multiple" / "Rich Price"
+  - "Heavy Debt Load" — not "High Leverage"
+  - "Slowing Sales" — not "Top-Line Decel"
+  - "Cheap For A Reason" — not "Value Trap"
 
-Pick something specific to the metrics above, not generic praise."""
+Examples of good output:
+  - "Fat Margins, High Debt"
+  - "Slowing Sales, Steady Profits"
+  - "Pricey Stock, Real Growth"
+  - "Heavy Debt Load"
+  - "Burning Cash Quarterly"
+  - "Too Pricey vs. Sector"
+
+Pick something specific to the metrics above, not generic praise. Anchor on the most striking number in the card."""
 
 
 def _critical_factor_description_prompt(

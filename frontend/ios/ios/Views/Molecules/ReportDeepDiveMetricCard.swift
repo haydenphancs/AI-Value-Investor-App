@@ -53,7 +53,7 @@ struct ReportDeepDiveMetricCard: View {
                             .foregroundColor(AppColors.textMuted)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .minimumScaleFactor(0.7)
+                            .minimumScaleFactor(0.9)
                         Spacer(minLength: 4)
                         HStack(spacing: 2) {
                             if let trend = metric.trend {

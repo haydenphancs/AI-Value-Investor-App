@@ -61,6 +61,14 @@ def _validate_ticker(ticker: str) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+def _first_valid(*vals: Optional[float]) -> Optional[float]:
+    """Return the first non-None value, or None if all are None."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     val = record.get(key)
     if val is None:
@@ -270,10 +278,15 @@ class ProfitabilitySnapshotService:
         """
         from app.services.profit_power_service import get_profit_power_service
 
+        # TTM endpoints for ratios + key_metrics so ROE/ROA/margins reflect
+        # the last 4 quarters instead of an up-to-12-months-stale fiscal-year
+        # snapshot. profit_power still drives margins when its annual data
+        # is fresh; TTM ratios are the fallback that matches what Webull
+        # and other consumer apps display.
         pp_task = get_profit_power_service().get_profit_power(ticker)
-        km_task = self.fmp.get_key_metrics(ticker, period="annual", limit=1)
+        km_task = self.fmp.get_key_metrics_ttm(ticker)
         profile_task = self.fmp.get_company_profile(ticker)
-        ratios_task = self.fmp.get_financial_ratios(ticker, period="annual", limit=1)
+        ratios_task = self.fmp.get_ratios_ttm(ticker)
 
         results = await asyncio.gather(
             pp_task, km_task, profile_task, ratios_task, return_exceptions=True
@@ -298,10 +311,18 @@ class ProfitabilitySnapshotService:
         elif isinstance(km_raw, dict):
             km = km_raw
 
-        roe = _to_pct(_safe_float(km, "returnOnEquity"))
-        roa_raw = _safe_float(km, "returnOnAssets")
-        if roa_raw is None:
-            roa_raw = _safe_float(km, "returnOnTangibleAssets")
+        # Field names: /key-metrics-ttm uses TTM-suffixed names; legacy
+        # bare names are kept as fallbacks in case FMP rolls the schema.
+        roe = _to_pct(_first_valid(
+            _safe_float(km, "returnOnEquityTTM"),
+            _safe_float(km, "returnOnEquity"),
+        ))
+        roa_raw = _first_valid(
+            _safe_float(km, "returnOnAssetsTTM"),
+            _safe_float(km, "returnOnAssets"),
+            _safe_float(km, "returnOnTangibleAssetsTTM"),
+            _safe_float(km, "returnOnTangibleAssets"),
+        )
         roa = _to_pct(roa_raw)
 
         # Sector for benchmark comparison
@@ -322,11 +343,20 @@ class ProfitabilitySnapshotService:
             ratios0 = ratios_raw
 
         if gross_margin is None:
-            gross_margin = _to_pct(_safe_float(ratios0, "grossProfitMargin"))
+            gross_margin = _to_pct(_first_valid(
+                _safe_float(ratios0, "grossProfitMarginTTM"),
+                _safe_float(ratios0, "grossProfitMargin"),
+            ))
         if op_margin is None:
-            op_margin = _to_pct(_safe_float(ratios0, "operatingProfitMargin"))
+            op_margin = _to_pct(_first_valid(
+                _safe_float(ratios0, "operatingProfitMarginTTM"),
+                _safe_float(ratios0, "operatingProfitMargin"),
+            ))
         if net_margin is None:
-            net_margin = _to_pct(_safe_float(ratios0, "netProfitMargin"))
+            net_margin = _to_pct(_first_valid(
+                _safe_float(ratios0, "netProfitMarginTTM"),
+                _safe_float(ratios0, "netProfitMargin"),
+            ))
 
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""

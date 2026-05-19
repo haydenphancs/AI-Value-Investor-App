@@ -216,6 +216,28 @@ class FMPClient:
             params={"symbol": ticker.upper(), "period": period, "limit": limit},
         )
 
+    async def get_ratios_ttm(self, ticker: str) -> List[Dict[str, Any]]:
+        """Trailing-twelve-month financial ratios.
+
+        Returns the same field shape as `get_financial_ratios` but the
+        denominators (earnings, sales, book value, FCF) sum the last 4
+        reported quarters instead of the latest fiscal year-end. Use this
+        for valuation card display where the user expects values that
+        match Webull / Yahoo / TradingView, which all use TTM.
+        """
+        return await self._make_request(
+            "ratios-ttm",
+            params={"symbol": ticker.upper()},
+        )
+
+    async def get_key_metrics_ttm(self, ticker: str) -> List[Dict[str, Any]]:
+        """TTM key metrics (per-share book value, free cash flow yield,
+        ROE, ROIC, EV/EBITDA, etc.). TTM counterpart of `get_key_metrics`."""
+        return await self._make_request(
+            "key-metrics-ttm",
+            params={"symbol": ticker.upper()},
+        )
+
     # ── Market data ─────────────────────────────────────────────────
 
     async def get_historical_prices(

@@ -283,14 +283,23 @@ class ValuationSnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
-        """Fetch same data as Financials tab and score against sector benchmarks."""
+        """Fetch TTM ratios + same fallback data as Financials tab and score
+        against sector benchmarks.
 
-        # Parallel fetch — same FMP endpoints the Financials tab uses
-        # Include cash_flow + income for fallback P/FCF and EV/EBITDA computation
+        Switched from `period=annual` to TTM (`ratios-ttm` / `key-metrics-ttm`)
+        in 2026-05 — the annual endpoints anchor to the last fiscal year-end,
+        which for ORCL (FY ends May) was up to 24 months stale and drove a
+        62% gap on P/B vs Webull. TTM rolls the trailing four quarters so
+        denominators stay current.
+        """
+
+        # Parallel fetch — TTM-first for valuation ratios, annual cash_flow +
+        # income kept only as fallback for the P/FCF / EV/EBITDA reconstruction
+        # paths (FMP doesn't expose TTM cash flow statements directly).
         results = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
-            self.fmp.get_financial_ratios(ticker, period="annual", limit=1),
-            self.fmp.get_key_metrics(ticker, period="annual", limit=1),
+            self.fmp.get_ratios_ttm(ticker),
+            self.fmp.get_key_metrics_ttm(ticker),
             self.fmp.get_cash_flow_statement(ticker, period="annual", limit=1),
             self.fmp.get_income_statement(ticker, period="annual", limit=1),
             return_exceptions=True,
@@ -309,18 +318,46 @@ class ValuationSnapshotService:
         cf = _parse_first(results[3]) if not isinstance(results[3], Exception) else {}
         inc = _parse_first(results[4]) if not isinstance(results[4], Exception) else {}
 
-        # Extract valuation metrics (fallback chain: ratios → key_metrics → compute from raw)
+        # Extract valuation metrics. /ratios-ttm uses a `TTM` suffix on field
+        # names; /key-metrics-ttm uses a different convention. Cover both
+        # plus the legacy names so a quiet FMP rename doesn't NULL out the
+        # whole card.
         def _first_valid(*vals) -> Optional[float]:
             for v in vals:
                 if v is not None:
                     return v
             return None
 
-        pe = _first_valid(_safe_float(fr, "priceToEarningsRatio"), _safe_float(km, "peRatio"))
-        ps = _first_valid(_safe_float(fr, "priceToSalesRatio"), _safe_float(km, "priceToSalesRatio"))
-        pb = _first_valid(_safe_float(fr, "priceToBookRatio"), _safe_float(km, "pbRatio"))
-        pfcf = _first_valid(_safe_float(fr, "priceToFreeCashFlowsRatio"), _safe_float(km, "pfcfRatio"))
-        ev_ebitda = _first_valid(_safe_float(fr, "enterpriseValueOverEBITDA"), _safe_float(km, "enterpriseValueOverEBITDA"))
+        pe = _first_valid(
+            _safe_float(fr, "priceToEarningsRatioTTM"),
+            _safe_float(fr, "priceToEarningsRatio"),
+            _safe_float(km, "peRatioTTM"),
+            _safe_float(km, "peRatio"),
+        )
+        ps = _first_valid(
+            _safe_float(fr, "priceToSalesRatioTTM"),
+            _safe_float(fr, "priceToSalesRatio"),
+            _safe_float(km, "priceToSalesRatioTTM"),
+            _safe_float(km, "priceToSalesRatio"),
+        )
+        pb = _first_valid(
+            _safe_float(fr, "priceToBookRatioTTM"),
+            _safe_float(fr, "priceToBookRatio"),
+            _safe_float(km, "pbRatioTTM"),
+            _safe_float(km, "pbRatio"),
+        )
+        pfcf = _first_valid(
+            _safe_float(fr, "priceToFreeCashFlowsRatioTTM"),
+            _safe_float(fr, "priceToFreeCashFlowsRatio"),
+            _safe_float(km, "pfcfRatioTTM"),
+            _safe_float(km, "pfcfRatio"),
+        )
+        ev_ebitda = _first_valid(
+            _safe_float(fr, "enterpriseValueOverEBITDATTM"),
+            _safe_float(fr, "enterpriseValueOverEBITDA"),
+            _safe_float(km, "enterpriseValueOverEBITDATTM"),
+            _safe_float(km, "enterpriseValueOverEBITDA"),
+        )
 
         # Market-cap fallback chain — FMP sometimes omits it from key_metrics
         # for less-covered tickers. Profile.mktCap and key_metrics.marketCap
@@ -354,12 +391,14 @@ class ValuationSnapshotService:
                 ev_ebitda = round(ev / ebitda, 2)
 
         # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
-        #   1. ratios.earningsYield
-        #   2. key_metrics.earningsYield
+        #   1. ratios.earningsYield (TTM-suffixed first, then bare name)
+        #   2. key_metrics.earningsYield (TTM and legacy)
         #   3. 1/PE  (matches the canonical formula)
         #   4. netIncome / marketCap
         ey = _first_valid(
+            _safe_float(fr, "earningsYieldTTM"),
             _safe_float(fr, "earningsYield"),
+            _safe_float(km, "earningsYieldTTM"),
             _safe_float(km, "earningsYield"),
         )
         if ey is None and pe is not None and pe > 0:

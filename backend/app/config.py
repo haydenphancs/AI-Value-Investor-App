@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24       # 24 hours
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
+    # Admin trigger token — when set, accepted via `X-Admin-Token` header
+    # as an alternative to the email-based admin allowlist on admin
+    # endpoints. Useful in dev for running scripted maintenance jobs
+    # (sector_benchmarks recompute) without going through the auth flow.
+    # Leave unset in production to force email-based auth.
+    ADMIN_TOKEN: Optional[str] = None
+
     # Supabase
     SUPABASE_URL: str
     SUPABASE_SERVICE_ROLE_KEY: str

@@ -243,7 +243,7 @@ struct HealthCheckMetric: Identifiable {
                 AppColors.bullish
             ]
         }
-        
+         
         // Map position to color index (0.0 -> first color, 1.0 -> last color)
         let colorCount = gradientColors.count
         let scaledPosition = clampedPosition * Double(colorCount - 1)

@@ -75,9 +75,12 @@ struct RevenueSegment: Identifiable {
         return (currentRevenue / totalRevenue) * 100
     }
 
-    /// Formatted revenue string (e.g., "$12.5B")
+    /// Formatted revenue string (e.g., "$12.5B").
+    /// Backend always emits in MILLIONS — branch the display tier here.
     var formattedRevenue: String {
-        if currentRevenue >= 1000 {
+        if currentRevenue >= 1_000_000 {
+            return String(format: "$%.2fT", currentRevenue / 1_000_000)
+        } else if currentRevenue >= 1000 {
             return String(format: "$%.1fB", currentRevenue / 1000)
         } else {
             return String(format: "$%.0fM", currentRevenue)
@@ -162,9 +165,14 @@ struct ReportRevenueEngineData {
         return .diversified
     }
 
-    /// Total revenue formatted
+    /// Total revenue formatted. Backend emits in MILLIONS, so:
+    ///   < 1,000        → "$NM"   (e.g., $57M company)
+    ///   < 1,000,000    → "$N.NB" (e.g., $57,230M = "$57.2B")
+    ///   ≥ 1,000,000    → "$N.NNT" (e.g., $1,200,000M = "$1.20T")
     var formattedTotalRevenue: String {
-        if totalRevenue >= 1000 {
+        if totalRevenue >= 1_000_000 {
+            return String(format: "$%.2fT", totalRevenue / 1_000_000)
+        } else if totalRevenue >= 1000 {
             return String(format: "$%.1fB", totalRevenue / 1000)
         } else {
             return String(format: "$%.0fM", totalRevenue)

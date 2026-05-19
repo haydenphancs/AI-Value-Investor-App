@@ -37,6 +37,16 @@ struct ReportPriceMovementSection: View {
                 Text(ctx.timeLabel)
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
+
+                // Volatility sub-label — "Normal range: ±10.2% (1.5% daily σ)".
+                // Hidden when backend couldn't compute σ (e.g. < 30 trading days
+                // of history). This is the user-facing institutional-rigor cue
+                // that anchors the move to the stock's own baseline.
+                if let sub = ctx.volatilitySubLabel {
+                    Text(sub)
+                        .font(AppTypography.captionTiny)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
 
             // Sparkline with event dot

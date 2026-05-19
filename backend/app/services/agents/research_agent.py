@@ -61,6 +61,36 @@ logger = logging.getLogger(__name__)
 MAX_AGENTIC_ROUNDS = 4
 
 
+def _safe_response_text(response: Any) -> str:
+    """Defensive accessor for Gemini's `response.text`.
+
+    The SDK's `.text` property is a quick accessor that raises ValueError
+    when the candidate has no text Part (e.g. only function calls, or
+    `finish_reason=STOP` with empty content). `hasattr(response, "text")`
+    returns True even in those cases because `text` is a declared property
+    — so we have to wrap the access itself.
+
+    Falls back to walking `response.parts` and concatenating any text
+    parts we can find, then returns "" as a last resort.
+    """
+    try:
+        return response.text or ""
+    except (ValueError, AttributeError):
+        pass
+    try:
+        chunks: List[str] = []
+        for p in (response.parts or []):
+            try:
+                t = p.text
+            except (ValueError, AttributeError):
+                continue
+            if t:
+                chunks.append(t)
+        return "\n".join(chunks)
+    except (ValueError, AttributeError):
+        return ""
+
+
 class ResearchAgent:
     """Autonomous research agent for the Generate Analysis flow.
 
@@ -210,12 +240,9 @@ class ResearchAgent:
 
                     if fc.name == "research_complete":
                         args = dict(fc.args) if fc.args else {}
-                        text_parts = [
-                            p.text for p in response.parts
-                            if hasattr(p, "text") and p.text
-                        ]
+                        text_from_parts = _safe_response_text(response)
                         final_text = (
-                            "\n".join(text_parts) if text_parts
+                            text_from_parts if text_from_parts
                             else args.get("summary", "Research complete.")
                         )
                         return final_text
@@ -253,9 +280,18 @@ class ResearchAgent:
                     )
                     continue
 
-                final_text = (
-                    response.text if hasattr(response, "text") else ""
-                )
+                # No function call this round — extract whatever text the
+                # model emitted and break the loop. If Gemini returned an
+                # empty candidate (finish_reason=STOP with no parts), this
+                # yields "" and we fall through to the fallback path below.
+                final_text = _safe_response_text(response)
+                if not final_text:
+                    logger.warning(
+                        f"Agent {self.persona.key} round {round_num + 1}: "
+                        f"Gemini returned empty response — falling back to "
+                        f"single-pass analysis."
+                    )
+                    return await self._fallback_text_analysis(out, evidence)
                 break
 
             return final_text or "Research analysis complete."

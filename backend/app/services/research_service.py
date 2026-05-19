@@ -24,7 +24,7 @@ from app.integrations.fmp import get_fmp_client
 from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
 from app.services.agents.persona_scoring import compute_quality_score
-from app.services.ticker_report_cache import upsert_cached_report
+from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR, upsert_cached_report
 
 logger = logging.getLogger(__name__)
 
@@ -239,10 +239,16 @@ class ResearchService:
         Runs the synchronous Supabase call in a thread to avoid blocking
         the event loop.
         """
-        cutoff = (
+        # Honor the same schema floor as ticker_report_cache so a payload-
+        # shape change (e.g. new required price_action fields) invalidates
+        # cross-user reuse just like it invalidates the dedicated cache.
+        # Without this gate, a stale report from a pre-deploy user would
+        # be silently served to every subsequent caller until TTL expiry.
+        ttl_cutoff = (
             datetime.now(timezone.utc)
             - timedelta(hours=SHARED_CACHE_TTL_HOURS)
-        ).isoformat()
+        )
+        cutoff = max(ttl_cutoff, CACHE_SCHEMA_FLOOR).isoformat()
 
         def _query():
             try:

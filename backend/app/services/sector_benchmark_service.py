@@ -112,12 +112,14 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},
     {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
     {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
-    {"name": "pfcf_ratio",          "source": "ratios",    "field": "priceToFreeCashFlowsRatio", "type": "direct"},
-    # `enterpriseValueOverEBITDA` is exposed on both /key-metrics and /ratios,
-    # but /key-metrics returns null for too many tickers (most companies on the
-    # FMP free-ish tier expose it under /ratios instead). Source from /ratios
-    # so this populates alongside pe_ratio / pb_ratio / ps_ratio / pfcf_ratio.
-    {"name": "ev_ebitda",           "source": "ratios",      "field": "enterpriseValueOverEBITDA", "type": "direct"},
+    # P/FCF and EV/EBITDA come from /key-metrics — FMP's annual /ratios drops
+    # `priceToFreeCashFlowsRatio` and `enterpriseValueOverEBITDA` as null for
+    # most of the S&P 500, leaving the recompute below MIN_SAMPLE_SIZE and the
+    # sector_benchmarks table empty for these two metrics (visible as missing
+    # asterisks on the Valuation card). Field name `pfcfRatio` matches what
+    # valuation_snapshot_service reads from /key-metrics-ttm.
+    {"name": "pfcf_ratio",          "source": "key_metrics", "field": "pfcfRatio",                 "type": "direct"},
+    {"name": "ev_ebitda",           "source": "key_metrics", "field": "enterpriseValueOverEBITDA", "type": "direct"},
     {"name": "earnings_yield",      "source": "ratios",    "field": "earningsYield",          "type": "direct"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency

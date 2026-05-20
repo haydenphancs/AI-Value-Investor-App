@@ -464,9 +464,17 @@ Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
   Cite a specific source from the headlines or macro block when you can.
 
 Final sentence — Classify the signal. Use one of these two frames explicitly:
-  A) "This reflects a FUNDAMENTAL change in the business" — when the cause is
-     declining revenue, leadership change, structural cost issue, lost contract,
-     credible guidance reset, deteriorating moat. Be specific about what changed.
+  A) "This reflects a FUNDAMENTAL change in the business" — a structural shift
+     in the company's own economics, in EITHER direction:
+       POSITIVE examples: new contract or major customer win, secular-tailwind
+         capture (AI-infrastructure build-out, EV transition, GLP-1 wave),
+         accelerating revenue, raised guidance, durable moat strengthening,
+         expanded TAM, breakthrough product launch.
+       NEGATIVE examples: declining revenue, leadership change, structural
+         cost issue, lost contract, credible guidance reset, deteriorating
+         moat, regulatory blow.
+     Be specific about WHAT changed. Default to Frame A when a strong
+     company-specific catalyst (positive or negative) sits in the headlines.
   B) "This is short-term market NOISE" — when the cause is macro fears (rates,
      war, oil), sector rotation, broad risk-off, or no clear cause at all.
 

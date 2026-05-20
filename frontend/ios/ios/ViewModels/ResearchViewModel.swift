@@ -75,6 +75,13 @@ class ResearchViewModel: ObservableObject {
     /// task got abandoned) and surface the error card.
     private let processingTimeoutSeconds: TimeInterval = 600
 
+    /// Backend report IDs the user has retried out of (or otherwise
+    /// dismissed). The failed card disappears from the list immediately
+    /// on retry tap; we then filter these out of every loadReports()
+    /// result so it doesn't pop back when the backend still returns the
+    /// stale failed row. In-memory only — app restart resets it.
+    private var dismissedReportIds: Set<String> = []
+
     // MARK: - Initialization
     init(prefilledTicker: String? = nil, apiClient: APIClient = .shared, isAuthenticated: @escaping () -> Bool = { false }) {
         self.apiClient = apiClient
@@ -186,7 +193,9 @@ class ResearchViewModel: ObservableObject {
                 responseType: [BackendReportListItem].self
             )
             print("✅ ResearchVM: Loaded \(backendReports.count) reports from backend")
-            self.reports = backendReports.map { AnalysisReport.from($0) }
+            self.reports = backendReports
+                .filter { !dismissedReportIds.contains($0.id) }
+                .map { AnalysisReport.from($0) }
             applyClientSideTimeoutPass()
             sortReports()
         } catch {
@@ -348,6 +357,13 @@ class ResearchViewModel: ObservableObject {
     func generateAnalysis() {
         print("🔬 ResearchVM: generateAnalysis() tapped — searchText='\(searchText)', persona=\(selectedPersona.backendKey), credits=\(creditBalance.credits)")
 
+        // Debounce: a single fast double-tap on Generate (or Retry) would
+        // otherwise post /research/generate twice and create two rows.
+        guard !isGeneratingAnalysis else {
+            print("⚠️ ResearchVM: generation already in flight, ignoring duplicate tap.")
+            return
+        }
+
         // DEV: auth disabled — backend handles unauthenticated callers as guest.
 
         let ticker = searchText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -462,7 +478,22 @@ class ResearchViewModel: ObservableObject {
 
     func retryReport(_ report: AnalysisReport) {
         guard report.status == .failed else { return }
+        // Same debounce as generateAnalysis() — if another generation is
+        // already in flight, don't dismiss the failed card pre-emptively
+        // (otherwise the card would vanish with no replacement).
+        guard !isGeneratingAnalysis else {
+            print("⚠️ ResearchVM: another generation in flight, ignoring retry tap.")
+            return
+        }
         print("🔄 ResearchVM: Retrying report for \(report.ticker)...")
+        // Drop the failed card immediately — both from the in-memory list
+        // and from the dismiss-set so the next loadReports() doesn't
+        // re-surface it. The new processing card will appear when
+        // generateAnalysis() spawns the next report.
+        if let backendId = report.backendId {
+            dismissedReportIds.insert(backendId)
+            reports.removeAll { $0.backendId == backendId }
+        }
         searchText = report.ticker
         selectedPersona = report.persona
         generateAnalysis()

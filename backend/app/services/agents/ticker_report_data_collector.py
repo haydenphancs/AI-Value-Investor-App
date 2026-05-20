@@ -35,6 +35,7 @@ Honest-placeholder policy:
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -657,13 +658,26 @@ class TickerReportDataCollector:
         # price-action volatility classifier. The sparkline still renders
         # only the chosen evaluation window (7/15/30/45 days) — the rest
         # is baseline data the user never sees but the math needs.
+        #
+        # We also carry the trading-day date for each close so the window
+        # selector can map "Last 30 Days" to a true 30-calendar-day window
+        # (close on/before today−30 days) instead of indexing 30 entries
+        # back in the array, which would land ~42 calendar days back.
         hist_list = _hist_list(out.historical)
-        recent_prices = [
-            p.get("close", 0.0) for p in hist_list[:200]
-            if p.get("close") is not None
-        ]
-        recent_prices.reverse()
-        c["recent_prices"] = recent_prices
+        recent_pairs: List[Tuple[date, float]] = []
+        for p in hist_list[:200]:
+            close = p.get("close")
+            if close is None:
+                continue
+            date_str = p.get("date") or ""
+            try:
+                d = date.fromisoformat(date_str[:10])
+            except ValueError:
+                continue
+            recent_pairs.append((d, float(close)))
+        recent_pairs.reverse()  # FMP returns newest-first; we want chronological.
+        c["recent_prices"] = [px for _, px in recent_pairs]
+        c["recent_price_dates"] = [d for d, _ in recent_pairs]
 
         # ── Monthly closes for the Wall Street chart ──────────────────
         c["monthly_prices"] = _monthly_closes(hist_list, count=12)
@@ -769,6 +783,7 @@ class TickerReportDataCollector:
             current_price,
             out.earnings_dates,
             out.news,
+            recent_price_dates=c.get("recent_price_dates") or [],
         )
 
         # ── Revenue engine segments ───────────────────────────────────
@@ -2207,6 +2222,7 @@ def _tier_for_z(z: Optional[float]) -> str:
 
 def _compute_price_volatility(
     prices: List[float],
+    price_dates: Optional[List[date]] = None,
     baseline_days: int = _BASELINE_DAYS,
     windows: Tuple[int, ...] = _EVAL_WINDOWS,
 ) -> Dict[str, Any]:
@@ -2214,7 +2230,15 @@ def _compute_price_volatility(
 
     Returns a dict with sigma_daily, per-window metrics, the chosen window
     (argmax |z|, or _DEFAULT_WINDOW when every window is within ±1σ), the
-    tier label, and the chosen-window's move/z/band.
+    tier label, the chosen-window's move/z/band, and the index in `prices`
+    of the reference close used for the chosen window (so the caller can
+    compute change_pct against the same anchor instead of recomputing).
+
+    `windows` is interpreted in calendar days when `price_dates` is given
+    (production path): "30 days" means today vs the close on or before
+    today−30 calendar days. When `price_dates` is omitted (tests with
+    synthetic price arrays), the function falls back to trading-day
+    indexing so historical fixtures keep working unchanged.
 
     When fewer than 30 daily returns are available the result still has the
     same shape but sigma_daily is None and the chosen window stays at the
@@ -2224,6 +2248,7 @@ def _compute_price_volatility(
         "sigma_daily": None,
         "windows": [],
         "chosen_window": _DEFAULT_WINDOW,
+        "chosen_ref_idx": None,
         "tier": "Typical",
         "chosen_z": None,
         "chosen_move_pct": None,
@@ -2231,6 +2256,10 @@ def _compute_price_volatility(
     }
     if len(prices) < 30:
         return out
+    # If a date list was provided but doesn't line up, drop it and fall
+    # back to trading-day mode rather than emitting subtly wrong windows.
+    if price_dates is not None and len(price_dates) != len(prices):
+        price_dates = None
 
     # Use the last `baseline_days + 1` closes so the returns array has
     # at most `baseline_days` entries. The +1 covers the inter-day diff.
@@ -2240,23 +2269,57 @@ def _compute_price_volatility(
         return out
     out["sigma_daily"] = sigma_daily
 
+    newest = prices[-1]
     metrics: List[Dict[str, Any]] = []
-    for n in windows:
-        if len(prices) <= n:
-            continue
-        oldest = prices[-(n + 1)]
-        newest = prices[-1]
-        if not oldest or oldest <= 0:
-            continue
-        move_pct = (newest - oldest) / oldest * 100
-        n_day_sigma_pct = sigma_daily * (n ** 0.5) * 100
-        z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
-        metrics.append({
-            "days": n,
-            "move_pct": round(move_pct, 2),
-            "z": round(z, 2),
-            "band_2sigma": round(n_day_sigma_pct * 2, 2),
-        })
+
+    if price_dates:
+        # Calendar-day mode (production).
+        today = price_dates[-1]
+        for n in windows:
+            target = today - timedelta(days=n)
+            # Rightmost index whose date is <= target (handles
+            # weekends/holidays by stepping back to the prior trading day).
+            idx = bisect.bisect_right(price_dates, target) - 1
+            if idx < 0 or idx >= len(prices) - 1:
+                continue
+            oldest = prices[idx]
+            if not oldest or oldest <= 0:
+                continue
+            move_pct = (newest - oldest) / oldest * 100
+            # Trading-day count actually elapsed in this calendar window;
+            # feeds the √n scaling so the σ band shrinks accordingly
+            # (e.g., 30 calendar days ≈ 21 trading days → smaller band
+            # than the old code's √30).
+            trading_days = len(prices) - 1 - idx
+            n_day_sigma_pct = sigma_daily * (trading_days ** 0.5) * 100
+            z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
+            metrics.append({
+                "days": n,
+                "ref_idx": idx,
+                "move_pct": round(move_pct, 2),
+                "z": round(z, 2),
+                "band_2sigma": round(n_day_sigma_pct * 2, 2),
+            })
+    else:
+        # Trading-day mode (test fixtures with synthetic price arrays).
+        for n in windows:
+            if len(prices) <= n:
+                continue
+            ref_idx = len(prices) - (n + 1)
+            oldest = prices[ref_idx]
+            if not oldest or oldest <= 0:
+                continue
+            move_pct = (newest - oldest) / oldest * 100
+            n_day_sigma_pct = sigma_daily * (n ** 0.5) * 100
+            z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
+            metrics.append({
+                "days": n,
+                "ref_idx": ref_idx,
+                "move_pct": round(move_pct, 2),
+                "z": round(z, 2),
+                "band_2sigma": round(n_day_sigma_pct * 2, 2),
+            })
+
     out["windows"] = metrics
     if not metrics:
         return out
@@ -2274,6 +2337,7 @@ def _compute_price_volatility(
         chosen = most_unusual
 
     out["chosen_window"] = chosen["days"]
+    out["chosen_ref_idx"] = chosen["ref_idx"]
     out["chosen_z"] = chosen["z"]
     out["chosen_move_pct"] = chosen["move_pct"]
     out["chosen_band_pct"] = chosen["band_2sigma"]
@@ -2286,12 +2350,15 @@ def _build_price_action(
     current_price: float,
     earnings_dates: List[str],
     news: Optional[List[Dict[str, Any]]] = None,
+    recent_price_dates: Optional[List[date]] = None,
 ) -> Dict[str, Any]:
     """Volatility-aware price-movement section with dynamic window selection.
 
     Pipeline:
       1. Compute σ_daily over the 180-day baseline, then per-window z-scores
-         for the evaluation windows (7, 15, 30, 45 days).
+         for the evaluation windows (7, 15, 30, 45 calendar days). Windows
+         are calendar-day when `recent_price_dates` is provided (production)
+         and trading-day otherwise (legacy test path).
       2. If a catalyst event (earnings or news headline) fires within the
          last 45 days, the chart anchors to the event date and the tier is
          computed for the exact since-event span. Otherwise, the chart
@@ -2309,9 +2376,10 @@ def _build_price_action(
     today = datetime.now(timezone.utc).date()
 
     # ── Volatility & dynamic window selection ─────────────────────────
-    vol = _compute_price_volatility(recent_prices)
+    vol = _compute_price_volatility(recent_prices, recent_price_dates)
     sigma_daily = vol["sigma_daily"]
     chosen_window = vol["chosen_window"]
+    chosen_ref_idx = vol["chosen_ref_idx"]
 
     # ── Scan for catalysts within the larger of (45 days, chosen window)
     # so we don't miss an old-but-significant event.
@@ -2384,6 +2452,13 @@ def _build_price_action(
     if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
         ref_price = recent_prices[chosen_event["index"]]
         change_days = max(1, (today - chosen_event["date"]).days)
+    elif chosen_ref_idx is not None:
+        # Pin to the exact close the volatility function selected. In
+        # calendar-day mode this is the close on/before today−N days; in
+        # trading-day mode it's the Nth from end. Either way, change_pct
+        # and the σ band agree because they both anchor here.
+        ref_price = recent_prices[chosen_ref_idx]
+        change_days = max(1, len(recent_prices) - 1 - chosen_ref_idx)
     else:
         ref_idx = max(0, len(recent_prices) - (window_days + 1))
         ref_price = recent_prices[ref_idx]
@@ -2415,14 +2490,20 @@ def _build_price_action(
         tag = tier  # Typical / Notable / Unusual / Extreme
 
     # ── Trim sparkline to the chosen window so iOS doesn't ship 200
-    # closes when the chart only renders ~30.
-    sparkline_len = window_days + 1
-    if len(recent_prices) >= sparkline_len:
-        sparkline = recent_prices[-sparkline_len:]
-        offset = len(recent_prices) - sparkline_len
+    # closes when the chart only renders ~30. For the no-event path with
+    # calendar-day windows we anchor to chosen_ref_idx so the chart shows
+    # exactly the closes that fell inside the labelled window.
+    if not chosen_event and chosen_ref_idx is not None:
+        sparkline = recent_prices[chosen_ref_idx:]
+        offset = chosen_ref_idx
     else:
-        sparkline = list(recent_prices)
-        offset = 0
+        sparkline_len = window_days + 1
+        if len(recent_prices) >= sparkline_len:
+            sparkline = recent_prices[-sparkline_len:]
+            offset = len(recent_prices) - sparkline_len
+        else:
+            sparkline = list(recent_prices)
+            offset = 0
 
     # Re-index the event marker against the trimmed sparkline.
     event_out: Optional[Dict[str, Any]] = None

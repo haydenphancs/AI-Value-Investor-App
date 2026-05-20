@@ -35,9 +35,15 @@ struct ReportCard: View {
                         ReportStatusBadge(status: report.status)
 
                         if report.status == .failed && report.isRefunded {
-                            Text("[Refunded]")
+                            // Mirror the "ORCL • Software - Infrastructure"
+                            // subtitle styling so the refund note reads as
+                            // metadata, not a second status pill. Amount is
+                            // sourced from the same constant the charger
+                            // reads (AnalysisCost.standard), so retry will
+                            // re-debit the matching number.
+                            Text("Refunded \(AnalysisCost.standard.credits) credits")
                                 .font(AppTypography.caption)
-                                .foregroundColor(report.status.color)
+                                .foregroundColor(AppColors.textSecondary)
                         }
                     }
                 }
@@ -76,7 +82,10 @@ struct ReportCard: View {
                         )
                     }
                 } else {
-                    // Persona info without gauge (for processing/failed)
+                    // Persona info without gauge (for processing/failed).
+                    // For .failed, the Retry button lives at the trailing
+                    // end of this row (below the Failed badge), not on a
+                    // separate row underneath.
                     HStack(spacing: AppSpacing.sm) {
                         PersonaIcon(
                             persona: report.persona,
@@ -93,6 +102,23 @@ struct ReportCard: View {
                             Text(report.persona.tagline)
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textSecondary)
+                        }
+
+                        if report.status == .failed {
+                            Spacer()
+                            Button(action: {
+                                onRetry?()
+                            }) {
+                                HStack(spacing: AppSpacing.xs) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(AppTypography.iconXS).fontWeight(.semibold)
+                                    Text("Retry Analysis")
+                                        .font(AppTypography.labelSmall)
+                                        .fontWeight(.semibold)
+                                }
+                                .foregroundColor(report.status.color)
+                            }
+                            .buttonStyle(PlainButtonStyle())
                         }
                     }
 
@@ -114,23 +140,7 @@ struct ReportCard: View {
                             }
                         }
 
-                    case .failed:
-                        // Retry button
-                        Button(action: {
-                            onRetry?()
-                        }) {
-                            HStack(spacing: AppSpacing.xs) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(AppTypography.iconXS).fontWeight(.semibold)
-                                Text("Retry Analysis")
-                                    .font(AppTypography.labelSmall)
-                                    .fontWeight(.semibold)
-                            }
-                            .foregroundColor(report.status.color)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                    case .ready:
+                    case .failed, .ready:
                         EmptyView()
                     }
                 }

@@ -428,6 +428,56 @@ def _price_action_narrative_prompt(
             "above strongly says otherwise."
         )
 
+    # Branch the sentence template on tier. Python-side branching keeps
+    # the LLM-facing prompt tight and removes the implicit pressure for
+    # the AI to attribute a Typical (within-±1σ) move to a single driver.
+    if tier == "Typical":
+        write_block = """WRITE 2-3 SENTENCES (TYPICAL MOVE — within ±1σ):
+
+Sentence 1 — STATE PLAINLY that this move is within the stock's normal
+  monthly range. Do NOT open by assigning a catalyst. Use phrasing like
+  "This is a normal-range move — well within the stock's typical monthly
+  band" or "Trading inside its usual envelope; nothing statistically
+  unusual here."
+
+Sentence 2 (OPTIONAL) — If a strong headline is in the window, mention it
+  as CONTEXT only ("came alongside X" / "X was in the news"), NOT as the
+  driver of the move. SKIP this sentence entirely if no notable headline.
+
+Final sentence — Use Frame B: classify this as routine trading inside the
+  stock's normal range, not a fundamental shift. You may name a macro or
+  sector backdrop if relevant.
+
+NEVER contradict GROUND TRUTH direction. DO NOT quote σ, z-score, or any
+volatility math — that lives in the chart sub-label. DO NOT write phrases
+like "pushing the stock up X%" or "spurred investor confidence" for a
+within-range move — the whole point is that this magnitude is unremarkable
+for this stock."""
+    else:
+        # Notable / Unusual / Extreme — catalyst-led, classify at the end.
+        write_block = """WRITE 2-3 SENTENCES:
+
+Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
+  - if there's an EVENT (earnings/news catalyst), lead with it (cite the headline if available)
+  - otherwise lead with the strongest macro/sector driver (sector rotation, fed, yields, war, oil, etc.)
+  - otherwise say plainly that no single catalyst explains it — broader market drift
+  Cite a specific source from the headlines or macro block when you can.
+
+Final sentence — Classify the signal. Use one of these two frames explicitly:
+  A) "This reflects a FUNDAMENTAL change in the business" — when the cause is
+     declining revenue, leadership change, structural cost issue, lost contract,
+     credible guidance reset, deteriorating moat. Be specific about what changed.
+  B) "This is short-term market NOISE" — when the cause is macro fears (rates,
+     war, oil), sector rotation, broad risk-off, or no clear cause at all.
+
+NEVER contradict GROUND TRUTH direction. If headlines suggest the opposite of
+the chart, treat the move as macro-driven (market repricing through this name).
+If everything is FLAT, write one sentence saying so and skip the catalyst hunt.
+
+DO NOT quote σ, z-score, or any volatility math in the prose — that lives in
+the chart sub-label. Focus on the WHY (catalyst) and the WHAT-KIND-OF-SIGNAL
+(fundamental vs. noise)."""
+
     return f"""Explain WHY the stock moved and what kind of signal this is.
 
 GROUND TRUTH: {ground_truth}
@@ -441,29 +491,7 @@ EVIDENCE:
 {_style_block(persona)}
 {_length_brief(3, 60)}
 
-WRITE 2-3 SENTENCES:
-
-Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
-  - if there's an EVENT (earnings/news catalyst), lead with it (cite the headline if available)
-  - otherwise lead with the strongest macro/sector driver (sector rotation, fed, yields, war, oil, etc.)
-  - otherwise say plainly that no single catalyst explains it — broader market drift
-  Cite a specific source from the headlines or macro block when you can.
-
-Final sentence — Classify the signal. Use one of these two frames explicitly:
-  A) "This reflects a FUNDAMENTAL change in the business" — when the cause is
-     declining revenue, leadership change, structural cost issue, lost contract,
-     credible guidance reset, deteriorating moat. Be specific about what changed.
-  B) "This is short-term market NOISE" — when the cause is macro fears (rates,
-     war, oil), sector rotation, broad risk-off, routine earnings reaction
-     inside the stock's normal range, or no clear cause at all.
-
-NEVER contradict GROUND TRUTH direction. If headlines suggest the opposite of
-the chart, treat the move as macro-driven (market repricing through this name).
-If everything is FLAT, write one sentence saying so and skip the catalyst hunt.
-
-DO NOT quote σ, z-score, or any volatility math in the prose — that lives in
-the chart sub-label. Focus on the WHY (catalyst) and the WHAT-KIND-OF-SIGNAL
-(fundamental vs. noise)."""
+{write_block}"""
 
 
 def _revenue_engine_analysis_note_prompt(

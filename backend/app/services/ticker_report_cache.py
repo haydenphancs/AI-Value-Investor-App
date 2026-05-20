@@ -77,6 +77,22 @@ TABLE_NAME = "ticker_report_cache"
 CACHE_SCHEMA_FLOOR = datetime(2026, 5, 19, 22, 0, 0, tzinfo=timezone.utc)
 
 
+def _legacy_tier_from_change(pct: float) -> str:
+    """Map |%| change to the 4-tier vocabulary for legacy entries that
+    pre-date the σ-based classifier. No σ is stored on these payloads, so
+    we approximate from magnitude alone. Bands chosen to mirror the live
+    breakpoints for an average-volatility stock (~1.5% daily σ over a
+    30-day window → 2σ ≈ ±8%)."""
+    a = abs(pct)
+    if a >= 15.0:
+        return "Extreme"
+    if a >= 7.0:
+        return "Unusual"
+    if a >= 2.0:
+        return "Notable"
+    return "Typical"
+
+
 def patch_legacy_price_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Backfill the ground-truth fields onto a `price_action` block stored
     before change_pct / direction / window_label / tag were added.
@@ -116,20 +132,19 @@ def patch_legacy_price_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         direction = "down"
 
+    legacy_tier = _legacy_tier_from_change(change_pct)
     if event:
         window_label = f"Since {event.get('date', '')}".strip()
-        tag = event.get("tag") or "Normal"
+        tag = event.get("tag") or legacy_tier
     else:
         window_label = "Last 30 Days"
-        if abs(change_pct) > 10:
-            tag = "Momentum" if direction == "up" else "Correction"
-        else:
-            tag = "Normal"
+        tag = legacy_tier
 
     pa.setdefault("change_pct", change_pct)
     pa.setdefault("direction", direction)
     pa.setdefault("window_label", window_label)
     pa.setdefault("tag", tag)
+    pa.setdefault("tier", legacy_tier)
     payload["price_action"] = pa
     return payload
 

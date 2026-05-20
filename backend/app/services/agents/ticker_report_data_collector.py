@@ -643,11 +643,11 @@ class TickerReportDataCollector:
         if estimates and len(estimates) >= 2:
             sorted_est = sorted(estimates, key=lambda e: (e.get("date") or ""))
             n = len(sorted_est)
-            est0_rev = _safe_float(sorted_est[0], "estimatedRevenueAvg")
-            estn_rev = _safe_float(sorted_est[-1], "estimatedRevenueAvg")
+            est0_rev = _est_revenue(sorted_est[0])
+            estn_rev = _est_revenue(sorted_est[-1])
             c["revenue_cagr"] = _safe_cagr(est0_rev, estn_rev, n)
-            est0_eps = _safe_float(sorted_est[0], "estimatedEpsAvg")
-            estn_eps = _safe_float(sorted_est[-1], "estimatedEpsAvg")
+            est0_eps = _est_eps(sorted_est[0])
+            estn_eps = _est_eps(sorted_est[-1])
             c["eps_cagr"] = _safe_cagr(est0_eps, estn_eps, n)
         else:
             c["revenue_cagr"] = None
@@ -1040,6 +1040,30 @@ def _safe_float(d: Any, key: str, default: float = 0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _est_revenue(est: Dict[str, Any]) -> float:
+    """Pull the average revenue estimate off an analyst-estimates row.
+
+    FMP `/stable` returns `revenueAvg`; the deprecated `/api/v3` shape
+    returned `estimatedRevenueAvg`. Try the current name first, fall
+    back so older test fixtures and any straggler responses still parse.
+    The same pattern is used in stock_overview_service and the stocks
+    endpoint — keep them in sync.
+    """
+    return (
+        _safe_float(est, "revenueAvg")
+        or _safe_float(est, "estimatedRevenueAvg")
+    )
+
+
+def _est_eps(est: Dict[str, Any]) -> float:
+    """Pull the average EPS estimate off an analyst-estimates row.
+    See `_est_revenue` for the rationale on the two-name lookup."""
+    return (
+        _safe_float(est, "epsAvg")
+        or _safe_float(est, "estimatedEpsAvg")
+    )
 
 
 def _num_or_none(v: Any) -> Optional[float]:
@@ -1889,9 +1913,7 @@ def _build_revenue_forecast_partial(
     sorted_estimates = sorted(estimates, key=lambda e: (e.get("date") or ""))[:3]
 
     # Pick a single divisor across all bars so they're visually comparable.
-    revs = [
-        _safe_float(est, "estimatedRevenueAvg") for est in sorted_estimates
-    ]
+    revs = [_est_revenue(est) for est in sorted_estimates]
     max_rev = max(revs) if revs else 0.0
     if max_rev >= 1e12:
         divisor = 1e12
@@ -1904,8 +1926,8 @@ def _build_revenue_forecast_partial(
     for i, est in enumerate(sorted_estimates):
         date_str = est.get("date") or ""
         period = date_str[:4] if len(date_str) >= 4 else f"FY{i}"
-        rev = _safe_float(est, "estimatedRevenueAvg")
-        eps = _safe_float(est, "estimatedEpsAvg")
+        rev = _est_revenue(est)
+        eps = _est_eps(est)
         projections.append({
             "period": period,
             "revenue": round(rev / divisor, 2) if rev else 0.0,
@@ -3478,8 +3500,8 @@ def build_financial_context(out: CollectedTickerData) -> str:
         for est in estimates[:2]:
             parts.append(
                 f"  {est.get('date', '?')}: "
-                f"Rev ${est.get('estimatedRevenueAvg', 0):,.0f}, "
-                f"EPS ${est.get('estimatedEpsAvg', 0):.2f}"
+                f"Rev ${_est_revenue(est):,.0f}, "
+                f"EPS ${_est_eps(est):.2f}"
             )
 
     if out.analyst_analysis:

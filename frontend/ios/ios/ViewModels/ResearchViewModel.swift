@@ -63,6 +63,18 @@ class ResearchViewModel: ObservableObject {
     private var reportsPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Backend report IDs the client has locally given up on because they've
+    /// been .processing past `processingTimeoutSeconds`. Survives across
+    /// loadReports() calls so a stubborn backend "processing" row stays
+    /// flipped to .failed in the UI. Cleared per-id when the backend reports
+    /// a terminal status (.ready / .failed).
+    private var locallyTimedOutReportIds: Set<String> = []
+
+    /// Generous upper bound — real generations finish in 3-5 min. After
+    /// 10 min with no terminal status, we assume Railway is down (or the
+    /// task got abandoned) and surface the error card.
+    private let processingTimeoutSeconds: TimeInterval = 600
+
     // MARK: - Initialization
     init(prefilledTicker: String? = nil, apiClient: APIClient = .shared, isAuthenticated: @escaping () -> Bool = { false }) {
         self.apiClient = apiClient
@@ -138,6 +150,33 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
+    /// Detect reports stuck in .processing past `processingTimeoutSeconds`,
+    /// register their backend IDs, and flip them to `.failed` locally so the
+    /// ReportCard's failed branch (with the Retry button) appears. Runs
+    /// against `self.reports` in-place after every load attempt. Mock
+    /// reports without a `backendId` are skipped — the timeout only applies
+    /// to real backend-tracked generations.
+    private func applyClientSideTimeoutPass() {
+        let now = Date()
+        reports = reports.map { report in
+            guard let backendId = report.backendId else { return report }
+            // Backend gave us a terminal status — trust it, clear any prior flag.
+            if report.status == .ready || report.status == .failed {
+                locallyTimedOutReportIds.remove(backendId)
+                return report
+            }
+            // Still .processing — age out if past the timeout.
+            let age = now.timeIntervalSince(report.date)
+            if age > processingTimeoutSeconds {
+                locallyTimedOutReportIds.insert(backendId)
+            }
+            if locallyTimedOutReportIds.contains(backendId) {
+                return report.withClientTimeout()
+            }
+            return report
+        }
+    }
+
     /// Fetch user's research reports from GET /research/reports
     func loadReports() async {
         print("📋 ResearchVM: Loading reports from backend...")
@@ -148,11 +187,16 @@ class ResearchViewModel: ObservableObject {
             )
             print("✅ ResearchVM: Loaded \(backendReports.count) reports from backend")
             self.reports = backendReports.map { AnalysisReport.from($0) }
+            applyClientSideTimeoutPass()
             sortReports()
         } catch {
             print("⚠️ ResearchVM: Failed to load reports — \(error). Using mock data.")
             if reports.isEmpty {
                 reports = AnalysisReport.mockReports
+                sortReports()
+            } else {
+                // Network blip — keep existing rows but still age out the stale ones.
+                applyClientSideTimeoutPass()
                 sortReports()
             }
         }

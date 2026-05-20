@@ -391,6 +391,26 @@ struct AnalysisReport: Identifiable, Hashable {
         Int((progress ?? 0) * 100)
     }
 
+    /// Copy with status flipped to `.failed` for the client-side timeout path.
+    /// Other fields pass through unchanged so the card identity (ticker /
+    /// persona / date) stays stable across the transition.
+    func withClientTimeout() -> AnalysisReport {
+        AnalysisReport(
+            backendId: backendId,
+            companyName: companyName,
+            ticker: ticker,
+            industry: industry,
+            persona: persona,
+            status: .failed,
+            progress: progress,
+            currentStep: "Service temporarily unavailable. Tap Retry to try again.",
+            rating: rating,
+            ratingLabel: ratingLabel,
+            date: date,
+            isRefunded: isRefunded
+        )
+    }
+
     static func == (lhs: AnalysisReport, rhs: AnalysisReport) -> Bool {
         lhs.id == rhs.id
     }

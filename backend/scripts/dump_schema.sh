@@ -10,7 +10,7 @@
 #
 # Usage:
 #   ./backend/scripts/dump_schema.sh
-#
+# 
 # Password resolution order:
 #   1. $SUPABASE_DB_PASSWORD env var if already set
 #   2. backend/.env file if it defines SUPABASE_DB_PASSWORD

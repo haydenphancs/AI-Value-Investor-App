@@ -1174,6 +1174,37 @@ class FMPClient:
             logger.warning(f"Insider trading search failed for {ticker}: {e}")
             return []
 
+    async def get_beneficial_ownership(
+        self, ticker: str
+    ) -> List[Dict[str, Any]]:
+        """SC 13D/G filings — true beneficial ownership for 5%+ holders.
+
+        Bridges the Form 4 gap for founders and major holders who don't
+        trade often: their Form 4 `securitiesOwned` is just one account's
+        post-trade balance, while 13G `soleVotingPower` is the full
+        beneficial stake (including trusts and other vehicles). For ORCL
+        this is the only path that exposes Larry Ellison's 1.157B / 43%
+        position.
+        """
+        try:
+            data = await self._make_request(
+                "acquisition-of-beneficial-ownership",
+                params={"symbol": ticker.upper()},
+            )
+            return data if isinstance(data, list) else []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
+                logger.warning(
+                    f"Beneficial-ownership unavailable for {ticker}"
+                )
+                return []
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Beneficial-ownership fetch failed for {ticker}: {e}"
+            )
+            return []
+
     async def get_insider_trading_statistics(
         self, ticker: str
     ) -> List[Dict[str, Any]]:

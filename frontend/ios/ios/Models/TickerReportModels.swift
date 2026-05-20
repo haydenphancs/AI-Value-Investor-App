@@ -529,9 +529,35 @@ struct RevenueProjection: Identifiable {
     let period: String      // x-axis category e.g. "FY24", "FY25E"
     let revenue: Double     // revenue value (billions)
     let revenueLabel: String // display label e.g. "$120B"
+    let revenueYoyPct: Double? // YoY %, nil for the first visible year when no anchor exists
     let eps: Double         // EPS value e.g. 4.50
     let epsLabel: String    // display label e.g. "$4.50"
+    let epsYoyPct: Double?  // YoY %, nil for the first visible year when no anchor exists
     let isForecast: Bool
+
+    /// Compact YoY string for the bar/dot annotations. Returns nil when
+    /// we have no anchor — the view should hide the row entirely.
+    var revenueYoYText: String? {
+        guard let pct = revenueYoyPct else { return nil }
+        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+    }
+
+    var epsYoYText: String? {
+        guard let pct = epsYoyPct else { return nil }
+        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+    }
+
+    /// Color for the YoY chip: green for growth, red for decline, gray
+    /// when missing (caller should also gate on the *Text property).
+    var revenueYoYColor: Color {
+        guard let pct = revenueYoyPct else { return AppColors.textMuted }
+        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    }
+
+    var epsYoYColor: Color {
+        guard let pct = epsYoyPct else { return AppColors.textMuted }
+        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    }
 }
 
 enum ManagementGuidance: String {
@@ -595,6 +621,12 @@ struct KeyManager: Identifiable {
     let title: String
     let ownership: String       // e.g. "40.3%", "$2,025", etc.
     let ownershipValue: String  // dollar amount or additional info
+    let percentOwnership: Double?  // 13G beneficial %, nil for non-5%-filers
+
+    var percentOwnershipLabel: String? {
+        guard let pct = percentOwnership, pct > 0 else { return nil }
+        return String(format: "%.0f%% owner", pct)
+    }
 }
 
 struct ReportKeyManagement {
@@ -1306,9 +1338,9 @@ extension TickerReportData {
             epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(period: "2026", revenue: 120, revenueLabel: "$120B", eps: 4.50, epsLabel: "$4.50", isForecast: false),
-                RevenueProjection(period: "2027", revenue: 132, revenueLabel: "$132B", eps: 5.10, epsLabel: "$5.10", isForecast: true),
-                RevenueProjection(period: "2028", revenue: 145, revenueLabel: "$145B", eps: 6.20, epsLabel: "$6.20", isForecast: true)
+                RevenueProjection(period: "2026", revenue: 120, revenueLabel: "$120B", revenueYoyPct: 8, eps: 4.50, epsLabel: "$4.50", epsYoyPct: 12, isForecast: false),
+                RevenueProjection(period: "2027", revenue: 132, revenueLabel: "$132B", revenueYoyPct: 10, eps: 5.10, epsLabel: "$5.10", epsYoyPct: 13, isForecast: true),
+                RevenueProjection(period: "2028", revenue: 145, revenueLabel: "$145B", revenueYoyPct: 10, eps: 6.20, epsLabel: "$6.20", epsYoyPct: 22, isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3",
             guidanceSpeaker: "CFO",
@@ -1325,11 +1357,11 @@ extension TickerReportData {
         ),
         keyManagement: ReportKeyManagement(
             managers: [
-                KeyManager(name: "Lawrence Ellison", title: "Co-Founder", ownership: "40.3%", ownershipValue: "$43.5b"),
-                KeyManager(name: "Jeffrey Henley", title: "Co-Founder", ownership: "0.022%", ownershipValue: "$102.6m"),
-                KeyManager(name: "Dania Caral", title: "Executive Vice Chair...", ownership: "0.0059%", ownershipValue: "$9.7m"),
-                KeyManager(name: "Marla Smith", title: "Executive VP & Chief Accounting Officer", ownership: "0.002%", ownershipValue: "$7.1m"),
-                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer & Director", ownership: "0.0005%", ownershipValue: "$18.7m")
+                KeyManager(name: "Lawrence Ellison", title: "Co-Founder", ownership: "1.16B", ownershipValue: "$214.5B", percentOwnership: 43),
+                KeyManager(name: "Jeffrey Henley", title: "Co-Founder", ownership: "745K", ownershipValue: "$138.1M", percentOwnership: nil),
+                KeyManager(name: "Dania Caral", title: "Executive Vice Chair...", ownership: "249K", ownershipValue: "$46.2M", percentOwnership: nil),
+                KeyManager(name: "Marla Smith", title: "Executive VP & Chief Accounting Officer", ownership: "224K", ownershipValue: "$41.6M", percentOwnership: nil),
+                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer & Director", ownership: "1.0M", ownershipValue: "$192.3M", percentOwnership: nil)
             ],
             ownershipInsight: "Oracle's high ownership ensures long-term thinking, though governance risk is high."
         ),

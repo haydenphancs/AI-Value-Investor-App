@@ -52,6 +52,7 @@ from app.schemas.stock_overview import SnapshotItemResponse
 from app.services._insider_common import (
     classify_insider_transaction,
     is_informative,
+    normalize_insider_name,
 )
 from app.services.sector_aggregates_service import (
     SectorAggregates,
@@ -215,6 +216,9 @@ class CollectedTickerData:
     news: List[Dict[str, Any]] = field(default_factory=list)
     insider_trades: List[Dict[str, Any]] = field(default_factory=list)
     insider_roster: List[Dict[str, Any]] = field(default_factory=list)
+    # SC 13D/G filings — used to upgrade Form 4 share counts for
+    # 10%+ owners whose direct holdings understate true beneficial ownership.
+    beneficial_owners: List[Dict[str, Any]] = field(default_factory=list)
     segments_raw: List[Dict[str, Any]] = field(default_factory=list)
     earnings_dates: List[str] = field(default_factory=list)
     analyst_analysis: Optional[AnalystAnalysisResponse] = None
@@ -348,11 +352,16 @@ class TickerReportDataCollector:
             ("cash_flow", self.fmp.get_cash_flow_statement(ticker, "annual", 5), []),
             ("key_metrics", self.fmp.get_key_metrics(ticker, "annual", 5), []),
             ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 5), []),
-            ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 3), []),
+            # Pull 4 future-year analyst estimates: we render the latest 3
+            # on the forecast chart and use the 4th-latest as the YoY anchor
+            # for the first visible year (otherwise the first bar's YoY
+            # would have nothing to compare against).
+            ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 4), []),
             ("historical", self.fmp.get_historical_prices(ticker), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
             ("insider_trades", self.fmp.get_insider_trading(ticker, limit=200), []),
             ("insider_roster", self.fmp.get_insider_roster(ticker), []),
+            ("beneficial_owners", self.fmp.get_beneficial_ownership(ticker), []),
             (
                 "segments_raw",
                 self.fmp.get_revenue_product_segmentation(ticker, "annual", "flat"),
@@ -641,7 +650,12 @@ class TickerReportDataCollector:
         # regardless of FMP's response order (newest-first vs oldest-first
         # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            sorted_est = sorted(estimates, key=lambda e: (e.get("date") or ""))
+            # CAGR is computed over the 3 visible chart years so the legend
+            # caption matches what the user sees. The 4th (oldest) entry,
+            # when present, is consumed only as the YoY anchor inside
+            # _build_revenue_forecast_partial — it must not stretch the
+            # CAGR span.
+            sorted_est = sorted(estimates, key=lambda e: (e.get("date") or ""))[-3:]
             n = len(sorted_est)
             est0_rev = _est_revenue(sorted_est[0])
             estn_rev = _est_revenue(sorted_est[-1])
@@ -774,7 +788,10 @@ class TickerReportDataCollector:
 
         # ── Key management roster ─────────────────────────────────────
         out.key_management_partial = _build_key_management(
-            out.insider_roster, profile
+            out.insider_roster,
+            profile,
+            current_price,
+            beneficial_owners=out.beneficial_owners,
         )
 
         # ── Price action: deterministic earnings + news-catalyst event ──
@@ -1909,8 +1926,14 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
 ) -> Dict[str, Any]:
-    # Sort estimates oldest→newest so the chart reads left-to-right in time.
-    sorted_estimates = sorted(estimates, key=lambda e: (e.get("date") or ""))[:3]
+    # Sort estimates oldest→newest so the chart reads left-to-right.
+    # We fetch 4 from FMP (when available): the latest 3 are rendered as
+    # bars/dots, and the 4th-latest serves as the YoY anchor for the
+    # first visible year. When fewer than 4 are available, the first
+    # year's YoY stays None and iOS hides the % label on that bar/dot.
+    sorted_all = sorted(estimates, key=lambda e: (e.get("date") or ""))
+    sorted_estimates = sorted_all[-3:]
+    anchor = sorted_all[-4] if len(sorted_all) >= 4 else None
 
     # Pick a single divisor across all bars so they're visually comparable.
     revs = [_est_revenue(est) for est in sorted_estimates]
@@ -1922,18 +1945,37 @@ def _build_revenue_forecast_partial(
     else:
         divisor = 1e6
 
+    def _yoy(curr: float, prior: float) -> Optional[float]:
+        """YoY % change. None when prior is non-positive so we don't emit
+        a misleading +∞ for a segment that started from zero."""
+        if prior is None or prior <= 0:
+            return None
+        return round((curr - prior) / prior * 100, 1)
+
     projections: List[Dict[str, Any]] = []
     for i, est in enumerate(sorted_estimates):
         date_str = est.get("date") or ""
         period = date_str[:4] if len(date_str) >= 4 else f"FY{i}"
         rev = _est_revenue(est)
         eps = _est_eps(est)
+        # Prior year is the previous visible projection, or the anchor
+        # for the first visible year. Anchor may be None in tests with
+        # only 3 estimates — first year's YoY then comes back as null.
+        if i == 0:
+            prior_rev = _est_revenue(anchor) if anchor else None
+            prior_eps = _est_eps(anchor) if anchor else None
+        else:
+            prior_est = sorted_estimates[i - 1]
+            prior_rev = _est_revenue(prior_est)
+            prior_eps = _est_eps(prior_est)
         projections.append({
             "period": period,
             "revenue": round(rev / divisor, 2) if rev else 0.0,
             "revenue_label": _format_revenue(rev),
+            "revenue_yoy_pct": _yoy(rev, prior_rev) if rev else None,
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps else "$0",
+            "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
             # FMP `analyst-estimates` is forward-looking only — every entry
             # is a future-period analyst estimate, never an actual.
             "is_forecast": True,
@@ -2064,13 +2106,61 @@ def _build_insider_sections(
 def _build_key_management(
     insider_roster: List[Dict[str, Any]],
     profile: Dict[str, Any],
+    current_price: float = 0.0,
+    beneficial_owners: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Real exec roster from FMP insider-trading derived data.
+    """Real exec roster from FMP insider-trading derived data, upgraded
+    with 13D/G beneficial-ownership data for any "10 percent owner".
 
     Sorted by ownership share count desc; ranks the top 5. Falls back
     to `[CEO from profile]` when the roster is empty so iOS never
     sees an empty `managers` array (the view assumes ≥1 entry).
+
+    Names are normalized via `_insider_common.normalize_insider_name`
+    so 'ELLISON LAWRENCE JOSEPH' renders as 'Lawrence Joseph Ellison',
+    matching the Holders tab. `ownership_value` is computed from
+    `shares × current_price` and rendered with the standard short-form
+    currency formatter ("$45.5M" / "$1.0B") — the placeholder "—" is
+    only used when we have neither a share count nor a price.
+
+    For founders/major holders whose Form 4 `securitiesOwned` understates
+    true beneficial ownership (Ellison @ ORCL: 571K direct vs 1.157B
+    beneficial), we pair each "10 percent owner"-tagged roster entry
+    with the largest available IN-type 13G filer and replace shares
+    with `soleVotingPower`, attaching `percent_ownership` for the chip.
     """
+    # Queue of individual (IN-type) 13G filers, largest first. We pop
+    # from this in roster order to upgrade Form 4 holdings for 10%+
+    # owners. CO-type filers (companies, e.g. legacy Oracle acquisition
+    # disclosures) are ignored — they're not individual insiders.
+    #
+    # FMP returns the full filing history for each CIK (Ellison has 6
+    # filings spanning ~2010-2022 with different share counts as he
+    # gifted/transferred). Dedupe by CIK and keep only the MOST RECENT
+    # filing per filer — older filings are historical and shouldn't be
+    # treated as competing rows.
+    latest_by_cik: Dict[str, Dict[str, Any]] = {}
+    for f in beneficial_owners or []:
+        if (f.get("typeOfReportingPerson") or "").upper() != "IN":
+            continue
+        sole = _safe_float(f, "soleVotingPower")
+        if sole <= 0:
+            continue
+        cik = f.get("cik") or ""
+        if not cik:
+            continue
+        date = f.get("filingDate") or f.get("acceptedDate") or ""
+        prev = latest_by_cik.get(cik)
+        if prev is None or date > (prev.get("date") or ""):
+            latest_by_cik[cik] = {
+                "shares": sole,
+                "pct": _safe_float(f, "percentOfClass"),
+                "date": date,
+            }
+    ind_filers = list(latest_by_cik.values())
+    ind_filers.sort(key=lambda x: x["shares"], reverse=True)
+    ind_queue = list(ind_filers)
+
     managers: List[Dict[str, Any]] = []
     if insider_roster:
         ranked = sorted(
@@ -2079,22 +2169,40 @@ def _build_key_management(
             reverse=True,
         )
         for r in ranked[:5]:
+            type_of_owner = (
+                (r.get("title") or "") + " " + (r.get("typeOfOwner") or "")
+            ).lower()
+            is_major = (
+                "10 percent owner" in type_of_owner
+                or "10% owner" in type_of_owner
+            )
             shares = _safe_float(r, "numberOfShares")
+            pct: Optional[float] = None
+            if is_major and ind_queue:
+                override = ind_queue.pop(0)
+                shares = override["shares"]
+                pct = override["pct"] or None
+            if shares > 0 and current_price > 0:
+                value_str = _format_currency_short(shares * current_price)
+            else:
+                value_str = "—"
             managers.append({
-                "name": r.get("owner") or "Insider",
+                "name": normalize_insider_name(r.get("owner")),
                 "title": r.get("title") or r.get("typeOfOwner") or "Officer",
                 "ownership": _format_shares_short(shares),
-                "ownership_value": "—",  # roster lacks value; AI may rewrite
+                "ownership_value": value_str,
+                "percent_ownership": round(pct, 1) if pct else None,
             })
 
     if not managers:
         ceo = profile.get("ceo")
         if ceo:
             managers.append({
-                "name": ceo,
+                "name": normalize_insider_name(ceo),
                 "title": "CEO",
                 "ownership": "—",
                 "ownership_value": "—",
+                "percent_ownership": None,
             })
         else:
             managers.append({
@@ -2102,6 +2210,7 @@ def _build_key_management(
                 "title": "Officer",
                 "ownership": "—",
                 "ownership_value": "—",
+                "percent_ownership": None,
             })
 
     return {

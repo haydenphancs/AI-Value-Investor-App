@@ -305,15 +305,19 @@ struct RevenueProjectionDTO: Codable {
     let period: String
     let revenue: Double
     let revenueLabel: String
+    let revenueYoyPct: Double?
     let eps: Double
     let epsLabel: String
+    let epsYoyPct: Double?
     let isForecast: Bool
 
     enum CodingKeys: String, CodingKey {
         case period, revenue
         case revenueLabel = "revenue_label"
+        case revenueYoyPct = "revenue_yoy_pct"
         case eps
         case epsLabel = "eps_label"
+        case epsYoyPct = "eps_yoy_pct"
         case isForecast = "is_forecast"
     }
 }
@@ -368,10 +372,12 @@ struct KeyManagerDTO: Codable {
     let title: String
     let ownership: String
     let ownershipValue: String
+    let percentOwnership: Double?
 
     enum CodingKeys: String, CodingKey {
         case name, title, ownership
         case ownershipValue = "ownership_value"
+        case percentOwnership = "percent_ownership"
     }
 }
 
@@ -819,8 +825,12 @@ extension TickerReportAPIResponse {
             projections: revenueForecast.projections.map { p in
                 RevenueProjection(
                     period: p.period, revenue: p.revenue,
-                    revenueLabel: p.revenueLabel, eps: p.eps,
-                    epsLabel: p.epsLabel, isForecast: p.isForecast
+                    revenueLabel: p.revenueLabel,
+                    revenueYoyPct: p.revenueYoyPct,
+                    eps: p.eps,
+                    epsLabel: p.epsLabel,
+                    epsYoyPct: p.epsYoyPct,
+                    isForecast: p.isForecast
                 )
             },
             guidanceQuote: revenueForecast.guidanceQuote,
@@ -841,7 +851,13 @@ extension TickerReportAPIResponse {
         // Key Management
         let management = ReportKeyManagement(
             managers: keyManagement.managers.map { m in
-                KeyManager(name: m.name, title: m.title, ownership: m.ownership, ownershipValue: m.ownershipValue)
+                KeyManager(
+                    name: m.name,
+                    title: m.title,
+                    ownership: m.ownership,
+                    ownershipValue: m.ownershipValue,
+                    percentOwnership: m.percentOwnership
+                )
             },
             ownershipInsight: keyManagement.ownershipInsight
         )

@@ -147,8 +147,13 @@ class RevenueProjectionResponse(BaseModel):
     period: str
     revenue: float
     revenue_label: str
+    # YoY % vs the prior year. None for the earliest year when no anchor
+    # is available (FMP returned fewer than 4 estimates). iOS hides the
+    # % label on that bar/dot when null.
+    revenue_yoy_pct: Optional[float] = None
     eps: float
     eps_label: str
+    eps_yoy_pct: Optional[float] = None
     is_forecast: bool
 
 
@@ -189,6 +194,11 @@ class KeyManagerResponse(BaseModel):
     title: str
     ownership: str
     ownership_value: str
+    # 13G total beneficial %, only populated when the manager is tagged
+    # "10 percent owner" in their Form 4 typeOfOwner AND a matching
+    # IN-type 13G filing is available. iOS renders this as a green
+    # "43% owner" chip next to the name.
+    percent_ownership: Optional[float] = None
 
 
 class KeyManagementResponse(BaseModel):

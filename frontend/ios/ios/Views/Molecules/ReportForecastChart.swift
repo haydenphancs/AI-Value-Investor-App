@@ -37,9 +37,16 @@ struct ReportForecastChart: View {
                     )
                     .cornerRadius(AppCornerRadius.small)
                     .annotation(position: .top, spacing: 4) {
-                        Text(projection.revenueLabel)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
+                        VStack(spacing: 1) {
+                            if let yoy = projection.revenueYoYText {
+                                Text(yoy)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(projection.revenueYoYColor)
+                            }
+                            Text(projection.revenueLabel)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
                     }
                 }
                 
@@ -63,9 +70,16 @@ struct ReportForecastChart: View {
                     .foregroundStyle(AppColors.accentYellow)
                     .symbolSize(40)
                     .annotation(position: .bottom, spacing: 4) {
-                        Text(projection.epsLabel)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.accentYellow)
+                        VStack(spacing: 1) {
+                            Text(projection.epsLabel)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.accentYellow)
+                            if let yoy = projection.epsYoYText {
+                                Text(yoy)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(projection.epsYoYColor)
+                            }
+                        }
                     }
                 }
             }

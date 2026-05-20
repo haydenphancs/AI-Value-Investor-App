@@ -31,9 +31,25 @@ struct ReportKeyManagementTable: View {
                 VStack(spacing: AppSpacing.xs) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                            Text(manager.name)
-                                .font(AppTypography.label)
-                                .foregroundColor(AppColors.textPrimary)
+                            HStack(spacing: AppSpacing.xs) {
+                                Text(manager.name)
+                                    .font(AppTypography.label)
+                                    .foregroundColor(AppColors.textPrimary)
+                                if let chip = manager.percentOwnershipLabel {
+                                    // 13G beneficial ownership chip — only
+                                    // shows for 5%+ filers (Ellison-style).
+                                    Text(chip)
+                                        .font(AppTypography.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(AppColors.bullish)
+                                        .padding(.horizontal, AppSpacing.sm)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Capsule()
+                                                .fill(AppColors.bullish.opacity(0.15))
+                                        )
+                                }
+                            }
                             Text(manager.title)
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textMuted)

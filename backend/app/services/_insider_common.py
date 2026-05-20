@@ -1,17 +1,70 @@
 """
-Shared helpers for classifying insider (Form 4) transactions.
+Shared helpers for insider (Form 4) data: transaction classification AND
+name normalization.
 
 Both ``holders_service`` (per-ticker detail view) and ``tracking_service``
 (watchlist-wide alerts) need to agree on:
   * which FMP transactionType strings map to buys vs sells
   * which trades carry real signal ("Informative") vs mechanical compensation
     noise like option exercises and tax withholding ("Uninformative")
+  * how to render insider names — FMP returns them in messy 'LAST FIRST
+    MIDDLE' uppercase form ("ELLISON LAWRENCE JOSEPH"); both surfaces
+    should display the natural 'First Middle Last' shape.
 
-Keeping the classifier in one place prevents the alert card and the Holders
-tab from disagreeing about the same underlying Form 4 row.
+Keeping these in one place prevents the alert card, the Holders tab, and
+the ticker report's "Insider & Management" section from disagreeing about
+the same underlying Form 4 row.
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
+
+
+def normalize_insider_name(raw: Optional[str]) -> str:
+    """Convert an FMP-style insider name into a natural 'First Middle Last'.
+
+    FMP's `reportingName` comes in two messy shapes:
+      - 'ELLISON LAWRENCE JOSEPH'   (uppercase, space-separated, last-first)
+      - 'Ellison, Lawrence Joseph'  (mixed case with a comma)
+
+    Both collapse to 'Lawrence Joseph Ellison'. Single-letter middle tokens
+    get a period appended ('Sicilia Michael D' → 'Michael D. Sicilia').
+    Falls back to 'Insider' for empty/None so callers can render without a
+    None-check.
+
+    Compound last names ('VAN DER BERG ALICE') are not detected — the first
+    space-delimited token is treated as the surname. Rare enough to skip the
+    extra heuristic.
+    """
+    if not raw or not raw.strip():
+        return "Insider"
+    s = raw.strip().rstrip(".")
+
+    def _tok(t: str) -> str:
+        t = t.strip(". ,")
+        if not t:
+            return ""
+        if len(t) == 1:
+            return t.upper() + "."
+        # title() lowercases letters after the first; for "MC"/"MAC"
+        # prefixes this gives "Mcdonald"/"Macarthur" — acceptable
+        # without a special lookup table.
+        return t[0].upper() + t[1:].lower()
+
+    if "," in s:
+        last_part, rest = s.split(",", 1)
+        first_middle_part = rest
+    else:
+        parts = s.split()
+        if len(parts) < 2:
+            return _tok(s) or "Insider"
+        last_part = parts[0]
+        first_middle_part = " ".join(parts[1:])
+
+    last_titled = _tok(last_part)
+    first_middle_titled = " ".join(
+        _tok(t) for t in first_middle_part.split() if _tok(t)
+    )
+    return f"{first_middle_titled} {last_titled}".strip() or "Insider"
 
 
 def classify_insider_transaction(tx_type: str) -> str:

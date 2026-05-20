@@ -19,7 +19,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.services._insider_common import classify_insider_transaction
+from app.services._insider_common import (
+    classify_insider_transaction,
+    normalize_insider_name,
+)
 from app.services._whale_common import (
     parse_congress_amount_dollars,
     calc_13f_trade_dollars,
@@ -488,7 +491,7 @@ class HoldersService:
                     ownership_pct *= 100.0
 
             insiders.append({
-                "name": r.get("owner", "Unknown"),
+                "name": normalize_insider_name(r.get("owner")),
                 "title": r.get("title", r.get("typeOfOwner", "Officer")),
                 "valueInMillions": value_millions,
                 "percentOwnership": ownership_pct,

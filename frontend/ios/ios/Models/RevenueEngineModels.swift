@@ -97,7 +97,7 @@ struct RevenueSegment: Identifiable {
     var formattedGrowth: String {
         let percentage = growth * 100
         let sign = growth >= 0 ? "+" : ""
-        let percentString = String(format: "%@%.0f%%", sign, percentage)
+        let percentString = String(format: "%@%.1f%%", sign, percentage)
 
         if growth >= 0.40 {
             return "Hyper-growth (\(percentString) YoY)"

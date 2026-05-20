@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zwYxO0h3utCiI1hicylc8IEZXlpj6sECmVVoC8HqyKcaotxMx2910qbJXim6mxM
+\restrict 84YhokA63C0VRSipck6mdhZxOVZSeNwshATTWbeCtBchy4wGJG3PXhTRwL1P0Pi
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -939,6 +939,7 @@ CREATE FUNCTION pgbouncer.get_auth(p_usename text) RETURNS TABLE(username text, 
 
 CREATE FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) RETURNS integer
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     new_remaining INT;
@@ -961,6 +962,7 @@ $$;
 
 CREATE FUNCTION public.cleanup_expired_news_cache() RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     DELETE FROM ticker_news_cache WHERE expires_at < now();
@@ -974,6 +976,7 @@ $$;
 
 CREATE FUNCTION public.cleanup_old_social_mentions() RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     DELETE FROM social_mentions_history
@@ -988,6 +991,7 @@ $$;
 
 CREATE FUNCTION public.create_user_credits() RETURNS trigger
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     INSERT INTO user_credits (user_id, total, used)
@@ -1007,6 +1011,7 @@ $$;
 
 CREATE FUNCTION public.get_top_watchlist_tickers(n integer DEFAULT 20) RETURNS TABLE(ticker text, watch_count bigint)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -1066,6 +1071,7 @@ $$;
 
 CREATE FUNCTION public.increment_chat_message_count() RETURNS trigger
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     UPDATE chat_sessions
@@ -1083,6 +1089,7 @@ $$;
 
 CREATE FUNCTION public.refund_user_credits(p_user_id uuid, p_amount integer) RETURNS integer
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     new_remaining INT;
@@ -1104,6 +1111,7 @@ $$;
 
 CREATE FUNCTION public.search_all_chunks(query_embedding public.vector, match_threshold double precision DEFAULT 0.7, match_count integer DEFAULT 10) RETURNS TABLE(source_type text, source_id uuid, source_label text, section_title text, chunk_text text, similarity double precision)
     LANGUAGE plpgsql STABLE
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -1162,6 +1170,7 @@ COMMENT ON FUNCTION public.search_all_chunks(query_embedding public.vector, matc
 
 CREATE FUNCTION public.search_article_chunks(query_embedding public.vector, match_threshold double precision DEFAULT 0.7, match_count integer DEFAULT 5) RETURNS TABLE(id uuid, article_id uuid, section_title text, chunk_text text, similarity double precision)
     LANGUAGE plpgsql STABLE
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -1185,6 +1194,7 @@ $$;
 
 CREATE FUNCTION public.search_book_chunks(query_embedding public.vector, match_threshold double precision DEFAULT 0.7, match_count integer DEFAULT 5, filter_book_id uuid DEFAULT NULL::uuid) RETURNS TABLE(id uuid, book_id uuid, book_title text, book_author text, chapter_number integer, section_title text, chunk_text text, similarity double precision)
     LANGUAGE plpgsql STABLE
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -1220,6 +1230,7 @@ COMMENT ON FUNCTION public.search_book_chunks(query_embedding public.vector, mat
 
 CREATE FUNCTION public.search_filing_chunks(query_embedding public.vector, match_threshold double precision DEFAULT 0.7, match_count integer DEFAULT 5, filter_ticker text DEFAULT NULL::text, filter_filing_type text DEFAULT NULL::text) RETURNS TABLE(id uuid, ticker text, filing_type text, fiscal_year integer, fiscal_quarter integer, section_title text, chunk_text text, similarity double precision)
     LANGUAGE plpgsql STABLE
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -1255,6 +1266,7 @@ COMMENT ON FUNCTION public.search_filing_chunks(query_embedding public.vector, m
 
 CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     NEW.updated_at = now();
@@ -1269,6 +1281,7 @@ $$;
 
 CREATE FUNCTION public.update_whale_followers_count() RETURNS trigger
     LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -3954,12 +3967,17 @@ CREATE TABLE public.hedge_fund_quarters (
     year integer NOT NULL,
     quarter integer NOT NULL,
     quarter_date text NOT NULL,
-    buy_volume double precision DEFAULT 0,
-    sell_volume double precision DEFAULT 0,
-    net_flow double precision DEFAULT 0,
+    buy_volume numeric(20,2) DEFAULT 0,
+    sell_volume numeric(20,2) DEFAULT 0,
+    net_flow numeric(20,2) DEFAULT 0,
     buyers_count integer DEFAULT 0,
     sellers_count integer DEFAULT 0,
-    computed_at timestamp with time zone DEFAULT now()
+    computed_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT hedge_fund_quarters_buy_volume_nonneg CHECK ((buy_volume >= (0)::numeric)),
+    CONSTRAINT hedge_fund_quarters_buyers_count_nonneg CHECK ((buyers_count >= 0)),
+    CONSTRAINT hedge_fund_quarters_quarter_range CHECK (((quarter >= 1) AND (quarter <= 4))),
+    CONSTRAINT hedge_fund_quarters_sell_volume_nonneg CHECK ((sell_volume >= (0)::numeric)),
+    CONSTRAINT hedge_fund_quarters_sellers_count_nonneg CHECK ((sellers_count >= 0))
 );
 
 
@@ -4176,7 +4194,9 @@ CREATE TABLE public.portfolio_holdings (
     country text DEFAULT 'US'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
-    shares double precision
+    shares numeric(20,4),
+    CONSTRAINT portfolio_holdings_market_value_nonneg CHECK ((market_value >= (0)::numeric)),
+    CONSTRAINT portfolio_holdings_shares_nonneg CHECK (((shares IS NULL) OR (shares >= (0)::numeric)))
 );
 
 
@@ -4197,8 +4217,10 @@ CREATE TABLE public.portfolio_items (
     ticker text NOT NULL,
     "position" integer DEFAULT 0 NOT NULL,
     added_at timestamp with time zone DEFAULT now() NOT NULL,
-    shares double precision,
-    market_value double precision
+    shares numeric(20,4),
+    market_value numeric(20,2),
+    CONSTRAINT portfolio_items_market_value_nonneg CHECK (((market_value IS NULL) OR (market_value >= (0)::numeric))),
+    CONSTRAINT portfolio_items_shares_nonneg CHECK (((shares IS NULL) OR (shares >= (0)::numeric)))
 );
 
 
@@ -4267,6 +4289,7 @@ CREATE TABLE public.research_reports (
     industry text,
     is_refunded boolean DEFAULT false NOT NULL,
     credits_charged integer DEFAULT 5 NOT NULL,
+    CONSTRAINT research_reports_fair_value_nonneg CHECK (((fair_value_estimate IS NULL) OR (fair_value_estimate >= (0)::numeric))),
     CONSTRAINT research_reports_overall_score_check CHECK (((overall_score >= (0)::numeric) AND (overall_score <= (100)::numeric))),
     CONSTRAINT research_reports_progress_check CHECK (((progress >= 0) AND (progress <= 100))),
     CONSTRAINT research_reports_user_rating_check CHECK (((user_rating >= 1) AND (user_rating <= 5)))
@@ -4348,13 +4371,15 @@ CREATE TABLE public.revenue_breakdown_cache (
 
 CREATE TABLE public.sector_aggregates (
     sector text NOT NULL,
-    total_revenue_usd numeric,
-    cagr_5yr_pct numeric,
-    hhi numeric,
-    top1_share_pct numeric,
-    top2_share_pct numeric,
+    total_revenue_usd numeric(24,2),
+    cagr_5yr_pct numeric(9,4),
+    hhi numeric(10,4),
+    top1_share_pct numeric(7,4),
+    top2_share_pct numeric(7,4),
     num_constituents integer,
-    computed_at timestamp with time zone DEFAULT now() NOT NULL
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sector_aggregates_top1_share_pct_range CHECK (((top1_share_pct IS NULL) OR ((top1_share_pct >= (0)::numeric) AND (top1_share_pct <= (100)::numeric)))),
+    CONSTRAINT sector_aggregates_top2_share_pct_range CHECK (((top2_share_pct IS NULL) OR ((top2_share_pct >= (0)::numeric) AND (top2_share_pct <= (100)::numeric))))
 );
 
 
@@ -4368,10 +4393,11 @@ CREATE TABLE public.sector_benchmarks (
     metric_name text NOT NULL,
     period_type text NOT NULL,
     period_label text NOT NULL,
-    median_value double precision NOT NULL,
+    median_value numeric(20,6) NOT NULL,
     sample_size integer DEFAULT 0 NOT NULL,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text])))
+    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text]))),
+    CONSTRAINT sector_benchmarks_sample_size_nonneg CHECK ((sample_size >= 0))
 );
 
 
@@ -4525,7 +4551,9 @@ CREATE TABLE public.user_credits (
     used integer DEFAULT 0 NOT NULL,
     remaining integer GENERATED ALWAYS AS ((total - used)) STORED,
     resets_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_credits_total_nonneg CHECK ((total >= 0)),
+    CONSTRAINT user_credits_used_nonneg CHECK ((used >= 0))
 );
 
 
@@ -4644,11 +4672,13 @@ CREATE TABLE public.watchlist_items (
     company_name text NOT NULL,
     logo_url text,
     added_at timestamp with time zone DEFAULT now() NOT NULL,
-    shares double precision,
-    market_value double precision,
+    shares numeric(20,4),
+    market_value numeric(20,2),
     sector text,
     asset_type text DEFAULT 'Stock'::text,
-    country text DEFAULT 'US'::text
+    country text DEFAULT 'US'::text,
+    CONSTRAINT watchlist_items_market_value_nonneg CHECK (((market_value IS NULL) OR (market_value >= (0)::numeric))),
+    CONSTRAINT watchlist_items_shares_nonneg CHECK (((shares IS NULL) OR (shares >= (0)::numeric)))
 );
 
 
@@ -4706,7 +4736,7 @@ CREATE TABLE public.whale_filing_snapshots (
     whale_id uuid NOT NULL,
     filing_period text NOT NULL,
     filing_date text NOT NULL,
-    total_value numeric,
+    total_value numeric(24,2),
     holdings_data jsonb DEFAULT '[]'::jsonb NOT NULL,
     sector_data jsonb DEFAULT '[]'::jsonb NOT NULL,
     trade_group jsonb,
@@ -4782,8 +4812,9 @@ CREATE TABLE public.whale_holdings (
     ticker text NOT NULL,
     company_name text NOT NULL,
     logo_url text,
-    allocation numeric NOT NULL,
-    change_percent numeric
+    allocation numeric(7,4) NOT NULL,
+    change_percent numeric(9,4),
+    CONSTRAINT whale_holdings_allocation_range CHECK (((allocation >= (0)::numeric) AND (allocation <= (100)::numeric)))
 );
 
 
@@ -4813,7 +4844,8 @@ CREATE TABLE public.whale_sector_allocations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     whale_id uuid NOT NULL,
     sector text NOT NULL,
-    allocation numeric NOT NULL
+    allocation numeric(7,4) NOT NULL,
+    CONSTRAINT whale_sector_allocations_allocation_range CHECK (((allocation >= (0)::numeric) AND (allocation <= (100)::numeric)))
 );
 
 
@@ -4827,10 +4859,11 @@ CREATE TABLE public.whale_trade_groups (
     date text NOT NULL,
     trade_count integer NOT NULL,
     net_action text NOT NULL,
-    net_amount numeric NOT NULL,
+    net_amount numeric(24,2) NOT NULL,
     summary text,
     insights jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT whale_trade_groups_net_amount_nonneg CHECK ((net_amount >= (0)::numeric))
 );
 
 
@@ -4853,11 +4886,12 @@ CREATE TABLE public.whale_trades (
     company_name text NOT NULL,
     action public.trade_action NOT NULL,
     trade_type public.trade_type NOT NULL,
-    amount numeric NOT NULL,
-    previous_allocation numeric,
-    new_allocation numeric,
+    amount numeric(24,2) NOT NULL,
+    previous_allocation numeric(7,4),
+    new_allocation numeric(7,4),
     date text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT whale_trades_amount_nonneg CHECK ((amount >= (0)::numeric))
 );
 
 
@@ -4873,8 +4907,8 @@ CREATE TABLE public.whales (
     avatar_url text,
     category public.whale_category DEFAULT 'investors'::public.whale_category NOT NULL,
     risk_profile public.whale_risk_profile,
-    portfolio_value numeric,
-    ytd_return numeric,
+    portfolio_value numeric(24,2),
+    ytd_return numeric(9,4),
     followers_count integer DEFAULT 0 NOT NULL,
     behavior_summary jsonb,
     sentiment_summary text,
@@ -4886,7 +4920,9 @@ CREATE TABLE public.whales (
     last_hydrated_at timestamp with time zone,
     associated_ticker text,
     return_source text DEFAULT ''::text,
-    return_label text DEFAULT ''::text
+    return_label text DEFAULT ''::text,
+    CONSTRAINT whales_followers_count_nonneg CHECK ((followers_count >= 0)),
+    CONSTRAINT whales_portfolio_value_nonneg CHECK (((portfolio_value IS NULL) OR (portfolio_value >= (0)::numeric)))
 );
 
 
@@ -6949,20 +6985,6 @@ CREATE INDEX idx_portfolio_items_portfolio ON public.portfolio_items USING btree
 
 
 --
--- Name: idx_portfolios_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_portfolios_user ON public.portfolios USING btree (user_id, sort_order);
-
-
---
--- Name: idx_portfolios_user_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_portfolios_user_id ON public.portfolios USING btree (user_id);
-
-
---
 -- Name: idx_portfolios_user_sort; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7180,6 +7202,20 @@ CREATE INDEX idx_whale_alerts_active ON public.whale_alerts USING btree (is_acti
 
 
 --
+-- Name: idx_whale_alerts_expires_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_whale_alerts_expires_at ON public.whale_alerts USING btree (expires_at) WHERE (expires_at IS NOT NULL);
+
+
+--
+-- Name: idx_whale_alerts_whale; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_whale_alerts_whale ON public.whale_alerts USING btree (whale_id) WHERE (whale_id IS NOT NULL);
+
+
+--
 -- Name: idx_whale_follows_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7261,6 +7297,13 @@ CREATE INDEX idx_whales_category ON public.whales USING btree (category);
 --
 
 CREATE INDEX idx_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
+
+
+--
+-- Name: idx_whales_last_hydrated_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_whales_last_hydrated_at ON public.whales USING btree (last_hydrated_at NULLS FIRST);
 
 
 --
@@ -7621,11 +7664,35 @@ ALTER TABLE ONLY public.chat_messages
 
 
 --
+-- Name: chat_sessions chat_sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_sessions
+    ADD CONSTRAINT chat_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: portfolio_holdings portfolio_holdings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.portfolio_holdings
+    ADD CONSTRAINT portfolio_holdings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: portfolio_items portfolio_items_portfolio_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.portfolio_items
     ADD CONSTRAINT portfolio_items_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE CASCADE;
+
+
+--
+-- Name: portfolios portfolios_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.portfolios
+    ADD CONSTRAINT portfolios_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -7682,6 +7749,14 @@ ALTER TABLE ONLY public.user_study_schedules
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: watchlist_items watchlist_items_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.watchlist_items
+    ADD CONSTRAINT watchlist_items_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -7912,69 +7987,6 @@ CREATE POLICY "Allow public read access" ON public.sector_benchmarks FOR SELECT 
 --
 
 CREATE POLICY "Allow service_role full access" ON public.sector_benchmarks TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: crypto_coin_id_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.crypto_coin_id_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: crypto_fundamentals_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.crypto_fundamentals_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: crypto_snapshots Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.crypto_snapshots USING (true) WITH CHECK (true);
-
-
---
--- Name: etf_detail_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.etf_detail_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: index_detail_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.index_detail_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: short_interest_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.short_interest_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: stock_fundamentals_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.stock_fundamentals_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: ticker_report_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.ticker_report_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: etf_snapshot_cache Service role full access on etf_snapshot_cache; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access on etf_snapshot_cache" ON public.etf_snapshot_cache USING (true) WITH CHECK (true);
 
 
 --
@@ -8250,6 +8262,26 @@ CREATE POLICY chat_sessions_update_own ON public.chat_sessions FOR UPDATE USING 
 ALTER TABLE public.company_filing_chunks ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: company_profile_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.company_profile_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: company_profile_cache company_profile_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY company_profile_cache_public_read ON public.company_profile_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: company_profile_cache company_profile_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY company_profile_cache_service_write ON public.company_profile_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: user_credits credits_select_own; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -8277,10 +8309,38 @@ CREATE POLICY credits_update_own ON public.user_credits FOR UPDATE USING ((auth.
 ALTER TABLE public.crypto_coin_id_cache ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: crypto_coin_id_cache crypto_coin_id_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_coin_id_cache_public_read ON public.crypto_coin_id_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: crypto_coin_id_cache crypto_coin_id_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_coin_id_cache_service_write ON public.crypto_coin_id_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: crypto_fundamentals_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.crypto_fundamentals_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: crypto_fundamentals_cache crypto_fundamentals_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_fundamentals_cache_public_read ON public.crypto_fundamentals_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: crypto_fundamentals_cache crypto_fundamentals_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_fundamentals_cache_service_write ON public.crypto_fundamentals_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: crypto_snapshots; Type: ROW SECURITY; Schema: public; Owner: -
@@ -8289,16 +8349,58 @@ ALTER TABLE public.crypto_fundamentals_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.crypto_snapshots ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: crypto_snapshots crypto_snapshots_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_snapshots_public_read ON public.crypto_snapshots FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: crypto_snapshots crypto_snapshots_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY crypto_snapshots_service_write ON public.crypto_snapshots TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: etf_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.etf_detail_cache ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: etf_detail_cache etf_detail_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY etf_detail_cache_public_read ON public.etf_detail_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: etf_detail_cache etf_detail_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY etf_detail_cache_service_write ON public.etf_detail_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: etf_snapshot_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.etf_snapshot_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: etf_snapshot_cache etf_snapshot_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY etf_snapshot_cache_public_read ON public.etf_snapshot_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: etf_snapshot_cache etf_snapshot_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY etf_snapshot_cache_service_write ON public.etf_snapshot_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: company_filing_chunks filing_chunks_select_all; Type: POLICY; Schema: public; Owner: -
@@ -8321,10 +8423,38 @@ CREATE POLICY filing_chunks_service_all ON public.company_filing_chunks USING ((
 ALTER TABLE public.index_detail_cache ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: index_detail_cache index_detail_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY index_detail_cache_public_read ON public.index_detail_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: index_detail_cache index_detail_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY index_detail_cache_service_write ON public.index_detail_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: index_macro_forecast_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.index_macro_forecast_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: index_macro_forecast_cache index_macro_forecast_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY index_macro_forecast_cache_public_read ON public.index_macro_forecast_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: index_macro_forecast_cache index_macro_forecast_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY index_macro_forecast_cache_service_write ON public.index_macro_forecast_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: user_lesson_progress lesson_progress_insert_own; Type: POLICY; Schema: public; Owner: -
@@ -8379,6 +8509,20 @@ CREATE POLICY lessons_service_all ON public.lessons USING ((auth.role() = 'servi
 --
 
 ALTER TABLE public.market_deep_dive_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: market_deep_dive_cache market_deep_dive_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY market_deep_dive_cache_public_read ON public.market_deep_dive_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: market_deep_dive_cache market_deep_dive_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY market_deep_dive_cache_service_write ON public.market_deep_dive_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: money_move_articles; Type: ROW SECURITY; Schema: public; Owner: -
@@ -8529,24 +8673,44 @@ CREATE POLICY sector_aggregates_read_authenticated ON public.sector_aggregates F
 ALTER TABLE public.sector_benchmarks ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: index_macro_forecast_cache service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY service_role_all ON public.index_macro_forecast_cache USING (true) WITH CHECK (true);
-
-
---
--- Name: market_deep_dive_cache service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY service_role_all ON public.market_deep_dive_cache USING (true) WITH CHECK (true);
-
-
---
 -- Name: short_interest_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.short_interest_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: short_interest_cache short_interest_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY short_interest_cache_public_read ON public.short_interest_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: short_interest_cache short_interest_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY short_interest_cache_service_write ON public.short_interest_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: snapshot_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.snapshot_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: snapshot_cache snapshot_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY snapshot_cache_public_read ON public.snapshot_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: snapshot_cache snapshot_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY snapshot_cache_service_write ON public.snapshot_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: asset_snapshots snapshots_select_all; Type: POLICY; Schema: public; Owner: -
@@ -8567,6 +8731,20 @@ CREATE POLICY snapshots_service_all ON public.asset_snapshots USING ((auth.role(
 --
 
 ALTER TABLE public.stock_fundamentals_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: stock_fundamentals_cache stock_fundamentals_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY stock_fundamentals_cache_public_read ON public.stock_fundamentals_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: stock_fundamentals_cache stock_fundamentals_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY stock_fundamentals_cache_service_write ON public.stock_fundamentals_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: user_study_schedules study_schedules_insert_own; Type: POLICY; Schema: public; Owner: -
@@ -8614,6 +8792,20 @@ CREATE POLICY ticker_news_cache_service_all ON public.ticker_news_cache USING ((
 --
 
 ALTER TABLE public.ticker_report_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ticker_report_cache ticker_report_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_report_cache_public_read ON public.ticker_report_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: ticker_report_cache ticker_report_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_report_cache_service_write ON public.ticker_report_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: user_bookmarks; Type: ROW SECURITY; Schema: public; Owner: -
@@ -9018,5 +9210,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zwYxO0h3utCiI1hicylc8IEZXlpj6sECmVVoC8HqyKcaotxMx2910qbJXim6mxM
+\unrestrict 84YhokA63C0VRSipck6mdhZxOVZSeNwshATTWbeCtBchy4wGJG3PXhTRwL1P0Pi
 

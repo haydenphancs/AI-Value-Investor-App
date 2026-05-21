@@ -609,30 +609,28 @@ If there's no real guidance signal in the data, write the literal word: NULL"""
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    """Single-sentence read on insider alignment, anchored in the dominant
-    holder's stake when one exists. Designed to NOT restate the buy/sell
-    counts shown directly above on the same screen — those are already
-    visible; the prose should add interpretation, not echo.
+    """Single-sentence read on insider alignment that:
+    1. Anchors on the dominant 10%+ holder's stake when one exists.
+    2. Applies the BUY/SELL signal asymmetry — Lynch principle: insiders
+       buy for one reason (they expect the price to rise) but sell for
+       many (tax, diversification, estate planning, scheduled 10b5-1).
+       Leads with buys when present; acknowledges sells without
+       dismissing them as "minor".
     """
     km = shell.get("key_management", {}) or {}
-    managers = km.get("managers") or []
-
-    # The 13G overlay in _build_key_management writes `percent_ownership`
-    # on 5%+ filers (Ellison @ 43%, Zuckerberg @ 13.6%, etc.). When one
-    # exists, the recent 90-day flow has to be judged *against* that
-    # base — a $2.6M director sale is rounding error on a $215B founder
-    # stake.
-    major = max(
-        (m for m in managers if (m.get("percent_ownership") or 0) >= 5),
-        key=lambda m: m.get("percent_ownership", 0),
-        default=None,
-    )
+    # `top_holders` is the curated 10%+ list from `_build_key_management`
+    # (sorted by % desc). When non-empty, the recent 90-day flow has to
+    # be judged *against* that base — a $2.6M director sale is rounding
+    # error on a $215B founder stake, but it still happened and should
+    # be named, not dismissed.
+    top_holders = km.get("top_holders") or []
+    major = top_holders[0] if top_holders else None
     if major:
         anchor_line = (
             f"DOMINANT HOLDER: {major.get('name')} holds "
             f"{major.get('percent_ownership')}% "
             f"({major.get('ownership_value')}). Judge recent activity "
-            f"against this base."
+            f"against this base — but name the activity, don't dismiss it."
         )
     else:
         anchor_line = (
@@ -642,11 +640,35 @@ def _key_management_insight_prompt(
 
     insider = shell.get("insider_data") or {}
     sentiment = insider.get("sentiment", "neutral")
+    transactions = insider.get("transactions") or []
+    buys = next(
+        (t for t in transactions if (t.get("type") or "").lower() == "buys"),
+        {},
+    )
+    sells = next(
+        (t for t in transactions if (t.get("type") or "").lower() == "sells"),
+        {},
+    )
+    has_buy = (buys.get("count") or 0) > 0
+    has_sell = (sells.get("count") or 0) > 0
+
+    if has_buy and has_sell:
+        flow_state = "BOTH buys and sells in window — lead with the buy (higher signal)"
+    elif has_buy:
+        flow_state = "BUYS only — high-conviction signal, lead with it"
+    elif has_sell:
+        flow_state = (
+            "SELLS only — acknowledge but qualify the motive "
+            "(tax, diversification, estate planning, scheduled 10b5-1 plan)"
+        )
+    else:
+        flow_state = "NO transactions — focus on structural alignment, not flow"
 
     return f"""Write a one-sentence insight on insider/exec ownership alignment.
 
 {anchor_line}
 RECENT 90-DAY SENTIMENT: {sentiment}
+FLOW STATE: {flow_state}
 
 EVIDENCE:
 {evidence}
@@ -654,17 +676,29 @@ EVIDENCE:
 {_style_block(persona)}
 LENGTH: 1 sentence, under 28 words.
 
-RULES:
-- Do NOT restate buy/sell counts, share totals, or dollar values that already appear in the table above the insight box.
-- When a DOMINANT HOLDER exists, anchor the read in their stake. A small recent sale is immaterial against a multi-billion founder position.
-- End with the IMPLICATION: alignment intact, alignment weakening, or activity too small to matter for the thesis.
+SIGNAL ASYMMETRY (most important rule — Peter Lynch):
+- BUYS carry HIGH signal. Insiders buy for one reason only: they think the stock will rise. Even a small buy alongside a dominant holder is a strong endorsement.
+- SELLS carry LOW-to-medium signal. Sells happen for many reasons (tax, diversification, estate, scheduled 10b5-1). The motive isn't knowable from the filing alone.
+- A dominant holder's stake structurally aligns interests, but does NOT erase that selling occurred.
 
-FORBIDDEN PHRASES (because they restate the visible table):
+RULES:
+- Do NOT restate exact buy/sell counts, share totals, or dollar values from the table above the insight box.
+- Buy present → lead with it as a high-conviction signal; pair with dominant-holder anchor if one exists.
+- Sell-only + dominant holder → name the sell, qualify the motive (tax / diversification / scheduled), then anchor in the stake.
+- Sell-only + no dominant holder → treat as more material; flag whether the pattern warrants tracking.
+- No transactions + dominant holder → structural alignment is locked in regardless of 90-day flow.
+- End with the IMPLICATION: alignment strengthening, intact, weakening, or signal too ambiguous to act on.
+
+FORBIDDEN PHRASES (dismissive or restate the visible table):
 - "suggesting management isn't increasing their stake"
 - "indicates a lack of skin in the game"
 - "shows no purchases in the last 90 days"
 - "only a $X million sale"
 - "no buys and N sells"
+- "minor insider selling"
+- "doesn't weaken"
+- "doesn't materially affect"
+- "immaterial against"
 """
 
 

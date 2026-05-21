@@ -382,12 +382,45 @@ struct KeyManagerDTO: Codable {
 }
 
 struct KeyManagementDTO: Codable {
-    let managers: [KeyManagerDTO]
+    let topHolders: [KeyManagerDTO]
+    let officers: [KeyManagerDTO]
     let ownershipInsight: String
 
     enum CodingKeys: String, CodingKey {
-        case managers
+        case topHolders = "top_holders"
+        case officers
         case ownershipInsight = "ownership_insight"
+    }
+
+    // Decoder-only fallback for the pre-split backend shape.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case managers
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let newTopHolders = try c.decodeIfPresent([KeyManagerDTO].self, forKey: .topHolders) ?? []
+        let newOfficers = try c.decodeIfPresent([KeyManagerDTO].self, forKey: .officers) ?? []
+
+        if newTopHolders.isEmpty && newOfficers.isEmpty {
+            // Legacy payload (pre-split): a single `managers` list.
+            // The 24h `ticker_report_cache` row + already-generated
+            // `research_reports` rows still carry this shape until they
+            // expire / are cleared. Split client-side so the table
+            // renders meaningfully during the rollout window: 10%+
+            // ownership rows go to topHolders, the rest to officers.
+            let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let legacy = try legacyContainer.decodeIfPresent(
+                [KeyManagerDTO].self, forKey: .managers
+            ) ?? []
+            self.topHolders = legacy.filter { ($0.percentOwnership ?? 0) >= 10 }
+            self.officers = legacy.filter { ($0.percentOwnership ?? 0) < 10 }
+        } else {
+            self.topHolders = newTopHolders
+            self.officers = newOfficers
+        }
+
+        self.ownershipInsight = (try? c.decode(String.self, forKey: .ownershipInsight)) ?? ""
     }
 }
 
@@ -871,17 +904,20 @@ extension TickerReportAPIResponse {
             ownershipNote: insiderData.ownershipNote
         )
 
-        // Key Management
+        // Key Management — split into top holders (10%+ owners) and
+        // officers (CEO/CFO/COO/… by role rank).
+        let mapManager: (KeyManagerDTO) -> KeyManager = { m in
+            KeyManager(
+                name: m.name,
+                title: m.title,
+                ownership: m.ownership,
+                ownershipValue: m.ownershipValue,
+                percentOwnership: m.percentOwnership
+            )
+        }
         let management = ReportKeyManagement(
-            managers: keyManagement.managers.map { m in
-                KeyManager(
-                    name: m.name,
-                    title: m.title,
-                    ownership: m.ownership,
-                    ownershipValue: m.ownershipValue,
-                    percentOwnership: m.percentOwnership
-                )
-            },
+            topHolders: keyManagement.topHolders.map(mapManager),
+            officers: keyManagement.officers.map(mapManager),
             ownershipInsight: keyManagement.ownershipInsight
         )
 

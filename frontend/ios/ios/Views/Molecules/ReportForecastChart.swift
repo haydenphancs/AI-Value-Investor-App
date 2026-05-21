@@ -99,7 +99,7 @@ struct ReportForecastChart: View {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(AppColors.primaryBlue)
                         .frame(width: 12, height: 12)
-                    Text("Revenue: \(forecast.formattedCAGR)")
+                    Text("Revenue")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -108,7 +108,7 @@ struct ReportForecastChart: View {
                     Circle()
                         .fill(AppColors.accentYellow)
                         .frame(width: 8, height: 8)
-                    Text("EPS: \(forecast.formattedEPSGrowth)")
+                    Text("EPS")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -118,7 +118,7 @@ struct ReportForecastChart: View {
             // Management Guidance
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.sm) {
-                    Text("Management Guidance")
+                    Text("Company Guidance")
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
                 }

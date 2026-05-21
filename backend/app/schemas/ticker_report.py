@@ -265,7 +265,10 @@ class RevenueEngineResponse(BaseModel):
 class MarketDynamicsResponse(BaseModel):
     industry: str
     concentration: str  # "monopoly" | "duopoly" | "oligopoly" | "fragmented"
-    cagr_5yr: float
+    # None when neither the sector_aggregates batch nor the in-hand peer
+    # profiles can produce a CAGR — iOS renders "—" in that case rather
+    # than misleading zeros.
+    cagr_5yr: Optional[float] = None
     current_tam: float
     future_tam: float
     current_year: str
@@ -275,6 +278,11 @@ class MarketDynamicsResponse(BaseModel):
     # that the AI used to derive `current_tam`/`future_tam`. Empty string
     # when no source quote was found (TAM stays 0 in that case).
     tam_source_quote: Optional[str] = None
+    # Short human caption shown under the TAM row identifying which
+    # source produced the figure: "Earnings call quote" when AI extracted
+    # it from the transcript, "BEA <Sector> value-added (via FRED)" when
+    # the FRED industry-proxy was used, None when TAM stayed at 0.
+    tam_source_label: Optional[str] = None
 
 
 class MoatDimensionResponse(BaseModel):

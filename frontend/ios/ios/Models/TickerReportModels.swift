@@ -864,20 +864,32 @@ enum LifecyclePhase: String {
 struct MarketDynamics {
     let industry: String                    // "Cloud Computing"
     let concentration: MarketConcentration  // .oligopoly
-    let cagr5Yr: Double                     // 18.5 (percentage)
-    let currentTAM: Double                  // 900 (in billions)
-    let futureTAM: Double                   // 1600 (in billions)
+    // Nil when no source could produce a CAGR (cache miss + no peers);
+    // iOS renders "—" rather than a misleading "+0.0%".
+    let cagr5Yr: Double?
+    let currentTAM: Double                  // 900 (in billions); 0 when unknown
+    let futureTAM: Double                   // 1600 (in billions); 0 when unknown
     let currentYear: String                 // "2025"
     let futureYear: String                  // "2030"
     let lifecyclePhase: LifecyclePhase      // .secularGrowth
     // Verbatim quote from the earnings transcript / company description
     // that the AI used to derive `currentTAM` / `futureTAM`. Nil when
-    // TAM was not extracted from real text (TAM stays 0 in that case).
+    // TAM came from FRED proxy or wasn't sourced at all.
     let tamSourceQuote: String?
+    // Caption shown under the TAM row: "Earnings call quote" when AI
+    // extracted it from the transcript, "BEA <Sector> value-added (via
+    // FRED)" when FRED proxy was used, nil when TAM is 0 (UI hides).
+    let tamSourceLabel: String?
 
     var formattedCAGR: String {
-        let sign = cagr5Yr >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", cagr5Yr))%"
+        guard let cagr = cagr5Yr else { return "—" }
+        let sign = cagr >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", cagr))%"
+    }
+
+    var cagrColor: Color {
+        guard let cagr = cagr5Yr else { return AppColors.textMuted }
+        return cagr >= 0 ? AppColors.bullish : AppColors.bearish
     }
 
     var formattedCurrentTAM: String {
@@ -896,8 +908,15 @@ struct MarketDynamics {
         }
     }
 
+    /// True when no TAM source has populated either bound — view hides
+    /// the entire "Market Size (TAM)" column in that case.
+    var tamIsAvailable: Bool {
+        currentTAM > 0 || futureTAM > 0
+    }
+
     var formattedTAMRange: String {
-        "\(formattedCurrentTAM) → \(formattedFutureTAM)"
+        guard tamIsAvailable else { return "—" }
+        return "\(formattedCurrentTAM) → \(formattedFutureTAM)"
     }
 }
 
@@ -1399,7 +1418,8 @@ extension TickerReportData {
                 currentYear: "2025",
                 futureYear: "2030",
                 lifecyclePhase: .secularGrowth,
-                tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030."
+                tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030.",
+                tamSourceLabel: "Earnings call quote"
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

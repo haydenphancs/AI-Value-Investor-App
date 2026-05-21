@@ -352,11 +352,13 @@ class TickerReportDataCollector:
             ("cash_flow", self.fmp.get_cash_flow_statement(ticker, "annual", 5), []),
             ("key_metrics", self.fmp.get_key_metrics(ticker, "annual", 5), []),
             ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 5), []),
-            # Pull 4 future-year analyst estimates: we render the latest 3
-            # on the forecast chart and use the 4th-latest as the YoY anchor
-            # for the first visible year (otherwise the first bar's YoY
-            # would have nothing to compare against).
-            ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 4), []),
+            # Pull 10 years of analyst estimates so we have current FY + 3
+            # future on-screen (4 bars), plus the FY immediately before the
+            # leftmost visible bar as its off-screen YoY anchor. FMP returns
+            # newest-by-date first; sorted-ascending we get past actuals on
+            # the left and forward estimates on the right, which lets the
+            # window helper pick "current = first FY with date >= today".
+            ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 10), []),
             ("historical", self.fmp.get_historical_prices(ticker), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
             ("insider_trades", self.fmp.get_insider_trading(ticker, limit=200), []),
@@ -650,19 +652,23 @@ class TickerReportDataCollector:
         # regardless of FMP's response order (newest-first vs oldest-first
         # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            # CAGR is computed over the 3 visible chart years so the legend
-            # caption matches what the user sees. The 4th (oldest) entry,
-            # when present, is consumed only as the YoY anchor inside
-            # _build_revenue_forecast_partial — it must not stretch the
-            # CAGR span.
-            sorted_est = sorted(estimates, key=lambda e: (e.get("date") or ""))[-3:]
-            n = len(sorted_est)
-            est0_rev = _est_revenue(sorted_est[0])
-            estn_rev = _est_revenue(sorted_est[-1])
-            c["revenue_cagr"] = _safe_cagr(est0_rev, estn_rev, n)
-            est0_eps = _est_eps(sorted_est[0])
-            estn_eps = _est_eps(sorted_est[-1])
-            c["eps_cagr"] = _safe_cagr(est0_eps, estn_eps, n)
+            # CAGR spans the 4 visible chart years so the legend caption
+            # matches what the user sees. The off-screen anchor returned
+            # by the helper is consumed only by _build_revenue_forecast_
+            # partial for the leftmost bar's YoY chip — it must NOT
+            # stretch the CAGR span.
+            visible_est, _ = _select_visible_forecast_window(estimates)
+            n = len(visible_est)
+            if n >= 2:
+                est0_rev = _est_revenue(visible_est[0])
+                estn_rev = _est_revenue(visible_est[-1])
+                c["revenue_cagr"] = _safe_cagr(est0_rev, estn_rev, n)
+                est0_eps = _est_eps(visible_est[0])
+                estn_eps = _est_eps(visible_est[-1])
+                c["eps_cagr"] = _safe_cagr(est0_eps, estn_eps, n)
+            else:
+                c["revenue_cagr"] = None
+                c["eps_cagr"] = None
         else:
             c["revenue_cagr"] = None
             c["eps_cagr"] = None
@@ -1131,6 +1137,48 @@ def _safe_cagr(
     if start <= 0 or end <= 0 or periods <= 1:
         return None
     return round(((end / start) ** (1.0 / max(periods - 1, 1)) - 1) * 100, 1)
+
+
+def _select_visible_forecast_window(
+    estimates: List[Dict[str, Any]],
+    today: Optional[date] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Pick the 4 chart-visible projections plus the off-screen anchor.
+
+    The leftmost visible projection is the earliest FY whose `date` field
+    is >= today (i.e., the FY currently in progress, or the next FY when
+    the prior one just closed). We then take that and the next 3 forward
+    FYs (4 total). The FY immediately before the leftmost visible serves
+    as the YoY anchor for the first bar so the chip on bar 1 has a real
+    prior-year baseline.
+
+    Fallback: if FMP didn't return enough forward entries to fill the
+    4-wide window, return the last 4 entries by date with the 5th-from-
+    last as the anchor. This keeps the synthetic test fixtures (which
+    pass 3-entry past-dated lists) producing the same projections count
+    as before.
+    """
+    if not estimates:
+        return [], None
+    today = today or datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
+    sorted_all = sorted(estimates, key=lambda e: (e.get("date") or ""))
+    first_future = next(
+        (
+            i for i, e in enumerate(sorted_all)
+            if (e.get("date") or "")[:10] >= today_iso
+        ),
+        None,
+    )
+    if first_future is not None and first_future + 4 <= len(sorted_all):
+        visible = sorted_all[first_future:first_future + 4]
+        anchor = (
+            sorted_all[first_future - 1] if first_future > 0 else None
+        )
+        return visible, anchor
+    visible = sorted_all[-4:]
+    anchor = sorted_all[-5] if len(sorted_all) >= 5 else None
+    return visible, anchor
 
 
 def _coerce_score(v: Any, default: float = 50.0) -> float:
@@ -1926,14 +1974,11 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
 ) -> Dict[str, Any]:
-    # Sort estimates oldest→newest so the chart reads left-to-right.
-    # We fetch 4 from FMP (when available): the latest 3 are rendered as
-    # bars/dots, and the 4th-latest serves as the YoY anchor for the
-    # first visible year. When fewer than 4 are available, the first
-    # year's YoY stays None and iOS hides the % label on that bar/dot.
-    sorted_all = sorted(estimates, key=lambda e: (e.get("date") or ""))
-    sorted_estimates = sorted_all[-3:]
-    anchor = sorted_all[-4] if len(sorted_all) >= 4 else None
+    # Pick 4 chart-visible projections (current FY + 3 forward) plus the
+    # off-screen anchor (FY before "current") for the leftmost bar's YoY
+    # chip. Falls back to the last 4 entries when FMP doesn't return
+    # enough forward data — see `_select_visible_forecast_window`.
+    sorted_estimates, anchor = _select_visible_forecast_window(estimates)
 
     # Pick a single divisor across all bars so they're visually comparable.
     revs = [_est_revenue(est) for est in sorted_estimates]

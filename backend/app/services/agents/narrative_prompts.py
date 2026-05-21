@@ -59,7 +59,6 @@ FALLBACK = {
         "Price chart shown above; commentary unavailable."
     ),
     "key_management_insight": "Data unavailable for this ticker.",
-    "insider_ownership_note": None,
     "insider_key_insight": (
         "Insider data refreshed; commentary unavailable."
     ),
@@ -610,32 +609,63 @@ If there's no real guidance signal in the data, write the literal word: NULL"""
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    return f"""Write the one or two-sentence note on insider/exec ownership alignment.
+    """Single-sentence read on insider alignment, anchored in the dominant
+    holder's stake when one exists. Designed to NOT restate the buy/sell
+    counts shown directly above on the same screen — those are already
+    visible; the prose should add interpretation, not echo.
+    """
+    km = shell.get("key_management", {}) or {}
+    managers = km.get("managers") or []
+
+    # The 13G overlay in _build_key_management writes `percent_ownership`
+    # on 5%+ filers (Ellison @ 43%, Zuckerberg @ 13.6%, etc.). When one
+    # exists, the recent 90-day flow has to be judged *against* that
+    # base — a $2.6M director sale is rounding error on a $215B founder
+    # stake.
+    major = max(
+        (m for m in managers if (m.get("percent_ownership") or 0) >= 5),
+        key=lambda m: m.get("percent_ownership", 0),
+        default=None,
+    )
+    if major:
+        anchor_line = (
+            f"DOMINANT HOLDER: {major.get('name')} holds "
+            f"{major.get('percent_ownership')}% "
+            f"({major.get('ownership_value')}). Judge recent activity "
+            f"against this base."
+        )
+    else:
+        anchor_line = (
+            "DOMINANT HOLDER: none holds 5%+. Judge by aggregate "
+            "buy/sell flow alone."
+        )
+
+    insider = shell.get("insider_data") or {}
+    sentiment = insider.get("sentiment", "neutral")
+
+    return f"""Write a one-sentence insight on insider/exec ownership alignment.
+
+{anchor_line}
+RECENT 90-DAY SENTIMENT: {sentiment}
 
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-LENGTH: 1-2 sentences, total under 30 words.
+LENGTH: 1 sentence, under 28 words.
 
-Lead with whether management has skin in the game (or doesn't). If the roster is sparse or unavailable, say so directly."""
+RULES:
+- Do NOT restate buy/sell counts, share totals, or dollar values that already appear in the table above the insight box.
+- When a DOMINANT HOLDER exists, anchor the read in their stake. A small recent sale is immaterial against a multi-billion founder position.
+- End with the IMPLICATION: alignment intact, alignment weakening, or activity too small to matter for the thesis.
 
-
-def _insider_ownership_note_prompt(
-    persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
-) -> str:
-    insider = shell.get("insider_data", {}) or {}
-    sentiment = insider.get("sentiment", "neutral")
-    txns = insider.get("transactions", [])
-    return f"""Write a one-line context note on the 90-day insider activity.
-
-SENTIMENT: {sentiment}
-TRANSACTIONS: {txns}
-
-{_style_block(persona)}
-{_length_brief(1, 25)}
-
-If insiders aren't doing anything noteworthy, write the literal word: NULL"""
+FORBIDDEN PHRASES (because they restate the visible table):
+- "suggesting management isn't increasing their stake"
+- "indicates a lack of skin in the game"
+- "shows no purchases in the last 90 days"
+- "only a $X million sale"
+- "no buys and N sells"
+"""
 
 
 def _insider_key_insight_prompt(
@@ -851,17 +881,13 @@ def build_narrative_jobs(
             fallback_value=FALLBACK["key_management_insight"],
         ))
 
-    # ── insider_data.ownership_note + insider_vital.key_insight ──────
-    insider = shell.get("insider_data")
-    if isinstance(insider, dict):
-        jobs.append(NarrativeJob(
-            label="insider_ownership_note",
-            prompt=_insider_ownership_note_prompt(persona, evidence, shell),
-            word_cap=28,
-            apply=_setter_with_null(insider, "ownership_note"),
-            fallback_value=FALLBACK["insider_ownership_note"],
-            nullable=True,
-        ))
+    # ── insider_vital.key_insight ────────────────────────────────────
+    # NOTE: `insider_data.ownership_note` used to be a Gemini-generated
+    # one-liner rendered as a red banner above Key Management. It was
+    # removed because it just paraphrased the buy/sell table directly
+    # below it ("Insiders dumped $2.6M…" — yes, the table already says
+    # that). The schema field stays nullable for backward compatibility
+    # with older cached reports.
 
     iv = (shell.get("key_vitals") or {}).get("insider")
     if isinstance(iv, dict):

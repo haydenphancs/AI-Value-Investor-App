@@ -1338,9 +1338,10 @@ extension TickerReportData {
             epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(period: "2026", revenue: 120, revenueLabel: "$120B", revenueYoyPct: 8, eps: 4.50, epsLabel: "$4.50", epsYoyPct: 12, isForecast: false),
-                RevenueProjection(period: "2027", revenue: 132, revenueLabel: "$132B", revenueYoyPct: 10, eps: 5.10, epsLabel: "$5.10", epsYoyPct: 13, isForecast: true),
-                RevenueProjection(period: "2028", revenue: 145, revenueLabel: "$145B", revenueYoyPct: 10, eps: 6.20, epsLabel: "$6.20", epsYoyPct: 22, isForecast: true)
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67B",  revenueYoyPct: 18, eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25, isForecast: false),
+                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$89B",  revenueYoyPct: 32, eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,  isForecast: true),
+                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130B", revenueYoyPct: 46, eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35, isForecast: true),
+                RevenueProjection(period: "2029", revenue: 179, revenueLabel: "$179B", revenueYoyPct: 37, eps: 15.14, epsLabel: "$15.14", epsYoyPct: 41, isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3",
             guidanceSpeaker: "CFO",

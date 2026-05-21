@@ -822,17 +822,40 @@ extension TickerReportAPIResponse {
             cagr: revenueForecast.cagr,
             epsGrowth: revenueForecast.epsGrowth,
             managementGuidance: Self.mapGuidance(revenueForecast.managementGuidance),
-            projections: revenueForecast.projections.map { p in
-                RevenueProjection(
-                    period: p.period, revenue: p.revenue,
-                    revenueLabel: p.revenueLabel,
-                    revenueYoyPct: p.revenueYoyPct,
-                    eps: p.eps,
-                    epsLabel: p.epsLabel,
-                    epsYoyPct: p.epsYoyPct,
-                    isForecast: p.isForecast
-                )
-            },
+            projections: {
+                // Client-side YoY fallback: when the backend payload pre-
+                // dates the YoY-fields commit (e.g., a Railway deploy that
+                // hasn't shipped yet), `revenueYoyPct` / `epsYoyPct` come
+                // back nil. For every bar that has a neighbor in the
+                // visible window we can compute YoY locally from the
+                // adjacent projection — that covers bars 2 and 3. The
+                // first bar still needs the backend's hidden anchor
+                // (FY-1 estimate) so it stays nil here; the chip will
+                // appear after the next regen against new-code backend.
+                let dtoProjections = revenueForecast.projections
+                return dtoProjections.enumerated().map { (idx, p) -> RevenueProjection in
+                    var revYoy = p.revenueYoyPct
+                    var epsYoy = p.epsYoyPct
+                    if idx > 0 {
+                        let prev = dtoProjections[idx - 1]
+                        if revYoy == nil, prev.revenue > 0 {
+                            revYoy = (p.revenue - prev.revenue) / prev.revenue * 100
+                        }
+                        if epsYoy == nil, prev.eps > 0 {
+                            epsYoy = (p.eps - prev.eps) / prev.eps * 100
+                        }
+                    }
+                    return RevenueProjection(
+                        period: p.period, revenue: p.revenue,
+                        revenueLabel: p.revenueLabel,
+                        revenueYoyPct: revYoy,
+                        eps: p.eps,
+                        epsLabel: p.epsLabel,
+                        epsYoyPct: epsYoy,
+                        isForecast: p.isForecast
+                    )
+                }
+            }(),
             guidanceQuote: revenueForecast.guidanceQuote,
             guidanceSpeaker: revenueForecast.guidanceSpeaker,
             guidancePeriod: revenueForecast.guidancePeriod

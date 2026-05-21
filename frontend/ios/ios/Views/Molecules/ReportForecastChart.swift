@@ -28,7 +28,7 @@ struct ReportForecastChart: View {
                     BarMark(
                         x: .value("Period", projection.period),
                         y: .value("Revenue", projection.revenue),
-                        width: .ratio(0.5)
+                        width: .ratio(0.4)
                     )
                     .foregroundStyle(
                         projection.isForecast

@@ -37,9 +37,10 @@ from __future__ import annotations
 import asyncio
 import bisect
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.analyst import (
@@ -2148,31 +2149,85 @@ def _build_insider_sections(
     return insider_data_partial, insider_vital_partial
 
 
+_OFFICER_PREFIX_RE = re.compile(r"\s*officer:\s*", flags=re.IGNORECASE)
+
+
+def _clean_role_title(title: Optional[str]) -> str:
+    """Strip the FMP `officer:` tag from a roster title so it reads
+    cleanly in the UI ("officer: Chief Executive Officer" →
+    "Chief Executive Officer"). Other tags (`director,`,
+    `10 percent owner,`) are preserved.
+    """
+    if not title:
+        return "Officer"
+    cleaned = _OFFICER_PREFIX_RE.sub(" ", title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(",").strip()
+    return cleaned or "Officer"
+
+
+def _role_rank(cleaned_title: str, raw_type: str) -> int:
+    """Numeric priority for ordering the Officers sub-section
+    (lower = higher in the list). Pulls CEO/CFO/COO/President to the
+    top regardless of share count, then other C-level, then other
+    officers, then directors-only.
+    """
+    title_l = (cleaned_title or "").lower()
+    type_l = (raw_type or "").lower()
+
+    if "chief executive" in title_l or title_l == "ceo":
+        return 1
+    if "chief financial" in title_l or title_l == "cfo":
+        return 2
+    if "chief operating" in title_l or title_l == "coo":
+        return 3
+    if "president" in title_l:
+        return 4
+    if "chair" in title_l:
+        return 5
+    if "chief" in title_l:
+        return 6
+    # Directors above rank-and-file officers — governance role (hire/fire
+    # CEO, approve strategy) is material even when they have no officer tag.
+    if "director" in type_l:
+        return 7
+    if "officer" in type_l:
+        return 10
+    return 99
+
+
 def _build_key_management(
     insider_roster: List[Dict[str, Any]],
     profile: Dict[str, Any],
     current_price: float = 0.0,
     beneficial_owners: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Real exec roster from FMP insider-trading derived data, upgraded
-    with 13D/G beneficial-ownership data for any "10 percent owner".
+    """Split key management into two sub-sections so the UI can render
+    them under separate sub-headers:
 
-    Sorted by ownership share count desc; ranks the top 5. Falls back
-    to `[CEO from profile]` when the roster is empty so iOS never
-    sees an empty `managers` array (the view assumes ≥1 entry).
+    - **top_holders**: roster entries tagged `"10 percent owner"` AND
+      paired with an IN-type 13G filing. iOS shows these first with
+      the green "N% owner" chip — these are the people who *control*
+      the company.
+    - **officers**: everyone else, ordered by canonical role rank
+      (CEO → CFO → COO → President → Chair → other C-level → other
+      officer → director), then shares desc as tiebreaker. These are
+      the people who *run* the company day-to-day.
 
-    Names are normalized via `_insider_common.normalize_insider_name`
-    so 'ELLISON LAWRENCE JOSEPH' renders as 'Lawrence Joseph Ellison',
-    matching the Holders tab. `ownership_value` is computed from
-    `shares × current_price` and rendered with the standard short-form
-    currency formatter ("$45.5M" / "$1.0B") — the placeholder "—" is
-    only used when we have neither a share count nor a price.
+    A person who qualifies as a Top Holder is dedup-removed from the
+    Officers list (CIK-keyed). Caps: top_holders=3, officers=5.
 
-    For founders/major holders whose Form 4 `securitiesOwned` understates
+    Names are normalized via `_insider_common.normalize_insider_name`.
+    Titles are passed through `_clean_role_title` to drop the FMP
+    `officer:` tag prefix.
+
+    Empty-roster fallback: a single placeholder row goes into
+    `officers` so iOS never sees both sub-sections empty (the view
+    assumes ≥1 row across the whole table).
+
+    Founders/major holders whose Form 4 `securitiesOwned` understates
     true beneficial ownership (Ellison @ ORCL: 571K direct vs 1.157B
-    beneficial), we pair each "10 percent owner"-tagged roster entry
-    with the largest available IN-type 13G filer and replace shares
-    with `soleVotingPower`, attaching `percent_ownership` for the chip.
+    beneficial) get their shares replaced with the 13G `soleVotingPower`
+    and `percent_ownership` attached for the chip.
     """
     # Queue of individual (IN-type) 13G filers, largest first. We pop
     # from this in roster order to upgrade Form 4 holdings for 10%+
@@ -2194,72 +2249,103 @@ def _build_key_management(
         cik = f.get("cik") or ""
         if not cik:
             continue
-        date = f.get("filingDate") or f.get("acceptedDate") or ""
+        filing_date = f.get("filingDate") or f.get("acceptedDate") or ""
         prev = latest_by_cik.get(cik)
-        if prev is None or date > (prev.get("date") or ""):
+        if prev is None or filing_date > (prev.get("date") or ""):
             latest_by_cik[cik] = {
                 "shares": sole,
                 "pct": _safe_float(f, "percentOfClass"),
-                "date": date,
+                "date": filing_date,
             }
-    ind_filers = list(latest_by_cik.values())
-    ind_filers.sort(key=lambda x: x["shares"], reverse=True)
-    ind_queue = list(ind_filers)
+    ind_queue = sorted(
+        latest_by_cik.values(), key=lambda x: x["shares"], reverse=True,
+    )
 
-    managers: List[Dict[str, Any]] = []
+    top_holders: List[Dict[str, Any]] = []
+    officers: List[Dict[str, Any]] = []
+    seen_top_ciks: Set[str] = set()
+
     if insider_roster:
+        # Walk the roster in shares-desc order so the 13G queue is
+        # consumed deterministically (largest filer paired with largest
+        # 10%-tagged insider). After top-holder extraction the officers
+        # are re-sorted by role rank below.
         ranked = sorted(
             insider_roster,
             key=lambda r: _safe_float(r, "numberOfShares"),
             reverse=True,
         )
-        for r in ranked[:5]:
-            type_of_owner = (
+        for r in ranked:
+            raw_type = (
                 (r.get("title") or "") + " " + (r.get("typeOfOwner") or "")
             ).lower()
             is_major = (
-                "10 percent owner" in type_of_owner
-                or "10% owner" in type_of_owner
+                "10 percent owner" in raw_type
+                or "10% owner" in raw_type
             )
             shares = _safe_float(r, "numberOfShares")
             pct: Optional[float] = None
+            in_top = False
             if is_major and ind_queue:
                 override = ind_queue.pop(0)
                 shares = override["shares"]
                 pct = override["pct"] or None
+                in_top = True
+
             if shares > 0 and current_price > 0:
                 value_str = _format_currency_short(shares * current_price)
             else:
                 value_str = "—"
-            managers.append({
+
+            cleaned_title = _clean_role_title(
+                r.get("title") or r.get("typeOfOwner")
+            )
+            row = {
                 "name": normalize_insider_name(r.get("owner")),
-                "title": r.get("title") or r.get("typeOfOwner") or "Officer",
+                "title": cleaned_title,
                 "ownership": _format_shares_short(shares),
                 "ownership_value": value_str,
                 "percent_ownership": round(pct, 1) if pct else None,
-            })
+            }
 
-    if not managers:
+            cik = r.get("cik") or ""
+            if in_top:
+                top_holders.append(row)
+                if cik:
+                    seen_top_ciks.add(cik)
+            else:
+                if cik and cik in seen_top_ciks:
+                    continue
+                row["_rank"] = _role_rank(
+                    cleaned_title, r.get("typeOfOwner") or ""
+                )
+                row["_shares"] = shares
+                officers.append(row)
+
+    top_holders.sort(
+        key=lambda r: r.get("percent_ownership") or 0, reverse=True,
+    )
+    officers.sort(key=lambda r: (r["_rank"], -r["_shares"]))
+
+    top_holders = top_holders[:3]
+    officers = officers[:5]
+    for o in officers:
+        o.pop("_rank", None)
+        o.pop("_shares", None)
+
+    if not top_holders and not officers:
         ceo = profile.get("ceo")
-        if ceo:
-            managers.append({
-                "name": normalize_insider_name(ceo),
-                "title": "CEO",
-                "ownership": "—",
-                "ownership_value": "—",
-                "percent_ownership": None,
-            })
-        else:
-            managers.append({
-                "name": "Data unavailable",
-                "title": "Officer",
-                "ownership": "—",
-                "ownership_value": "—",
-                "percent_ownership": None,
-            })
+        officers.append({
+            "name": normalize_insider_name(ceo) if ceo else "Data unavailable",
+            "title": "CEO" if ceo else "Officer",
+            "ownership": "—",
+            "ownership_value": "—",
+            "percent_ownership": None,
+        })
 
     return {
-        "managers": managers,
+        "top_holders": top_holders,
+        "officers": officers,
         "ownership_insight": None,  # AI fills
     }
 

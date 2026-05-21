@@ -630,7 +630,8 @@ struct KeyManager: Identifiable {
 }
 
 struct ReportKeyManagement {
-    let managers: [KeyManager]
+    let topHolders: [KeyManager]    // 10%+ owners (paired with 13G filings)
+    let officers: [KeyManager]      // sorted CEO → CFO → COO → … → directors
     let ownershipInsight: String    // "Oracle's high ownership ensures long-term thinking..."
 }
 
@@ -1357,12 +1358,14 @@ extension TickerReportData {
             ownershipNote: "The stock is heavily sold off by insiders."
         ),
         keyManagement: ReportKeyManagement(
-            managers: [
-                KeyManager(name: "Lawrence Ellison", title: "Co-Founder", ownership: "1.16B", ownershipValue: "$214.5B", percentOwnership: 43),
-                KeyManager(name: "Jeffrey Henley", title: "Co-Founder", ownership: "745K", ownershipValue: "$138.1M", percentOwnership: nil),
-                KeyManager(name: "Dania Caral", title: "Executive Vice Chair...", ownership: "249K", ownershipValue: "$46.2M", percentOwnership: nil),
-                KeyManager(name: "Marla Smith", title: "Executive VP & Chief Accounting Officer", ownership: "224K", ownershipValue: "$41.6M", percentOwnership: nil),
-                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer & Director", ownership: "1.0M", ownershipValue: "$192.3M", percentOwnership: nil)
+            topHolders: [
+                KeyManager(name: "Lawrence Joseph Ellison", title: "director, 10 percent owner, Executive Chairman", ownership: "1.16B", ownershipValue: "$214.5B", percentOwnership: 43)
+            ],
+            officers: [
+                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer", ownership: "1.0M", ownershipValue: "$192.3M", percentOwnership: nil),
+                KeyManager(name: "Marla Smith", title: "Chief Financial Officer", ownership: "224K", ownershipValue: "$41.6M", percentOwnership: nil),
+                KeyManager(name: "Dania Caral", title: "Pres., Global Field Operations", ownership: "249K", ownershipValue: "$46.2M", percentOwnership: nil),
+                KeyManager(name: "Jeffrey Henley", title: "director, Vice Chairman", ownership: "745K", ownershipValue: "$138.1M", percentOwnership: nil)
             ],
             ownershipInsight: "Oracle's high ownership ensures long-term thinking, though governance risk is high."
         ),

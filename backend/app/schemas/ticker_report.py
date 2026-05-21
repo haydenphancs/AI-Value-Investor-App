@@ -202,7 +202,14 @@ class KeyManagerResponse(BaseModel):
 
 
 class KeyManagementResponse(BaseModel):
-    managers: List[KeyManagerResponse]
+    # Split into two sub-sections so the UI can render them under
+    # separate sub-headers. `top_holders` are 10%+ owners (paired with
+    # an IN-type 13G filing) — capital control. `officers` are sorted
+    # by canonical role rank (CEO → CFO → COO → …) — operational
+    # control. A person who qualifies as a top holder is dedup-removed
+    # from officers (CIK-keyed) so they don't appear twice.
+    top_holders: List[KeyManagerResponse] = []
+    officers: List[KeyManagerResponse] = []
     ownership_insight: str
 
 

@@ -2,7 +2,9 @@
 //  ReportKeyManagementTable.swift
 //  ios
 //
-//  Molecule: Key management table showing executives and ownership
+//  Molecule: Key management table with two sub-sections — Top Holders
+//  (10%+ owners, paired with 13G filings) and Officers (sorted by role
+//  rank: CEO → CFO → COO → …).
 //
 
 import SwiftUI
@@ -16,7 +18,7 @@ struct ReportKeyManagementTable: View {
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
-            // Table header
+            // Column header sits above the first non-empty sub-section.
             HStack {
                 Text("")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -26,52 +28,14 @@ struct ReportKeyManagementTable: View {
             .font(AppTypography.caption)
             .foregroundColor(AppColors.textMuted)
 
-            // Manager rows
-            ForEach(management.managers) { manager in
-                VStack(spacing: AppSpacing.xs) {
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                            HStack(spacing: AppSpacing.xs) {
-                                Text(manager.name)
-                                    .font(AppTypography.label)
-                                    .foregroundColor(AppColors.textPrimary)
-                                if let chip = manager.percentOwnershipLabel {
-                                    // 13G beneficial ownership chip — only
-                                    // shows for 5%+ filers (Ellison-style).
-                                    Text(chip)
-                                        .font(AppTypography.caption)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(AppColors.bullish)
-                                        .padding(.horizontal, AppSpacing.sm)
-                                        .padding(.vertical, 2)
-                                        .background(
-                                            Capsule()
-                                                .fill(AppColors.bullish.opacity(0.15))
-                                        )
-                                }
-                            }
-                            Text(manager.title)
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            if !management.topHolders.isEmpty {
+                sectionHeader("Top Holders")
+                ForEach(management.topHolders) { managerRow($0) }
+            }
 
-                        VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                            Text(manager.ownership)
-                                .font(AppTypography.label)
-                                .fontWeight(.medium)
-                                .foregroundColor(AppColors.textPrimary)
-                            Text(manager.ownershipValue)
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-                        }
-                        .frame(width: 80, alignment: .trailing)
-                    }
-
-                    Divider()
-                        .background(AppColors.textMuted.opacity(0.15))
-                }
+            if !management.officers.isEmpty {
+                sectionHeader("Officers")
+                ForEach(management.officers) { managerRow($0) }
             }
 
             // Ownership insight
@@ -102,6 +66,61 @@ struct ReportKeyManagementTable: View {
                     .lineSpacing(3)
             }
             .padding(AppSpacing.md)
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(AppTypography.caption)
+            .fontWeight(.semibold)
+            .foregroundColor(AppColors.textMuted)
+            .padding(.top, AppSpacing.xs)
+    }
+
+    private func managerRow(_ manager: KeyManager) -> some View {
+        VStack(spacing: AppSpacing.xs) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text(manager.name)
+                            .font(AppTypography.label)
+                            .foregroundColor(AppColors.textPrimary)
+                        if let chip = manager.percentOwnershipLabel {
+                            // 13G beneficial ownership chip — only
+                            // shows for 5%+ filers (Ellison-style).
+                            Text(chip)
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(AppColors.bullish)
+                                .padding(.horizontal, AppSpacing.sm)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(AppColors.bullish.opacity(0.15))
+                                )
+                        }
+                    }
+                    Text(manager.title)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                    Text(manager.ownership)
+                        .font(AppTypography.label)
+                        .fontWeight(.medium)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text(manager.ownershipValue)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .frame(width: 80, alignment: .trailing)
+            }
+
+            Divider()
+                .background(AppColors.textMuted.opacity(0.15))
         }
     }
 }

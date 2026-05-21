@@ -503,13 +503,19 @@ struct RevenueEngineDTO: Codable {
 struct MarketDynamicsDTO: Codable {
     let industry: String
     let concentration: String
-    let cagr5yr: Double
+    // Optional now — nil signals "unknown" (sector batch hasn't run AND
+    // we couldn't derive from in-hand peers); iOS renders "—" rather
+    // than misleading "+0.0%".
+    let cagr5yr: Double?
     let currentTam: Double
     let futureTam: Double
     let currentYear: String
     let futureYear: String
     let lifecyclePhase: String
     let tamSourceQuote: String?
+    // Caption attribution shown under the TAM row when TAM is sourced
+    // (AI transcript quote OR FRED industry proxy). Nil when TAM is 0.
+    let tamSourceLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -520,6 +526,21 @@ struct MarketDynamicsDTO: Codable {
         case futureYear = "future_year"
         case lifecyclePhase = "lifecycle_phase"
         case tamSourceQuote = "tam_source_quote"
+        case tamSourceLabel = "tam_source_label"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.industry = try c.decode(String.self, forKey: .industry)
+        self.concentration = try c.decode(String.self, forKey: .concentration)
+        self.cagr5yr = try c.decodeIfPresent(Double.self, forKey: .cagr5yr)
+        self.currentTam = (try? c.decode(Double.self, forKey: .currentTam)) ?? 0
+        self.futureTam = (try? c.decode(Double.self, forKey: .futureTam)) ?? 0
+        self.currentYear = try c.decode(String.self, forKey: .currentYear)
+        self.futureYear = try c.decode(String.self, forKey: .futureYear)
+        self.lifecyclePhase = try c.decode(String.self, forKey: .lifecyclePhase)
+        self.tamSourceQuote = try c.decodeIfPresent(String.self, forKey: .tamSourceQuote)
+        self.tamSourceLabel = try c.decodeIfPresent(String.self, forKey: .tamSourceLabel)
     }
 }
 
@@ -966,7 +987,8 @@ extension TickerReportAPIResponse {
                 currentYear: moatCompetition.marketDynamics.currentYear,
                 futureYear: moatCompetition.marketDynamics.futureYear,
                 lifecyclePhase: Self.mapLifecycle(moatCompetition.marketDynamics.lifecyclePhase),
-                tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote
+                tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote,
+                tamSourceLabel: moatCompetition.marketDynamics.tamSourceLabel
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

@@ -238,7 +238,16 @@ class CollectedTickerData:
     # they depend on `peer_tickers` and `profile.sector` resolving first.
     peer_tickers: List[str] = field(default_factory=list)
     peer_profiles: List[Dict[str, Any]] = field(default_factory=list)
+    # TTM ratios keyed by peer ticker — feeds real op_margin / ROE /
+    # revenue_growth into `_build_competitors` per-peer scoring (replaces
+    # the old proxy that scored every peer off intraday %-change).
+    peer_ratios: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     sector_aggregates: Optional[SectorAggregates] = None
+    # Industry-size projection from a FRED BEA value-added series, used
+    # as a fallback when AI Stage A didn't extract an explicit TAM quote
+    # from the earnings transcript. None when industry isn't in the
+    # FRED mapping or the FRED API is misconfigured.
+    industry_tam: Optional[Any] = None  # IndustryTAM (imported lazily)
 
     # ── Earnings call transcript (PR 3 — TAM extraction; PR 6 — guidance) ──
     # Latest available quarterly transcript text from FMP. Empty string when
@@ -529,29 +538,50 @@ class TickerReportDataCollector:
         """Second-pass fetches that depend on first-pass data resolving.
 
         Kept separate so the first pass stays a flat parallel gather
-        (easy to reason about, no per-task ordering bugs). Both
-        sub-tasks here degrade gracefully — peer profiles missing
-        means the Moat module's competitor list is empty, sector
-        aggregates missing means market_dynamics renders honest
-        defaults.
+        (easy to reason about, no per-task ordering bugs). All sub-tasks
+        here degrade gracefully — peer profiles missing means the Moat
+        module's competitor list is empty, sector aggregates missing
+        falls back to a peer-derived computation, FRED TAM missing
+        falls back to "hide the TAM column".
         """
         ticker = out.ticker
         # Cap peer fan-out to keep FMP costs bounded; iOS only renders
-        # up to ~6 competitors anyway.
+        # up to 5 competitors anyway.
         peers = (out.peer_tickers or [])[:8]
         sector = (out.profile or {}).get("sector")
+        industry = (out.profile or {}).get("industry")
 
         peer_profiles_task = (
             self.fmp.get_company_profiles_batch(peers)
             if peers else asyncio.sleep(0, result=[])
         )
+        peer_ratios_task = (
+            self._fetch_peer_ratios(peers)
+            if peers else asyncio.sleep(0, result={})
+        )
         sector_agg_task = (
             get_sector_aggregates(sector)
             if sector else asyncio.sleep(0, result=None)
         )
+        # FRED industry-TAM lookup. Imported lazily so the FRED
+        # dependency stays out of test paths that don't exercise Moat
+        # data (e.g., persona scoring tests).
+        from app.services.industry_tam_service import (
+            INDUSTRY_TO_FRED_SERIES,
+            get_industry_tam,
+        )
+        industry_tam_task = (
+            get_industry_tam(industry)
+            if industry and industry in INDUSTRY_TO_FRED_SERIES
+            else asyncio.sleep(0, result=None)
+        )
 
-        peer_profiles, sector_agg = await asyncio.gather(
-            peer_profiles_task, sector_agg_task, return_exceptions=True,
+        peer_profiles, peer_ratios, sector_agg, industry_tam = await asyncio.gather(
+            peer_profiles_task,
+            peer_ratios_task,
+            sector_agg_task,
+            industry_tam_task,
+            return_exceptions=True,
         )
 
         if isinstance(peer_profiles, Exception):
@@ -563,6 +593,15 @@ class TickerReportDataCollector:
         else:
             out.peer_profiles = peer_profiles or []
 
+        if isinstance(peer_ratios, Exception):
+            logger.warning(
+                f"Collector pass 2: peer_ratios failed for {ticker}: "
+                f"{type(peer_ratios).__name__}: {peer_ratios}"
+            )
+            out.peer_ratios = {}
+        else:
+            out.peer_ratios = peer_ratios or {}
+
         if isinstance(sector_agg, Exception):
             logger.warning(
                 f"Collector pass 2: sector_aggregates failed for {ticker}: "
@@ -571,6 +610,43 @@ class TickerReportDataCollector:
             out.sector_aggregates = None
         else:
             out.sector_aggregates = sector_agg
+
+        if isinstance(industry_tam, Exception):
+            logger.warning(
+                f"Collector pass 2: industry_tam failed for {ticker}: "
+                f"{type(industry_tam).__name__}: {industry_tam}"
+            )
+            out.industry_tam = None
+        else:
+            out.industry_tam = industry_tam
+
+    async def _fetch_peer_ratios(
+        self, peers: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch TTM ratios for each peer, keyed by ticker.
+
+        Returns the latest TTM row (or {} for peers whose call failed)
+        so the caller can grab `operatingProfitMargin` / `returnOnEquity`
+        / `revenueGrowth` for real per-peer moat scoring without a
+        downstream None-check storm.
+        """
+        sem = asyncio.Semaphore(8)
+
+        async def _one(sym: str) -> Tuple[str, Dict[str, Any]]:
+            async with sem:
+                try:
+                    rows = await self.fmp.get_ratios_ttm(sym)
+                    if isinstance(rows, list) and rows:
+                        return sym.upper(), rows[0]
+                except Exception as e:
+                    logger.debug(
+                        f"peer ratios-ttm failed for {sym}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                return sym.upper(), {}
+
+        results = await asyncio.gather(*[_one(s) for s in peers])
+        return {sym: row for sym, row in results}
 
     # ── Phase 2: derived metrics with edge-case correctness ───────────
 
@@ -929,21 +1005,28 @@ class TickerReportDataCollector:
         # "real data wins" policy that already governs fundamental_metrics
         # and the wall-street consensus.
         ai_moat = ai.get("moat_competition") or {}
-        moat_dims = list(ai_moat.get("dimensions") or [])
-        deterministic_market_dynamics = _build_market_dynamics(
-            out.profile, out.sector_aggregates,
+        moat_dims = _apply_peer_score_baseline(
+            list(ai_moat.get("dimensions") or [])
         )
-        # PR 3 — overlay the AI-extracted TAM from the transcript onto
-        # the deterministic market_dynamics. AI was instructed to set
-        # current_tam / future_tam ONLY when the transcript or company
-        # description contained an explicit quoted figure; otherwise it
-        # returns 0 and we keep the deterministic 0.0 placeholder.
-        _overlay_ai_tam(deterministic_market_dynamics, ai_moat.get("market_dynamics"))
+        deterministic_market_dynamics = _build_market_dynamics(
+            out.profile, out.sector_aggregates, out.peer_profiles,
+        )
+        # Two-tier TAM source priority: AI-extracted transcript quote
+        # (highest trust — explicit, grounded), then FRED industry
+        # value-added proxy (BEA series). If neither resolves, TAM stays
+        # at 0.0 and iOS hides the column.
+        _apply_tam_source(
+            deterministic_market_dynamics,
+            ai_moat.get("market_dynamics"),
+            out.industry_tam,
+        )
         deterministic_competitors = _build_competitors(
             my_ticker=out.ticker,
+            my_profile=out.profile,
             my_ratios=out.ratios,
             my_revenue_growth=c.get("revenue_growth_yoy"),
             peer_profiles=out.peer_profiles,
+            peer_ratios=out.peer_ratios,
         )
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
@@ -2836,25 +2919,157 @@ def _empty_price_action(current_price: float) -> Dict[str, Any]:
 
 
 def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """Honest fallback when no `SectorAggregates` row is available.
+    """Honest empty state when neither cached sector aggregates nor
+    in-hand peer profiles are available.
 
-    Concentration defaults to `fragmented` (rather than the more
-    pessimistic `mature` cycle phase) because absence-of-data should
-    not look like presence-of-bad-data. iOS will render these as a
-    placeholder card and the user knows the batch hasn't populated yet.
+    `cagr_5yr` and `tam_*` are None so iOS renders "—" placeholders
+    rather than misleading zeros. Concentration defaults to `fragmented`
+    (rather than the more pessimistic `mature` cycle phase) because
+    absence-of-data should not look like presence-of-bad-data.
     """
     now_year = datetime.now(timezone.utc).year
     return {
         "industry": profile.get("industry") or "Unknown",
         "concentration": "fragmented",
-        "cagr_5yr": 0.0,
+        "cagr_5yr": None,
         "current_tam": 0.0,
         "future_tam": 0.0,
         "current_year": str(now_year),
         "future_year": str(now_year + 5),
         "lifecycle_phase": "mature",
         "tam_source_quote": None,
+        "tam_source_label": None,
     }
+
+
+def _aggregates_from_peers(
+    focal_profile: Dict[str, Any],
+    peer_profiles: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Derive concentration metrics from in-hand peer market caps.
+
+    Used as the fallback when the `sector_aggregates` cache table is
+    empty for this sector (batch hasn't run, or the row expired). The
+    focal ticker is included in the cap list so the top-1/top-2 share
+    math reflects competitive dynamics, not just peer-among-peer ranking.
+
+    Skips CAGR — we'd need historical revenue per peer (5+ years × N
+    peers worth of FMP calls) which is too expensive to do inline.
+    Caller leaves `cagr_5yr=None` when this is the source.
+
+    Returns None when fewer than 3 valid market caps are available —
+    HHI on 1-2 points isn't informative.
+    """
+    from app.services.sector_aggregates_service import compute_hhi
+
+    caps: List[float] = []
+    focal_cap = float((focal_profile or {}).get("mktCap") or 0.0)
+    if focal_cap > 0:
+        caps.append(focal_cap)
+    for p in peer_profiles or []:
+        c = float(p.get("mktCap") or 0.0)
+        if c > 0:
+            caps.append(c)
+
+    if len(caps) < 3:
+        return None
+
+    total = sum(caps)
+    caps_sorted = sorted(caps, reverse=True)
+    top1_share = (caps_sorted[0] / total) * 100.0
+    top2_share = ((caps_sorted[0] + caps_sorted[1]) / total) * 100.0
+
+    return {
+        "hhi": compute_hhi(caps),
+        "top1_share_pct": top1_share,
+        "top2_share_pct": top2_share,
+        "num_constituents": len(caps),
+    }
+
+
+def _apply_tam_source(
+    market_dynamics: Dict[str, Any],
+    ai_md: Optional[Dict[str, Any]],
+    industry_tam: Optional[Any],
+) -> None:
+    """Apply TAM with priority chain: AI quote → FRED proxy → leave 0.
+
+    Mutates `market_dynamics` in place. Sets `tam_source_label` to a
+    short caption iOS shows under the TAM row so users know which
+    source produced the figure.
+
+    Priority 1 (highest trust): AI-extracted explicit quote from the
+    earnings transcript. Requires both a positive number AND a non-empty
+    source quote — strict to prevent fabrication.
+
+    Priority 2: FRED BEA value-added industry series. Honest about being
+    an industry-size proxy (caption says e.g. "BEA Information Sector
+    via FRED"), not company-specific TAM.
+
+    Priority 3: leave 0.0 / null. iOS renders "—" instead of "$0B".
+    """
+    # Priority 1: AI-extracted transcript quote
+    if isinstance(ai_md, dict):
+        quote_raw = ai_md.get("tam_source_quote")
+        quote = quote_raw.strip() if isinstance(quote_raw, str) else ""
+        if quote:
+            def _safe_positive(v: Any) -> Optional[float]:
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return None
+                return f if f > 0 else None
+
+            current = _safe_positive(ai_md.get("current_tam"))
+            future = _safe_positive(ai_md.get("future_tam"))
+
+            if current is not None or future is not None:
+                if current is not None:
+                    market_dynamics["current_tam"] = round(current, 0)
+                if future is not None:
+                    market_dynamics["future_tam"] = round(future, 0)
+                market_dynamics["tam_source_quote"] = quote[:200]
+                market_dynamics["tam_source_label"] = "Earnings call quote"
+
+                fy = ai_md.get("future_year")
+                if isinstance(fy, (int, str)):
+                    s = str(fy).strip()
+                    if s.isdigit() and len(s) == 4:
+                        market_dynamics["future_year"] = s
+                return
+
+    # Priority 2: FRED industry proxy
+    if industry_tam is not None:
+        market_dynamics["current_tam"] = industry_tam.current_tam
+        market_dynamics["future_tam"] = industry_tam.future_tam
+        market_dynamics["current_year"] = industry_tam.current_year
+        market_dynamics["future_year"] = industry_tam.future_year
+        market_dynamics["tam_source_label"] = industry_tam.source_label
+        return
+
+    # Priority 3: leave at 0.0 / null (iOS hides)
+
+
+def _apply_peer_score_baseline(
+    dims: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Ensure every dimension has a visible peer_score baseline.
+
+    AI Stage A frequently leaves `peer_score` at the 0.0 default from
+    the JSON template. A 0.0 collapses the gray "Peer Avg" polygon to
+    the radar chart center, making it invisible. Replace any `<= 0`
+    value with 5.0 (midpoint of the 0-10 scale) so the polygon is
+    always anchored at a sensible reference — AI is free to write
+    higher / lower values when it actually has signal.
+    """
+    for d in dims:
+        peer = d.get("peer_score")
+        try:
+            if peer is None or float(peer) <= 0:
+                d["peer_score"] = 5.0
+        except (TypeError, ValueError):
+            d["peer_score"] = 5.0
+    return dims
 
 
 # ── Macro risk-factor derivation (PR 4) ──────────────────────────────
@@ -3260,123 +3475,103 @@ def _overlay_ai_guidance(
     revenue_forecast["guidance_period"] = period
 
 
-def _overlay_ai_tam(
-    market_dynamics: Dict[str, Any], ai_md: Optional[Dict[str, Any]],
-) -> None:
-    """Mutate `market_dynamics` in place with TAM fields the AI extracted.
+def _classify_concentration(
+    top1_share_pct: float, top2_share_pct: float, hhi: float,
+) -> str:
+    """Map structural concentration metrics to the iOS enum value.
 
-    AI is instructed (Stage A prompt) to fill `current_tam`/`future_tam`
-    only when an explicit, quoted figure appears in the earnings-call
-    transcript excerpt or the company description; otherwise it returns
-    0 and we keep the deterministic 0.0 placeholder.
-
-    Defenses:
-      - Negative or non-numeric values are ignored (treated as 0).
-      - `tam_source_quote` is required (and non-empty) for any positive
-        TAM to be applied — if AI provides a number without a source
-        quote, it's discarded as fabrication.
-      - `future_year` is only overridden when it parses as a 4-digit
-        year string (so AI typos don't break the iOS chart axis).
+    Prioritizes top-N share thresholds (which capture market shape —
+    one dominant firm vs. duopoly — better than HHI alone). HHI is the
+    tiebreaker for sectors where no firm dominates but the upper few
+    still account for most of the value.
     """
-    if not isinstance(ai_md, dict):
-        return
-    quote = ai_md.get("tam_source_quote")
-    if not isinstance(quote, str):
-        quote = ""
-    quote = quote.strip()
-    if not quote:
-        # No source citation → reject any TAM number as un-grounded.
-        return
-
-    def _safe_positive(v: Any) -> Optional[float]:
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            return None
-        return f if f > 0 else None
-
-    current = _safe_positive(ai_md.get("current_tam"))
-    future = _safe_positive(ai_md.get("future_tam"))
-
-    if current is None and future is None:
-        return
-
-    if current is not None:
-        market_dynamics["current_tam"] = round(current, 0)
-    if future is not None:
-        market_dynamics["future_tam"] = round(future, 0)
-    market_dynamics["tam_source_quote"] = quote[:200]
-
-    fy = ai_md.get("future_year")
-    if isinstance(fy, (int, str)):
-        s = str(fy).strip()
-        if s.isdigit() and len(s) == 4:
-            market_dynamics["future_year"] = s
+    if top1_share_pct > 50.0:
+        return "monopoly"
+    if top2_share_pct > 70.0:
+        return "duopoly"
+    if hhi >= 1500.0:
+        return "oligopoly"
+    return "fragmented"
 
 
 def _build_market_dynamics(
     profile: Dict[str, Any],
     sector_agg: Optional[SectorAggregates],
+    peer_profiles: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Real `MarketDynamicsResponse` payload from sector aggregates.
+    """Real `MarketDynamicsResponse` payload, with cascading data sources.
 
-    Concentration enum (Swift `MarketConcentration`):
-      - `monopoly`  — top firm > 50% sector market cap
-      - `duopoly`   — top 2 firms > 70% combined
-      - `oligopoly` — HHI >= 1500 (DOJ "moderately concentrated")
-      - `fragmented`— everything else
+    Priority chain for concentration / lifecycle:
+      1. Cached `SectorAggregates` row (full data including CAGR).
+      2. Inline `_aggregates_from_peers` (concentration only, no CAGR).
+      3. `_default_market_dynamics` (all unknown).
 
     Lifecycle enum (Swift `LifecyclePhase`):
-      - `secular_growth` — sector 5Y CAGR > 15%
+      - `secular_growth` — sector 5Y CAGR > 15% (only when CAGR known)
       - `declining`      — CAGR < 0
       - `emerging`       — fewer than 5 sector constituents
       - `mature`         — default
 
-    TAM stays 0.0 here — extracted from 10-K MD&A in PR 3.
+    TAM stays 0.0 here — `_apply_tam_source` overlays the AI-extracted
+    quote OR the FRED industry proxy in `assemble_report`.
     """
-    if sector_agg is None:
-        return _default_market_dynamics(profile)
-
     now_year = datetime.now(timezone.utc).year
     industry = profile.get("industry") or "Unknown"
 
-    # Structural concentration: prioritize top-N share thresholds
-    # because they capture market shape (one dominant firm vs. duopoly)
-    # better than HHI alone, which can fail to distinguish a 1×80%/19×1%
-    # market from a 5×40% one.
-    if sector_agg.top1_share_pct > 50.0:
-        concentration = "monopoly"
-    elif sector_agg.top2_share_pct > 70.0:
-        concentration = "duopoly"
-    elif sector_agg.hhi >= 1500.0:
-        concentration = "oligopoly"
-    else:
-        concentration = "fragmented"
+    # Priority 1: cached sector aggregates (has real CAGR)
+    if sector_agg is not None:
+        concentration = _classify_concentration(
+            sector_agg.top1_share_pct,
+            sector_agg.top2_share_pct,
+            sector_agg.hhi,
+        )
+        cagr = sector_agg.cagr_5yr_pct
+        if sector_agg.num_constituents > 0 and sector_agg.num_constituents < 5:
+            lifecycle = "emerging"
+        elif cagr > 15.0:
+            lifecycle = "secular_growth"
+        elif cagr < 0.0:
+            lifecycle = "declining"
+        else:
+            lifecycle = "mature"
 
-    cagr = sector_agg.cagr_5yr_pct
-    if sector_agg.num_constituents > 0 and sector_agg.num_constituents < 5:
-        lifecycle = "emerging"
-    elif cagr > 15.0:
-        lifecycle = "secular_growth"
-    elif cagr < 0.0:
-        lifecycle = "declining"
-    else:
-        lifecycle = "mature"
+        return {
+            "industry": industry,
+            "concentration": concentration,
+            "cagr_5yr": round(cagr, 1),
+            "current_tam": 0.0,
+            "future_tam": 0.0,
+            "current_year": str(now_year),
+            "future_year": str(now_year + 5),
+            "lifecycle_phase": lifecycle,
+            "tam_source_quote": None,
+            "tam_source_label": None,
+        }
 
-    return {
-        "industry": industry,
-        "concentration": concentration,
-        "cagr_5yr": round(cagr, 1),
-        # TAM defaults to 0; `assemble_report` overlays the AI-extracted
-        # value (PR 3) when the earnings transcript or company description
-        # contained an explicit, quoted TAM figure.
-        "current_tam": 0.0,
-        "future_tam": 0.0,
-        "current_year": str(now_year),
-        "future_year": str(now_year + 5),
-        "lifecycle_phase": lifecycle,
-        "tam_source_quote": None,
-    }
+    # Priority 2: derive concentration from in-hand peer market caps
+    peer_agg = _aggregates_from_peers(profile, peer_profiles or [])
+    if peer_agg is not None:
+        concentration = _classify_concentration(
+            peer_agg["top1_share_pct"],
+            peer_agg["top2_share_pct"],
+            peer_agg["hhi"],
+        )
+        lifecycle = "emerging" if peer_agg["num_constituents"] < 5 else "mature"
+        return {
+            "industry": industry,
+            "concentration": concentration,
+            "cagr_5yr": None,
+            "current_tam": 0.0,
+            "future_tam": 0.0,
+            "current_year": str(now_year),
+            "future_year": str(now_year + 5),
+            "lifecycle_phase": lifecycle,
+            "tam_source_quote": None,
+            "tam_source_label": None,
+        }
+
+    # Priority 3: honest empty state
+    return _default_market_dynamics(profile)
 
 
 def _peer_score(
@@ -3423,30 +3618,83 @@ def _normalize_to_0_10(values: List[float]) -> List[float]:
     return [round(((v - lo) / (hi - lo)) * 10.0, 1) for v in values]
 
 
+_COMPETITOR_MKT_CAP_FLOOR_RATIO = 0.05    # 5% of focal mkt cap
+_COMPETITOR_MKT_CAP_FLOOR_ABS = 5_000_000_000.0   # $5B hard floor
+_COMPETITOR_TOP_N = 5
+
+
 def _build_competitors(
     my_ticker: str,
+    my_profile: Dict[str, Any],
     my_ratios: List[Dict[str, Any]],
     my_revenue_growth: Optional[float],
     peer_profiles: List[Dict[str, Any]],
+    peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Real competitor list from FMP peer profiles.
+    """Real competitor list from FMP peer profiles, top-5 by market cap.
 
-    Each entry:
-      - `name`, `ticker` from the peer profile
-      - `market_share_percent` from peer market cap / total peer market cap
-      - `moat_score` from min-max scaling of the peer-score signal onto 0-10
-      - `threat_level` from moat-score delta vs. the focal ticker's own
-        score in the same scaled space ("high" if peer >= focal+1.5,
-        "low" if peer <= focal-1.5, "moderate" otherwise)
+    FMP's `stock-peers` endpoint is noisy for mega-caps — it can include
+    obvious misclassifications (Helport AI for ORCL, etc.). To keep the
+    UI signal-heavy:
+      1. Drop any peer whose mktCap is below max(focal × 5%, $5B). For an
+         $800B focal that filters peers under $40B; for a $30B focal it
+         filters peers under $5B (the absolute floor).
+      2. Sort survivors by mktCap desc and keep the top 5.
+      3. Recompute `market_share_percent` from the *survivor* total so
+         the visible 5 entries' shares add up to 100% (not diluted by
+         dropped misclassifications).
 
-    Returns [] when peer profiles are missing — iOS handles the empty
-    list and the AI Stage A still writes the qualitative competitive
-    insight prose around it.
+    Per-peer scoring uses real financial ratios from the peers' own
+    `/stable/ratios-ttm` responses (passed in via `peer_ratios`, keyed
+    by ticker). The previous version used the profile-level `changes`
+    field (intraday percent change) as a noise-tier proxy — that
+    clustered every peer near a random value and made the bar chart
+    meaningless.
+
+    Returns [] when no peer survives the floor.
     """
     if not peer_profiles:
         return []
+    peer_ratios = peer_ratios or {}
 
-    # ── Score the focal ticker so we can compute threat-level deltas ──
+    focal_mkt_cap = float((my_profile or {}).get("mktCap") or 0.0)
+    floor = max(
+        focal_mkt_cap * _COMPETITOR_MKT_CAP_FLOOR_RATIO,
+        _COMPETITOR_MKT_CAP_FLOOR_ABS,
+    )
+
+    # ── 1. Filter + cap to top N by mktCap ────────────────────────────
+    survivors: List[Dict[str, Any]] = []
+    for p in peer_profiles:
+        sym = (p.get("symbol") or "").upper()
+        if not sym or sym == my_ticker.upper():
+            continue
+        mkt_cap = float(p.get("mktCap") or 0.0)
+        if mkt_cap < floor:
+            continue
+        survivors.append({"profile": p, "symbol": sym, "mkt_cap": mkt_cap})
+
+    if not survivors:
+        logger.info(
+            f"_build_competitors({my_ticker}): no peers passed mkt-cap "
+            f"floor ${floor / 1e9:.1f}B (had {len(peer_profiles)} candidates)"
+        )
+        return []
+
+    survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
+    survivors = survivors[:_COMPETITOR_TOP_N]
+
+    total_peer_cap = sum(s["mkt_cap"] for s in survivors)
+    if total_peer_cap <= 0:
+        # Defensive: should never hit because the floor is > 0, but logs
+        # surface a field-name regression in FMP profile responses.
+        logger.warning(
+            f"_build_competitors({my_ticker}): total_peer_cap is 0 after "
+            f"filtering — peer profiles may be missing mktCap field"
+        )
+        return []
+
+    # ── 2. Score the focal so we can compute threat-level deltas ──────
     my_op_margin = None
     my_roe = None
     if my_ratios:
@@ -3462,49 +3710,49 @@ def _build_competitors(
         (my_revenue_growth * 100) if my_revenue_growth is not None else None,
     )
 
-    # ── Score each peer from its profile (margins/ROE not in profile;
-    # fall back to whatever ratio-shaped fields the profile carries) ──
+    # ── 3. Score each survivor from its own ratios-ttm row ────────────
     peer_data: List[Dict[str, Any]] = []
-    for p in peer_profiles:
-        sym = (p.get("symbol") or "").upper()
-        if not sym or sym == my_ticker.upper():
-            continue
-        mkt_cap = float(p.get("mktCap") or 0.0)
-        # FMP's profile carries `range`, `volAvg`, `lastDiv`, etc. but
-        # not margins. Use what's there: change-percentage as a weak
-        # momentum proxy when nothing better is available.
-        change_pct = p.get("changes")
-        peer_score_raw = _peer_score(
-            None, None,
-            float(change_pct) if change_pct is not None else None,
-        )
+    for s in survivors:
+        sym = s["symbol"]
+        p = s["profile"]
+        ratios_row = peer_ratios.get(sym, {}) or {}
+
+        op_margin = None
+        roe_val = None
+        rev_growth = None
+        omp = ratios_row.get("operatingProfitMargin")
+        if omp is not None:
+            op_margin = float(omp) * 100
+        roe_v = ratios_row.get("returnOnEquity")
+        if roe_v is not None:
+            roe_val = float(roe_v) * 100
+        rg = ratios_row.get("revenueGrowth")
+        if rg is not None:
+            rev_growth = float(rg) * 100
+
         peer_data.append({
             "name": p.get("companyName") or sym,
             "ticker": sym,
-            "mkt_cap": mkt_cap,
-            "score_raw": peer_score_raw,
+            "mkt_cap": s["mkt_cap"],
+            "score_raw": _peer_score(op_margin, roe_val, rev_growth),
         })
 
-    # Build the score distribution with the focal ticker included so
-    # min-max scaling places the focal somewhere on the same line. Then
-    # extract the focal's scaled score to compute threat-level deltas.
-    raw_scores: List[float] = []
-    for p in peer_data:
-        raw_scores.append(p["score_raw"] if p["score_raw"] is not None else 0.0)
+    # Build the distribution with the focal included so min-max scaling
+    # places the focal somewhere on the same 0-10 line. Then peel off
+    # the focal's scaled score to compute threat-level deltas.
+    raw_scores: List[float] = [
+        p["score_raw"] if p["score_raw"] is not None else 0.0
+        for p in peer_data
+    ]
     raw_scores.append(my_raw_score if my_raw_score is not None else 0.0)
     scaled = _normalize_to_0_10(raw_scores)
     my_scaled = scaled[-1] if scaled else 5.0
     peer_scaled = scaled[:-1]
 
-    total_peer_cap = sum(p["mkt_cap"] for p in peer_data) or 0.0
-
     out: List[Dict[str, Any]] = []
     for i, p in enumerate(peer_data):
         moat_score = peer_scaled[i] if i < len(peer_scaled) else 5.0
-        share_pct = (
-            round((p["mkt_cap"] / total_peer_cap) * 100, 1)
-            if total_peer_cap > 0 else 0.0
-        )
+        share_pct = round((p["mkt_cap"] / total_peer_cap) * 100, 1)
         delta = moat_score - my_scaled
         if delta >= 1.5:
             threat = "high"
@@ -3520,7 +3768,6 @@ def _build_competitors(
             "threat_level": threat,
         })
 
-    # Largest peers first — iOS shows the top 4-5 competitors.
     out.sort(key=lambda c: c["market_share_percent"], reverse=True)
     return out
 

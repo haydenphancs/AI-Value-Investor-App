@@ -17,6 +17,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.services.agents.ticker_report_data_collector import (
+    _apply_tam_source,
     _build_competitors,
     _build_insider_sections,
     _build_macro_risk_factors_from_fred,
@@ -30,7 +31,6 @@ from app.services.agents.ticker_report_data_collector import (
     _extract_tam_relevant_excerpt,
     _merge_macro_risk_factors,
     _overlay_ai_guidance,
-    _overlay_ai_tam,
     _safe_cagr,
     compute_earnings_yield,
 )
@@ -690,11 +690,32 @@ def _agg(**overrides) -> SectorAggregates:
 
 
 def test_market_dynamics_falls_back_to_defaults_when_no_aggregates():
-    """No batch → honest placeholders (fragmented / mature / 0 CAGR)."""
+    """No batch + no peer profiles → honest placeholders. CAGR is None
+    (not 0) so iOS renders "—" instead of misleading zeros; concentration
+    defaults to `fragmented` because absence-of-data shouldn't look like
+    presence-of-bad-data."""
     md = _build_market_dynamics({"industry": "Software"}, None)
     assert md["concentration"] == "fragmented"
     assert md["lifecycle_phase"] == "mature"
-    assert md["cagr_5yr"] == 0.0
+    assert md["cagr_5yr"] is None
+    assert md["industry"] == "Software"
+
+
+def test_market_dynamics_derives_concentration_from_peers_on_cache_miss():
+    """When sector_aggregates is missing but peer profiles are in-hand,
+    HHI / top-N concentration is computed inline so the UI still shows
+    something better than the empty fallback. CAGR stays None because
+    peer profiles alone don't carry historical revenue."""
+    focal = {"industry": "Software", "mktCap": 800_000_000_000}
+    peers = [
+        {"mktCap": 3_000_000_000_000},   # one dominant peer
+        {"mktCap": 200_000_000_000},
+        {"mktCap": 100_000_000_000},
+    ]
+    md = _build_market_dynamics(focal, None, peers)
+    # Top firm has ~72% of the (focal + peers) total cap → monopoly.
+    assert md["concentration"] == "monopoly"
+    assert md["cagr_5yr"] is None
     assert md["industry"] == "Software"
 
 
@@ -767,21 +788,24 @@ def _peer(symbol: str, name: str, mkt_cap: float, change: float = 0.0) -> dict:
 def test_build_competitors_empty_when_no_peers():
     """No peers → empty list (don't fabricate competitors)."""
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=[],
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=[],
     )
     assert out == []
 
 
 def test_build_competitors_market_share_sums_to_100():
-    """Peer market shares must total ~100% — the moat module's chart
-    relies on this for its market-share donut visualization."""
+    """Surviving peer market shares must total ~100% — recomputed from
+    the post-filter set so dropped micro-caps don't dilute the visible
+    top-N's percentages."""
     peers = [
         _peer("MSFT", "Microsoft", 3_000_000_000_000),
         _peer("GOOGL", "Alphabet", 2_000_000_000_000),
         _peer("META", "Meta", 1_000_000_000_000),
     ]
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
     )
     total = sum(c["market_share_percent"] for c in out)
     assert abs(total - 100.0) < 0.5
@@ -796,28 +820,60 @@ def test_build_competitors_excludes_focal_ticker():
         _peer("MSFT", "Microsoft", 3_000_000_000_000),
     ]
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
     )
     assert all(c["ticker"] != "AAPL" for c in out)
     assert len(out) == 1
 
 
-def test_build_competitors_threat_level_assigned():
-    """Each competitor gets a threat_level enum value; the value is
-    based on moat_score delta vs the focal ticker, so all three buckets
-    (low/moderate/high) are reachable."""
+def test_build_competitors_drops_micro_cap_misclassifications():
+    """FMP's `stock-peers` endpoint sometimes returns obvious
+    misclassifications (e.g., Helport AI listed as ORCL peer). The
+    mkt-cap floor (max focal × 5%, $5B) drops them so the UI only shows
+    real competitors."""
     peers = [
-        _peer("STRONG", "Strong Co", 1_000_000_000, change=10.0),
-        _peer("AVG", "Average Co", 1_000_000_000, change=0.0),
-        _peer("WEAK", "Weak Co", 1_000_000_000, change=-10.0),
+        _peer("MSFT", "Microsoft", 3_000_000_000_000),
+        _peer("HPAI", "Helport AI", 30_000_000),  # micro-cap — should be dropped
     ]
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        my_ticker="ORCL",
+        my_profile={"mktCap": 700_000_000_000},
+        my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
     )
-    levels = {c["ticker"]: c["threat_level"] for c in out}
-    assert levels["STRONG"] in ("high", "moderate")
-    assert levels["WEAK"] in ("low", "moderate")
-    # All three bucket values are valid Swift enum members.
+    tickers = [c["ticker"] for c in out]
+    assert "HPAI" not in tickers
+    assert "MSFT" in tickers
+
+
+def test_build_competitors_caps_at_top_5():
+    """Even with many valid peers, only the top 5 by mktCap make the
+    cut — iOS's competitor card list is sized for 5 entries."""
+    peers = [
+        _peer(f"P{i}", f"Peer {i}", (10 - i) * 50_000_000_000)
+        for i in range(8)
+    ]
+    out = _build_competitors(
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
+    )
+    assert len(out) == 5
+
+
+def test_build_competitors_threat_level_assigned():
+    """Each competitor gets a threat_level enum value. With no
+    peer_ratios passed in, scores cluster (no signal to differentiate),
+    so threat_level for all survivors lands as "moderate" — still a
+    valid Swift enum member."""
+    peers = [
+        _peer("STRONG", "Strong Co", 100_000_000_000, change=10.0),
+        _peer("AVG", "Average Co", 100_000_000_000, change=0.0),
+        _peer("WEAK", "Weak Co", 100_000_000_000, change=-10.0),
+    ]
+    out = _build_competitors(
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
+    )
     assert all(c["threat_level"] in ("low", "moderate", "high") for c in out)
 
 
@@ -825,12 +881,13 @@ def test_build_competitors_moat_scores_in_0_10_range():
     """Moat scores must always land in [0, 10] (clamped by the iOS
     rendering layer otherwise)."""
     peers = [
-        _peer("A", "A", 1e9, change=50.0),
-        _peer("B", "B", 1e9, change=-50.0),
-        _peer("C", "C", 1e9, change=0.0),
+        _peer("A", "A", 100_000_000_000, change=50.0),
+        _peer("B", "B", 100_000_000_000, change=-50.0),
+        _peer("C", "C", 100_000_000_000, change=0.0),
     ]
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
     )
     for c in out:
         assert 0.0 <= c["moat_score"] <= 10.0
@@ -838,18 +895,44 @@ def test_build_competitors_moat_scores_in_0_10_range():
 
 def test_build_competitors_sorted_by_market_share_desc():
     """Largest competitor first — iOS renders top-N and we don't want
-    the small fish above the whales."""
+    the small fish above the whales. Micro-caps below the $5B floor
+    are dropped entirely."""
     peers = [
-        _peer("SMALL", "Small Co", 1_000_000),
+        _peer("SMALL", "Small Co", 1_000_000),       # below $5B floor → dropped
         _peer("BIG", "Big Co", 1_000_000_000_000),
-        _peer("MEDIUM", "Medium Co", 100_000_000),
+        _peer("MEDIUM", "Medium Co", 100_000_000),   # below floor → dropped
+        _peer("MID", "Mid Co", 50_000_000_000),
     ]
     out = _build_competitors(
-        my_ticker="AAPL", my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
     )
     shares = [c["market_share_percent"] for c in out]
     assert shares == sorted(shares, reverse=True)
     assert out[0]["ticker"] == "BIG"
+    # Below-floor peers should be gone.
+    tickers = [c["ticker"] for c in out]
+    assert "SMALL" not in tickers
+    assert "MEDIUM" not in tickers
+
+
+def test_build_competitors_uses_peer_ratios_for_scoring():
+    """When peer_ratios are provided, scoring uses real ratios instead
+    of the (now-removed) changes proxy — gives meaningful differentiation."""
+    peers = [
+        _peer("HIGHMARGIN", "High Margin Co", 100_000_000_000),
+        _peer("LOWMARGIN", "Low Margin Co", 100_000_000_000),
+    ]
+    ratios = {
+        "HIGHMARGIN": {"operatingProfitMargin": 0.40, "returnOnEquity": 0.35},
+        "LOWMARGIN": {"operatingProfitMargin": 0.05, "returnOnEquity": 0.03},
+    }
+    out = _build_competitors(
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers, peer_ratios=ratios,
+    )
+    scores = {c["ticker"]: c["moat_score"] for c in out}
+    assert scores["HIGHMARGIN"] > scores["LOWMARGIN"]
 
 
 # ── PR 3: TAM overlay (AI extraction → market_dynamics) ───────────────
@@ -857,7 +940,8 @@ def test_build_competitors_sorted_by_market_share_desc():
 
 def _md_with_zero_tam() -> dict:
     """Fresh market_dynamics dict in the deterministic-default state
-    (TAM=0, no source quote) — the input shape `_overlay_ai_tam` operates on."""
+    (TAM=0, no source quote, no source label) — the input shape
+    `_apply_tam_source` operates on."""
     return {
         "industry": "Software",
         "concentration": "oligopoly",
@@ -868,104 +952,130 @@ def _md_with_zero_tam() -> dict:
         "future_year": "2031",
         "lifecycle_phase": "secular_growth",
         "tam_source_quote": None,
+        "tam_source_label": None,
     }
 
 
-def test_overlay_tam_applies_when_ai_provides_quote_and_number():
+def test_apply_tam_ai_quote_wins_when_provided():
     """The happy path: AI returns a positive TAM AND a verbatim source
-    quote → both fields land on market_dynamics."""
+    quote → both numbers and the "Earnings call quote" label land on
+    market_dynamics. AI quote is highest priority — beats any FRED
+    proxy that was passed in."""
     md = _md_with_zero_tam()
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": 150_000_000_000,
         "future_tam": 300_000_000_000,
         "future_year": "2030",
         "tam_source_quote": "We see a $150B addressable market today expanding to $300B by 2030.",
-    })
+    }, None)
     assert md["current_tam"] == 150_000_000_000
     assert md["future_tam"] == 300_000_000_000
     assert md["future_year"] == "2030"
     assert "150B addressable market" in md["tam_source_quote"]
+    assert md["tam_source_label"] == "Earnings call quote"
 
 
-def test_overlay_tam_rejects_number_without_source_quote():
-    """No quote → reject the number entirely. This is the primary
-    anti-fabrication guard: if AI couldn't cite a source, it's making
-    things up regardless of what number it returned."""
+def test_apply_tam_rejects_number_without_source_quote():
+    """No quote → reject the AI-provided number. Primary anti-fabrication
+    guard. With no FRED fallback, TAM stays at 0 and label stays None."""
     md = _md_with_zero_tam()
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": 999_000_000_000,
         "future_tam": 0,
         "tam_source_quote": "",
-    })
+    }, None)
     assert md["current_tam"] == 0.0
     assert md["future_tam"] == 0.0
     assert md["tam_source_quote"] is None
+    assert md["tam_source_label"] is None
 
 
-def test_overlay_tam_rejects_zero_or_negative_numbers():
-    """Zero TAM with a quote → no overlay (nothing meaningful to apply).
-    Negative numbers (rare AI typo) are also rejected."""
+def test_apply_tam_rejects_zero_or_negative_numbers():
+    """Zero/negative TAM with a quote → no overlay (no meaningful value
+    to apply). FRED fallback is also None so labels stay None."""
     md = _md_with_zero_tam()
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": 0,
         "future_tam": -1,
         "tam_source_quote": "We have a market.",
-    })
+    }, None)
     assert md["current_tam"] == 0.0
     assert md["future_tam"] == 0.0
+    assert md["tam_source_label"] is None
 
 
-def test_overlay_tam_handles_string_numbers():
-    """Some AI runs return numbers as strings; the overlay must coerce
-    them rather than silently dropping the extraction."""
+def test_apply_tam_handles_string_numbers():
+    """Some AI runs return numbers as strings; coerce rather than drop."""
     md = _md_with_zero_tam()
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": "75000000000",
         "future_tam": "120000000000",
         "tam_source_quote": "$75B today, growing to $120B.",
-    })
+    }, None)
     assert md["current_tam"] == 75_000_000_000
     assert md["future_tam"] == 120_000_000_000
 
 
-def test_overlay_tam_ignores_invalid_future_year():
+def test_apply_tam_ignores_invalid_future_year():
     """`future_year` only updates when AI returned a 4-digit numeric
     string; garbage values don't break the iOS chart's x-axis."""
     md = _md_with_zero_tam()
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": 50_000_000_000,
         "future_tam": 0,
         "future_year": "soonish",
         "tam_source_quote": "Our market is $50B.",
-    })
+    }, None)
     assert md["future_year"] == "2031"  # unchanged from default
 
 
-def test_overlay_tam_truncates_long_quotes():
+def test_apply_tam_truncates_long_quotes():
     """Source quotes are capped at 200 chars so the iOS attribution
     bubble doesn't become a wall of text."""
     md = _md_with_zero_tam()
     long_quote = "x" * 500
-    _overlay_ai_tam(md, {
+    _apply_tam_source(md, {
         "current_tam": 10_000_000_000,
         "future_tam": 0,
         "tam_source_quote": long_quote,
-    })
+    }, None)
     assert len(md["tam_source_quote"]) == 200
 
 
-def test_overlay_tam_no_op_when_ai_md_missing():
-    """No AI input → no mutations. Defensive against the AI returning
-    null `market_dynamics` (which is valid per Stage A prompt rules
+def test_apply_tam_no_op_when_both_sources_missing():
+    """No AI input + no FRED fallback → no mutations. Defensive against
+    the AI returning null `market_dynamics` (valid per Stage A prompt
     when the transcript was unavailable)."""
     md = _md_with_zero_tam()
     snapshot = dict(md)
-    _overlay_ai_tam(md, None)
+    _apply_tam_source(md, None, None)
     assert md == snapshot
-    _overlay_ai_tam(md, {})
+    _apply_tam_source(md, {}, None)
     assert md == snapshot
-    _overlay_ai_tam(md, "not a dict")  # type: ignore[arg-type]
+    _apply_tam_source(md, "not a dict", None)  # type: ignore[arg-type]
     assert md == snapshot
+
+
+def test_apply_tam_falls_back_to_fred_when_ai_has_no_quote():
+    """When AI didn't extract a transcript quote, the FRED industry
+    proxy fills in — TAM numbers come from BEA, label attributes the
+    source so users know it's an industry-size proxy, not company TAM."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    md = _md_with_zero_tam()
+    fred = IndustryTAM(
+        current_tam=1700.0,
+        future_tam=2100.0,
+        current_year="2024",
+        future_year="2029",
+        source_label="BEA Information Sector value-added (via FRED)",
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, fred)
+    assert md["current_tam"] == 1700.0
+    assert md["future_tam"] == 2100.0
+    assert md["current_year"] == "2024"
+    assert md["future_year"] == "2029"
+    assert "BEA Information Sector" in md["tam_source_label"]
 
 
 # ── PR 3: transcript excerpt builder ───────────────────────────────

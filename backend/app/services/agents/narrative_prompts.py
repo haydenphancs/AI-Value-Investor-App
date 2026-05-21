@@ -1075,11 +1075,11 @@ Return ONLY valid JSON (no markdown fences):
       "tam_source_quote": ""
     }},
     "dimensions": [
-      {{"name": "Switching Costs",  "score": 0.0, "peer_score": 0.0}},
-      {{"name": "Network Effects",  "score": 0.0, "peer_score": 0.0}},
-      {{"name": "Brand Power",      "score": 0.0, "peer_score": 0.0}},
-      {{"name": "Cost Advantage",   "score": 0.0, "peer_score": 0.0}},
-      {{"name": "Intangible Assets","score": 0.0, "peer_score": 0.0}}
+      {{"name": "Switching Costs",  "score": 0.0, "peer_score": 5.0}},
+      {{"name": "Network Effects",  "score": 0.0, "peer_score": 5.0}},
+      {{"name": "Brand Power",      "score": 0.0, "peer_score": 5.0}},
+      {{"name": "Cost Advantage",   "score": 0.0, "peer_score": 5.0}},
+      {{"name": "Intangible Assets","score": 0.0, "peer_score": 5.0}}
     ],
     "durability_note": "",
     "competitors": [
@@ -1118,6 +1118,7 @@ RULES:
 - moat_competition.market_dynamics.current_tam / future_tam: STRICT EXTRACTION ONLY. Set to a USD-denominated number (e.g. 150000000000 for $150B) **only when the EARNINGS-CALL TRANSCRIPT EXCERPT or the company description above contains an explicit, quoted TAM/addressable-market figure**. Set both to 0 when no figure is disclosed. Do NOT estimate from sector context, competitor data, or your training-data knowledge of the industry. Forced fabrication here is the highest-cost failure mode for this product.
 - moat_competition.market_dynamics.tam_source_quote: when current_tam > 0, paste the verbatim sentence from the transcript / description that contains the figure (≤ 200 chars). When current_tam = 0, return "".
 - moat_competition.market_dynamics.future_year: when future_tam > 0, set to the year in which the projection is stated (e.g. "2030"). Otherwise leave the default.
+- moat_competition.dimensions[*].peer_score: 0-10 estimate of how a typical sector PEER scores on each dimension (not the focal company — that's `score`). Use 5.0 only when you have no basis to differentiate; otherwise raise or lower based on industry norms (e.g., enterprise software peers usually score ~7 on Switching Costs; commodity producers usually score ~2 on Brand Power; semiconductor peers usually score ~7 on Intangible Assets / IP).
 - revenue_forecast.management_guidance + guidance_quote: STRICT EXTRACTION ONLY from the EARNINGS-CALL TRANSCRIPT EXCERPT above.
   * Set `management_guidance` to "raised" only when the transcript contains explicit raise language ("we now expect", "we are raising our outlook", "we increased our full-year guidance", "guidance was lifted", etc.).
   * "lowered" only on explicit cut language ("we are lowering", "we now see", "guidance was reduced", "below prior outlook", etc.).

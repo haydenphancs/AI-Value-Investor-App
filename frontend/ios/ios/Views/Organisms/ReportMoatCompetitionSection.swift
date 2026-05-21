@@ -81,11 +81,11 @@ struct ReportMoatCompetitionSection: View {
 
             // 3-column metrics
             HStack(spacing: AppSpacing.sm) {
-                // Column 1: CAGR
+                // Column 1: CAGR — shows "—" when source data is missing
                 marketMetricColumn(
                     label: "CAGR (5Yr)",
                     value: data.marketDynamics.formattedCAGR,
-                    valueColor: data.marketDynamics.cagr5Yr >= 0 ? AppColors.bullish : AppColors.bearish,
+                    valueColor: data.marketDynamics.cagrColor,
                     subtitle: nil
                 )
                 .frame(maxWidth: 75)
@@ -94,36 +94,43 @@ struct ReportMoatCompetitionSection: View {
                     .frame(height: 40)
                     .background(AppColors.cardBackgroundLight)
 
-                // Column 2: Market Size (TAM)
+                // Column 2: Market Size (TAM) — hides year labels when
+                // TAM is unknown (renders just "—" instead of "$0B → $0B").
                 VStack(alignment: .center, spacing: AppSpacing.xxs) {
                     Text("Market Size (TAM)")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
 
-                    HStack(spacing: AppSpacing.xxs) {
-                        Text(data.marketDynamics.formattedCurrentTAM)
+                    if data.marketDynamics.tamIsAvailable {
+                        HStack(spacing: AppSpacing.xxs) {
+                            Text(data.marketDynamics.formattedCurrentTAM)
+                                .font(AppTypography.bodySmall).fontWeight(.bold)
+                                .foregroundColor(AppColors.textPrimary)
+
+                            Text("→")
+                                .font(AppTypography.bodySmallEmphasis)
+                                .foregroundColor(AppColors.textSecondary)
+
+                            Text(data.marketDynamics.formattedFutureTAM)
+                                .font(AppTypography.bodySmall).fontWeight(.bold)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        HStack(spacing: AppSpacing.xxs) {
+                            Text("(\(data.marketDynamics.currentYear))")
+                                .font(AppTypography.captionTiny)
+                                .foregroundColor(AppColors.textMuted)
+
+                            Spacer()
+                                .frame(width: 14)
+
+                            Text("(\(data.marketDynamics.futureYear))")
+                                .font(AppTypography.captionTiny)
+                                .foregroundColor(AppColors.textMuted)
+                        }
+                    } else {
+                        Text("—")
                             .font(AppTypography.bodySmall).fontWeight(.bold)
-                            .foregroundColor(AppColors.textPrimary)
-
-                        Text("→")
-                            .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(AppColors.textSecondary)
-
-                        Text(data.marketDynamics.formattedFutureTAM)
-                            .font(AppTypography.bodySmall).fontWeight(.bold)
-                            .foregroundColor(AppColors.textPrimary)
-                    }
-
-                    HStack(spacing: AppSpacing.xxs) {
-                        Text("(\(data.marketDynamics.currentYear))")
-                            .font(AppTypography.captionTiny)
-                            .foregroundColor(AppColors.textMuted)
-
-                        Spacer()
-                            .frame(width: 14)
-
-                        Text("(\(data.marketDynamics.futureYear))")
-                            .font(AppTypography.captionTiny)
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -144,6 +151,18 @@ struct ReportMoatCompetitionSection: View {
                 .frame(maxWidth: 105)
             }
             .padding(.top, AppSpacing.sm)
+
+            // TAM source attribution — small caption shown only when a
+            // source (transcript quote or FRED proxy) actually produced
+            // the TAM value, so users know it's not company-quoted TAM.
+            if let label = data.marketDynamics.tamSourceLabel,
+               data.marketDynamics.tamIsAvailable {
+                Text("source: \(label)")
+                    .font(AppTypography.captionTiny)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, AppSpacing.xxs)
+            }
         }
     }
 

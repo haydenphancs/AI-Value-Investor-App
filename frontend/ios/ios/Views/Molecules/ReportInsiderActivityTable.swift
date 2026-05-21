@@ -71,18 +71,12 @@ struct ReportInsiderActivityTable: View {
                 }
             }
 
-            // Ownership note
-            if let note = insiderData.ownershipNote {
-                Text(note)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.bearish)
-                    .padding(AppSpacing.sm)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                            .fill(AppColors.bearish.opacity(0.1))
-                    )
-            }
+            // The red `ownership_note` banner that used to live here was
+            // removed — it paraphrased the buy/sell table directly above
+            // ("Insiders dumped $2.6M…") so it added no information.
+            // Interpretation now lives in the Key Management Insight
+            // (ReportKeyManagementTable), which anchors in the dominant
+            // holder's stake instead of restating the table.
         }
     }
 }

@@ -953,6 +953,7 @@ def _md_with_zero_tam() -> dict:
         "lifecycle_phase": "secular_growth",
         "tam_source_quote": None,
         "tam_source_label": None,
+        "source_grain": None,
     }
 
 
@@ -1098,6 +1099,196 @@ def test_apply_tam_preserves_sector_cagr_over_industry_proxy_cagr():
     )
     _apply_tam_source(md, {"tam_source_quote": ""}, proxy)
     assert md["cagr_5yr"] == 12.5    # untouched
+
+
+def test_apply_tam_promotes_lifecycle_to_secular_growth_on_high_industry_cagr():
+    """When industry proxy CAGR > 15% and lifecycle was the "mature"
+    default, promote to "secular_growth" so the UI reflects the tailwind."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["lifecycle_phase"] = "mature"
+    proxy = IndustryTAM(
+        current_tam=1156.0,
+        future_tam=2267.0,
+        current_year="2023",
+        future_year="2028",
+        source_label="US Census AIES — Electronic shopping (NAICS 4541)",
+        cagr_5y_pct=14.4,   # below 15% threshold → stays mature
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, proxy)
+    assert md["lifecycle_phase"] == "mature"   # 14.4% < 15% cutoff
+
+    md["lifecycle_phase"] = "mature"
+    md["cagr_5yr"] = None
+    proxy_fast = IndustryTAM(
+        current_tam=100.0,
+        future_tam=200.0,
+        current_year="2023",
+        future_year="2028",
+        source_label="test",
+        cagr_5y_pct=18.0,   # clears the 15% threshold
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, proxy_fast)
+    assert md["lifecycle_phase"] == "secular_growth"
+
+
+def test_apply_tam_promotes_lifecycle_to_declining_on_negative_industry_cagr():
+    """Negative industry CAGR + default 'mature' lifecycle → 'declining'."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["lifecycle_phase"] = "mature"
+    shrinking = IndustryTAM(
+        current_tam=50.0,
+        future_tam=40.0,
+        current_year="2023",
+        future_year="2028",
+        source_label="test",
+        cagr_5y_pct=-4.0,
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, shrinking)
+    assert md["lifecycle_phase"] == "declining"
+
+
+def test_apply_tam_does_not_override_emerging_lifecycle():
+    """`emerging` (set by low-constituent-count signal) outranks the
+    CAGR-based promotion. A new niche with 3 public players stays
+    'emerging' even if its CAGR is rocketing."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["lifecycle_phase"] = "emerging"
+    rocket = IndustryTAM(
+        current_tam=10.0, future_tam=25.0,
+        current_year="2023", future_year="2028",
+        source_label="test", cagr_5y_pct=20.0,
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, rocket)
+    assert md["lifecycle_phase"] == "emerging"
+
+
+# ── Industry dossier overlay (replaces FRED/Census live path) ─────────
+
+
+def test_apply_tam_writes_source_grain_from_dossier():
+    """The dossier carries `source_grain` ('industry' | 'sector' |
+    'all_industry') so iOS can decide whether to show the
+    "⚠ Broader than industry" chip. `_apply_tam_source` must surface it
+    on market_dynamics. Plain `IndustryTAM` (no dossier) → no chip."""
+    from app.services.industry_dossier_service import IndustryDossier
+    from app.services.industry_tam_service import IndustryTAM
+
+    # Industry-grain dossier → 'industry' (no chip on iOS).
+    md = _md_with_zero_tam()
+    dossier = IndustryDossier(
+        current_tam=526.0, future_tam=820.0,
+        current_year="2023", future_year="2028",
+        source_label="US Census AIES — Software publishers (NAICS 5112)",
+        cagr_5y_pct=9.2,
+        industry="Software - Infrastructure",
+        sector="Technology",
+        source_grain="industry",
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, dossier)
+    assert md["source_grain"] == "industry"
+
+    # Sector-grain (fallback) → 'sector' (iOS shows chip).
+    md2 = _md_with_zero_tam()
+    sector_dossier = IndustryDossier(
+        current_tam=1700.0, future_tam=2100.0,
+        current_year="2023", future_year="2028",
+        source_label="BEA Information sector GDP — broader than X",
+        cagr_5y_pct=4.3,
+        industry="Some Niche Industry",
+        sector="Technology",
+        source_grain="sector",
+    )
+    _apply_tam_source(md2, {"tam_source_quote": ""}, sector_dossier)
+    assert md2["source_grain"] == "sector"
+
+    # Plain IndustryTAM (live-path fallback) → leaves source_grain unset.
+    md3 = _md_with_zero_tam()
+    plain = IndustryTAM(
+        current_tam=1700.0, future_tam=2100.0,
+        current_year="2024", future_year="2029",
+        source_label="FRED", cagr_5y_pct=4.3,
+    )
+    _apply_tam_source(md3, {"tam_source_quote": ""}, plain)
+    assert md3.get("source_grain") is None  # unset → iOS treats as no warning
+
+
+def test_apply_tam_dossier_concentration_overrides_peer_derived():
+    """When the dossier carries `concentration_label` (computed weekly
+    from ALL constituents in the industry), it must override whatever
+    `_build_market_dynamics` set from the focal ticker's top-5 peers —
+    the industry-wide number is more authoritative."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    md = _md_with_zero_tam()
+    md["concentration"] = "oligopoly"     # set by peer-derived earlier
+    dossier = IndustryDossier(
+        current_tam=100.0, future_tam=120.0,
+        current_year="2023", future_year="2028",
+        source_label="test", cagr_5y_pct=5.0,
+        industry="Foo", sector="Technology",
+        concentration_label="fragmented",
+        source_grain="industry",
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, dossier)
+    assert md["concentration"] == "fragmented"
+
+
+def test_apply_tam_dossier_lifecycle_overrides_default_mature():
+    """Same idea for lifecycle — the dossier's classification (which
+    factors industry-wide CAGR + constituent count) wins over the
+    `_build_market_dynamics` default. Only non-default ('mature')
+    classifications override."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    md = _md_with_zero_tam()
+    md["lifecycle_phase"] = "mature"
+    dossier = IndustryDossier(
+        current_tam=100.0, future_tam=200.0,
+        current_year="2023", future_year="2028",
+        source_label="test", cagr_5y_pct=18.0,
+        industry="Foo", sector="Technology",
+        lifecycle_phase="secular_growth",
+        source_grain="industry",
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, dossier)
+    assert md["lifecycle_phase"] == "secular_growth"
+
+
+def test_dossier_classification_helpers_match_collector_thresholds():
+    """`industry_dossier_service.classify_concentration` /
+    `classify_lifecycle` are local mirrors of the collector helpers — pin
+    parity so the two paths can't silently diverge."""
+    from app.services.industry_dossier_service import (
+        classify_concentration as ds_concentration,
+        classify_lifecycle as ds_lifecycle,
+    )
+    from app.services.agents.ticker_report_data_collector import (
+        _classify_concentration as collector_concentration,
+        _classify_lifecycle as collector_lifecycle,
+    )
+
+    # Concentration thresholds: monopoly/duopoly/oligopoly/fragmented.
+    cases = [
+        (55.0, 80.0, 2200.0),   # monopoly (top1 > 50)
+        (35.0, 75.0, 1800.0),   # duopoly (top2 > 70)
+        (20.0, 35.0, 1600.0),   # oligopoly (HHI >= 1500)
+        (10.0, 18.0, 800.0),    # fragmented
+    ]
+    for top1, top2, hhi in cases:
+        assert ds_concentration(top1, top2, hhi) == collector_concentration(top1, top2, hhi)
+
+    # Lifecycle: emerging / secular_growth / declining / mature.
+    for cagr, n in [(None, 3), (None, 10), (20.0, 10), (-2.0, 10), (8.0, 10)]:
+        assert ds_lifecycle(cagr, n) == collector_lifecycle(cagr, n)
 
 
 # ── PR 3: transcript excerpt builder ───────────────────────────────

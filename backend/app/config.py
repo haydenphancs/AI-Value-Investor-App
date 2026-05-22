@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     CENSUS_API_KEY: str = ""
     CENSUS_BASE_URL: str = "https://api.census.gov/data"
 
+    # Industry dossier — AI-driven Phase B override toggle. When False,
+    # the quarterly recompute job runs Phase A (Census/FRED) only and
+    # skips the AI research overrides. Useful as a kill switch when
+    # Gemini quota is exhausted or a bad research run shipped and we
+    # need to revert to Census-only while debugging.
+    INDUSTRY_OVERRIDE_AI_ENABLED: bool = True
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

@@ -563,17 +563,22 @@ class TickerReportDataCollector:
             get_sector_aggregates(sector)
             if sector else asyncio.sleep(0, result=None)
         )
-        # FRED industry-TAM lookup. Imported lazily so the FRED
-        # dependency stays out of test paths that don't exercise Moat
-        # data (e.g., persona scoring tests).
-        from app.services.industry_tam_service import (
-            INDUSTRY_TO_FRED_SERIES,
-            get_industry_tam,
+        # Industry dossier read — GUARANTEES every ticker gets data via
+        # the service's 4-tier fallback (Census → industry-FRED →
+        # sector-FRED → all-industry USNGSP). The weekly batch
+        # pre-computes most industries; the read path computes any
+        # missing ones live (one-time cost, memoized for 5 min). Imported
+        # lazily so the FRED dependency stays out of test paths that
+        # don't exercise Moat data.
+        from app.services.industry_dossier_service import (
+            get_industry_dossier_service,
         )
+
         industry_tam_task = (
-            get_industry_tam(industry)
-            if industry and industry in INDUSTRY_TO_FRED_SERIES
-            else asyncio.sleep(0, result=None)
+            get_industry_dossier_service().get_or_compute_dossier(
+                industry=industry, sector=sector,
+            )
+            if industry else asyncio.sleep(0, result=None)
         )
 
         peer_profiles, peer_ratios, sector_agg, industry_tam = await asyncio.gather(
@@ -2939,6 +2944,7 @@ def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
         "lifecycle_phase": "mature",
         "tam_source_quote": None,
         "tam_source_label": None,
+        "source_grain": None,
     }
 
 
@@ -3043,19 +3049,53 @@ def _apply_tam_source(
                         market_dynamics["future_year"] = s
                 return
 
-    # Priority 2: industry-level proxy (Census → FRED chain)
+    # Priority 2: industry-level proxy (Census → FRED chain, or
+    # pre-computed industry_dossier row when available).
     if industry_tam is not None:
         market_dynamics["current_tam"] = industry_tam.current_tam
         market_dynamics["future_tam"] = industry_tam.future_tam
         market_dynamics["current_year"] = industry_tam.current_year
         market_dynamics["future_year"] = industry_tam.future_year
         market_dynamics["tam_source_label"] = industry_tam.source_label
+
+        # `source_grain` is set when the proxy is an IndustryDossier
+        # (i.e., pre-computed weekly batch). iOS reads it to render the
+        # "⚠ Broader than industry" chip when fallback was used.
+        grain = getattr(industry_tam, "source_grain", None)
+        if grain:
+            market_dynamics["source_grain"] = grain
+
+        # Industry-wide concentration (HHI from ALL constituents in this
+        # industry, computed weekly) is more authoritative than the focal
+        # ticker's peer-set HHI computed live. Override when present.
+        dossier_concentration = getattr(industry_tam, "concentration_label", None)
+        if dossier_concentration:
+            market_dynamics["concentration"] = dossier_concentration
+
+        # Dossier-derived lifecycle wins outright when present (already
+        # incorporates CAGR + constituent count). Otherwise fall back to
+        # the legacy CAGR-based promotion below.
+        dossier_lifecycle = getattr(industry_tam, "lifecycle_phase", None)
+        if dossier_lifecycle and dossier_lifecycle != "mature":
+            # `mature` is the dataclass default — only override the
+            # current lifecycle when the dossier produced a non-default
+            # classification (the dossier saw a real signal).
+            market_dynamics["lifecycle_phase"] = dossier_lifecycle
+
         # Surface the industry's realized CAGR only when sector_aggregates
         # didn't already produce one — preserves higher-trust source.
         if market_dynamics.get("cagr_5yr") is None:
             cagr = getattr(industry_tam, "cagr_5y_pct", None)
             if cagr is not None:
                 market_dynamics["cagr_5yr"] = cagr
+                # Legacy promotion path — only fires when the proxy
+                # didn't already publish a lifecycle (plain IndustryTAM,
+                # not a dossier).
+                if not dossier_lifecycle and market_dynamics.get("lifecycle_phase") == "mature":
+                    if cagr > 15.0:
+                        market_dynamics["lifecycle_phase"] = "secular_growth"
+                    elif cagr < 0.0:
+                        market_dynamics["lifecycle_phase"] = "declining"
         return
 
     # Priority 3: leave at 0.0 / null (iOS hides)
@@ -3505,6 +3545,28 @@ def _classify_concentration(
     return "fragmented"
 
 
+def _classify_lifecycle(
+    cagr_5yr: Optional[float], num_constituents: int,
+) -> str:
+    """Map a sector CAGR + constituent count to the iOS lifecycle enum.
+
+    `emerging` wins on low constituent count (a brand-new niche with
+    only a few public players is "emerging" regardless of growth rate).
+    Past that, CAGR drives: > 15% → `secular_growth`, < 0% → `declining`,
+    otherwise `mature`. CAGR=None falls through to `mature` since we
+    have no growth signal to differentiate.
+    """
+    if 0 < num_constituents < 5:
+        return "emerging"
+    if cagr_5yr is None:
+        return "mature"
+    if cagr_5yr > 15.0:
+        return "secular_growth"
+    if cagr_5yr < 0.0:
+        return "declining"
+    return "mature"
+
+
 def _build_market_dynamics(
     profile: Dict[str, Any],
     sector_agg: Optional[SectorAggregates],
@@ -3537,15 +3599,6 @@ def _build_market_dynamics(
             sector_agg.hhi,
         )
         cagr = sector_agg.cagr_5yr_pct
-        if sector_agg.num_constituents > 0 and sector_agg.num_constituents < 5:
-            lifecycle = "emerging"
-        elif cagr > 15.0:
-            lifecycle = "secular_growth"
-        elif cagr < 0.0:
-            lifecycle = "declining"
-        else:
-            lifecycle = "mature"
-
         return {
             "industry": industry,
             "concentration": concentration,
@@ -3554,9 +3607,12 @@ def _build_market_dynamics(
             "future_tam": 0.0,
             "current_year": str(now_year),
             "future_year": str(now_year + 5),
-            "lifecycle_phase": lifecycle,
+            "lifecycle_phase": _classify_lifecycle(
+                cagr, sector_agg.num_constituents,
+            ),
             "tam_source_quote": None,
             "tam_source_label": None,
+            "source_grain": None,
         }
 
     # Priority 2: derive concentration from in-hand peer market caps
@@ -3567,7 +3623,9 @@ def _build_market_dynamics(
             peer_agg["top2_share_pct"],
             peer_agg["hhi"],
         )
-        lifecycle = "emerging" if peer_agg["num_constituents"] < 5 else "mature"
+        # CAGR is None at this point (peer profiles alone don't carry
+        # historical revenue). Lifecycle may still get promoted from
+        # "mature" once `_apply_tam_source` overlays a Census/FRED CAGR.
         return {
             "industry": industry,
             "concentration": concentration,
@@ -3576,9 +3634,12 @@ def _build_market_dynamics(
             "future_tam": 0.0,
             "current_year": str(now_year),
             "future_year": str(now_year + 5),
-            "lifecycle_phase": lifecycle,
+            "lifecycle_phase": _classify_lifecycle(
+                None, peer_agg["num_constituents"],
+            ),
             "tam_source_quote": None,
             "tam_source_label": None,
+            "source_grain": None,
         }
 
     # Priority 3: honest empty state

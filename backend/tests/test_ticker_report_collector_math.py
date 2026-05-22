@@ -1056,26 +1056,48 @@ def test_apply_tam_no_op_when_both_sources_missing():
     assert md == snapshot
 
 
-def test_apply_tam_falls_back_to_fred_when_ai_has_no_quote():
-    """When AI didn't extract a transcript quote, the FRED industry
-    proxy fills in — TAM numbers come from BEA, label attributes the
-    source so users know it's an industry-size proxy, not company TAM."""
+def test_apply_tam_falls_back_to_industry_proxy_when_ai_has_no_quote():
+    """When AI didn't extract a transcript quote, the industry proxy
+    fills in — TAM numbers come from the source's data, label attributes
+    it so users know it's a proxy, not company TAM."""
     from app.services.industry_tam_service import IndustryTAM
 
     md = _md_with_zero_tam()
-    fred = IndustryTAM(
+    md["cagr_5yr"] = None     # simulate empty sector_aggregates
+    proxy = IndustryTAM(
         current_tam=1700.0,
         future_tam=2100.0,
         current_year="2024",
         future_year="2029",
-        source_label="BEA Information Sector value-added (via FRED)",
+        source_label="BEA Information Sector GDP (via FRED)",
+        cagr_5y_pct=4.3,
     )
-    _apply_tam_source(md, {"tam_source_quote": ""}, fred)
+    _apply_tam_source(md, {"tam_source_quote": ""}, proxy)
     assert md["current_tam"] == 1700.0
     assert md["future_tam"] == 2100.0
     assert md["current_year"] == "2024"
     assert md["future_year"] == "2029"
     assert "BEA Information Sector" in md["tam_source_label"]
+    assert md["cagr_5yr"] == 4.3
+
+
+def test_apply_tam_preserves_sector_cagr_over_industry_proxy_cagr():
+    """When sector_aggregates already produced a CAGR (highest trust —
+    S&P 500-derived), the industry proxy's CAGR must NOT overwrite it."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = 12.5     # sector_aggregates already set this
+    proxy = IndustryTAM(
+        current_tam=1700.0,
+        future_tam=2100.0,
+        current_year="2024",
+        future_year="2029",
+        source_label="BEA Information Sector GDP (via FRED)",
+        cagr_5y_pct=4.3,      # would lose to sector value
+    )
+    _apply_tam_source(md, {"tam_source_quote": ""}, proxy)
+    assert md["cagr_5yr"] == 12.5    # untouched
 
 
 # ── PR 3: transcript excerpt builder ───────────────────────────────

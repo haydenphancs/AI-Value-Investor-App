@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     FRED_API_KEY: str = ""
     FRED_BASE_URL: str = "https://api.stlouisfed.org/fred"
 
+    # US Census Bureau Data API — used by industry_tam_service to fetch
+    # NAICS-precise industry revenue (e.g., NAICS 5112 Software Publishers).
+    # Required for every Census API request; sign up free at
+    # https://api.census.gov/data/key_signup.html. When unset, the Census
+    # tier of the TAM chain silently degrades and FRED becomes the primary
+    # source (see app/services/industry_tam_service.py).
+    CENSUS_API_KEY: str = ""
+    CENSUS_BASE_URL: str = "https://api.census.gov/data"
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

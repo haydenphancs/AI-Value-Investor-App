@@ -880,6 +880,12 @@ struct MarketDynamics {
     // extracted it from the transcript, "BEA <Sector> value-added (via
     // FRED)" when FRED proxy was used, nil when TAM is 0 (UI hides).
     let tamSourceLabel: String?
+    // Grain of the source data: "industry" | "sector" | "all_industry".
+    // Drives `tamGrainWarning` so the UI can flag when the TAM/CAGR is
+    // sourced from a broader bucket than the company's own industry
+    // (e.g., we fell back to the sector-level FRED series because no
+    // industry-specific NAICS was mapped). Nil for AI-quote sourced TAM.
+    let sourceGrain: String?
 
     var formattedCAGR: String {
         guard let cagr = cagr5Yr else { return "—" }
@@ -1419,7 +1425,8 @@ extension TickerReportData {
                 futureYear: "2030",
                 lifecyclePhase: .secularGrowth,
                 tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030.",
-                tamSourceLabel: "Earnings call quote"
+                tamSourceLabel: "Earnings call quote",
+                sourceGrain: nil
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

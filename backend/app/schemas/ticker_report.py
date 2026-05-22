@@ -283,6 +283,13 @@ class MarketDynamicsResponse(BaseModel):
     # it from the transcript, "BEA <Sector> value-added (via FRED)" when
     # the FRED industry-proxy was used, None when TAM stayed at 0.
     tam_source_label: Optional[str] = None
+    # Grain of the underlying data source: 'industry' (Census 4-digit NAICS
+    # or industry-specific FRED), 'sector' (sector-level FRED used as
+    # fallback), 'all_industry' (USNGSP fallback). iOS renders a small
+    # "⚠ Broader than industry" chip when this is not 'industry' so users
+    # know the figure is a proxy. None when TAM came from an AI quote or
+    # wasn't populated.
+    source_grain: Optional[str] = None
 
 
 class MoatDimensionResponse(BaseModel):

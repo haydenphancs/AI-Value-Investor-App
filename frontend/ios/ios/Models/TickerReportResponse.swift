@@ -516,6 +516,13 @@ struct MarketDynamicsDTO: Codable {
     // Caption attribution shown under the TAM row when TAM is sourced
     // (AI transcript quote OR FRED industry proxy). Nil when TAM is 0.
     let tamSourceLabel: String?
+    // Grain of the source data: "industry" | "sector" | "all_industry".
+    // The UI renders a "⚠ Broader than industry" chip when this is not
+    // "industry", letting users know the TAM/CAGR is a proxy from a
+    // broader bucket than the company's own industry. Nil when TAM came
+    // from an AI-extracted earnings-call quote (company-specific) or
+    // when no source produced data.
+    let sourceGrain: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -527,6 +534,7 @@ struct MarketDynamicsDTO: Codable {
         case lifecyclePhase = "lifecycle_phase"
         case tamSourceQuote = "tam_source_quote"
         case tamSourceLabel = "tam_source_label"
+        case sourceGrain = "source_grain"
     }
 
     init(from decoder: Decoder) throws {
@@ -541,6 +549,7 @@ struct MarketDynamicsDTO: Codable {
         self.lifecyclePhase = try c.decode(String.self, forKey: .lifecyclePhase)
         self.tamSourceQuote = try c.decodeIfPresent(String.self, forKey: .tamSourceQuote)
         self.tamSourceLabel = try c.decodeIfPresent(String.self, forKey: .tamSourceLabel)
+        self.sourceGrain = try c.decodeIfPresent(String.self, forKey: .sourceGrain)
     }
 }
 
@@ -988,7 +997,8 @@ extension TickerReportAPIResponse {
                 futureYear: moatCompetition.marketDynamics.futureYear,
                 lifecyclePhase: Self.mapLifecycle(moatCompetition.marketDynamics.lifecyclePhase),
                 tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote,
-                tamSourceLabel: moatCompetition.marketDynamics.tamSourceLabel
+                tamSourceLabel: moatCompetition.marketDynamics.tamSourceLabel,
+                sourceGrain: moatCompetition.marketDynamics.sourceGrain
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

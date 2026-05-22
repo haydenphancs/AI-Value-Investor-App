@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from app.integrations.census import get_census_client
 from app.integrations.fred import get_fred_client
@@ -43,10 +43,11 @@ INDUSTRY_TO_FRED_SERIES: Dict[str, str] = {
     # Information / Software / Tech services (NAICS 51) ≈ $1.7T
     "Software - Infrastructure": "USINFONGSP",
     "Software - Application": "USINFONGSP",
+    "Software - Services": "USINFONGSP",
     "Information Technology Services": "USINFONGSP",
     "Internet Content & Information": "USINFONGSP",
     "Communication Equipment": "USINFONGSP",
-    "Telecom Services": "USINFONGSP",
+    "Telecommunications Services": "USINFONGSP",
     # Manufacturing (NAICS 31-33) — semis, pharma, devices, autos
     "Semiconductors": "USMANNGSP",
     "Semiconductor Equipment & Materials": "USMANNGSP",
@@ -54,67 +55,120 @@ INDUSTRY_TO_FRED_SERIES: Dict[str, str] = {
     "Drug Manufacturers - General": "USMANNGSP",
     "Drug Manufacturers - Specialty & Generic": "USMANNGSP",
     "Biotechnology": "USMANNGSP",
-    "Medical Devices": "USMANNGSP",
-    "Auto Manufacturers": "USMANNGSP",
+    "Medical - Devices": "USMANNGSP",
+    "Medical - Instruments & Supplies": "USMANNGSP",
+    "Auto - Manufacturers": "USMANNGSP",
+    "Auto - Parts": "USMANNGSP",
+    "Aerospace & Defense": "USMANNGSP",
+    "Chemicals": "USMANNGSP",
+    "Chemicals - Specialty": "USMANNGSP",
+    "Industrial - Machinery": "USMANNGSP",
+    "Agricultural - Machinery": "USMANNGSP",
+    "Electrical Equipment & Parts": "USMANNGSP",
+    "Computer Hardware": "USMANNGSP",
+    "Consumer Electronics": "USMANNGSP",
     # Finance & Insurance (NAICS 52)
     "Banks - Diversified": "USFININSNGSP",
     "Banks - Regional": "USFININSNGSP",
     "Capital Markets": "USFININSNGSP",
-    "Insurance - Diversified": "USFININSNGSP",
     "Asset Management": "USFININSNGSP",
+    "Financial - Capital Markets": "USFININSNGSP",
+    "Investment - Banking & Investment Services": "USFININSNGSP",
+    "Insurance - Diversified": "USFININSNGSP",
+    "Insurance - Life": "USFININSNGSP",
+    "Insurance - Property & Casualty": "USFININSNGSP",
+    "Insurance - Reinsurance": "USFININSNGSP",
+    "Insurance - Brokers": "USFININSNGSP",
+    "Insurance - Specialty": "USFININSNGSP",
     # Health Care & Social Assistance (NAICS 62) ≈ $2.4T
-    "Healthcare Plans": "USHLTHSOCASSNGSP",
-    "Medical Care Facilities": "USHLTHSOCASSNGSP",
-    "Health Information Services": "USHLTHSOCASSNGSP",
+    "Medical - Healthcare Plans": "USHLTHSOCASSNGSP",
+    "Medical - Care Facilities": "USHLTHSOCASSNGSP",
+    "Medical - Healthcare Information Services": "USHLTHSOCASSNGSP",
+    "Medical - Distribution": "USHLTHSOCASSNGSP",
+    "Medical - Diagnostics & Research": "USHLTHSOCASSNGSP",
     # Mining, Quarrying, Oil & Gas (NAICS 21)
     "Oil & Gas Integrated": "USMINNGSP",
-    "Oil & Gas E&P": "USMINNGSP",
+    "Oil & Gas Exploration & Production": "USMINNGSP",
     "Oil & Gas Refining & Marketing": "USMINNGSP",
+    "Oil & Gas Midstream": "USMINNGSP",
+    "Oil & Gas Equipment & Services": "USMINNGSP",
     # Retail Trade (NAICS 44-45) ≈ $1.9T
     "Internet Retail": "USRETAILNGSP",
     "Specialty Retail": "USRETAILNGSP",
     "Discount Stores": "USRETAILNGSP",
-    "Apparel Retail": "USRETAILNGSP",
+    "Apparel - Retail": "USRETAILNGSP",
+    "Apparel - Footwear & Accessories": "USRETAILNGSP",
+    "Apparel - Manufacturers": "USRETAILNGSP",
     "Home Improvement Retail": "USRETAILNGSP",
-    # Wholesale Trade (NAICS 42) ≈ $1.9T
-    "Specialty Industrial Machinery": "USWHOLENGSP",
+    "Auto - Dealerships": "USRETAILNGSP",
     # Food Services (NAICS 722)
     "Restaurants": "USFOODDPNGSP",
+    # Construction (NAICS 23)
+    "Construction": "USCONSTNGSP",
+    "Construction Materials": "USCONSTNGSP",
+    "Engineering & Construction": "USCONSTNGSP",
+    "Residential Construction": "USCONSTNGSP",
+    # Utilities (NAICS 22)
+    "Regulated Electric": "USUTILNGSP",
+    "Regulated Gas": "USUTILNGSP",
+    "Regulated Water": "USUTILNGSP",
+    "Renewable Utilities": "USUTILNGSP",
+    "Independent Power Producers": "USUTILNGSP",
+    "Diversified Utilities": "USUTILNGSP",
+    # Real Estate (NAICS 53)
+    "Real Estate - Services": "USREALNGSP",
+    "REIT - Healthcare Facilities": "USREALNGSP",
+    "REIT - Hotel & Motel": "USREALNGSP",
+    "REIT - Industrial": "USREALNGSP",
+    "REIT - Office": "USREALNGSP",
+    "REIT - Residential": "USREALNGSP",
+    "REIT - Retail": "USREALNGSP",
+    "REIT - Specialty": "USREALNGSP",
+    "REIT - Diversified": "USREALNGSP",
+    "REIT - Mortgage": "USREALNGSP",
+    # Beverages (NAICS 3121)
+    "Beverages - Alcoholic": "USMANNGSP",
+    "Beverages - Non-Alcoholic": "USMANNGSP",
+    "Beverages - Wineries & Distilleries": "USMANNGSP",
 }
 
 
-# ── Census 4-digit NAICS mapping (more precise than FRED) ──────────────
+# ── Census NAICS mapping (4-digit, more precise than FRED) ─────────────
 #
-# FMP industry → (Census survey, NAICS code). When CENSUS_API_KEY is set
-# and the survey/NAICS combo returns data, this is preferred over FRED
-# because it pinpoints the actual industry (e.g., "Software Publishers"
-# instead of "all of Information sector").
+# FMP industry → NAICS 2017 code. Looked up via AIES (annual revenue,
+# latest year) + Economic Census 2017 (5y-prior baseline for CAGR).
+# All NAICS codes here were verified live to return data from both
+# endpoints; codes that AIES doesn't cover (e.g., NAICS 2111 oil & gas
+# extraction, NAICS 7221 restaurants) were intentionally left out so
+# those industries fall through to FRED.
 
-INDUSTRY_TO_CENSUS: Dict[str, Tuple[str, str]] = {
-    # Software Publishers (NAICS 5112) ≈ $300B — far more precise than
-    # the Information sector aggregate at FRED.
-    "Software - Infrastructure": ("sas", "5112"),
-    "Software - Application": ("sas", "5112"),
-    # Computer Systems Design and Related Services (NAICS 5415) ≈ $450B
-    "Information Technology Services": ("sas", "5415"),
-    # Internet publishing has shifted to NAICS 519 under 2022 — use 5191
-    "Internet Content & Information": ("sas", "5191"),
-    # Semiconductor and Other Electronic Component Manufacturing (NAICS 3344)
-    "Semiconductors": ("asm", "3344"),
-    "Semiconductor Equipment & Materials": ("asm", "3344"),
-    "Electronic Components": ("asm", "3344"),
-    # Pharmaceutical and Medicine Manufacturing (NAICS 3254)
-    "Drug Manufacturers - General": ("asm", "3254"),
-    "Drug Manufacturers - Specialty & Generic": ("asm", "3254"),
-    "Biotechnology": ("asm", "3254"),
-    # Medical Equipment and Supplies Manufacturing (NAICS 3391)
-    "Medical Devices": ("asm", "3391"),
-    # Motor Vehicle Manufacturing (NAICS 3361)
-    "Auto Manufacturers": ("asm", "3361"),
-    # Electronic Shopping and Mail-Order Houses (NAICS 4541)
-    "Internet Retail": ("arts", "4541"),
-    # Full-Service Restaurants (NAICS 7221) — closest to "Restaurants"
-    "Restaurants": ("sas", "7221"),
+INDUSTRY_TO_CENSUS: Dict[str, str] = {
+    # Software Publishers (NAICS 5112) — 2023 ≈ $526B, 2017 = $276B
+    # (vs. FRED's broader Information sector ≈ $1.7T).
+    "Software - Infrastructure": "5112",
+    "Software - Application": "5112",
+    "Software - Services": "5112",
+    # Computer Systems Design Services (NAICS 5415) — 2023 ≈ $631B
+    "Information Technology Services": "5415",
+    # Semiconductor and Other Electronic Component Mfg (NAICS 3344) —
+    # 2023 ≈ $117B. The actual semiconductor industry is larger globally
+    # but this is the US-domestic NAICS bucket.
+    "Semiconductors": "3344",
+    "Semiconductor Equipment & Materials": "3344",
+    "Electronic Components": "3344",
+    # Pharmaceutical and Medicine Mfg (NAICS 3254) — 2023 ≈ $249B
+    "Drug Manufacturers - General": "3254",
+    "Drug Manufacturers - Specialty & Generic": "3254",
+    "Biotechnology": "3254",
+    # Medical Equipment and Supplies Mfg (NAICS 3391) — 2023 ≈ $98B
+    "Medical - Devices": "3391",
+    "Medical - Instruments & Supplies": "3391",
+    # Motor Vehicle Mfg (NAICS 3361) — 2023 ≈ $481B
+    "Auto - Manufacturers": "3361",
+    # Motor Vehicle Parts Mfg (NAICS 3363) — 2023 ≈ $268B
+    "Auto - Parts": "3363",
+    # Electronic Shopping and Mail-Order Houses (NAICS 4541) — 2023 ≈ $1.16T
+    "Internet Retail": "4541",
 }
 
 
@@ -146,6 +200,10 @@ _FRED_SOURCE_LABELS: Dict[str, str] = {
     "USRETAILNGSP": "BEA Retail Trade GDP (via FRED)",
     "USWHOLENGSP": "BEA Wholesale Trade GDP (via FRED)",
     "USFOODDPNGSP": "BEA Food Services GDP (via FRED)",
+    "USREALNGSP": "BEA Real Estate & Rental GDP (via FRED)",
+    "USUTILNGSP": "BEA Utilities GDP (via FRED)",
+    "USCONSTNGSP": "BEA Construction GDP (via FRED)",
+    "USNGSP": "BEA US Total GDP, all industries (via FRED)",
 }
 
 
@@ -153,13 +211,13 @@ def _fred_source_label(series_id: str) -> str:
     return _FRED_SOURCE_LABELS.get(series_id, f"BEA {series_id} (via FRED)")
 
 
-def _census_source_label(survey: str, naics: str) -> str:
-    survey_name = {
-        "sas": "Service Annual Survey",
-        "asm": "Annual Survey of Manufactures",
-        "arts": "Annual Retail Trade Survey",
-    }.get(survey, survey.upper())
-    return f"US Census {survey_name} (NAICS {naics})"
+def _census_source_label(naics: str, label: str = "") -> str:
+    """Caption shown under the TAM row when Census produced the figure.
+    Includes the human-readable NAICS label when Economic Census gave us
+    one ("Software Publishers"), falling back to just the code."""
+    if label:
+        return f"US Census AIES — {label} (NAICS {naics})"
+    return f"US Census AIES (NAICS {naics})"
 
 
 def _project_5y(latest_value: float, cagr_decimal: float) -> float:
@@ -170,15 +228,17 @@ def _project_5y(latest_value: float, cagr_decimal: float) -> float:
     return latest_value * math.pow(1.0 + clamped, 5)
 
 
-async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
-    """FRED branch: BEA GDP-by-industry series. Returns None when the
-    industry isn't mapped, the FRED key isn't set, or the series has
-    insufficient observations.
-    """
-    series_id = INDUSTRY_TO_FRED_SERIES.get(industry)
-    if not series_id:
-        return None
+async def fred_tam_for_series(
+    series_id: str,
+    source_label: Optional[str] = None,
+) -> Optional[IndustryTAM]:
+    """Fetch a FRED nominal-dollar series and build the IndustryTAM shape.
 
+    Public-ish helper so callers outside this module (industry_dossier_service
+    for sector / all-industry fallback) can reuse the snapshot → TAM logic
+    without duplicating the millions-to-billions normalization and the 5y
+    CAGR computation.
+    """
     client = get_fred_client()
     if not client.is_configured:
         return None
@@ -186,8 +246,8 @@ async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
     obs = await client.get_observations(series_id, limit=8)
     if len(obs) < 2:
         logger.warning(
-            f"FRED series {series_id} returned {len(obs)} obs for industry "
-            f"{industry!r} — check series exists and FRED_API_KEY is set"
+            f"FRED series {series_id} returned {len(obs)} obs — "
+            "check series exists and FRED_API_KEY is set"
         )
         return None
     latest = obs[0]
@@ -200,7 +260,6 @@ async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
     except (AttributeError, ValueError, IndexError):
         return None
 
-    # Realized 5y CAGR (or shorter window when we don't have 6 obs yet).
     cagr_decimal = 0.0
     if len(obs) >= 6 and obs[5].value > 0:
         cagr_decimal = (latest.value / obs[5].value) ** (1.0 / 5) - 1.0
@@ -208,8 +267,6 @@ async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
         years = len(obs) - 1
         cagr_decimal = (latest.value / obs[-1].value) ** (1.0 / years) - 1.0
 
-    # FRED returns values in millions USD — convert to billions for iOS
-    # (matches the formatter's $B / $T scale).
     current_b = latest.value / 1000.0
     future_b = _project_5y(current_b, cagr_decimal)
 
@@ -218,35 +275,55 @@ async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
         future_tam=round(future_b, 1),
         current_year=current_year,
         future_year=str(int(current_year) + 5),
-        source_label=_fred_source_label(series_id),
+        source_label=source_label or _fred_source_label(series_id),
         cagr_5y_pct=round(cagr_decimal * 100, 1),
     )
 
 
-async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
-    """Census branch: NAICS-precise revenue from SAS / ASM / ARTS.
-
-    Returns None when the industry isn't mapped, the Census API key isn't
-    set (Census requires a key for every request, even on the free tier),
-    or the survey/NAICS combo returns no data.
+async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
+    """FRED branch: BEA GDP-by-industry series. Returns None when the
+    industry isn't mapped, the FRED key isn't set, or the series has
+    insufficient observations.
     """
-    lookup = INDUSTRY_TO_CENSUS.get(industry)
-    if not lookup:
+    series_id = INDUSTRY_TO_FRED_SERIES.get(industry)
+    if not series_id:
         return None
-    survey, naics = lookup
+    return await fred_tam_for_series(series_id)
+
+
+async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
+    """Census branch: NAICS-precise revenue from AIES (latest) +
+    Economic Census 2017 (baseline for CAGR).
+
+    Returns None when the industry isn't mapped, the Census API key
+    isn't set (Census requires a key for every request, even free tier),
+    or AIES doesn't cover the NAICS code (e.g., oil & gas extraction).
+    """
+    naics = INDUSTRY_TO_CENSUS.get(industry)
+    if not naics:
+        return None
 
     client = get_census_client()
     if not client.is_configured:
         return None
 
-    snapshot = await client.get_industry_revenue_snapshot(survey, naics)
+    snapshot = await client.get_industry_revenue_snapshot(naics)
     if snapshot is None:
         return None
 
-    cagr_decimal = 0.0
-    if snapshot.revenue_usd_5y_ago and snapshot.revenue_usd_5y_ago > 0:
+    # CAGR over `years_apart` years (typically 6 = 2023 AIES - 2017 ECN).
+    # `years_apart` is None when the baseline call failed; we still emit
+    # TAM in that case, just without a CAGR.
+    cagr_decimal: float = 0.0
+    if (
+        snapshot.revenue_usd_baseline
+        and snapshot.revenue_usd_baseline > 0
+        and snapshot.years_apart
+        and snapshot.years_apart > 0
+    ):
         cagr_decimal = (
-            (snapshot.revenue_usd / snapshot.revenue_usd_5y_ago) ** (1.0 / 5)
+            (snapshot.revenue_usd / snapshot.revenue_usd_baseline)
+            ** (1.0 / snapshot.years_apart)
             - 1.0
         )
 
@@ -258,7 +335,7 @@ async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
         future_tam=round(future_b, 1),
         current_year=str(snapshot.year),
         future_year=str(snapshot.year + 5),
-        source_label=_census_source_label(survey, naics),
+        source_label=_census_source_label(naics, snapshot.naics_label),
         cagr_5y_pct=round(cagr_decimal * 100, 1) if cagr_decimal else None,
     )
 

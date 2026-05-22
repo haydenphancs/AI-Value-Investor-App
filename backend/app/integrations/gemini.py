@@ -13,6 +13,8 @@ import hashlib
 import time
 from functools import wraps
 
+import httpx
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -387,6 +389,130 @@ Provide ONLY the bullet points, no additional commentary."""
             "summary": response["text"],
             "bullets": bullets[:max_bullets],
             **response
+        }
+
+    @async_retry(max_attempts=2, delay=2.0)
+    async def generate_grounded_research(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        model_name: Optional[str] = None,
+        temperature: float = 0.3,
+        max_output_tokens: int = 8192,
+    ) -> Dict[str, Any]:
+        """
+        Generate text with **Google Search grounding** enabled.
+
+        The Python SDK 0.8.3 doesn't expose the `google_search` tool
+        through the high-level `GenerativeModel(tools=...)` API, so we
+        post directly to the Gemini REST endpoint. The response includes
+        `groundingMetadata.groundingChunks` with the actual web URLs
+        Gemini consulted — the audit log uses those (more trustworthy
+        than asking the model to self-report sources).
+
+        Args:
+            prompt: User prompt.
+            system_instruction: Optional system instruction.
+            model_name: Optional model override (defaults to settings.GEMINI_MODEL).
+            temperature: Lower = more deterministic. 0.3 is a good default
+                for research-style synthesis.
+            max_output_tokens: Cap on generated tokens.
+
+        Returns:
+            dict with keys:
+              - text: the raw response text (parse JSON / extract code fences
+                in the caller)
+              - tokens_used: total token count if available
+              - grounding_sources: list of {title, uri, publisher} dicts
+                extracted from groundingMetadata (deduped by uri)
+              - search_queries: list of search query strings Gemini ran
+        """
+        model = model_name or self.model_name
+        api_key = settings.GEMINI_API_KEY
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={api_key}"
+        )
+
+        body: Dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt}], "role": "user"}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_output_tokens,
+            },
+        }
+        if system_instruction:
+            body["systemInstruction"] = {
+                "parts": [{"text": system_instruction}]
+            }
+
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, json=body)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Gemini grounded research HTTP error: %s — body: %s",
+                exc.response.status_code, exc.response.text[:300],
+            )
+            raise
+        except Exception as exc:
+            logger.error("Gemini grounded research failed: %s", exc, exc_info=True)
+            raise
+
+        # Parse response
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return {"text": "", "tokens_used": None, "grounding_sources": [], "search_queries": []}
+        cand = candidates[0]
+        parts = ((cand.get("content") or {}).get("parts") or [])
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+
+        # Extract grounding sources — deduped by uri.
+        sources: List[Dict[str, str]] = []
+        seen_uris: set = set()
+        grounding = cand.get("groundingMetadata") or {}
+        for chunk in grounding.get("groundingChunks") or []:
+            web = (chunk or {}).get("web") or {}
+            uri = web.get("uri") or ""
+            title = web.get("title") or ""
+            if uri and uri not in seen_uris:
+                seen_uris.add(uri)
+                # Try to derive a publisher from the URL host
+                try:
+                    from urllib.parse import urlparse
+                    host = urlparse(uri).hostname or ""
+                    publisher = host.replace("www.", "").split(".")[0] if host else ""
+                except Exception:
+                    publisher = ""
+                sources.append({
+                    "title": title[:200],
+                    "uri": uri,
+                    "publisher": publisher,
+                })
+
+        search_queries = list(grounding.get("webSearchQueries") or [])
+
+        tokens_used = (
+            (data.get("usageMetadata") or {}).get("totalTokenCount")
+        )
+        finish_reason = cand.get("finishReason")
+        if finish_reason and finish_reason != "STOP":
+            logger.warning(
+                "Gemini grounded research finished with reason=%s — response may be truncated",
+                finish_reason,
+            )
+
+        return {
+            "text": text,
+            "tokens_used": tokens_used,
+            "grounding_sources": sources,
+            "search_queries": search_queries,
+            "finish_reason": finish_reason,
+            "model": model,
         }
 
     @async_retry(max_attempts=2, delay=2.0)

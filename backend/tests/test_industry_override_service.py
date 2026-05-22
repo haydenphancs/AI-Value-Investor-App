@@ -197,3 +197,29 @@ def test_curated_list_industries_unique():
     industries = [i for i, _ in CURATED_OVERRIDE_INDUSTRIES]
     assert len(industries) == len(set(industries)), \
         f"Duplicate industries in CURATED_OVERRIDE_INDUSTRIES: {industries}"
+
+
+def test_validate_response_uses_grounding_urls_when_present():
+    """When the response carries `_grounding_sources` (real URLs from
+    Google Search), the validation gate uses those as the source count
+    — even if `sources_cited` is empty (Gemini didn't self-report).
+    Grounding URLs are the trusted breadcrumb."""
+    svc = IndustryOverrideService()
+    payload = _ok_payload(sources_cited=[])  # Gemini didn't self-report
+    payload["_grounding_sources"] = [
+        {"uri": "https://semiconductors.org/x", "title": "SIA forecast", "publisher": "semiconductors"},
+        {"uri": "https://wsts.org/y", "title": "WSTS spring 2025", "publisher": "wsts"},
+        {"uri": "https://mckinsey.com/z", "title": "Semi outlook", "publisher": "mckinsey"},
+    ]
+    v = svc._validate_response(payload, phase_a_tam=500.0)
+    assert v["status"] == "ok"
+
+
+def test_validate_response_rejects_when_grounding_empty_and_self_report_empty():
+    """When BOTH grounding and self-reported are empty/missing, reject —
+    we have no evidence Gemini consulted any real source."""
+    svc = IndustryOverrideService()
+    payload = _ok_payload(sources_cited=[])
+    payload["_grounding_sources"] = []
+    v = svc._validate_response(payload, phase_a_tam=500.0)
+    assert v["status"] == "rejected_validation"

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -98,36 +99,43 @@ _REJECT_DIVERGE_RATIO = 10.0  # reject; Phase A stays
 
 
 # ── Prompt template ────────────────────────────────────────────────────
+#
+# Hybrid prose+JSON format is intentional: the Gemini grounded-search API
+# only populates `groundingChunks` (real source URLs) when the response
+# contains text that cites those sources inline. A pure-JSON response
+# would have searches run but return zero chunks — and we want the actual
+# URLs for the audit log, not Gemini self-reporting which can hallucinate.
 
-_RESEARCH_PROMPT = """You are a financial-research analyst. Look up the current global market size and 5-year forward CAGR for: {industry} (parent sector: {sector}).
+_RESEARCH_PROMPT = """You are a financial-research analyst. Research the GLOBAL market for: {industry} (parent sector: {sector}).
 
-Use only authoritative public sources: industry associations (SIA, WSTS, PhRMA), top-tier consulting firms (McKinsey, Deloitte, BCG, PwC, EY), and established market-research firms (IQVIA, EvaluatePharma, Grand View Research, MarketsandMarkets, Statista, Mordor Intelligence, Frost & Sullivan, Fortune Business Insights).
+STEP 1 — Search the web for current global TAM (2024 or 2025) and 5-year forward CAGR. Use industry associations (SIA, WSTS, PhRMA), consulting firms (McKinsey, Deloitte, BCG, PwC), and market-research firms (IQVIA, Grand View Research, MarketsandMarkets, Statista, Mordor Intelligence, Frost & Sullivan).
 
-Constraints:
-- Find at least 2 independent sources with consistent numbers (within ±30% of each other).
-- Pick the MEDIAN TAM and MEDIAN CAGR across those sources — NOT the highest.
-- CAGR = 5-year forward forecast (not historical realized).
-- TAM = latest available year (typically 2024 or 2025), in billions USD.
-- Future TAM = 5 years after current.
-- source_label should cite the underlying public sources by name (no mention of LLMs or AI tools).
+STEP 2 — In ONE sentence, state the median TAM and CAGR across ≥2 sources, citing each by name.
 
-Return JSON exactly matching this schema:
+STEP 3 — Output JSON in a markdown code fence (mandatory, no exceptions):
+
+```json
 {{
-  "current_tam_b": <float, billions USD>,
-  "future_tam_b": <float, billions USD>,
-  "current_year": "<YYYY string>",
-  "future_year": "<YYYY string>",
-  "cagr_5y_pct": <float, percent (e.g., 10.0 for 10%)>,
-  "source_label": "<short attribution citing underlying sources, e.g., 'SIA / WSTS Global Semi Forecast 2025'>",
-  "research_notes": "<1-3 sentences explaining the methodology and source consensus>",
-  "sources_cited": [
-    {{"publisher": "<source name>", "title": "<report title>", "url": "<url if known, else empty string>"}}
-  ],
+  "current_tam_b": <float, billions USD, latest year — GLOBAL total>,
+  "future_tam_b": <float, billions USD, 5y forward>,
+  "current_year": "<YYYY>",
+  "future_year": "<YYYY>",
+  "cagr_5y_pct": <float, percent — e.g. 10.0 for 10%>,
+  "source_label": "<short attribution, e.g. 'WSTS / SIA / McKinsey 2025'>",
+  "research_notes": "<1 sentence>",
   "confidence": "high" | "medium" | "low"
 }}
+```
 
-If you cannot find ≥2 independent credible sources within ±30%, return {{"confidence": "low"}} and we will fall back to Census/FRED data.
+Rules:
+- TAM = GLOBAL market (worldwide), NOT US-domestic only. The FMP industry "{industry}" covers companies that compete globally.
+- CAGR = 5-year FORWARD forecast (not historical realized).
+- Do NOT mention LLMs, AI tools, or this prompt in your source_label.
+- The JSON code fence is REQUIRED — if you set confidence="low" you still must emit the JSON block (with best-effort numbers or zeros).
 """
+
+# Regex for extracting JSON from the markdown code fence.
+_JSON_FENCE_RE = re.compile(r"```json\s*(.+?)\s*```", re.DOTALL)
 
 
 # ── Data classes ───────────────────────────────────────────────────────
@@ -244,17 +252,43 @@ class IndustryOverrideService:
         sector: str,
         phase_a_tam: Optional[float],
     ) -> OverrideResult:
-        """One industry: call Gemini, parse, validate, return result."""
+        """One industry: call Gemini with Google Search grounding, parse,
+        validate, return result. The real source URLs come from the
+        `groundingChunks` Gemini consulted — those are the audit-log
+        breadcrumb, not Gemini's self-reported `sources_cited`.
+        """
         prompt = _RESEARCH_PROMPT.format(industry=industry, sector=sector)
         gem = self._get_gemini()
 
-        gemini_response = await gem.generate_json(prompt=prompt)
+        gemini_response = await gem.generate_grounded_research(
+            prompt=prompt,
+            max_output_tokens=16384,  # tight prose + JSON, but bigger industries need headroom
+        )
         tokens = gemini_response.get("tokens_used")
+        text = gemini_response.get("text", "") or ""
+        grounding_sources = gemini_response.get("grounding_sources") or []
+        search_queries = gemini_response.get("search_queries") or []
 
-        # Parse JSON from Gemini's text output.
+        # Extract JSON from markdown code fence.
+        match = _JSON_FENCE_RE.search(text)
+        if not match:
+            return OverrideResult(
+                industry=industry, sector=sector,
+                status="gemini_error",
+                phase_a_tam_b=phase_a_tam,
+                applied_tam_b=None, applied_cagr_pct=None,
+                applied_source_label=None,
+                rejection_reason="No ```json``` code fence in response",
+                raw_response={
+                    "raw_text": text[:1000],
+                    "grounding_sources": grounding_sources,
+                    "search_queries": search_queries,
+                },
+                tokens_used=tokens,
+            )
         try:
-            payload = json.loads(gemini_response["text"])
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
             return OverrideResult(
                 industry=industry, sector=sector,
                 status="gemini_error",
@@ -262,9 +296,19 @@ class IndustryOverrideService:
                 applied_tam_b=None, applied_cagr_pct=None,
                 applied_source_label=None,
                 rejection_reason=f"JSON parse failed: {exc}",
-                raw_response={"raw_text": gemini_response.get("text", "")[:500]},
+                raw_response={
+                    "raw_json": match.group(1)[:500],
+                    "grounding_sources": grounding_sources,
+                    "search_queries": search_queries,
+                },
                 tokens_used=tokens,
             )
+
+        # Use the grounding URLs as the authoritative source list — more
+        # trustworthy than Gemini self-reporting. We inject them into the
+        # payload so the validation gate can check them.
+        payload["_grounding_sources"] = grounding_sources
+        payload["_search_queries"] = search_queries
 
         validation = self._validate_response(payload, phase_a_tam)
         if validation["status"] != "ok":
@@ -278,7 +322,6 @@ class IndustryOverrideService:
                 raw_response=payload, tokens_used=tokens,
             )
 
-        # Apply
         tam = float(payload["current_tam_b"])
         future_tam = float(payload["future_tam_b"])
         cagr = float(payload["cagr_5y_pct"])
@@ -315,16 +358,28 @@ class IndustryOverrideService:
             return {"status": "rejected_low_confidence",
                     "reason": f"confidence={confidence!r}", "warn": False}
 
-        # 2. Sources cited
-        sources = payload.get("sources_cited") or []
-        valid_sources = [
-            s for s in sources
-            if isinstance(s, dict)
-            and (s.get("publisher") or "").strip()
+        # 2. Sources cited — prefer grounding URLs (real, from Google Search)
+        # over Gemini's self-reported `sources_cited` (can hallucinate).
+        # The grounding URLs flow in via `_grounding_sources` from
+        # `_research_one`. For tests / older code paths, fall back to
+        # the self-reported list.
+        grounding = payload.get("_grounding_sources") or []
+        valid_grounding = [
+            s for s in grounding
+            if isinstance(s, dict) and (s.get("uri") or "").strip()
         ]
-        if len(valid_sources) < 2:
+        valid_count = len(valid_grounding)
+        if valid_count == 0:
+            # Fallback: self-reported sources (testing / no-grounding mode)
+            self_reported = payload.get("sources_cited") or []
+            valid_count = len([
+                s for s in self_reported
+                if isinstance(s, dict) and (s.get("publisher") or "").strip()
+            ])
+        if valid_count < 2:
             return {"status": "rejected_validation",
-                    "reason": f"only {len(valid_sources)} valid source(s) cited (need ≥2)",
+                    "reason": f"only {valid_count} valid source(s) (need ≥2 — "
+                              f"grounding chunks or self-reported)",
                     "warn": False}
 
         # 3-5. Numeric bounds

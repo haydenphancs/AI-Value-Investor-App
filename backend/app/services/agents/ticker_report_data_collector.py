@@ -2992,7 +2992,7 @@ def _apply_tam_source(
     ai_md: Optional[Dict[str, Any]],
     industry_tam: Optional[Any],
 ) -> None:
-    """Apply TAM with priority chain: AI quote → FRED proxy → leave 0.
+    """Apply TAM with priority chain: AI quote → industry proxy → leave 0.
 
     Mutates `market_dynamics` in place. Sets `tam_source_label` to a
     short caption iOS shows under the TAM row so users know which
@@ -3002,9 +3002,14 @@ def _apply_tam_source(
     earnings transcript. Requires both a positive number AND a non-empty
     source quote — strict to prevent fabrication.
 
-    Priority 2: FRED BEA value-added industry series. Honest about being
-    an industry-size proxy (caption says e.g. "BEA Information Sector
-    via FRED"), not company-specific TAM.
+    Priority 2: industry-level proxy (Census 4-digit NAICS preferred,
+    FRED 2-digit sector as fallback — chain resolved upstream in
+    `industry_tam_service.get_industry_tam`). Caption is the source's
+    own label so the user sees which dataset produced the figure.
+
+    The industry proxy ALSO sets `cagr_5yr` when the sector_aggregates
+    batch hasn't produced one — keeps the CAGR cell from rendering as
+    "—" when we have a defensible sector growth rate.
 
     Priority 3: leave 0.0 / null. iOS renders "—" instead of "$0B".
     """
@@ -3038,13 +3043,19 @@ def _apply_tam_source(
                         market_dynamics["future_year"] = s
                 return
 
-    # Priority 2: FRED industry proxy
+    # Priority 2: industry-level proxy (Census → FRED chain)
     if industry_tam is not None:
         market_dynamics["current_tam"] = industry_tam.current_tam
         market_dynamics["future_tam"] = industry_tam.future_tam
         market_dynamics["current_year"] = industry_tam.current_year
         market_dynamics["future_year"] = industry_tam.future_year
         market_dynamics["tam_source_label"] = industry_tam.source_label
+        # Surface the industry's realized CAGR only when sector_aggregates
+        # didn't already produce one — preserves higher-trust source.
+        if market_dynamics.get("cagr_5yr") is None:
+            cagr = getattr(industry_tam, "cagr_5y_pct", None)
+            if cagr is not None:
+                market_dynamics["cagr_5yr"] = cagr
         return
 
     # Priority 3: leave at 0.0 / null (iOS hides)

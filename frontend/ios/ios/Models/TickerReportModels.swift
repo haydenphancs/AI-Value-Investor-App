@@ -924,6 +924,73 @@ struct MarketDynamics {
         guard tamIsAvailable else { return "—" }
         return "\(formattedCurrentTAM) → \(formattedFutureTAM)"
     }
+
+    // MARK: - Today-aligned projection
+    //
+    // Phase A (Census/FRED) data is typically a year or two stale —
+    // e.g., Census AIES "Software publishers" data is 2023 even when a
+    // user opens the report in 2026. To keep the displayed years
+    // current AND the math honest, project the source TAM forward to
+    // today using the source CAGR. If the source is already current
+    // (Gemini overrides, FMP transcript quotes), `yearsToProject` is 0
+    // and the displayed values equal the raw source values.
+
+    private var todayYear: Int {
+        Calendar.current.component(.year, from: Date())
+    }
+
+    private var sourceYearInt: Int? { Int(currentYear) }
+    private var futureYearInt: Int? { Int(futureYear) }
+
+    private var yearsToProject: Int {
+        guard let src = sourceYearInt else { return 0 }
+        return max(0, todayYear - src)
+    }
+
+    private var projectionMultiplier: Double {
+        guard yearsToProject > 0, let cagr = cagr5Yr else { return 1.0 }
+        return pow(1.0 + (cagr / 100.0), Double(yearsToProject))
+    }
+
+    /// Year shown in the UI as "current". Bumped forward to today when
+    /// the underlying data is older than today.
+    var displayedCurrentYear: String {
+        guard yearsToProject > 0 else { return currentYear }
+        return String(todayYear)
+    }
+
+    /// Future year shown in the UI. Preserves the source data's
+    /// (future − current) span (typically 5 years) but anchored to
+    /// `displayedCurrentYear` rather than the stale source year.
+    var displayedFutureYear: String {
+        guard let src = sourceYearInt, let fut = futureYearInt else {
+            return futureYear
+        }
+        let span = fut - src
+        let anchor = Int(displayedCurrentYear) ?? src
+        return String(anchor + span)
+    }
+
+    /// Current TAM projected forward to `displayedCurrentYear` using CAGR.
+    var displayedCurrentTAM: Double { currentTAM * projectionMultiplier }
+
+    /// Future TAM projected forward by the same multiplier so the
+    /// implied CAGR over (displayedFuture − displayedCurrent) is unchanged.
+    var displayedFutureTAM: Double { futureTAM * projectionMultiplier }
+
+    var formattedDisplayedCurrentTAM: String {
+        let v = displayedCurrentTAM
+        return v >= 1000
+            ? String(format: "$%.1fT", v / 1000)
+            : String(format: "$%.0fB", v)
+    }
+
+    var formattedDisplayedFutureTAM: String {
+        let v = displayedFutureTAM
+        return v >= 1000
+            ? String(format: "$%.1fT", v / 1000)
+            : String(format: "$%.0fB", v)
+    }
 }
 
 enum MoatOverallRating: String {
@@ -944,14 +1011,6 @@ enum MoatOverallRating: String {
         case .wide: return AppColors.alertPurple.opacity(0.15)
         case .narrow: return AppColors.accentYellow.opacity(0.15)
         case .none: return AppColors.textSecondary.opacity(0.15)
-        }
-    }
-
-    var meaning: String {
-        switch self {
-        case .wide: return ""
-        case .narrow: return "Strong defense, but beatable."
-        case .none: return "No structural advantage."
         }
     }
 

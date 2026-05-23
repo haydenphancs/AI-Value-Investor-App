@@ -17,6 +17,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.services.agents.ticker_report_data_collector import (
+    _INDUSTRY_PEERS_CACHE,
     _apply_tam_source,
     _build_competitors,
     _build_insider_sections,
@@ -29,6 +30,7 @@ from app.services.agents.ticker_report_data_collector import (
     _build_wall_street_sections,
     _classify_news_catalyst,
     _extract_tam_relevant_excerpt,
+    _industry_universe_peers,
     _merge_macro_risk_factors,
     _overlay_ai_guidance,
     _safe_cagr,
@@ -827,6 +829,44 @@ def test_build_competitors_excludes_focal_ticker():
     assert len(out) == 1
 
 
+def test_industry_universe_peers_sorts_by_mcap_and_excludes():
+    """`_industry_universe_peers` returns same-industry tickers from
+    the cached universe sorted by market cap desc, minus tickers in
+    `exclude`. Stub the cache so the test doesn't depend on the live
+    industry_universe.json file."""
+    industry = "Test-Industry"
+    # Pre-populate the cache as if the loader already ran. Order in
+    # the cache reflects what `_load_industry_peers_from_universe`
+    # would have produced (already mkt-cap sorted).
+    _INDUSTRY_PEERS_CACHE[industry] = [
+        "MSFT",  # largest
+        "ORCL",
+        "CRM",
+        "NOW",
+        "ADBE",
+    ]
+    try:
+        # Caller passes focal ticker + already-known FMP peers in `exclude`.
+        out = _industry_universe_peers(
+            industry, exclude={"ORCL", "MSFT"}
+        )
+        # Returns the rest, in original (mkt-cap) order, capped at 20.
+        assert out == ["CRM", "NOW", "ADBE"]
+
+        # Empty industry → empty list, doesn't touch cache.
+        assert _industry_universe_peers("", exclude=set()) == []
+
+        # Unknown industry → empty list (loader would return []).
+        # Stub to mimic the cached-miss-then-empty path.
+        _INDUSTRY_PEERS_CACHE["No-Such-Industry"] = []
+        assert _industry_universe_peers(
+            "No-Such-Industry", exclude=set()
+        ) == []
+    finally:
+        _INDUSTRY_PEERS_CACHE.pop(industry, None)
+        _INDUSTRY_PEERS_CACHE.pop("No-Such-Industry", None)
+
+
 def test_build_competitors_drops_micro_cap_misclassifications():
     """FMP's `stock-peers` endpoint sometimes returns obvious
     misclassifications (e.g., Helport AI listed as ORCL peer). The
@@ -846,18 +886,40 @@ def test_build_competitors_drops_micro_cap_misclassifications():
     assert "MSFT" in tickers
 
 
-def test_build_competitors_caps_at_top_5():
-    """Even with many valid peers, only the top 5 by mktCap make the
-    cut — iOS's competitor card list is sized for 5 entries."""
+def test_build_competitors_caps_at_max_n():
+    """When many peers pass the floor, the list is bounded at
+    `_COMPETITOR_MAX_N` (7) — wide enough to surface real competitive
+    depth for mega-caps without flooding the iOS card list. Industries
+    with fewer same-tier peers naturally return fewer; this test
+    exercises the upper bound."""
     peers = [
         _peer(f"P{i}", f"Peer {i}", (10 - i) * 50_000_000_000)
-        for i in range(8)
+        for i in range(10)  # 10 candidates all above $50B → all pass floor
     ]
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
     )
-    assert len(out) == 5
+    assert len(out) == 7
+
+
+def test_build_competitors_returns_all_survivors_when_below_cap():
+    """Variable count: when only e.g. 3 peers survive the floor, return
+    all 3 — don't pad, don't truncate. This is the "dynamic" behavior
+    so niche tickers show fewer competitors than mega-caps."""
+    peers = [
+        _peer("BIG1", "Big 1", 100_000_000_000),
+        _peer("BIG2", "Big 2", 80_000_000_000),
+        _peer("BIG3", "Big 3", 60_000_000_000),
+        _peer("TINY", "Tiny", 100_000_000),  # below $5B floor → dropped
+    ]
+    out = _build_competitors(
+        my_ticker="AAPL",
+        my_profile={"mktCap": 500_000_000_000},
+        my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+    )
+    assert len(out) == 3
+    assert {c["ticker"] for c in out} == {"BIG1", "BIG2", "BIG3"}
 
 
 def test_build_competitors_threat_level_assigned():

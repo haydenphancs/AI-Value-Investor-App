@@ -256,15 +256,41 @@ def _moat_durability_note_prompt(
     moat = shell.get("moat_competition", {})
     dims = moat.get("dimensions", [])
     top = max(dims, key=lambda d: float(d.get("score") or 0.0), default={})
+    max_score = float(top.get("score") or 0.0)
+
+    # Mirror the iOS rating thresholds (MoatOverallRating.from(dimensions:)
+    # in TickerReportModels.swift) so the AI's qualitative tone matches
+    # the WIDE/NARROW/NONE badge users see on the moat header. The
+    # iOS app no longer renders a separate tagline — this insight now
+    # carries the whole qualitative signal.
+    if max_score >= 8.5:
+        strength_hint = (
+            "WIDE moat — convey ELITE, durable defense. "
+            "Phrases like 'fortress', 'wonderfully sticky', 'hard to dislodge' fit."
+        )
+    elif max_score >= 7.0:
+        strength_hint = (
+            "NARROW moat — convey STRONG-BUT-BEATABLE defense. "
+            "Phrases like 'sticky but beatable', 'credible threats remain', "
+            "'durable but not impregnable' fit."
+        )
+    else:
+        strength_hint = (
+            "NO moat — convey LACK of structural advantage. "
+            "Phrases like 'exposed', 'no real defense', 'commodity-like' fit."
+        )
+
     return f"""Write a one-line judgment on how durable this company's moat is.
 
 TOP MOAT SOURCE: {top.get('name', 'unknown')} (score {top.get('score', 0)}/10)
 ALL DIMENSIONS: {", ".join(f"{d.get('name')} {d.get('score')}/10" for d in dims) or "none"}
+MOAT STRENGTH: {strength_hint}
 
 {_style_block(persona)}
 {_length_brief(1, 20)}
 
-Name the specific threat or staying power — don't just restate the score."""
+Name the specific threat or staying power — don't just restate the score.
+Weave the moat-strength tone naturally into the phrasing."""
 
 
 def _moat_competitive_insight_prompt(

@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any, Callable
 import logging
 import asyncio
 import hashlib
+import re
 import time
 from functools import wraps
 
@@ -481,13 +482,25 @@ Provide ONLY the bullet points, no additional commentary."""
             title = web.get("title") or ""
             if uri and uri not in seen_uris:
                 seen_uris.add(uri)
-                # Try to derive a publisher from the URL host
-                try:
-                    from urllib.parse import urlparse
-                    host = urlparse(uri).hostname or ""
-                    publisher = host.replace("www.", "").split(".")[0] if host else ""
-                except Exception:
-                    publisher = ""
+                # Gemini grounded search returns Vertex AI Search redirect
+                # URIs (vertexaisearch.cloud.google.com/...), so the URL host
+                # is always "vertexaisearch" — useless as a publisher. The
+                # real publisher domain comes through in `title` as a bare
+                # host like "infosys.com". Prefer that; fall back to the URI
+                # host only when the title isn't a domain (non-grounded
+                # responses, future API changes).
+                publisher = ""
+                title_clean = (title or "").strip().lower()
+                if re.match(r"^[\w.-]+\.[a-z]{2,}$", title_clean):
+                    publisher = title_clean.replace("www.", "").split(".")[0]
+                else:
+                    try:
+                        from urllib.parse import urlparse
+                        host = urlparse(uri).hostname or ""
+                        if host and "vertexaisearch" not in host:
+                            publisher = host.replace("www.", "").split(".")[0]
+                    except Exception:
+                        pass
                 sources.append({
                     "title": title[:200],
                     "uri": uri,

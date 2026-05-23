@@ -142,17 +142,19 @@ async def _run_sector_benchmark_job():
 
 
 def _next_quarterly_dossier_run(now: "datetime") -> "datetime":
-    """First Sunday of January / April / July / October at 2 AM local.
+    """First Sunday of January / April / July / October at 02:00 UTC.
 
     Picks the next such datetime strictly after `now`. Module-level so
     it can be unit-tested independently of the long-running job loop.
+    `now` must be a timezone-aware UTC datetime.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     candidates = []
     for year_offset in (0, 1):
         for month in (1, 4, 7, 10):
-            anchor = datetime(now.year + year_offset, month, 1, 2, 0, 0)
+            anchor = datetime(now.year + year_offset, month, 1, 2, 0, 0,
+                              tzinfo=timezone.utc)
             days_to_sunday = (6 - anchor.weekday()) % 7
             first_sunday = anchor + timedelta(days=days_to_sunday)
             if first_sunday > now:
@@ -162,7 +164,7 @@ def _next_quarterly_dossier_run(now: "datetime") -> "datetime":
 
 async def _run_industry_dossier_job():
     """Background task: recompute the industry_dossier table quarterly
-    on the first Sunday of January / April / July / October at 2 AM.
+    on the first Sunday of January / April / July / October at 02:00 UTC.
 
     The recompute itself is two-phase:
       Phase A — Census/FRED 4-tier chain (industry_dossier_service)
@@ -174,12 +176,12 @@ async def _run_industry_dossier_job():
     per-iteration try/except so a single failed quarter doesn't break
     the loop.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     await asyncio.sleep(120)  # let app fully start
 
     while True:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         next_run = _next_quarterly_dossier_run(now)
         sleep_seconds = (next_run - now).total_seconds()
         logger.info(

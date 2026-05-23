@@ -13,9 +13,12 @@ internet content), this service:
   1. Asks Gemini (Google Search grounded) for the current global TAM +
      5y forward CAGR with guidance to cite authoritative sources (SIA,
      IQVIA, McKinsey, Grand View Research, etc.) and return JSON.
-  2. Runs *numeric/structural* validation only — bounds, year parsing,
-     `future_tam <= 5x current_tam`. Confidence and Phase-A divergence
-     are NOT gated; the operator reviews the audit log to decide.
+  2. Runs *numeric/structural* validation — bounds, year parsing,
+     `future_tam <= 5x current_tam` — and a Phase-A FLOOR: Gemini's
+     TAM must be ≥ Phase A's TAM, or the row is rejected and Phase A
+     stays. Rationale: this override exists to FIX Census/FRED
+     undercounting, never to lower the TAM. Confidence and ratio-of-
+     divergence are NOT gated; the operator reviews the audit log.
   3. Writes accepted overrides to `industry_dossier` (overwrites the
      Phase A row for that industry).
   4. Logs every attempt to `industry_override_audit` (the breadcrumb
@@ -435,13 +438,27 @@ class IndustryOverrideService:
             return {"status": "rejected_validation",
                     "reason": f"future_year {future_year} <= current_year {current_year}"}
 
-        # 3. Log Phase-A divergence as info for audit context (no gating)
+        # 3. Phase-A floor — the override exists to FIX Census/FRED
+        # US-domestic undercounting of GLOBAL TAM. If Gemini comes back
+        # LOWER than Phase A, the search either narrowed the industry
+        # definition (e.g. only the ad market, not all internet content)
+        # or hallucinated low — reject and keep Phase A's value.
         if phase_a_tam and phase_a_tam > 0:
-            ratio = max(current_tam / phase_a_tam, phase_a_tam / current_tam)
+            if current_tam < phase_a_tam:
+                return {
+                    "status": "rejected_below_phase_a",
+                    "reason": (
+                        f"Gemini TAM ${current_tam:,.1f}B < Phase A "
+                        f"${phase_a_tam:,.1f}B; override only raises, "
+                        f"never lowers"
+                    ),
+                }
+            ratio = current_tam / phase_a_tam
             if ratio > 3.0:
                 logger.info(
-                    "industry_override: TAM divergence %.1fx (Phase A=%s, Gemini=%s) — "
-                    "applying anyway (trust mode, operator reviews audit log)",
+                    "industry_override: TAM divergence %.1fx "
+                    "(Phase A=%s, Gemini=%s) — applying (Gemini higher, "
+                    "operator reviews audit log)",
                     ratio, phase_a_tam, current_tam,
                 )
 

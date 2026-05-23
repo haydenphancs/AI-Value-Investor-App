@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
@@ -550,6 +552,22 @@ class TickerReportDataCollector:
         peers = (out.peer_tickers or [])[:8]
         sector = (out.profile or {}).get("sector")
         industry = (out.profile or {}).get("industry")
+
+        # FMP's `/stock-peers` endpoint is unreliable for mega-caps
+        # (returns micro-cap noise, or nothing). When it gives us
+        # fewer than 5 candidates, augment with same-industry
+        # constituents from the universe file. They still must survive
+        # `_build_competitors()`'s mkt-cap floor — so the "don't
+        # fabricate" guarantee is unchanged; we're just feeding the
+        # filter more material to evaluate.
+        if industry and len(peers) < 5:
+            augment = _industry_universe_peers(
+                industry,
+                exclude={ticker.upper(), *(p.upper() for p in peers)},
+            )
+            # Preserve order: FMP peers first (deterministic for tests),
+            # then universe augmentation. Cap at 12 candidates total.
+            peers = list(dict.fromkeys(peers + augment))[:12]
 
         peer_profiles_task = (
             self.fmp.get_company_profiles_batch(peers)
@@ -3692,7 +3710,72 @@ def _normalize_to_0_10(values: List[float]) -> List[float]:
 
 _COMPETITOR_MKT_CAP_FLOOR_RATIO = 0.05    # 5% of focal mkt cap
 _COMPETITOR_MKT_CAP_FLOOR_ABS = 5_000_000_000.0   # $5B hard floor
-_COMPETITOR_TOP_N = 5
+# Variable count: take EVERY peer that survives the mkt-cap floor, up to
+# this ceiling. Industries with many same-tier rivals (mega-cap software
+# like ORCL → MSFT/PLTR/PANW/CRWD/SNPS/FTNT/NET) naturally show 6-7;
+# niche or small-cap tickers with fewer comparable peers show 3-5;
+# outliers (no peer survives the floor) show 0 with the iOS empty state.
+# The floor is the quality gate — this cap just bounds the UI list.
+_COMPETITOR_MAX_N = 7
+
+
+# ── Industry-universe peer fallback ────────────────────────────────────
+#
+# FMP's `/stock-peers` endpoint is unreliable for mega-caps — it can
+# return micro-cap misclassifications (e.g. "Helport AI" for ORCL) or
+# nothing at all. When the FMP-supplied peer list is sparse, augment
+# with same-FMP-industry constituents from
+# `backend/data/industry_universe.json` (the file already maintained by
+# `scripts/discover_industries.py` and consumed by
+# `industry_dossier_service`). Augmented peers still flow through the
+# existing `_build_competitors()` floor + scoring, so the "don't
+# fabricate" guarantee is preserved.
+
+_INDUSTRY_UNIVERSE_PATH = (
+    Path(__file__).resolve().parents[3]  # backend/
+    / "data" / "industry_universe.json"
+)
+_INDUSTRY_PEERS_CACHE: Dict[str, List[str]] = {}
+
+
+def _load_industry_peers_from_universe(industry: str) -> List[str]:
+    """One-off file read + market-cap sort. Returns every ticker in
+    `industry` sorted by market cap descending. Called once per
+    industry per process (cached by `_industry_universe_peers`).
+    """
+    try:
+        data = json.loads(_INDUSTRY_UNIVERSE_PATH.read_text())
+    except Exception as exc:
+        logger.warning(
+            "industry_universe peers: failed to read %s: %s",
+            _INDUSTRY_UNIVERSE_PATH, exc,
+        )
+        return []
+    for entry in data.get("industries", []) or []:
+        if entry.get("industry") == industry:
+            mcaps = entry.get("market_caps") or {}
+            return [
+                t for t, _ in sorted(
+                    mcaps.items(),
+                    key=lambda x: x[1] or 0,
+                    reverse=True,
+                )
+            ]
+    return []
+
+
+def _industry_universe_peers(industry: str, exclude: Set[str]) -> List[str]:
+    """Tickers in `industry` sorted by market cap desc, excluding any
+    in `exclude`. Returns up to 20 candidates; caller trims further.
+    Cached in-process — universe file is static between deploys.
+    """
+    if not industry:
+        return []
+    sorted_tickers = _INDUSTRY_PEERS_CACHE.get(industry)
+    if sorted_tickers is None:
+        sorted_tickers = _load_industry_peers_from_universe(industry)
+        _INDUSTRY_PEERS_CACHE[industry] = sorted_tickers
+    return [t for t in sorted_tickers if t not in exclude][:20]
 
 
 def _build_competitors(
@@ -3754,7 +3837,7 @@ def _build_competitors(
         return []
 
     survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
-    survivors = survivors[:_COMPETITOR_TOP_N]
+    survivors = survivors[:_COMPETITOR_MAX_N]
 
     total_peer_cap = sum(s["mkt_cap"] for s in survivors)
     if total_peer_cap <= 0:

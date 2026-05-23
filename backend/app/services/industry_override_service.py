@@ -1,26 +1,32 @@
 """Industry dossier — Phase B research overrides.
 
 Runs right after `industry_dossier_service.recompute_all()` (Phase A,
-Census/FRED-based) on the quarterly schedule. For a small curated list
-of globally-traded industries where Census US-domestic measurements
-dramatically undercount the global addressable market (semis, biotech,
-pharma, medical devices, autos, defense, internet content), this
-service:
+Census/FRED-based). Phase B has NO independent schedule — it always
+cascades from Phase A, whether Phase A was triggered by the quarterly
+cron or by the admin `/refresh-industry-dossier` endpoint.
 
-  1. Asks Gemini for the current global TAM + 5y forward CAGR with
-     instructions to cite ≥2 authoritative sources (SIA, IQVIA,
-     McKinsey, Grand View Research, etc.) and return structured JSON.
-  2. Runs validation gates on the response (bounds, sources, sanity
-     vs Phase A).
+For a small curated list of globally-traded industries where Census
+US-domestic measurements dramatically undercount the global addressable
+market (semis, biotech, pharma, medical devices, autos, defense,
+internet content), this service:
+
+  1. Asks Gemini (Google Search grounded) for the current global TAM +
+     5y forward CAGR with guidance to cite authoritative sources (SIA,
+     IQVIA, McKinsey, Grand View Research, etc.) and return JSON.
+  2. Runs *numeric/structural* validation only — bounds, year parsing,
+     `future_tam <= 5x current_tam`. Confidence and Phase-A divergence
+     are NOT gated; the operator reviews the audit log to decide.
   3. Writes accepted overrides to `industry_dossier` (overwrites the
      Phase A row for that industry).
-  4. Logs every attempt — accept or reject — to
-     `industry_override_audit` (the breadcrumb trail).
+  4. Logs every attempt to `industry_override_audit` (the breadcrumb
+     trail — includes raw Gemini payload, grounding URIs, search
+     queries, model version, tokens used).
 
-The LLM is treated as a research synthesis tool, not a primary source.
-The `source_label` in the user-facing dossier cites the underlying
-public sources Gemini found (per the project's LLM identity rule —
-users never see "AI" / "Gemini" / "Google" in attribution).
+The user-facing `source_label` is derived from the actual grounded
+publishers Gemini consulted, NOT Gemini's self-reported `source_label`
+field — so the label can't drift from the citations stored in the
+audit log. Per the project's LLM identity rule, users never see
+"AI" / "Gemini" / "Google" in the attribution.
 
 Kill switch: `settings.INDUSTRY_OVERRIDE_AI_ENABLED = False` skips this
 phase entirely. Each curated industry is logged with
@@ -35,7 +41,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
@@ -83,19 +89,16 @@ CURATED_OVERRIDE_INDUSTRIES: List[Tuple[str, str]] = [
 
 # ── Validation thresholds ──────────────────────────────────────────────
 #
-# Bounds chosen to catch obvious hallucinations without rejecting
-# legitimate edge cases. Any out-of-bounds value triggers fallback to
-# Phase A (Census/FRED stays).
+# Numeric/structural bounds only — these catch Gemini formatting bugs
+# (negative TAM, exponent confusion, missing fields) rather than trust
+# judgments. Confidence and Phase-A divergence are NOT gated; operators
+# review the audit log to spot bad rows.
 
 _MIN_TAM_B = 1.0            # under $1B → suspect (most listed industries are bigger)
 _MAX_TAM_B = 50_000.0       # over $50T → impossible (>2x US GDP)
 _MAX_TAM_MULT = 5.0         # future_tam can't exceed 5x current (would imply >38% CAGR)
 _MIN_CAGR_PCT = -10.0       # industries don't shrink faster than this without being "declining"
 _MAX_CAGR_PCT = 50.0        # +50% CAGR is the upper bound of any sustained industry growth
-
-# Divergence vs Phase A's existing Census/FRED TAM
-_WARN_DIVERGE_RATIO = 3.0   # log warning + still apply
-_REJECT_DIVERGE_RATIO = 10.0  # reject; Phase A stays
 
 
 # ── Prompt template ────────────────────────────────────────────────────
@@ -154,6 +157,35 @@ class OverrideResult:
     rejection_reason: Optional[str]
     raw_response: Optional[Dict[str, Any]]
     tokens_used: Optional[int]
+    model_version: Optional[str] = None
+
+
+def _derive_source_label(
+    grounding_sources: List[Dict[str, Any]],
+    fallback: str = "",
+) -> str:
+    """Build the operator-facing source label from the actual grounded
+    publishers Gemini consulted, so the label can't drift from the
+    citations stored in the audit log.
+
+    Capitalizes each unique publisher and joins up to 4 with ' / '.
+    Falls back to Gemini's self-reported `source_label` (or
+    "Research synthesis") only if grounding returned no usable
+    publishers — e.g., a non-grounded test or an API change.
+    """
+    seen: List[str] = []
+    for s in grounding_sources or []:
+        if not isinstance(s, dict):
+            continue
+        pub = str(s.get("publisher") or "").strip()
+        if not pub:
+            continue
+        pretty = pub[:1].upper() + pub[1:]
+        if pretty not in seen:
+            seen.append(pretty)
+    if seen:
+        return " / ".join(seen[:4])[:200]
+    return (fallback or "Research synthesis")[:200]
 
 
 # ── Service ────────────────────────────────────────────────────────────
@@ -201,6 +233,7 @@ class IndustryOverrideService:
                     applied_cagr_pct=None, applied_source_label=None,
                     rejection_reason="INDUSTRY_OVERRIDE_AI_ENABLED=false",
                     raw_response=None, tokens_used=None,
+                    model_version=None,
                 ))
             if not dry_run:
                 self._write_audit_log(run_id, results)
@@ -229,6 +262,7 @@ class IndustryOverrideService:
                     applied_source_label=None,
                     rejection_reason=f"{type(exc).__name__}: {exc}",
                     raw_response=None, tokens_used=None,
+                    model_version=None,
                 )
             results.append(result)
 
@@ -265,6 +299,7 @@ class IndustryOverrideService:
             max_output_tokens=16384,  # tight prose + JSON, but bigger industries need headroom
         )
         tokens = gemini_response.get("tokens_used")
+        model_version = gemini_response.get("model")
         text = gemini_response.get("text", "") or ""
         grounding_sources = gemini_response.get("grounding_sources") or []
         search_queries = gemini_response.get("search_queries") or []
@@ -285,6 +320,7 @@ class IndustryOverrideService:
                     "search_queries": search_queries,
                 },
                 tokens_used=tokens,
+                model_version=model_version,
             )
         try:
             payload = json.loads(match.group(1))
@@ -302,11 +338,14 @@ class IndustryOverrideService:
                     "search_queries": search_queries,
                 },
                 tokens_used=tokens,
+                model_version=model_version,
             )
 
-        # Use the grounding URLs as the authoritative source list — more
-        # trustworthy than Gemini self-reporting. We inject them into the
-        # payload so the validation gate can check them.
+        # Persist the real grounding URLs (from Google Search) into the
+        # payload so the audit log captures them. The Gemini self-reported
+        # `source_label` is ignored in favor of a label derived from the
+        # actual grounded publishers (see below) — that way the label
+        # can't drift from the citations.
         payload["_grounding_sources"] = grounding_sources
         payload["_search_queries"] = search_queries
 
@@ -320,22 +359,27 @@ class IndustryOverrideService:
                 applied_source_label=None,
                 rejection_reason=validation["reason"],
                 raw_response=payload, tokens_used=tokens,
+                model_version=model_version,
             )
 
         tam = float(payload["current_tam_b"])
         future_tam = float(payload["future_tam_b"])
         cagr = float(payload["cagr_5y_pct"])
-        applied_status = "applied_with_warning" if validation["warn"] else "applied"
+        applied_source_label = _derive_source_label(
+            grounding_sources,
+            fallback=str(payload.get("source_label") or "").strip(),
+        )
 
         return OverrideResult(
             industry=industry, sector=sector,
-            status=applied_status,
+            status="applied",
             phase_a_tam_b=phase_a_tam,
             applied_tam_b=tam,
             applied_cagr_pct=cagr,
-            applied_source_label=str(payload.get("source_label") or "Research synthesis").strip()[:200],
-            rejection_reason=("TAM divergence >3x from Phase A" if validation["warn"] else None),
+            applied_source_label=applied_source_label,
+            rejection_reason=None,
             raw_response=payload, tokens_used=tokens,
+            model_version=model_version,
         )
 
     def _validate_response(
@@ -343,105 +387,65 @@ class IndustryOverrideService:
         payload: Dict[str, Any],
         phase_a_tam: Optional[float],
     ) -> Dict[str, Any]:
-        """Run all validation gates. Returns {status, reason, warn}.
+        """Run numeric/structural validation. Returns {status, reason}.
+
+        Only catches Gemini formatting bugs (negative TAM, exponent
+        confusion, missing fields). Confidence and Phase-A divergence
+        are NOT gated — those are trust judgments, and operators review
+        the audit log to decide. `phase_a_tam` is still logged for
+        audit context (see _research_one) but doesn't gate the result.
 
         status:
-          'ok' → accept (may also have warn=True)
-          'rejected_low_confidence' / 'rejected_validation' / 'rejected_sanity' → reject
-
-        warn=True means TAM differs from Phase A by >3x but <=10x. Still
-        applied but flagged in the audit log.
+          'ok' → accept
+          'rejected_validation' → numeric/structural failure
         """
-        # 1. Confidence
-        confidence = str(payload.get("confidence", "")).lower()
-        if confidence not in ("high", "medium"):
-            return {"status": "rejected_low_confidence",
-                    "reason": f"confidence={confidence!r}", "warn": False}
-
-        # 2. Sources cited — prefer grounding URLs (real, from Google Search)
-        # over Gemini's self-reported `sources_cited` (can hallucinate).
-        # The grounding URLs flow in via `_grounding_sources` from
-        # `_research_one`. For tests / older code paths, fall back to
-        # the self-reported list.
-        grounding = payload.get("_grounding_sources") or []
-        valid_grounding = [
-            s for s in grounding
-            if isinstance(s, dict) and (s.get("uri") or "").strip()
-        ]
-        valid_count = len(valid_grounding)
-        if valid_count == 0:
-            # Fallback: self-reported sources (testing / no-grounding mode)
-            self_reported = payload.get("sources_cited") or []
-            valid_count = len([
-                s for s in self_reported
-                if isinstance(s, dict) and (s.get("publisher") or "").strip()
-            ])
-        if valid_count < 2:
-            return {"status": "rejected_validation",
-                    "reason": f"only {valid_count} valid source(s) (need ≥2 — "
-                              f"grounding chunks or self-reported)",
-                    "warn": False}
-
-        # 3-5. Numeric bounds
+        # 1. Numeric bounds
         try:
             current_tam = float(payload["current_tam_b"])
             future_tam = float(payload["future_tam_b"])
             cagr = float(payload["cagr_5y_pct"])
         except (KeyError, TypeError, ValueError) as exc:
             return {"status": "rejected_validation",
-                    "reason": f"missing/non-numeric tam/cagr: {exc}", "warn": False}
+                    "reason": f"missing/non-numeric tam/cagr: {exc}"}
 
         if not (_MIN_TAM_B <= current_tam <= _MAX_TAM_B):
             return {"status": "rejected_validation",
-                    "reason": f"current_tam_b={current_tam} out of [{_MIN_TAM_B}, {_MAX_TAM_B}]",
-                    "warn": False}
+                    "reason": f"current_tam_b={current_tam} out of [{_MIN_TAM_B}, {_MAX_TAM_B}]"}
         if not (_MIN_TAM_B <= future_tam <= _MAX_TAM_B):
             return {"status": "rejected_validation",
-                    "reason": f"future_tam_b={future_tam} out of [{_MIN_TAM_B}, {_MAX_TAM_B}]",
-                    "warn": False}
+                    "reason": f"future_tam_b={future_tam} out of [{_MIN_TAM_B}, {_MAX_TAM_B}]"}
         if future_tam > current_tam * _MAX_TAM_MULT:
             return {"status": "rejected_validation",
-                    "reason": f"future_tam {future_tam} > {_MAX_TAM_MULT}x current_tam {current_tam}",
-                    "warn": False}
+                    "reason": f"future_tam {future_tam} > {_MAX_TAM_MULT}x current_tam {current_tam}"}
         if not (_MIN_CAGR_PCT <= cagr <= _MAX_CAGR_PCT):
             return {"status": "rejected_validation",
-                    "reason": f"cagr_5y_pct={cagr} out of [{_MIN_CAGR_PCT}, {_MAX_CAGR_PCT}]",
-                    "warn": False}
+                    "reason": f"cagr_5y_pct={cagr} out of [{_MIN_CAGR_PCT}, {_MAX_CAGR_PCT}]"}
 
-        # 6. Years
+        # 2. Years
         try:
             current_year = int(str(payload.get("current_year", "")).strip())
             future_year = int(str(payload.get("future_year", "")).strip())
         except (ValueError, TypeError):
             return {"status": "rejected_validation",
-                    "reason": "current_year / future_year not parseable as int",
-                    "warn": False}
+                    "reason": "current_year / future_year not parseable as int"}
         if not (2000 <= current_year <= 2099) or not (2000 <= future_year <= 2099):
             return {"status": "rejected_validation",
-                    "reason": f"years out of range: current={current_year}, future={future_year}",
-                    "warn": False}
+                    "reason": f"years out of range: current={current_year}, future={future_year}"}
         if future_year <= current_year:
             return {"status": "rejected_validation",
-                    "reason": f"future_year {future_year} <= current_year {current_year}",
-                    "warn": False}
+                    "reason": f"future_year {future_year} <= current_year {current_year}"}
 
-        # 7. Sanity vs Phase A — divergence ratio
-        warn = False
+        # 3. Log Phase-A divergence as info for audit context (no gating)
         if phase_a_tam and phase_a_tam > 0:
             ratio = max(current_tam / phase_a_tam, phase_a_tam / current_tam)
-            if ratio > _REJECT_DIVERGE_RATIO:
-                return {"status": "rejected_sanity",
-                        "reason": f"TAM divergence {ratio:.1f}x vs Phase A ({phase_a_tam} B); "
-                                  f"limit is {_REJECT_DIVERGE_RATIO}x",
-                        "warn": False}
-            if ratio > _WARN_DIVERGE_RATIO:
-                logger.warning(
-                    "industry_override: TAM divergence %.1fx (Phase A=%s, Gemini=%s) — applying with warning",
+            if ratio > 3.0:
+                logger.info(
+                    "industry_override: TAM divergence %.1fx (Phase A=%s, Gemini=%s) — "
+                    "applying anyway (trust mode, operator reviews audit log)",
                     ratio, phase_a_tam, current_tam,
                 )
-                warn = True
 
-        return {"status": "ok", "reason": None, "warn": warn}
+        return {"status": "ok", "reason": None}
 
     # ── Supabase I/O ──
 
@@ -517,13 +521,14 @@ class IndustryOverrideService:
                 sb.table("industry_dossier").update(update).eq("industry", industry).execute()
             else:
                 # Phase A didn't run for this industry — insert a fresh row.
+                # 8-day TTL matches Phase A so the row isn't born already-expired.
                 insert_row = {
                     **update,
                     "industry": industry,
                     "sector": sector,
                     "expires_at": (
-                        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                    ),
+                        datetime.now(timezone.utc) + timedelta(days=8)
+                    ).isoformat(),
                 }
                 sb.table("industry_dossier").insert(insert_row).execute()
         except Exception as exc:
@@ -551,6 +556,7 @@ class IndustryOverrideService:
                 "applied_source_label": r.applied_source_label,
                 "rejection_reason": r.rejection_reason,
                 "tokens_used": r.tokens_used,
+                "model_version": r.model_version,
             }
             for r in results
         ]

@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # need to revert to Census-only while debugging.
     INDUSTRY_OVERRIDE_AI_ENABLED: bool = True
 
+    # Competitor intel — Phase 2 revenue-mix-aware peer selection via
+    # Gemini grounded research. When False, ticker_report_data_collector
+    # falls back to the Phase 1 deterministic peer-augmentation path
+    # (FMP /stock-peers + industry-universe). Kill switch for quota
+    # outages or bad-research-run incidents.
+    COMPETITOR_INTEL_AI_ENABLED: bool = True
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

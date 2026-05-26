@@ -199,6 +199,25 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"Industry dossier job failed: {e}", exc_info=True)
 
+        # ── Phase 2 chained: competitor intel quarterly refresh ──
+        # Runs right after the dossier (Phase A + override Phase B)
+        # finishes so all Gemini-grounded research lands in the same
+        # quarterly audit window. Wrapped in its own try/except so a
+        # competitor-batch failure can't break the dossier loop.
+        try:
+            from app.services.competitor_intel_service import (
+                get_competitor_intel_service,
+            )
+
+            competitor_summary = (
+                await get_competitor_intel_service().refresh_top_tickers()
+            )
+            logger.info(
+                f"Competitor intel quarterly batch completed: {competitor_summary}"
+            )
+        except Exception as e:
+            logger.error(f"Competitor intel quarterly batch failed: {e}", exc_info=True)
+
 
 async def _run_whale_hydration_job():
     """Background task: hydrate whale profiles.

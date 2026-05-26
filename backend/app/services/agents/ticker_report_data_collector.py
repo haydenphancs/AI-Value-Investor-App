@@ -547,27 +547,53 @@ class TickerReportDataCollector:
         falls back to "hide the TAM column".
         """
         ticker = out.ticker
-        # Cap peer fan-out to keep FMP costs bounded; iOS only renders
-        # up to 5 competitors anyway.
-        peers = (out.peer_tickers or [])[:8]
-        sector = (out.profile or {}).get("sector")
-        industry = (out.profile or {}).get("industry")
+        profile_data = out.profile or {}
+        sector = profile_data.get("sector")
+        industry = profile_data.get("industry")
 
-        # FMP's `/stock-peers` endpoint is unreliable for mega-caps
-        # (returns micro-cap noise, or nothing). When it gives us
-        # fewer than 5 candidates, augment with same-industry
-        # constituents from the universe file. They still must survive
-        # `_build_competitors()`'s mkt-cap floor — so the "don't
-        # fabricate" guarantee is unchanged; we're just feeding the
-        # filter more material to evaluate.
-        if industry and len(peers) < 5:
-            augment = _industry_universe_peers(
-                industry,
-                exclude={ticker.upper(), *(p.upper() for p in peers)},
+        # ── Phase 2 (revenue-mix-aware): Gemini grounded research ──
+        #
+        # Lazy import so the test paths and any code path that doesn't
+        # touch Moat data don't pay the Gemini-client import cost.
+        peers: List[str] = []
+        try:
+            from app.services.competitor_intel_service import (
+                get_competitor_intel_service,
             )
-            # Preserve order: FMP peers first (deterministic for tests),
-            # then universe augmentation. Cap at 12 candidates total.
-            peers = list(dict.fromkeys(peers + augment))[:12]
+            intel_peers = await get_competitor_intel_service().get_competitors(
+                ticker, profile_data,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Collector pass 2: competitor_intel call failed for %s: "
+                "%s — falling back to Phase 1 deterministic path",
+                ticker, exc,
+            )
+            intel_peers = None
+
+        if intel_peers:
+            # Trust Phase-2 list verbatim — already FMP-validated +
+            # capped at 7 inside the service. Downstream
+            # `_build_competitors()` still computes per-peer scores +
+            # market-share, just from this curated list.
+            peers = intel_peers
+        else:
+            # ── Phase 1 fallback (deterministic peer assembly) ──
+            #
+            # FMP's `/stock-peers` is unreliable — micro-cap noise,
+            # mega-cap misclassifications, or too few candidates. We
+            # always augment from same-industry universe constituents
+            # when industry is known; FMP peers stay first in the
+            # dedup'd list, universe peers are supplemental. The
+            # "don't fabricate" guarantee is preserved by the $27.3B
+            # floor + 7-row cap in `_build_competitors()`.
+            peers = (out.peer_tickers or [])[:8]
+            if industry:
+                augment = _industry_universe_peers(
+                    industry,
+                    exclude={ticker.upper(), *(p.upper() for p in peers)},
+                )
+                peers = list(dict.fromkeys(peers + augment))[:12]
 
         peer_profiles_task = (
             self.fmp.get_company_profiles_batch(peers)

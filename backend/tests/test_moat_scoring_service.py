@@ -251,23 +251,65 @@ def test_latest_returns_none_for_empty():
 
 
 class _FakeLookup:
-    """Stand-in for SectorBenchmarkLookup. Returns the fixed medians given
-    at construction, regardless of which metrics / period_type are asked.
+    """Stand-in for SectorBenchmarkLookup. Supports both the legacy
+    `get_sector_benchmarks` shape and the sample-size-aware
+    `get_sector_benchmarks_with_n` shape Phase 3A uses.
+
+    Constructed from a simple {metric: median_value} dict; defaults to
+    one row per metric at period="2025" with n=50 (well above the
+    preferred sample-size threshold). Use `_FakeLookupMultiYear` when
+    you need to test year-selection edge cases.
     """
 
     def __init__(self, medians: Dict[str, float]):
-        # Wrap each in the {period_label: value} shape get_sector_benchmarks returns
-        self._data = {m: {"2024": v} for m, v in medians.items()}
+        # Single year, healthy sample size — covers the common test path.
+        self._data = {
+            m: {"2025": {"median": v, "n": 50}} for m, v in medians.items()
+        }
 
     def get_sector_benchmarks(
         self, sector: str, metrics: List[str], period_type: str,
     ) -> Dict[str, Dict[str, float]]:
+        return {
+            m: {p: payload["median"] for p, payload in (self._data.get(m) or {}).items()}
+            for m in metrics
+        }
+
+    def get_sector_benchmarks_with_n(
+        self, sector: str, metrics: List[str], period_type: str,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        return {m: dict(self._data.get(m, {})) for m in metrics}
+
+
+class _FakeLookupMultiYear:
+    """Same protocol as _FakeLookup but lets each metric have multiple
+    years with explicit (median, n) per year — useful for testing the
+    tiered year-selection logic.
+    """
+
+    def __init__(self, data: Dict[str, Dict[str, Dict[str, Any]]]):
+        # Expected shape:
+        #   {"rd_to_revenue": {"2025": {"median": 5.0, "n": 85},
+        #                       "2026": {"median": 27.0, "n": 12}}}
+        self._data = data
+
+    def get_sector_benchmarks_with_n(
+        self, sector: str, metrics: List[str], period_type: str,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
         return {m: dict(self._data.get(m, {})) for m in metrics}
 
 
 def _make_service_with_fake_medians(medians: Dict[str, float]) -> MoatScoringService:
     svc = MoatScoringService()
     svc._lookup = _FakeLookup(medians)  # type: ignore[assignment]
+    return svc
+
+
+def _make_service_with_multi_year(
+    data: Dict[str, Dict[str, Dict[str, Any]]],
+) -> MoatScoringService:
+    svc = MoatScoringService()
+    svc._lookup = _FakeLookupMultiYear(data)  # type: ignore[assignment]
     return svc
 
 
@@ -447,3 +489,161 @@ def test_pillar_result_serializes_to_dict():
     assert out["drivers"][0]["focal"] == 80.0
     assert out["drivers"][0]["sector_median"] == 40.0
     assert out["drivers"][0]["sub_score"] == 7.5
+
+
+# ── Tiered year selection (partial-year sample-size guard) ─────────────
+
+
+def test_year_selection_prefers_year_with_n_gte_20():
+    """When 2026 is partial (n=12) and 2025 is full (n=85), the scorer
+    must pick 2025 to avoid noisy partial-year medians. This is the
+    Technology deferred_revenue_to_revenue scenario from production."""
+    svc = _make_service_with_multi_year({
+        "gross_margin": {
+            "2025": {"median": 40.0, "n": 85},   # preferred — n high enough
+            "2026": {"median": 99.0, "n": 12},   # noisy partial year — skip
+        },
+        "ps_ratio": {
+            "2025": {"median": 4.0, "n": 85},
+            "2026": {"median": 50.0, "n": 12},
+        },
+    })
+    results = svc.score(
+        sector="Technology", industry="Software - Infrastructure",
+        profile={"sector": "Technology"},
+        income=[], balance=[],
+        ratios=[{
+            "date": "2024-12-31",
+            "grossProfitMargin": 0.80,        # 80% (2× the real 2025 median)
+            "priceToSalesRatio": 8.0,         # 2× the real 2025 median
+        }],
+        industry_tam=None,
+    )
+    brand = results[PILLAR_BRAND]
+    # If the scorer had wrongly used 2026's median=99% for gross margin,
+    # focal=80% would score BELOW median (~3.2). Picking 2025's 40% gives
+    # the correct 2× ratio → 7.5.
+    assert brand.score == 7.5
+    # Drivers should record period_used="2025" and sample_size=85
+    drivers = {d.metric: d for d in brand.drivers}
+    assert drivers["gross_margin"].period_used == "2025"
+    assert drivers["gross_margin"].sample_size == 85
+    assert drivers["ps_ratio"].period_used == "2025"
+
+
+def test_year_selection_falls_back_to_n_gte_10_when_no_preferred():
+    """If no year has n>=20 but a year has n>=10, use that (accept some
+    noise but better than dropping the metric entirely)."""
+    svc = _make_service_with_multi_year({
+        "gross_margin": {
+            "2024": {"median": 40.0, "n": 15},   # acceptable fallback
+            "2023": {"median": 38.0, "n": 6},    # too low — skip
+        },
+        "ps_ratio": {
+            "2024": {"median": 4.0, "n": 15},
+        },
+    })
+    results = svc.score(
+        sector="Communication Services", industry="Telecom",
+        profile={"sector": "Communication Services"},
+        income=[], balance=[],
+        ratios=[{
+            "date": "2024-12-31",
+            "grossProfitMargin": 0.80,
+            "priceToSalesRatio": 8.0,
+        }],
+        industry_tam=None,
+    )
+    brand = results[PILLAR_BRAND]
+    assert brand.score == 7.5  # 2024 median used
+    drivers = {d.metric: d for d in brand.drivers}
+    assert drivers["gross_margin"].period_used == "2024"
+    assert drivers["gross_margin"].sample_size == 15
+
+
+def test_year_selection_returns_none_when_all_below_acceptable():
+    """If every year has n<10, the metric is skipped — sector median
+    is too unstable to score against."""
+    svc = _make_service_with_multi_year({
+        "gross_margin": {
+            "2025": {"median": 40.0, "n": 6},
+            "2024": {"median": 38.0, "n": 5},
+        },
+        "ps_ratio": {
+            "2025": {"median": 4.0, "n": 7},
+        },
+    })
+    results = svc.score(
+        sector="MicroSector", industry="Niche",
+        profile={"sector": "MicroSector"},
+        income=[], balance=[],
+        ratios=[{
+            "date": "2024-12-31",
+            "grossProfitMargin": 0.80,
+            "priceToSalesRatio": 8.0,
+        }],
+        industry_tam=None,
+    )
+    brand = results[PILLAR_BRAND]
+    # Both metric drivers dropped (no usable sector median) → confidence low
+    assert brand.confidence == "low"
+    assert brand.score is None
+    # Driver entries still present (for audit) but with no sector_median
+    drivers = {d.metric: d for d in brand.drivers}
+    assert drivers["gross_margin"].sector_median is None
+    assert drivers["gross_margin"].sub_score is None
+    assert drivers["gross_margin"].period_used is None
+
+
+def test_year_selection_picks_latest_among_preferred():
+    """When multiple years clear the preferred threshold, take the
+    latest one (most recent fundamentals)."""
+    svc = _make_service_with_multi_year({
+        "gross_margin": {
+            "2023": {"median": 30.0, "n": 70},
+            "2024": {"median": 35.0, "n": 80},
+            "2025": {"median": 40.0, "n": 85},   # latest with n>=20 → pick this
+        },
+        "ps_ratio": {
+            "2025": {"median": 4.0, "n": 85},
+        },
+    })
+    results = svc.score(
+        sector="Technology", industry="Software",
+        profile={"sector": "Technology"},
+        income=[], balance=[],
+        ratios=[{
+            "date": "2024-12-31",
+            "grossProfitMargin": 0.80,
+            "priceToSalesRatio": 8.0,
+        }],
+        industry_tam=None,
+    )
+    brand = results[PILLAR_BRAND]
+    drivers = {d.metric: d for d in brand.drivers}
+    assert drivers["gross_margin"].period_used == "2025"
+    assert drivers["gross_margin"].sector_median == 40.0
+
+
+def test_pillar_drivers_to_dict_includes_period_and_sample_size():
+    """Audit output exposes period_used + sample_size so we can debug
+    'why is the median so weird' without re-running the query."""
+    svc = _make_service_with_multi_year({
+        "gross_margin": {"2025": {"median": 40.0, "n": 85}},
+        "ps_ratio": {"2025": {"median": 4.0, "n": 85}},
+    })
+    results = svc.score(
+        sector="Technology", industry="Software",
+        profile={"sector": "Technology"},
+        income=[], balance=[],
+        ratios=[{
+            "date": "2024-12-31",
+            "grossProfitMargin": 0.50,
+            "priceToSalesRatio": 5.0,
+        }],
+        industry_tam=None,
+    )
+    brand_dict = results[PILLAR_BRAND].to_dict()
+    gm_driver = next(d for d in brand_dict["drivers"] if d["metric"] == "gross_margin")
+    assert gm_driver["period_used"] == "2025"
+    assert gm_driver["sample_size"] == 85

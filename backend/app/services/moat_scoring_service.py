@@ -65,6 +65,17 @@ _CONFIDENCE_HIGH = "high"      # 3+ metrics resolved
 _CONFIDENCE_MEDIUM = "medium"  # 2 metrics resolved
 _CONFIDENCE_LOW = "low"        # <2 — service returns None instead
 
+# Sample-size thresholds for year selection. The recompute pipeline
+# already drops sectors below MIN_SAMPLE_SIZE=5 at compute time, so all
+# stored rows have n>=5. Within the stored set we still prefer fuller
+# samples to avoid partial-year noise (e.g., FY2026 with n=12 for
+# Technology vs. FY2025 with n=85). Walks years latest→oldest:
+#   - first year with n >= _N_PREFERRED → use it (high statistical confidence)
+#   - else first year with n >= _N_ACCEPTABLE → use it (fallback)
+#   - else return None for this metric
+_N_PREFERRED = 20
+_N_ACCEPTABLE = 10
+
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -172,6 +183,50 @@ def _lifecycle_to_score(phase: Optional[str]) -> Optional[float]:
     }.get(phase)
 
 
+def _pick_year_by_sample_size(
+    year_to_payload: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Walk years latest → oldest and return the first one whose
+    sample_size clears the preferred threshold. If none clear preferred,
+    fall back to the latest one that clears the acceptable threshold.
+    Returns None when nothing meets the acceptable floor.
+
+    Returned shape: {"median": float, "period": str, "n": int}.
+    """
+    if not year_to_payload:
+        return None
+    # Sort years descending. Year labels are strings like "2025"; rely
+    # on numeric sort where possible, fall back to lexical for safety.
+    def _year_key(label: str) -> int:
+        try:
+            return int(label)
+        except (TypeError, ValueError):
+            return -1
+    years_desc = sorted(year_to_payload.keys(), key=_year_key, reverse=True)
+
+    # Pass 1: preferred threshold.
+    for year in years_desc:
+        payload = year_to_payload.get(year) or {}
+        median = payload.get("median")
+        n = payload.get("n") or 0
+        if median is None or not isinstance(n, (int, float)):
+            continue
+        if n >= _N_PREFERRED:
+            return {"median": float(median), "period": year, "n": int(n)}
+
+    # Pass 2: acceptable fallback.
+    for year in years_desc:
+        payload = year_to_payload.get(year) or {}
+        median = payload.get("median")
+        n = payload.get("n") or 0
+        if median is None or not isinstance(n, (int, float)):
+            continue
+        if n >= _N_ACCEPTABLE:
+            return {"median": float(median), "period": year, "n": int(n)}
+
+    return None
+
+
 def _compute_yoy_pct(
     records: List[Dict[str, Any]], field_name: str,
 ) -> Optional[float]:
@@ -202,6 +257,8 @@ class MetricDriver:
     focal: Optional[float]
     sector_median: Optional[float]
     sub_score: Optional[float]   # 0-10 contribution; None if didn't resolve
+    period_used: Optional[str] = None       # e.g. "2025" — which year's median we selected
+    sample_size: Optional[int] = None       # n at that period; helps explain partial-year skips
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -209,6 +266,8 @@ class MetricDriver:
             "focal": self.focal,
             "sector_median": self.sector_median,
             "sub_score": self.sub_score,
+            "period_used": self.period_used,
+            "sample_size": self.sample_size,
         }
 
 
@@ -263,8 +322,11 @@ class MoatScoringService:
         latest_bs = _latest(balance)
         latest_ratios = _latest(ratios)
 
-        # Resolve sector medians for every metric in one Supabase call
-        # (it's a single SELECT IN — the lookup helper batches).
+        # Resolve sector medians for every metric in one Supabase call.
+        # `_fetch_sector_medians` returns a dict of
+        # {metric → (median, period_used, sample_size) | None} using the
+        # tiered year-selection rule (prefer n>=20, fall back to n>=10,
+        # else None).
         sector_medians = self._fetch_sector_medians(
             sector=sector,
             metrics=[
@@ -297,16 +359,24 @@ class MoatScoringService:
 
     def _fetch_sector_medians(
         self, sector: Optional[str], metrics: List[str],
-    ) -> Dict[str, Optional[float]]:
-        """For each metric, return the latest annual sector median (or
-        None when unavailable). One Supabase call total via the lookup
-        helper.
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """For each metric, pick the latest annual median that has
+        adequate sample size and return it along with its period label
+        and n.
+
+        Year-selection rule (walks years latest → oldest):
+            1. First year with n >= _N_PREFERRED (20) → use.
+            2. Else first year with n >= _N_ACCEPTABLE (10) → use as fallback.
+            3. Else None — metric won't resolve in scoring.
+
+        Returns a dict {metric: {"median": float, "period": str, "n": int}
+        | None}. None means "skip this metric in scoring."
         """
-        out: Dict[str, Optional[float]] = {m: None for m in metrics}
+        out: Dict[str, Optional[Dict[str, Any]]] = {m: None for m in metrics}
         if not sector:
             return out
         try:
-            benchmarks = self._lookup.get_sector_benchmarks(
+            benchmarks = self._lookup.get_sector_benchmarks_with_n(
                 sector, metrics, period_type="annual",
             )
         except Exception as exc:
@@ -316,15 +386,10 @@ class MoatScoringService:
             )
             return out
         for metric in metrics:
-            year_to_value = benchmarks.get(metric) or {}
-            if not year_to_value:
+            year_to_payload = benchmarks.get(metric) or {}
+            if not year_to_payload:
                 continue
-            latest_year = max(year_to_value.keys(), default=None)
-            if latest_year is None:
-                continue
-            value = year_to_value.get(latest_year)
-            if isinstance(value, (int, float)):
-                out[metric] = float(value)
+            out[metric] = _pick_year_by_sample_size(year_to_payload)
         return out
 
     # ── Per-pillar scorers ───────────────────────────────────────────
@@ -333,7 +398,7 @@ class MoatScoringService:
         self,
         latest_inc: Optional[Dict[str, Any]],
         latest_bs: Optional[Dict[str, Any]],
-        medians: Dict[str, Optional[float]],
+        medians: Dict[str, Optional[Dict[str, Any]]],
     ) -> PillarResult:
         """Switching Costs proxy: deferred revenue / revenue (subscription
         stickiness). v1 has only one strong deterministic signal — most
@@ -343,15 +408,10 @@ class MoatScoringService:
         """
         drivers: List[MetricDriver] = []
 
-        # Deferred Revenue / Revenue
         focal_def = self._deferred_rev_pct(latest_bs, latest_inc)
-        median_def = medians.get("deferred_revenue_to_revenue")
-        drivers.append(MetricDriver(
-            metric="deferred_revenue_to_revenue",
-            focal=focal_def, sector_median=median_def,
-            sub_score=_score_from_median_ratio(
-                focal_def, median_def, higher_is_better=True,
-            ),
+        drivers.append(_build_higher_better_driver(
+            "deferred_revenue_to_revenue", focal_def,
+            medians.get("deferred_revenue_to_revenue"),
         ))
 
         return _assemble_pillar(PILLAR_SWITCHING, drivers)
@@ -360,40 +420,41 @@ class MoatScoringService:
         self,
         income: List[Dict[str, Any]],
         industry_tam: Optional[Any],
-        medians: Dict[str, Optional[float]],
+        medians: Dict[str, Optional[Dict[str, Any]]],
     ) -> PillarResult:
         """Network Effects: HHI band + lifecycle phase + revenue growth
         premium vs sector median. Three inputs → high confidence common.
         """
         drivers: List[MetricDriver] = []
 
-        # HHI position (industry-level concentration)
+        # HHI position (industry-level concentration) — no sector
+        # median; the score is mapped directly from the DOJ bands.
         hhi = getattr(industry_tam, "hhi", None) if industry_tam else None
-        hhi_score = _hhi_to_score(hhi)
         drivers.append(MetricDriver(
             metric="industry_hhi",
             focal=hhi, sector_median=None,
-            sub_score=hhi_score,
+            sub_score=_hhi_to_score(hhi),
         ))
 
-        # Lifecycle phase
+        # Lifecycle phase — enum mapping, no median.
         phase = getattr(industry_tam, "lifecycle_phase", None) if industry_tam else None
-        phase_score = _lifecycle_to_score(phase)
         drivers.append(MetricDriver(
             metric="lifecycle_phase",
             focal=None, sector_median=None,
-            sub_score=phase_score,
+            sub_score=_lifecycle_to_score(phase),
         ))
 
         # Revenue growth premium (absolute delta to sector median)
         focal_rev_yoy = _compute_yoy_pct(income, "revenue")
-        median_rev_yoy = medians.get("revenue_yoy")
+        payload = medians.get("revenue_yoy")
+        median_rev_yoy, period, n = _unpack_median(payload)
         drivers.append(MetricDriver(
             metric="revenue_yoy",
             focal=focal_rev_yoy, sector_median=median_rev_yoy,
             sub_score=_absolute_delta_score(
                 focal_rev_yoy, median_rev_yoy, delta_per_point=2.0,
             ),
+            period_used=period, sample_size=n,
         ))
 
         return _assemble_pillar(PILLAR_NETWORK, drivers)
@@ -401,110 +462,75 @@ class MoatScoringService:
     def _score_brand_power(
         self,
         latest_ratios: Optional[Dict[str, Any]],
-        medians: Dict[str, Optional[float]],
+        medians: Dict[str, Optional[Dict[str, Any]]],
     ) -> PillarResult:
         """Brand Power: gross margin percentile + P/S percentile (the
         market pays for brand). Both higher = better.
         """
-        drivers: List[MetricDriver] = []
-
-        focal_gm = self._gross_margin_pct(latest_ratios)
-        median_gm = medians.get("gross_margin")
-        drivers.append(MetricDriver(
-            metric="gross_margin",
-            focal=focal_gm, sector_median=median_gm,
-            sub_score=_score_from_median_ratio(
-                focal_gm, median_gm, higher_is_better=True,
+        drivers = [
+            _build_higher_better_driver(
+                "gross_margin",
+                self._gross_margin_pct(latest_ratios),
+                medians.get("gross_margin"),
             ),
-        ))
-
-        focal_ps = _safe_float(latest_ratios or {}, "priceToSalesRatio")
-        median_ps = medians.get("ps_ratio")
-        drivers.append(MetricDriver(
-            metric="ps_ratio",
-            focal=focal_ps, sector_median=median_ps,
-            sub_score=_score_from_median_ratio(
-                focal_ps, median_ps, higher_is_better=True,
+            _build_higher_better_driver(
+                "ps_ratio",
+                _safe_float(latest_ratios or {}, "priceToSalesRatio"),
+                medians.get("ps_ratio"),
             ),
-        ))
-
+        ]
         return _assemble_pillar(PILLAR_BRAND, drivers)
 
     def _score_cost_advantage(
         self,
         latest_inc: Optional[Dict[str, Any]],
         latest_ratios: Optional[Dict[str, Any]],
-        medians: Dict[str, Optional[float]],
+        medians: Dict[str, Optional[Dict[str, Any]]],
     ) -> PillarResult:
         """Cost Advantage: operating margin (higher) + asset turnover
         (higher) + SG&A/Revenue (lower is better).
         """
-        drivers: List[MetricDriver] = []
-
-        focal_om = self._operating_margin_pct(latest_ratios)
-        median_om = medians.get("operating_margin")
-        drivers.append(MetricDriver(
-            metric="operating_margin",
-            focal=focal_om, sector_median=median_om,
-            sub_score=_score_from_median_ratio(
-                focal_om, median_om, higher_is_better=True,
+        drivers = [
+            _build_higher_better_driver(
+                "operating_margin",
+                self._operating_margin_pct(latest_ratios),
+                medians.get("operating_margin"),
             ),
-        ))
-
-        focal_at = _safe_float(latest_ratios or {}, "assetTurnover")
-        median_at = medians.get("asset_turnover")
-        drivers.append(MetricDriver(
-            metric="asset_turnover",
-            focal=focal_at, sector_median=median_at,
-            sub_score=_score_from_median_ratio(
-                focal_at, median_at, higher_is_better=True,
+            _build_higher_better_driver(
+                "asset_turnover",
+                _safe_float(latest_ratios or {}, "assetTurnover"),
+                medians.get("asset_turnover"),
             ),
-        ))
-
-        focal_sga = self._sga_to_revenue_pct(latest_inc)
-        median_sga = medians.get("sga_to_revenue")
-        drivers.append(MetricDriver(
-            metric="sga_to_revenue",
-            focal=focal_sga, sector_median=median_sga,
-            sub_score=_score_from_median_ratio(
-                focal_sga, median_sga, higher_is_better=False,
+            _build_lower_better_driver(
+                "sga_to_revenue",
+                self._sga_to_revenue_pct(latest_inc),
+                medians.get("sga_to_revenue"),
             ),
-        ))
-
+        ]
         return _assemble_pillar(PILLAR_COST, drivers)
 
     def _score_intangible_assets(
         self,
         latest_inc: Optional[Dict[str, Any]],
         latest_bs: Optional[Dict[str, Any]],
-        medians: Dict[str, Optional[float]],
+        medians: Dict[str, Optional[Dict[str, Any]]],
     ) -> PillarResult:
         """Intangible Assets: R&D intensity + on-balance-sheet intangibles
         share of total assets. Tier 3 (3C) will add USPTO patent count
         + FDA approvals.
         """
-        drivers: List[MetricDriver] = []
-
-        focal_rd = self._rd_to_revenue_pct(latest_inc)
-        median_rd = medians.get("rd_to_revenue")
-        drivers.append(MetricDriver(
-            metric="rd_to_revenue",
-            focal=focal_rd, sector_median=median_rd,
-            sub_score=_score_from_median_ratio(
-                focal_rd, median_rd, higher_is_better=True,
+        drivers = [
+            _build_higher_better_driver(
+                "rd_to_revenue",
+                self._rd_to_revenue_pct(latest_inc),
+                medians.get("rd_to_revenue"),
             ),
-        ))
-
-        focal_int = self._intangibles_to_assets_pct(latest_bs)
-        median_int = medians.get("intangibles_to_assets")
-        drivers.append(MetricDriver(
-            metric="intangibles_to_assets",
-            focal=focal_int, sector_median=median_int,
-            sub_score=_score_from_median_ratio(
-                focal_int, median_int, higher_is_better=True,
+            _build_higher_better_driver(
+                "intangibles_to_assets",
+                self._intangibles_to_assets_pct(latest_bs),
+                medians.get("intangibles_to_assets"),
             ),
-        ))
-
+        ]
         return _assemble_pillar(PILLAR_INTANGIBLE, drivers)
 
     # ── Focal-value extractors ───────────────────────────────────────
@@ -582,6 +608,58 @@ class MoatScoringService:
 
 
 # ── Pillar assembly ────────────────────────────────────────────────────
+
+
+def _unpack_median(
+    payload: Optional[Dict[str, Any]],
+) -> tuple[Optional[float], Optional[str], Optional[int]]:
+    """Pull median / period / sample_size out of the lookup payload.
+    Returns (None, None, None) when the payload is missing (no year
+    passed the sample-size gate).
+    """
+    if not payload:
+        return None, None, None
+    median = payload.get("median")
+    period = payload.get("period")
+    n = payload.get("n")
+    if not isinstance(median, (int, float)):
+        return None, None, None
+    return float(median), period, (int(n) if isinstance(n, (int, float)) else None)
+
+
+def _build_higher_better_driver(
+    metric: str,
+    focal: Optional[float],
+    median_payload: Optional[Dict[str, Any]],
+) -> MetricDriver:
+    """Build a MetricDriver for a 'higher is better' metric with full
+    period/sample-size attribution."""
+    median, period, n = _unpack_median(median_payload)
+    return MetricDriver(
+        metric=metric,
+        focal=focal,
+        sector_median=median,
+        sub_score=_score_from_median_ratio(focal, median, higher_is_better=True),
+        period_used=period,
+        sample_size=n,
+    )
+
+
+def _build_lower_better_driver(
+    metric: str,
+    focal: Optional[float],
+    median_payload: Optional[Dict[str, Any]],
+) -> MetricDriver:
+    """Build a MetricDriver for a 'lower is better' metric (SG&A/Rev)."""
+    median, period, n = _unpack_median(median_payload)
+    return MetricDriver(
+        metric=metric,
+        focal=focal,
+        sector_median=median,
+        sub_score=_score_from_median_ratio(focal, median, higher_is_better=False),
+        period_used=period,
+        sample_size=n,
+    )
 
 
 def _assemble_pillar(

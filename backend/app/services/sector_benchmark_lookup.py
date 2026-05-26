@@ -92,6 +92,57 @@ class SectorBenchmarkLookup:
             logger.error(f"Sector benchmark lookup failed for {sector}/{period_type}: {e}")
             return {m: {} for m in metrics}
 
+    # ── Phase 3A: sample-size-aware lookup ──────────────────────────────
+
+    def get_sector_benchmarks_with_n(
+        self,
+        sector: str,
+        metrics: List[str],
+        period_type: str,
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """Variant of get_sector_benchmarks that also returns sample_size
+        per (metric, period). Used by moat scoring to skip partial-year
+        rows whose medians are noisy.
+
+        Returns:
+            {
+              "rd_to_revenue": {
+                  "2025": {"median": 6.0, "n": 85},
+                  "2026": {"median": 27.3, "n": 12},
+              },
+              ...
+            }
+        """
+        cache_key = f"with_n:{sector}:{period_type}:{','.join(sorted(metrics))}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            response = (
+                self.supabase.table("sector_benchmarks")
+                .select("metric_name,period_label,median_value,sample_size")
+                .eq("sector", sector)
+                .eq("period_type", period_type)
+                .in_("metric_name", metrics)
+                .execute()
+            )
+            result: Dict[str, Dict[str, Dict[str, float]]] = {m: {} for m in metrics}
+            for row in response.data or []:
+                metric = row["metric_name"]
+                label = row["period_label"]
+                result.setdefault(metric, {})[label] = {
+                    "median": row.get("median_value"),
+                    "n": row.get("sample_size") or 0,
+                }
+            _cache_set(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(
+                f"Sector benchmark with_n lookup failed for {sector}/{period_type}: {e}"
+            )
+            return {m: {} for m in metrics}
+
 
 # ── Singleton ─────────────────────────────────────────────────────
 

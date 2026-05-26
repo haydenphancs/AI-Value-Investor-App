@@ -12,6 +12,12 @@ struct ReportMoatRadarChart: View {
     let dimensions: [MoatDimension]
 
     private let chartSize: CGFloat = 200
+    // Outer frame gets generous padding around the chart so the side
+    // axis labels ("Intangible Assets" / "Network Effects") sit at
+    // labelRadius=132 with a 72pt-wide text frame don't get clipped by
+    // the .drawingGroup() rasterization bounds. 70pt per side > 68pt
+    // worst-case horizontal label extent (132·cos18° + 36).
+    private let frameSize: CGFloat = 340
     private let rings = 5
 
     var body: some View {
@@ -41,7 +47,7 @@ struct ReportMoatRadarChart: View {
             // Axis labels
             axisLabels
         }
-        .frame(width: chartSize + 80, height: chartSize + 80)
+        .frame(width: frameSize, height: frameSize)
         .drawingGroup()
     }
 
@@ -84,7 +90,7 @@ struct ReportMoatRadarChart: View {
                 )
             }
         }
-        .frame(width: chartSize + 80, height: chartSize + 80)
+        .frame(width: frameSize, height: frameSize)
     }
 
     // MARK: - Polygon
@@ -103,13 +109,13 @@ struct ReportMoatRadarChart: View {
             context.fill(path, with: .color(fillColor))
             context.stroke(path, with: .color(strokeColor), style: strokeStyle)
         }
-        .frame(width: chartSize + 80, height: chartSize + 80)
+        .frame(width: frameSize, height: frameSize)
     }
 
     // MARK: - Score Dots
 
     private var scoreDots: some View {
-        let center = CGPoint(x: (chartSize + 80) / 2, y: (chartSize + 80) / 2)
+        let center = CGPoint(x: frameSize / 2, y: frameSize / 2)
         let radius = chartSize / 2
 
         return ForEach(Array(dimensions.enumerated()), id: \.element.id) { index, dimension in
@@ -129,7 +135,7 @@ struct ReportMoatRadarChart: View {
     // MARK: - Axis Labels
 
     private var axisLabels: some View {
-        let center = CGPoint(x: (chartSize + 80) / 2, y: (chartSize + 80) / 2)
+        let center = CGPoint(x: frameSize / 2, y: frameSize / 2)
         let labelRadius = chartSize / 2 + 32
 
         return ForEach(Array(dimensions.enumerated()), id: \.element.id) { index, dimension in

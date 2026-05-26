@@ -1054,9 +1054,52 @@ class TickerReportDataCollector:
         # "real data wins" policy that already governs fundamental_metrics
         # and the wall-street consensus.
         ai_moat = ai.get("moat_competition") or {}
-        moat_dims = _apply_peer_score_baseline(
-            list(ai_moat.get("dimensions") or [])
+        # ── Phase 3A: deterministic moat scoring grounded in real
+        # FMP financials + sector benchmarks. Per-pillar: when ≥2
+        # metrics resolve (confidence high/medium), use the
+        # deterministic score; when <2 resolve (confidence low for
+        # that pillar), fall through to the legacy AI Stage A dimension
+        # — to be replaced in sub-phase 3D with Gemini grounded research
+        # (web-search-cited) rather than ungrounded LLM judgment.
+        from app.services.moat_scoring_service import (
+            score_moat_dimensions,
+            PILLAR_ORDER,
         )
+        try:
+            deterministic_pillars = score_moat_dimensions(
+                sector=(out.profile or {}).get("sector"),
+                industry=(out.profile or {}).get("industry"),
+                profile=out.profile or {},
+                income=out.income or [],
+                balance=out.balance or [],
+                ratios=out.ratios or [],
+                industry_tam=out.industry_tam,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Moat scoring failed for %s: %s — falling through to "
+                "legacy AI dimensions for all pillars", out.ticker, exc,
+            )
+            deterministic_pillars = {}
+        ai_dims_by_name = {
+            (d.get("name") or ""): d
+            for d in (ai_moat.get("dimensions") or [])
+            if isinstance(d, dict)
+        }
+        merged_dims: List[Dict[str, Any]] = []
+        for pillar_name in PILLAR_ORDER:
+            det = deterministic_pillars.get(pillar_name)
+            if det is not None and det.score is not None:
+                merged_dims.append(det.to_dict())
+                continue
+            # Fallback — keep the AI Stage A dimension for this pillar.
+            # The peer-score floor still applies so the gray polygon
+            # doesn't collapse to center.
+            ai_dim = ai_dims_by_name.get(pillar_name) or {
+                "name": pillar_name, "score": 0.0, "peer_score": 5.0,
+            }
+            merged_dims.append(ai_dim)
+        moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
             out.profile, out.sector_aggregates, out.peer_profiles,
         )

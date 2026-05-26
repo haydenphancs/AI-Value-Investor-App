@@ -127,6 +127,17 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
     {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct"},
+    # ── Moat-scoring metrics (Phase 3A) ──────────────────────────────
+    # All four are RECONSTRUCTED from raw income/balance fields rather
+    # than pulled from pre-computed FMP ratios because (a) FMP doesn't
+    # expose them as named ratios on /stable/ratios for most tickers,
+    # and (b) reconstructing here means a sector median and a company's
+    # own metric use identical math. Stored as percentages (×100) so
+    # the scale matches gross_margin/operating_margin/etc.
+    {"name": "rd_to_revenue",       "type": "computed",      "compute": "rd_to_revenue"},
+    {"name": "sga_to_revenue",      "type": "computed",      "compute": "sga_to_revenue"},
+    {"name": "intangibles_to_assets","type": "computed",     "compute": "intangibles_to_assets"},
+    {"name": "deferred_revenue_to_revenue", "type": "computed", "compute": "deferred_revenue_to_revenue"},
 ]
 
 
@@ -344,6 +355,59 @@ def _index_by_period(
     return out
 
 
+def _ratio_pct_from_income(
+    inc: Dict[str, Any], numerator_field: str,
+) -> Optional[float]:
+    """numerator / revenue as a percentage (×100). Returns None when
+    revenue is missing or non-positive. Allows numerator==0 (legitimate
+    signal — e.g., zero R&D for non-tech companies).
+    """
+    rev = _safe_float(inc, "revenue")
+    if not rev or rev <= 0:
+        return None
+    num = _safe_float(inc, numerator_field)
+    if num is None:
+        return None
+    return (num / rev) * 100.0
+
+
+def _intangibles_to_assets_pct(bs: Dict[str, Any]) -> Optional[float]:
+    """(Goodwill + Intangible Assets) / Total Assets, as percentage."""
+    assets = _safe_float(bs, "totalAssets")
+    if not assets or assets <= 0:
+        return None
+    goodwill = _safe_float(bs, "goodwill") or 0.0
+    intangibles = _safe_float(bs, "intangibleAssets") or 0.0
+    # FMP sometimes reports `goodwillAndIntangibleAssets` instead;
+    # prefer the combined field when it exists.
+    combined = _safe_float(bs, "goodwillAndIntangibleAssets")
+    if combined is not None and combined > 0:
+        total_intang = combined
+    else:
+        total_intang = goodwill + intangibles
+    return (total_intang / assets) * 100.0
+
+
+def _deferred_rev_to_rev_pct(
+    bs: Dict[str, Any], inc: Dict[str, Any],
+) -> Optional[float]:
+    """Deferred Revenue / Revenue, as percentage. High = subscription
+    stickiness (Switching Costs proxy).
+    """
+    rev = _safe_float(inc, "revenue")
+    if not rev or rev <= 0:
+        return None
+    deferred = _safe_float(bs, "deferredRevenue")
+    if deferred is None:
+        # Some FMP responses split into current / non-current.
+        cur = _safe_float(bs, "deferredRevenueCurrent") or 0.0
+        non = _safe_float(bs, "deferredRevenueNonCurrent") or 0.0
+        if cur == 0 and non == 0:
+            return None
+        deferred = cur + non
+    return (deferred / rev) * 100.0
+
+
 def _compute_ratio_values(
     all_company_data: List[Dict[str, List]],
     compute_name: str,
@@ -359,7 +423,58 @@ def _compute_ratio_values(
     km_key = f"key_metrics_{period_type}"
     cf_key = f"cashflow_{period_type}"
     inc_key = f"income_{period_type}"
+    bs_key = f"balance_{period_type}"
 
+    # Phase 3A moat metrics — income-only ratios. Pure inc-based loop;
+    # no balance / km / cf needed, so we can short-circuit and avoid
+    # rejecting years where km is missing.
+    if compute_name in ("rd_to_revenue", "sga_to_revenue"):
+        field_map = {
+            "rd_to_revenue": "researchAndDevelopmentExpenses",
+            "sga_to_revenue": "sellingGeneralAndAdministrativeExpenses",
+        }
+        numerator_field = field_map[compute_name]
+        for company in all_company_data:
+            inc_by_year = _index_by_period(
+                company.get(inc_key, []), period_type,
+            )
+            for year, inc in inc_by_year.items():
+                value = _ratio_pct_from_income(inc, numerator_field)
+                # Bucket non-None (allows 0 — zero R&D is a legitimate signal).
+                if value is not None and value >= 0:
+                    out.setdefault(year, []).append(value)
+        return out
+
+    # Phase 3A moat metric — balance-only ratio.
+    if compute_name == "intangibles_to_assets":
+        for company in all_company_data:
+            bs_by_year = _index_by_period(
+                company.get(bs_key, []), period_type,
+            )
+            for year, bs in bs_by_year.items():
+                value = _intangibles_to_assets_pct(bs)
+                if value is not None and value >= 0:
+                    out.setdefault(year, []).append(value)
+        return out
+
+    # Phase 3A moat metric — balance + income.
+    if compute_name == "deferred_revenue_to_revenue":
+        for company in all_company_data:
+            bs_by_year = _index_by_period(
+                company.get(bs_key, []), period_type,
+            )
+            inc_by_year = _index_by_period(
+                company.get(inc_key, []), period_type,
+            )
+            for year in set(bs_by_year) & set(inc_by_year):
+                value = _deferred_rev_to_rev_pct(
+                    bs_by_year[year], inc_by_year[year],
+                )
+                if value is not None and value >= 0:
+                    out.setdefault(year, []).append(value)
+        return out
+
+    # Existing P/FCF and EV/EBITDA paths — unchanged.
     for company in all_company_data:
         km_by_year = _index_by_period(company.get(km_key, []), period_type)
         cf_by_year = _index_by_period(company.get(cf_key, []), period_type)
@@ -636,7 +751,11 @@ class SectorBenchmarkService:
         return upserted
 
     async def _fetch_company_data(self, ticker: str, annual_limit: int, quarterly_limit: int) -> Dict[str, List]:
-        """Fetch income, cash flow, ratios, and key metrics for one company (annual + quarterly)."""
+        """Fetch income, cash flow, balance sheet, ratios, and key metrics for one company (annual + quarterly).
+
+        Balance sheet was added in Phase 3A for moat-scoring metrics
+        (intangibles_to_assets, deferred_revenue_to_revenue).
+        """
         results = await asyncio.gather(
             self._fmp_call(self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit)),
             self._fmp_call(self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit)),
@@ -646,6 +765,8 @@ class SectorBenchmarkService:
             self._fmp_call(self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit)),
             self._fmp_call(self.fmp.get_key_metrics(ticker, period="annual", limit=annual_limit)),
             self._fmp_call(self.fmp.get_key_metrics(ticker, period="quarter", limit=quarterly_limit)),
+            self._fmp_call(self.fmp.get_balance_sheet(ticker, period="annual", limit=annual_limit)),
+            self._fmp_call(self.fmp.get_balance_sheet(ticker, period="quarter", limit=quarterly_limit)),
             return_exceptions=True,
         )
 
@@ -661,6 +782,8 @@ class SectorBenchmarkService:
             "ratios_quarterly": _safe_list(results[5]),
             "key_metrics_annual": _safe_list(results[6]),
             "key_metrics_quarterly": _safe_list(results[7]),
+            "balance_annual": _safe_list(results[8]),
+            "balance_quarterly": _safe_list(results[9]),
         }
 
     def _collect_metric_values(

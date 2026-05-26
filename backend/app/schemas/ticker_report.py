@@ -7,7 +7,7 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 
 
 # ── Atomic Sub-Models ──────────────────────────────────────────────────────────
@@ -296,6 +296,14 @@ class MoatDimensionResponse(BaseModel):
     name: str
     score: float
     peer_score: float
+    # Phase 3A — deterministic moat scoring metadata. When this pillar
+    # was scored from real FMP financials + sector benchmarks, `drivers`
+    # holds the per-metric breakdown (focal value, sector median, sub-
+    # score) and `confidence` is "high" (≥3 metrics) or "medium" (2).
+    # When the legacy Gemini Stage A dimension was used as fallback,
+    # both fields are None — iOS treats absence as "no driver detail".
+    drivers: Optional[List[Dict[str, Any]]] = None
+    confidence: Optional[str] = None
 
 
 class CompetitorResponse(BaseModel):

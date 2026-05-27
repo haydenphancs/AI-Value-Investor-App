@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -93,17 +94,36 @@ def _is_pharma(profile: Dict[str, Any]) -> bool:
     return any(kw in industry for kw in _PHARMA_INDUSTRY_KEYWORDS)
 
 
+_CORP_SUFFIX_RE = re.compile(
+    r"[,\s]+("
+    r"Inc\.?|Incorporated|Corp\.?|Corporation|"
+    r"Co\.?|Company|Ltd\.?|Limited|"
+    r"LLC|L\.L\.C\.|PLC|plc|N\.V\.|NV|"
+    r"S\.A\.|SA|AG|GmbH|Holdings?|Group"
+    r")\.?$",
+    re.IGNORECASE,
+)
+
+
 def _normalize_assignee(name: str) -> str:
-    """Canonicalize a company name for USPTO/FDA search. v1 is naive —
-    just strip whitespace and common corporate suffixes. Future
-    enhancement: per-ticker alias map in data/.
+    """Canonicalize a company name for USPTO/FDA search.
+
+    Strips trailing corporate suffixes (Inc., Corporation, Ltd., LLC,
+    Holdings, etc.) because USPTO assignee records often list the
+    operating subsidiary rather than the listed holding company —
+    e.g. FMP returns "Oracle Corporation" but USPTO has the bulk of
+    the IP under "Oracle International Corporation" / "Oracle America,
+    Inc.". A bare prefix match catches both. Repeats once so chains
+    like "Holdings, Inc." collapse cleanly.
     """
     if not isinstance(name, str):
         return ""
     cleaned = name.strip()
-    # Don't lowercase — USPTO/FDA queries are case-insensitive anyway,
-    # and preserving "Inc."/"Corporation" punctuation helps with phrase
-    # match precision on names with multiple word stems.
+    for _ in range(2):
+        new = _CORP_SUFFIX_RE.sub("", cleaned).rstrip(", &+").strip()
+        if new == cleaned or not new:
+            break
+        cleaned = new
     return cleaned
 
 

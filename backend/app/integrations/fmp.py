@@ -342,17 +342,37 @@ class FMPClient:
     ) -> List[Dict[str, Any]]:
         """Return full earning calendar records for a ticker.
 
-        Includes date, eps, epsEstimated, revenue, revenueEstimated, time
-        (amc/bmo), fiscalDateEnding, etc.
+        Includes date, eps, epsEstimated, revenue, revenueEstimated.
+
+        FMP renamed the per-symbol earnings endpoint from
+        `/api/v3/earning_calendar?symbol=X` to `/stable/earnings?symbol=X`
+        (returns BOTH historical and upcoming records in one call). The
+        new endpoint ships `epsActual`/`revenueActual` instead of the
+        legacy `eps`/`revenue`; we normalize here so the 4 downstream
+        helpers (`_find_next_earnings_date(_simple)`) keep working
+        unchanged.
         """
         symbol = ticker.upper()
         try:
             data = await self._make_request(
-                "earning_calendar", params={"symbol": symbol}
+                "earnings", params={"symbol": symbol}
             )
-            return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                # Map new field names to legacy names. Keep originals too
+                # so any caller that's already on the new schema works.
+                if "eps" not in row and "epsActual" in row:
+                    row["eps"] = row.get("epsActual")
+                if "revenue" not in row and "revenueActual" in row:
+                    row["revenue"] = row.get("revenueActual")
+                normalized.append(row)
+            return normalized
         except Exception as e:
-            logger.warning(f"earning_calendar_full failed for {symbol}: {e}")
+            logger.warning(f"earnings (per-symbol) failed for {symbol}: {e}")
             return []
 
     async def get_earning_call_transcript(
@@ -427,39 +447,35 @@ class FMPClient:
     ) -> List[str]:
         """Return list of earnings report dates (yyyy-MM-dd) for a specific ticker.
 
-        Uses the historical/earning_calendar/{symbol} endpoint for past dates,
-        then merges with earning_calendar?symbol= for upcoming dates.
+        Uses `/stable/earnings?symbol=X`, which returns BOTH past and
+        upcoming earnings rows in a single response. Previously this
+        method made two FMP calls (`historical/earning_calendar/{X}`
+        + `earning_calendar?symbol=X`) — both of those paths were
+        renamed in FMP's 2026 migration to `/stable` and now 404.
         """
         symbol = ticker.upper()
+        try:
+            data = await self._make_request(
+                "earnings", params={"symbol": symbol}
+            )
+        except Exception as e:
+            logger.warning(f"earnings (per-symbol) failed for {symbol}: {e}")
+            return []
+
         all_dates: set = set()
-
-        # Primary: historical earnings endpoint (past dates)
-        try:
-            data = await self._make_request(
-                f"historical/earning_calendar/{symbol}"
-            )
-            if isinstance(data, list) and data:
-                for item in data:
-                    if isinstance(item, dict) and item.get("date"):
-                        all_dates.add(item["date"])
-                if all_dates:
-                    logger.info(f"historical/earning_calendar returned {len(all_dates)} dates for {symbol}")
-        except Exception as e:
-            logger.warning(f"historical/earning_calendar failed for {symbol}: {e}")
-
-        # Also fetch upcoming earnings so future dates appear on chart
-        try:
-            data = await self._make_request(
-                "earning_calendar", params={"symbol": symbol}
-            )
-            if isinstance(data, list):
-                for item in data:
-                    if (isinstance(item, dict)
-                            and item.get("date")
-                            and item.get("symbol", "").upper() == symbol):
-                        all_dates.add(item["date"])
-        except Exception as e:
-            logger.warning(f"earning_calendar failed for {symbol}: {e}")
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                d = item.get("date")
+                if not d:
+                    continue
+                # Endpoint already filters by symbol, but double-check
+                # in case FMP returns a noisy mixed set during plan
+                # downgrades.
+                if str(item.get("symbol", "")).upper() not in ("", symbol):
+                    continue
+                all_dates.add(d)
 
         dates = sorted(all_dates, reverse=True)
         logger.info(f"Total earnings dates for {symbol}: {len(dates)}")

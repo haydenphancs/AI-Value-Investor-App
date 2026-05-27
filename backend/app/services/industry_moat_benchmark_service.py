@@ -18,12 +18,20 @@ Lookup (online, per request):
   Returns {} when the industry has no rows yet so callers can fall
   back to the existing 5.0 baseline.
 
-Two pillars (Switching Costs, Intangible Assets) depend on transcript
-or USPTO data that we deliberately don't fetch in this batch — those
-pillars will commonly have small samples and fall back to the 5.0
-baseline. That's expected; this service is best-effort for the
-financial-statement-driven pillars (Network Effects, Brand Power,
-Cost Advantage) where signal density is high.
+All five Pat Dorsey pillars are populated:
+  * Brand Power, Cost Advantage, Intangible Assets — from FMP
+    profile + income + balance + ratios (always fetched).
+  * Switching Costs — from the earnings-call transcript via
+    `transcript_signals_service.extract_signals` (regex extraction
+    of NRR + user counts, no LLM cost). Transcript fetch adds two
+    FMP calls per peer; tickers without an available transcript
+    simply contribute no signal to this pillar.
+  * Network Effects — from the per-industry IndustryDossier
+    (industry_hhi + lifecycle_phase). The dossier is fetched ONCE
+    per industry (not per peer) and shared across the batch.
+One USPTO data tier is deliberately skipped: per-peer patent
+counts would balloon ip_intel cache misses and the IP component
+contributes only a fractional sub-score on Intangible Assets.
 """
 
 from __future__ import annotations
@@ -138,13 +146,18 @@ class IndustryMoatBenchmarkService:
         self,
         ticker: str,
         sem: asyncio.Semaphore,
+        *,
+        industry_tam: Optional[Any] = None,
     ) -> Optional[Dict[str, Optional[float]]]:
         """Fetch the focal data for one peer + run the deterministic
         scorer. Returns {pillar_name: score | None}, or None if the
         FMP profile lookup failed (ticker doesn't exist / FMP error).
-        Skips transcript + ip_intel inputs by design — those would
-        balloon the per-batch FMP cost without enough quality lift
-        across most industries.
+
+        Fetches in parallel:
+          profile, income(annual,2), balance(annual,2), ratios(annual,1),
+          transcript (list+content under the hood).
+        `industry_tam` is shared across all peers in the same industry
+        — caller pre-fetches it once and threads it through.
         """
         async with sem:
             try:
@@ -152,10 +165,10 @@ class IndustryMoatBenchmarkService:
                 income_task = self.fmp.get_income_statement(ticker, "annual", 2)
                 balance_task = self.fmp.get_balance_sheet(ticker, "annual", 2)
                 ratios_task = self.fmp.get_financial_ratios(ticker, "annual", 1)
-                km_task = self.fmp.get_key_metrics(ticker, "annual", 1)
-                profile, income, balance, ratios, km = await asyncio.gather(
+                transcript_task = self.fmp.get_earning_call_transcript(ticker)
+                profile, income, balance, ratios, transcript = await asyncio.gather(
                     profile_task, income_task, balance_task,
-                    ratios_task, km_task,
+                    ratios_task, transcript_task,
                     return_exceptions=True,
                 )
             except Exception as exc:
@@ -171,6 +184,8 @@ class IndustryMoatBenchmarkService:
         def _safe(v: Any) -> List[Dict[str, Any]]:
             return v if isinstance(v, list) else []
 
+        transcript_str = transcript if isinstance(transcript, str) else None
+
         try:
             pillars: Dict[str, PillarResult] = await asyncio.to_thread(
                 score_moat_dimensions,
@@ -180,6 +195,8 @@ class IndustryMoatBenchmarkService:
                 income=_safe(income),
                 balance=_safe(balance),
                 ratios=_safe(ratios),
+                industry_tam=industry_tam,
+                transcript=transcript_str,
             )
         except Exception as exc:
             logger.debug(
@@ -188,13 +205,35 @@ class IndustryMoatBenchmarkService:
             )
             return None
 
-        # The /key-metrics ROE fallback the per-report path applies
-        # isn't needed here — peer averaging only requires the pillar
-        # scores, and ROE-derived pillars resolve from /ratios already.
-        # km is fetched for symmetry with future scorer extensions.
-        _ = km
-
         return {p: pillars.get(p).score if pillars.get(p) else None for p in PILLAR_ORDER}
+
+    async def _fetch_industry_tam(
+        self, industry: str, sample_ticker: str,
+    ) -> Optional[Any]:
+        """Fetch the shared IndustryDossier for `industry`. Needs a
+        sector to look it up; pulls one from the first peer's profile
+        so we don't hardcode an industry→sector map. The dossier
+        service itself memoizes for 5 min, so re-running the batch
+        within that window is free.
+        """
+        try:
+            profile = await self.fmp.get_company_profile(sample_ticker)
+            sector = (profile or {}).get("sector")
+            if not sector:
+                return None
+            from app.services.industry_dossier_service import (
+                get_industry_dossier_service,
+            )
+            return await get_industry_dossier_service().get_or_compute_dossier(
+                industry=industry, sector=sector,
+            )
+        except Exception as exc:
+            logger.warning(
+                "industry_moat_benchmark: industry_tam fetch failed for "
+                "%s (sample=%s): %s — Network Effects pillar will fall to baseline",
+                industry, sample_ticker, exc,
+            )
+            return None
 
     # ── Industry-level aggregate ─────────────────────────────────────
 
@@ -219,9 +258,15 @@ class IndustryMoatBenchmarkService:
             )
             return {}
 
+        # Shared per-industry context for the Network Effects pillar.
+        # One fetch per industry; the dossier service caches for 5 min
+        # so a re-run within that window pays nothing extra.
+        industry_tam = await self._fetch_industry_tam(industry, tickers[0])
+
         sem = asyncio.Semaphore(PER_TICKER_FMP_CONCURRENCY)
         per_ticker_scores = await asyncio.gather(
-            *[self._score_one_ticker(t, sem) for t in tickers],
+            *[self._score_one_ticker(t, sem, industry_tam=industry_tam)
+              for t in tickers],
             return_exceptions=True,
         )
 

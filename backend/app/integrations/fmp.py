@@ -18,6 +18,18 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    # FMP /stable/profile renamed `mktCap` → `marketCap`. Many callers
+    # still read `mktCap`; alias it in-place so a single field rename
+    # upstream can't silently zero out market-cap-driven logic (peer
+    # filtering, competitor floors, sector aggregates).
+    if not isinstance(profile, dict):
+        return profile
+    if profile.get("mktCap") in (None, 0) and profile.get("marketCap") is not None:
+        profile["mktCap"] = profile["marketCap"]
+    return profile
+
+
 class FMPException(Exception):
     """Base class for typed FMP integration errors."""
 
@@ -143,7 +155,7 @@ class FMPClient:
         data = await self._make_request(
             "profile", params={"symbol": ticker.upper()}
         )
-        return data[0] if data else {}
+        return _normalize_profile(data[0]) if data else {}
 
     async def get_stock_price_quote(self, ticker: str) -> Dict[str, Any]:
         """Get real-time stock quote."""
@@ -1440,7 +1452,7 @@ class FMPClient:
                         "profile", params={"symbol": symbol.upper()}
                     )
                     if isinstance(data, list) and data:
-                        return data[0]
+                        return _normalize_profile(data[0])
                 except Exception:
                     pass
                 return None

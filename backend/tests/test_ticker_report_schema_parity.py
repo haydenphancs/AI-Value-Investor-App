@@ -230,6 +230,24 @@ def test_narrative_jobs_build_without_error_for_fallback_shell():
         assert callable(j.apply)
 
 
+def test_moat_dimensions_carry_source_tier():
+    """Each pillar must report `source` ∈ {deterministic, grounded,
+    ai_legacy} so iOS can show provenance separately from confidence.
+    Regression guard for the September 2025 bug where the field was
+    silently dropped by Pydantic before being added to the schema."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    report = coll.assemble_report(out, stage_a_fallback())
+    dims = report["moat_competition"]["dimensions"]
+    assert len(dims) == 5, f"expected 5 pillars, got {len(dims)}"
+    valid_sources = {"deterministic", "grounded", "ai_legacy"}
+    for d in dims:
+        assert "source" in d, f"pillar {d.get('name')!r} missing `source`"
+        assert d["source"] in valid_sources, (
+            f"pillar {d.get('name')!r} has invalid source {d.get('source')!r}"
+        )
+
+
 def test_narrative_fallbacks_keep_pydantic_valid():
     """If every Stage B call fails, applying job.fallback_value on each
     one must leave the report still Pydantic-valid."""

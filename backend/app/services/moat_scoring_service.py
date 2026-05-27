@@ -446,6 +446,8 @@ class MoatScoringService:
         balance: List[Dict[str, Any]],
         ratios: List[Dict[str, Any]],
         industry_tam: Optional[Any] = None,   # IndustryDossier or None
+        transcript: Optional[str] = None,     # Phase 3B — earnings-call text for NRR / user-count extraction
+        ip_intel: Optional[Dict[str, Any]] = None,  # Phase 3C — USPTO patents + FDA approvals
     ) -> Dict[str, PillarResult]:
         """Score all five pillars. Returns a dict keyed by pillar name.
 
@@ -476,12 +478,26 @@ class MoatScoringService:
             ],
         )
 
+        # Phase 3B — extract NRR + user-count from the earnings transcript
+        # once and reuse across pillars. Pure regex, no LLM cost.
+        transcript_sig = None
+        if transcript:
+            try:
+                from app.services.transcript_signals_service import (
+                    extract_signals,
+                )
+                transcript_sig = extract_signals(transcript)
+            except Exception as exc:
+                logger.warning(
+                    "moat_scoring: transcript signal extraction failed: %s", exc,
+                )
+
         results: Dict[str, PillarResult] = {}
         results[PILLAR_SWITCHING] = self._score_switching_costs(
-            latest_inc, latest_bs, sector_medians,
+            latest_inc, latest_bs, sector_medians, transcript_sig,
         )
         results[PILLAR_NETWORK] = self._score_network_effects(
-            income, industry_tam, sector_medians,
+            income, industry_tam, sector_medians, transcript_sig,
         )
         results[PILLAR_BRAND] = self._score_brand_power(
             latest_ratios, sector_medians,
@@ -490,7 +506,7 @@ class MoatScoringService:
             latest_inc, latest_ratios, sector_medians,
         )
         results[PILLAR_INTANGIBLE] = self._score_intangible_assets(
-            latest_inc, latest_bs, sector_medians,
+            latest_inc, latest_bs, sector_medians, ip_intel,
         )
         return results
 
@@ -538,12 +554,12 @@ class MoatScoringService:
         latest_inc: Optional[Dict[str, Any]],
         latest_bs: Optional[Dict[str, Any]],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        transcript_sig: Optional[Any] = None,
     ) -> PillarResult:
-        """Switching Costs proxy: deferred revenue / revenue (subscription
-        stickiness). v1 has only one strong deterministic signal — most
-        tickers will land at low confidence and fall back to Gemini
-        grounded research (or legacy AI) until Phase 3B adds NDR/NRR
-        extraction from earnings transcripts.
+        """Switching Costs: deferred-revenue/revenue + (Phase 3B) NRR
+        from earnings-transcript extraction. With NRR available, the
+        pillar usually reaches medium/high confidence instead of falling
+        through to grounded fallback.
         """
         drivers: List[MetricDriver] = []
 
@@ -553,6 +569,21 @@ class MoatScoringService:
             medians.get("deferred_revenue_to_revenue"),
         ))
 
+        # Phase 3B — NRR from earnings transcript regex extraction.
+        # No sector median for this one (the NRR scale itself is the
+        # reference). Sub-score derived via the anchor formula in
+        # transcript_signals_service.
+        if transcript_sig is not None and transcript_sig.nrr_pct is not None:
+            from app.services.transcript_signals_service import nrr_to_sub_score
+            drivers.append(MetricDriver(
+                metric="nrr_pct",
+                focal=transcript_sig.nrr_pct,
+                sector_median=None,
+                sub_score=nrr_to_sub_score(transcript_sig.nrr_pct),
+                period_used="earnings_transcript",
+                sample_size=None,
+            ))
+
         return _assemble_pillar(PILLAR_SWITCHING, drivers)
 
     def _score_network_effects(
@@ -560,6 +591,7 @@ class MoatScoringService:
         income: List[Dict[str, Any]],
         industry_tam: Optional[Any],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        transcript_sig: Optional[Any] = None,
     ) -> PillarResult:
         """Network Effects: HHI band + lifecycle phase + revenue growth
         premium vs sector median. Three inputs → high confidence common.
@@ -595,6 +627,21 @@ class MoatScoringService:
             ),
             period_used=period, sample_size=n,
         ))
+
+        # Phase 3B — platform user count from earnings transcript
+        # extraction. Maps log-scaled to a 0-10 score (10K → 0;
+        # 100M → 7.5; 1B+ → 9-10). No sector median — the user-count
+        # scale itself is the reference.
+        if transcript_sig is not None and transcript_sig.user_count is not None:
+            from app.services.transcript_signals_service import user_count_to_sub_score
+            drivers.append(MetricDriver(
+                metric="platform_user_count",
+                focal=float(transcript_sig.user_count),
+                sector_median=None,
+                sub_score=user_count_to_sub_score(transcript_sig.user_count),
+                period_used="earnings_transcript",
+                sample_size=None,
+            ))
 
         return _assemble_pillar(PILLAR_NETWORK, drivers)
 
@@ -653,10 +700,10 @@ class MoatScoringService:
         latest_inc: Optional[Dict[str, Any]],
         latest_bs: Optional[Dict[str, Any]],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        ip_intel: Optional[Dict[str, Any]] = None,
     ) -> PillarResult:
         """Intangible Assets: R&D intensity + on-balance-sheet intangibles
-        share of total assets. Tier 3 (3C) will add USPTO patent count
-        + FDA approvals.
+        share of total assets + (Phase 3C) USPTO patents + FDA approvals.
         """
         drivers = [
             _build_higher_better_driver(
@@ -670,6 +717,36 @@ class MoatScoringService:
                 medians.get("intangibles_to_assets"),
             ),
         ]
+
+        # Phase 3C — patents per employee + FDA active approvals.
+        if isinstance(ip_intel, dict):
+            from app.services.ip_intel_service import (
+                fda_approvals_to_sub_score,
+                patents_per_employee_to_sub_score,
+            )
+            patents_pe = ip_intel.get("patents_per_employee")
+            patents_score = patents_per_employee_to_sub_score(patents_pe)
+            if patents_score is not None:
+                drivers.append(MetricDriver(
+                    metric="patents_per_employee",
+                    focal=patents_pe,
+                    sector_median=None,
+                    sub_score=patents_score,
+                    period_used="uspto_recent_5y",
+                    sample_size=ip_intel.get("patents_recent_5y"),
+                ))
+            fda_active = ip_intel.get("fda_active_approvals")
+            fda_score = fda_approvals_to_sub_score(fda_active)
+            if fda_score is not None:
+                drivers.append(MetricDriver(
+                    metric="fda_active_approvals",
+                    focal=(float(fda_active) if isinstance(fda_active, (int, float)) else None),
+                    sector_median=None,
+                    sub_score=fda_score,
+                    period_used="openfda_current",
+                    sample_size=None,
+                ))
+
         return _assemble_pillar(PILLAR_INTANGIBLE, drivers)
 
     # ── Focal-value extractors ───────────────────────────────────────
@@ -1196,10 +1273,13 @@ def score_moat_dimensions(
     balance: List[Dict[str, Any]],
     ratios: List[Dict[str, Any]],
     industry_tam: Optional[Any] = None,
+    transcript: Optional[str] = None,
+    ip_intel: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, PillarResult]:
     """Module-level convenience for the data collector."""
     return get_moat_scoring_service().score(
         sector=sector, industry=industry, profile=profile,
         income=income, balance=balance, ratios=ratios,
-        industry_tam=industry_tam,
+        industry_tam=industry_tam, transcript=transcript,
+        ip_intel=ip_intel,
     )

@@ -72,7 +72,7 @@ struct ReportPeerComparisonRow: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                 Spacer()
-                Text(String(format: "%.0f%%", competitor.marketSharePercent))
+                Text(String(format: "%.1f%%", competitor.marketSharePercent))
                     .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
             }

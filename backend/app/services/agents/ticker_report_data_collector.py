@@ -270,6 +270,11 @@ class CollectedTickerData:
     # from these series simply don't appear; AI-driven factors still do.
     fred_indicators: List[Dict[str, Any]] = field(default_factory=list)
 
+    # ── Phase 3D: pre-computed moat scoring (deterministic + grounded
+    # fallback). Filled at the end of `_fetch_dependent` so assemble_report
+    # stays synchronous.
+    moat_grounded_pillars: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # ── Computed metrics (real numbers / None) ────────────────────────
     computed: Dict[str, Any] = field(default_factory=dict)
 
@@ -668,6 +673,73 @@ class TickerReportDataCollector:
             out.industry_tam = None
         else:
             out.industry_tam = industry_tam
+
+        # ── Phase 3D: precompute Gemini grounded fallback for pillars
+        # the deterministic moat scorer would leave at low confidence.
+        # Runs here (async context) so the synchronous assemble_report
+        # can just read out.moat_grounded_pillars. The full deterministic
+        # scoring also re-runs inside assemble_report (cheap — sector
+        # benchmark lookup is in-memory cached for 1h), so we use the
+        # same logic here to decide whether grounded is needed.
+        await self._precompute_moat_grounded(out)
+
+    async def _precompute_moat_grounded(self, out: "CollectedTickerData") -> None:
+        """Run the deterministic moat scorer once to decide which pillars
+        would fall back; if any need fallback, call Gemini grounded
+        research and store the result on `out.moat_grounded_pillars`.
+        Safe to call even when there's no profile / sector data — silent
+        no-op in that case.
+        """
+        if not (out.profile and (out.profile.get("sector") or out.profile.get("industry"))):
+            return
+        try:
+            from app.services.moat_scoring_service import (
+                PILLAR_ORDER as _PILLAR_ORDER,
+                get_moat_scoring_service,
+                score_moat_dimensions,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Moat precompute: import failed for %s: %s", out.ticker, exc,
+            )
+            return
+
+        try:
+            det_pillars = await asyncio.to_thread(
+                score_moat_dimensions,
+                sector=out.profile.get("sector"),
+                industry=out.profile.get("industry"),
+                profile=out.profile or {},
+                income=out.income or [],
+                balance=out.balance or [],
+                ratios=out.ratios or [],
+                industry_tam=out.industry_tam,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Moat precompute: deterministic scoring failed for %s: %s",
+                out.ticker, exc,
+            )
+            return
+
+        low_conf = [
+            p for p in _PILLAR_ORDER
+            if (det_pillars.get(p) is None
+                or getattr(det_pillars[p], "score", None) is None)
+        ]
+        if not low_conf:
+            return
+
+        try:
+            grounded = await get_moat_scoring_service().gemini_grounded_fallback(
+                out.ticker, out.profile,
+            )
+            out.moat_grounded_pillars = grounded or {}
+        except Exception as exc:
+            logger.warning(
+                "Moat precompute: grounded fallback failed for %s: %s",
+                out.ticker, exc,
+            )
 
     async def _fetch_peer_ratios(
         self, peers: List[str],
@@ -1086,15 +1158,25 @@ class TickerReportDataCollector:
             for d in (ai_moat.get("dimensions") or [])
             if isinstance(d, dict)
         }
+        # Phase 3D: grounded fallback for pillars deterministic left at
+        # low confidence. Both `deterministic_pillars` and the grounded
+        # scores were precomputed during the async `_fetch_dependent`
+        # pass — assemble_report stays sync.
+        grounded_scores: Dict[str, Dict[str, Any]] = out.moat_grounded_pillars or {}
+
         merged_dims: List[Dict[str, Any]] = []
         for pillar_name in PILLAR_ORDER:
             det = deterministic_pillars.get(pillar_name)
             if det is not None and det.score is not None:
                 merged_dims.append(det.to_dict())
                 continue
-            # Fallback — keep the AI Stage A dimension for this pillar.
-            # The peer-score floor still applies so the gray polygon
-            # doesn't collapse to center.
+            grounded = grounded_scores.get(pillar_name)
+            if isinstance(grounded, dict) and grounded.get("score") is not None:
+                merged_dims.append(grounded)
+                continue
+            # Final fallback — legacy AI Stage A dimension. The
+            # peer-score floor still applies so the gray polygon doesn't
+            # collapse to center.
             ai_dim = ai_dims_by_name.get(pillar_name) or {
                 "name": pillar_name, "score": 0.0, "peer_score": 5.0,
             }

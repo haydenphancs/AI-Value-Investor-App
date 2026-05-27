@@ -180,6 +180,25 @@ async def _run_industry_dossier_job():
 
     await asyncio.sleep(120)  # let app fully start
 
+    # Each sub-job is anchored to a wall-clock offset from the quarterly
+    # base run time (02:00 UTC). Spacing the starts by 30 min means even
+    # if one job's burst tail is still draining FMP quota, the next job
+    # waits until it's clear before hitting FMP again — never overlapping
+    # in the rate-limit window.
+    #
+    #   base + 0   min → industry_dossier  (Phase A + Phase B)
+    #   base + 30  min → competitor_intel.refresh_top_tickers
+    #   base + 60  min → ip_intel.refresh_top_tickers
+    #   base + 90  min → industry_moat_benchmark.recompute_all  (longest)
+    #
+    # If a sub-job overruns its 30-min window, the next one starts as
+    # soon as the previous awaits return — _wait_until clamps to "at
+    # least the target time, never earlier".
+    async def _wait_until(target: datetime) -> None:
+        delta = (target - datetime.now(timezone.utc)).total_seconds()
+        if delta > 0:
+            await asyncio.sleep(delta)
+
     while True:
         now = datetime.now(timezone.utc)
         next_run = _next_quarterly_dossier_run(now)
@@ -199,11 +218,13 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"Industry dossier job failed: {e}", exc_info=True)
 
-        # ── Phase 2 chained: competitor intel quarterly refresh ──
-        # Runs right after the dossier (Phase A + override Phase B)
-        # finishes so all Gemini-grounded research lands in the same
-        # quarterly audit window. Wrapped in its own try/except so a
-        # competitor-batch failure can't break the dossier loop.
+        # ── Phase 2 chained: competitor intel @ base + 30 min ──
+        # Waits until the staggered start time so its Gemini-grounded
+        # research batch doesn't overlap any FMP burst tail from the
+        # dossier job. Own try/except so a batch failure can't break
+        # the loop.
+        from datetime import timedelta as _td
+        await _wait_until(next_run + _td(minutes=30))
         try:
             from app.services.competitor_intel_service import (
                 get_competitor_intel_service,
@@ -218,11 +239,10 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"Competitor intel quarterly batch failed: {e}", exc_info=True)
 
-        # ── Phase 3C chained: ip_intel (USPTO + FDA) quarterly refresh ──
-        # USPTO patents and FDA approvals change very slowly. Chained
-        # here so all moat-relevant external data refreshes on the same
-        # quarterly anchor. Its own try/except so an upstream API outage
-        # can't break the dossier loop.
+        # ── Phase 3C chained: ip_intel (USPTO + FDA) @ base + 60 min ──
+        # USPTO patents and FDA approvals change very slowly. Run an
+        # hour after base so the FMP rate-limit window has fully reset.
+        await _wait_until(next_run + _td(minutes=60))
         try:
             from app.services.ip_intel_service import get_ip_intel_service
 
@@ -235,18 +255,22 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"IP intel quarterly batch failed: {e}", exc_info=True)
 
-        # ── Industry moat benchmarks (Peer Avg overlay) quarterly refresh ──
-        # Heavy compute (~5 FMP calls × top 200 tickers × 156 industries),
-        # but writes ~780 rows total that overlay the moat radar's
-        # gray "Peer Avg" polygon. Without this, peer_score collapses
-        # to a flat 5.0 sector-median anchor.
+        # ── Industry moat benchmarks (Peer Avg overlay) @ base + 90 min ──
+        # Heaviest job in the chain (~140k FMP calls, ~60-90 min wall-clock
+        # at 3000/min). Started last so any failures don't block the
+        # upstream refreshes. `skip_if_fresh_hours=24` prevents the
+        # quarterly run from blowing through FMP quota redoing rows
+        # the operator already triggered manually within the last day.
+        await _wait_until(next_run + _td(minutes=90))
         try:
             from app.services.industry_moat_benchmark_service import (
                 get_industry_moat_benchmark_service,
             )
 
             moat_bench_summary = (
-                await get_industry_moat_benchmark_service().recompute_all()
+                await get_industry_moat_benchmark_service().recompute_all(
+                    skip_if_fresh_hours=24,
+                )
             )
             logger.info(
                 f"Industry moat benchmark quarterly batch completed: {moat_bench_summary}"

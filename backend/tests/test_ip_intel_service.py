@@ -56,8 +56,15 @@ def test_is_pharma_case_insensitive_industry():
 # ── _normalize_assignee ────────────────────────────────────────────────
 
 
-def test_normalize_assignee_strips_whitespace():
-    assert _normalize_assignee("  Apple Inc.  ") == "Apple Inc."
+def test_normalize_assignee_strips_whitespace_and_suffix():
+    # Strips trailing corporate suffix (Inc., Corp., Ltd., LLC, etc.) so
+    # USPTO phrase search hits subsidiary entities too — Oracle's patents
+    # are under "Oracle International Corporation" / "Oracle America,
+    # Inc.", which a bare "Oracle" prefix matches but a full "Oracle
+    # Corporation" phrase does not (live probe: 1 vs 3,787 hits).
+    assert _normalize_assignee("  Apple Inc.  ") == "Apple"
+    assert _normalize_assignee("Oracle Corporation") == "Oracle"
+    assert _normalize_assignee("Microsoft Corp") == "Microsoft"
 
 
 def test_normalize_assignee_handles_non_string():
@@ -65,10 +72,13 @@ def test_normalize_assignee_handles_non_string():
     assert _normalize_assignee(123) == ""    # type: ignore[arg-type]
 
 
-def test_normalize_assignee_preserves_punctuation():
-    """USPTO / FDA phrase searches benefit from preserved punctuation."""
-    assert _normalize_assignee("Pfizer Inc.") == "Pfizer Inc."
-    assert _normalize_assignee("Eli Lilly and Company") == "Eli Lilly and Company"
+def test_normalize_assignee_handles_chained_suffix_and_ampersand():
+    # "Holdings, Inc." / "& Co." chains collapse cleanly; preserved
+    # internal `&` (AT&T) is not mistaken for a trailing connector.
+    assert _normalize_assignee("Berkshire Hathaway Inc.") == "Berkshire Hathaway"
+    assert _normalize_assignee("JPMorgan Chase & Co.") == "JPMorgan Chase"
+    assert _normalize_assignee("AT&T Inc.") == "AT&T"
+    assert _normalize_assignee("AstraZeneca PLC") == "AstraZeneca"
 
 
 # ── patents_per_employee_to_sub_score ──────────────────────────────────

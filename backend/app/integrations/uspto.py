@@ -1,14 +1,16 @@
-"""USPTO PatentsView API Integration — Patent Counts for Moat Scoring
+"""USPTO Open Data Portal Integration — Patent Counts for Moat Scoring
 
 Used by ip_intel_service (Phase 3C) to fetch patent counts per company,
 which feed the Intangible Assets pillar of moat_scoring_service.
 
-API: https://search.patentsview.org/api/v1/
+API: https://api.uspto.gov/api/v1/patent/applications/search
+  - PatentsView was decommissioned in early 2026 and migrated to the
+    USPTO Open Data Portal (https://data.uspto.gov/apis). The legacy
+    search.patentsview.org hostname no longer resolves.
   - POST endpoint with structured JSON query body
-  - Requires a free API key (X-API-Key header). Register at:
-      https://search.patentsview.org/docs/
+  - Requires an API key (X-API-KEY header). Register at:
+      https://data.uspto.gov/apis/getting-started
     Add to backend/.env as USPTO_API_KEY
-  - Free tier: 45 req/min, no documented monthly cap
   - When the key is absent, this integration silently no-ops (returns
     an empty result) so the rest of the report still renders without
     the patents driver contributing.
@@ -51,9 +53,10 @@ class USPTOTimeoutException(USPTOException):
 
 
 class USPTOClient:
-    """Thin async wrapper around USPTO PatentsView API."""
+    """Thin async wrapper around USPTO Open Data Portal patent search."""
 
-    BASE_URL = "https://search.patentsview.org/api/v1"
+    BASE_URL = "https://api.uspto.gov"
+    SEARCH_PATH = "/api/v1/patent/applications/search"
 
     def __init__(self) -> None:
         self._client: Optional[httpx.AsyncClient] = None
@@ -88,9 +91,10 @@ class USPTOClient:
         Args:
             assignee_name: Company name as registered with USPTO (e.g.
                 "Oracle Corporation", "Apple Inc.").
-            since_year: When set, restrict to patents granted in or
-                after this year (used to compute the "recent 5y" count).
-            page_size: Max patents to return. Capped at 1000 by USPTO.
+            since_year: When set, restrict to patents filed in or after
+                this year (used to compute the "recent 5y" count via the
+                `applicationMetaData.filingDate` field).
+            page_size: Max patents to return per page. ODP caps at 100.
 
         Returns:
             dict with keys:
@@ -111,26 +115,23 @@ class USPTOClient:
             )
             return {"total_hits": 0, "patents": [], "error": "no_api_key"}
 
-        # Build the structured query body. PatentsView expects an `_and`
-        # of constraints. Assignee-organization match is fuzzy (some
-        # entries use abbreviated names) so we use _text_phrase rather
-        # than _eq.
-        constraints: List[Dict[str, Any]] = [
-            {"_text_phrase": {"assignees.assignee_organization": assignee_name}}
-        ]
+        # ODP search accepts an OpenSearch-style `q` string. Quoting the
+        # assignee name lets multi-word organizations match as a phrase;
+        # any embedded double-quote is escaped so it can't break out.
+        escaped = assignee_name.replace('\\', '\\\\').replace('"', '\\"')
+        q_parts = [f'assignmentBag.assigneeBag.assigneeNameText:"{escaped}"']
         if since_year:
-            constraints.append(
-                {"_gte": {"patent_year": int(since_year)}}
+            q_parts.append(
+                f'applicationMetaData.filingDate:[{int(since_year)}-01-01 TO 2099-12-31]'
             )
         body: Dict[str, Any] = {
-            "q": {"_and": constraints},
-            "f": ["patent_id", "patent_date", "patent_year"],
-            "s": [{"patent_date": "desc"}],
-            "o": {"size": min(int(page_size), 1000)},
+            "q": " AND ".join(q_parts),
+            "pagination": {"offset": 0, "limit": min(int(page_size), 100)},
+            "sort": [{"field": "applicationMetaData.filingDate", "order": "desc"}],
         }
 
-        url = f"{self.BASE_URL}/patent/"
-        headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
+        url = f"{self.BASE_URL}{self.SEARCH_PATH}"
+        headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
         try:
             client = await self._get_client()
@@ -150,6 +151,11 @@ class USPTOClient:
             raise USPTORateLimitException(
                 f"USPTO returned 429 for {assignee_name}"
             )
+        # ODP returns 404 with a JSON body when an assignee has zero
+        # matches — that's a legitimate "no patents" answer, not an
+        # outage. Treat as empty result rather than an error.
+        if resp.status_code == 404:
+            return {"total_hits": 0, "patents": [], "since_year": since_year}
         if resp.status_code != 200:
             return {
                 "total_hits": 0, "patents": [],
@@ -161,11 +167,9 @@ class USPTOClient:
         except Exception as exc:
             return {"total_hits": 0, "patents": [], "error": f"json_parse: {exc}"}
 
-        # The newer API returns {error: bool, count, total_hits, patents}.
-        # `error: True` is the "no results" signal in some versions, so we
-        # treat total_hits as the source of truth.
-        total_hits = int(data.get("total_hits") or 0)
-        patents = data.get("patents") or []
+        # ODP response shape: {count, patentFileWrapperDataBag, requestIdentifier}.
+        total_hits = int(data.get("count") or 0)
+        patents = data.get("patentFileWrapperDataBag") or []
         if not isinstance(patents, list):
             patents = []
         return {

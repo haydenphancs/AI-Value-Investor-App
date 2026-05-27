@@ -104,6 +104,14 @@ class Settings(BaseSettings):
 
     # Research
     DEEP_RESEARCH_TIMEOUT_SECONDS: int = 120
+    # Per-call timeout for individual Gemini SDK requests. The SDK's
+    # default is unbounded — without this guard a hung network read
+    # parks the whole report-generation task forever (seen as a card
+    # stuck at "Deep research complete, synthesizing..." 55%). On
+    # timeout, generate_text / generate_json raise asyncio.TimeoutError,
+    # the @async_retry decorator skips it (not a quota error), and the
+    # caller's existing sentinel fallback returns instead of hanging.
+    GEMINI_REQUEST_TIMEOUT_SECONDS: int = 90
 
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60

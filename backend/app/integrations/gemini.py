@@ -30,6 +30,27 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(s in msg for s in _QUOTA_ERROR_STRINGS)
 
 
+# ── Per-call timeout guard ─────────────────────────────────────────
+async def _call_with_timeout(callable_, *args, **kwargs):
+    """Run a sync Gemini SDK call in a thread with a timeout.
+
+    The Gemini SDK's default is unbounded — without this guard a hung
+    network read parks the whole report-generation task forever (seen
+    as a report card stuck at "Deep research complete, synthesizing..."
+    at 55% progress).
+
+    On timeout, raises asyncio.TimeoutError — `@async_retry` skips it
+    (not a quota error), and the caller's existing exception handler
+    returns its sentinel fallback instead of hanging.
+
+    Timeout sourced from settings.GEMINI_REQUEST_TIMEOUT_SECONDS.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(callable_, *args, **kwargs),
+        timeout=settings.GEMINI_REQUEST_TIMEOUT_SECONDS,
+    )
+
+
 def async_retry(max_attempts: int = 3, delay: float = 1.0):
     """
     Decorator for retrying async functions on failure.
@@ -157,9 +178,9 @@ class GeminiClient:
                     system_instruction=system_instruction
                 )
 
-            response = await asyncio.to_thread(
+            response = await _call_with_timeout(
                 model.generate_content,
-                prompt
+                prompt,
             )
 
             result = {
@@ -208,9 +229,9 @@ class GeminiClient:
                 system_instruction=system_instruction or None,
             )
 
-            response = await asyncio.to_thread(
+            response = await _call_with_timeout(
                 model.generate_content,
-                prompt
+                prompt,
             )
 
             result = {
@@ -271,7 +292,7 @@ Provide a comprehensive answer with citations to the context where appropriate."
             return cached
 
         try:
-            result = await asyncio.to_thread(
+            result = await _call_with_timeout(
                 genai.embed_content,
                 model=model_name,
                 content=text,
@@ -566,8 +587,8 @@ Provide ONLY the bullet points, no additional commentary."""
                 tools=tools,
             )
 
-            response = await asyncio.to_thread(
-                model.generate_content, prompt
+            response = await _call_with_timeout(
+                model.generate_content, prompt,
             )
 
             tool_results: List[Dict[str, Any]] = []
@@ -604,7 +625,7 @@ Provide ONLY the bullet points, no additional commentary."""
                                 response={"result": handler_result},
                             )
                         )
-                        follow_up = await asyncio.to_thread(
+                        follow_up = await _call_with_timeout(
                             model.generate_content,
                             [
                                 protos.Content(
@@ -692,7 +713,7 @@ Provide ONLY the bullet points, no additional commentary."""
 
         # Only 1 API call for the final message
         final_message = messages[-1]["content"]
-        response = await asyncio.to_thread(chat.send_message, final_message)
+        response = await _call_with_timeout(chat.send_message, final_message)
 
         return {
             "text": response.text,

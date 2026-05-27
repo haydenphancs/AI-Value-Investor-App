@@ -36,7 +36,7 @@ import google.generativeai as genai
 import google.generativeai.protos as protos
 
 from app.integrations.fmp import FMPClient
-from app.integrations.gemini import GeminiClient
+from app.integrations.gemini import GeminiClient, _call_with_timeout
 from app.services.agents.fmp_tools import (
     build_fmp_tool_declarations,
     build_tool_handlers,
@@ -225,8 +225,8 @@ class ResearchAgent:
                 )
 
                 if round_num == 0:
-                    response = await asyncio.to_thread(
-                        chat.send_message, research_prompt
+                    response = await _call_with_timeout(
+                        chat.send_message, research_prompt,
                     )
 
                 # Walk parts: handle function calls; collect tool responses
@@ -275,8 +275,8 @@ class ResearchAgent:
                     )
 
                 if has_function_call and response_parts:
-                    response = await asyncio.to_thread(
-                        chat.send_message, response_parts
+                    response = await _call_with_timeout(
+                        chat.send_message, response_parts,
                     )
                     continue
 

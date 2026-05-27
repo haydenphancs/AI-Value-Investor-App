@@ -1,0 +1,10 @@
+{
+  "_comment": "Per-ticker override of the USPTO assignee phrase used by ip_intel_service. Only tickers where the FMP companyName + suffix-strip normalizer mismatches the entity USPTO actually files patents under. Source: live USPTO probe in May 2026.",
+  "aliases": {
+    "MRNA": "ModernaTX",
+    "GOOG": "Google",
+    "GOOGL": "Google",
+    "DIS": "Disney Enterprises",
+    "XOM": "ExxonMobil"
+  }
+}

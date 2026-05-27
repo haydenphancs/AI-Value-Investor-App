@@ -133,10 +133,12 @@ METRIC_DEFS = [
     {
         "type": "interest_coverage",
         "source": "ratios",
-        # FMP /stable/ratios-ttm exposes this as `interestCoverageTTM` /
-        # `interestCoverage` (NOT `interestCoverageRatio`). Matches the
-        # field used in sector_benchmark_service METRIC_CONFIGS.
-        "fmp_field": "interestCoverage",
+        # FMP renamed this in 2026: `interestCoverage` → `interestCoverageRatio`
+        # (and on /ratios-ttm it's `interestCoverageRatioTTM`). The extractor
+        # below auto-appends TTM and falls back to the bare name, so listing
+        # the un-suffixed form is correct. Matches the rename in
+        # sector_benchmark_service METRIC_CONFIGS.
+        "fmp_field": "interestCoverageRatio",
         "benchmark_name": "interest_coverage",
         "lower_is_better": False,
         "is_percentage": False,
@@ -995,9 +997,12 @@ class HealthCheckService:
                 ],
                 "annual",
             )
+            benchmarks_keys = {
+                k: list(v.keys()) for k, v in benchmarks.items()
+            }
             logger.info(
                 f"Health check {ticker}: benchmarks returned keys="
-                f"{{k: list(v.keys()) for k, v in benchmarks.items()}}"
+                f"{benchmarks_keys}"
             )
             for bm_name, bm_data in benchmarks.items():
                 if not bm_data:

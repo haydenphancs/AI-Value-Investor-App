@@ -65,17 +65,6 @@ struct ReportPeerComparisonRow: View {
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 28, alignment: .trailing)
             }
-
-            // Market share
-            HStack {
-                Text("Market Share")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                Spacer()
-                Text(String(format: "%.1f%%", competitor.marketSharePercent))
-                    .font(AppTypography.captionEmphasis)
-                    .foregroundColor(AppColors.textSecondary)
-            }
         }
         .padding(AppSpacing.md)
         .background(

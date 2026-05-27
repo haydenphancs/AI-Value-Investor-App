@@ -1524,8 +1524,12 @@ class WhaleService:
             h["allocation"] = round(h["value"] / total_value * 100, 2)
         holdings.sort(key=lambda x: x["value"], reverse=True)
 
-        # Build trade group from recent trades (last 90 days)
-        cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        # Build trade group from recent trades (last 90 days relative to as_of_date)
+        try:
+            as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            as_of_dt = datetime.now()
+        cutoff = (as_of_dt - timedelta(days=90)).strftime("%Y-%m-%d")
         recent = [t for t in trades if (t.get("date", "") >= cutoff)]
         if not recent:
             recent = trades[:20]

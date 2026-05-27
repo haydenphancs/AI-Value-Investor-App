@@ -774,20 +774,14 @@ class TickerReportDataCollector:
         self, peers: List[str],
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch the three peer signals (op margin, ROE, revenue growth)
-        plus TTM revenue, keyed by ticker.
+        keyed by ticker.
 
         FMP split these across three endpoints in late 2025:
           * /ratios-ttm           → operatingProfitMarginTTM
-          * /key-metrics-ttm      → returnOnEquityTTM, marketCapTTM,
-                                    priceToSalesRatioTTM
+          * /key-metrics-ttm      → returnOnEquityTTM
           * /financial-growth     → revenueGrowth
 
-        TTM revenue is derived as marketCapTTM / priceToSalesRatioTTM
-        (P/S is mktCap/revenue by definition, so the inverse gives
-        revenue without an extra FMP call). Used by `_build_competitors`
-        as a more honest "Market Share" denominator than mkt cap alone.
-
-        We re-emit ratios under the legacy unsuffixed names so
+        We re-emit them under the legacy unsuffixed names so
         `_build_competitors` keeps working with no signature change.
         Returns {} for any peer whose three calls all failed.
         """
@@ -811,19 +805,9 @@ class TickerReportDataCollector:
                     if op is not None:
                         merged["operatingProfitMargin"] = op
                 if isinstance(km, list) and km:
-                    km0 = km[0]
-                    roe = km0.get("returnOnEquityTTM")
+                    roe = km[0].get("returnOnEquityTTM")
                     if roe is not None:
                         merged["returnOnEquity"] = roe
-                    mc_ttm = km0.get("marketCapTTM")
-                    ps_ttm = km0.get("priceToSalesRatioTTM")
-                    try:
-                        if mc_ttm is not None and ps_ttm is not None:
-                            ps_f = float(ps_ttm)
-                            if ps_f > 0:
-                                merged["revenue_ttm"] = float(mc_ttm) / ps_f
-                    except (TypeError, ValueError):
-                        pass
                 if isinstance(growth, list) and growth:
                     rg = growth[0].get("revenueGrowth")
                     if rg is not None:
@@ -1322,6 +1306,42 @@ class TickerReportDataCollector:
             ai_moat.get("market_dynamics"),
             out.industry_tam,
         )
+        # Build the sector-medians map keyed by NORMALIZED sector so
+        # `_build_competitors` can score each peer (and the focal)
+        # against ITS OWN sector — gives absolute, comparable 0-10
+        # scores instead of min-max-within-set. One Supabase query per
+        # unique sector (1-hour cache), so worst case ~5 batched calls
+        # for a 5-peer set spanning 5 sectors.
+        sector_medians_by_sector: Dict[str, Dict[str, Optional[float]]] = {}
+        try:
+            from app.services.sector_benchmark_service import _normalize_sector
+            from app.services.sector_benchmark_lookup import (
+                get_sector_benchmark_lookup,
+            )
+            seen_sectors: Set[str] = set()
+            focal_raw_sector = (out.profile or {}).get("sector") or ""
+            if focal_raw_sector:
+                seen_sectors.add(_normalize_sector(focal_raw_sector))
+            for p in out.peer_profiles or []:
+                raw = (p or {}).get("sector") or ""
+                if raw:
+                    seen_sectors.add(_normalize_sector(raw))
+            seen_sectors.discard("")
+            if seen_sectors:
+                lookup = get_sector_benchmark_lookup()
+                metrics_to_fetch = list(_COMPETITOR_BENCHMARK_METRICS.keys())
+                for sec in seen_sectors:
+                    bms = lookup.get_sector_benchmarks(
+                        sec, metrics_to_fetch, "annual",
+                    )
+                    sector_medians_by_sector[sec] = _latest_sector_medians(bms)
+        except Exception as exc:
+            logger.warning(
+                "Competitor sector_medians lookup failed for %s: %s — "
+                "falling back to absolute-threshold scoring",
+                out.ticker, exc,
+            )
+
         deterministic_competitors = _build_competitors(
             my_ticker=out.ticker,
             my_profile=out.profile,
@@ -1330,6 +1350,7 @@ class TickerReportDataCollector:
             peer_profiles=out.peer_profiles,
             peer_ratios=out.peer_ratios,
             my_key_metrics=out.key_metrics,
+            sector_medians_by_sector=sector_medians_by_sector,
         )
         # Coverage-aware competitive_insight: when one or more pillars
         # fall flat because the industry's real moats live outside the
@@ -4063,59 +4084,172 @@ def _build_market_dynamics(
     return _default_market_dynamics(profile)
 
 
-def _peer_score(
-    op_margin: Optional[float],
-    roe: Optional[float],
-    revenue_growth: Optional[float],
+# ── Absolute (sector-relative) competitive scoring ─────────────────
+#
+# Replaces the min-max peer-set scaling for competitor moat scores.
+# Each peer is scored against ITS OWN sector's medians, so a "9" means
+# "top decile vs sector" for any peer in any sector, comparable across
+# reports. A "5" means "at sector median". Old min-max scaling would
+# always force one peer to 10 and another to 0 regardless of absolute
+# strength, which the user (correctly) flagged as unreal.
+
+# Sector benchmark keys to fetch + their unit convention.
+# `is_fraction` = True means the median is stored as 0–1 (e.g. 0.22 for 22%
+# margin); peer values are passed in as percent (22.0), so the median
+# must be multiplied by 100 before comparison. `False` means the median
+# is already a percent (e.g. revenue_yoy stored as 10.0 for 10%).
+_COMPETITOR_BENCHMARK_METRICS: Dict[str, Dict[str, Any]] = {
+    "operating_margin": {"is_fraction": True},
+    "roe":              {"is_fraction": True},
+    "revenue_yoy":      {"is_fraction": False},
+}
+
+# Absolute-threshold fallback bands used when sector_benchmarks has no
+# row for this peer's sector. Each tuple is (peer_pct_value, score).
+# Linear interpolation between adjacent bands; clamp at endpoints.
+# Same band shapes for op_margin / roe (mature-profitability scale)
+# and growth (mid-cap growth scale).
+_PROFITABILITY_BANDS: List[Tuple[float, float]] = [
+    (0.0,  0.0), (10.0, 3.0), (20.0, 5.0), (30.0, 7.0), (40.0, 9.0), (50.0, 10.0),
+]
+_ROE_BANDS: List[Tuple[float, float]] = [
+    (0.0,  0.0), (8.0,  3.0), (15.0, 5.0), (25.0, 7.0), (35.0, 9.0), (50.0, 10.0),
+]
+_GROWTH_BANDS: List[Tuple[float, float]] = [
+    (0.0,  0.0), (5.0,  3.0), (10.0, 5.0), (20.0, 7.0), (30.0, 9.0), (50.0, 10.0),
+]
+_FALLBACK_BANDS: Dict[str, List[Tuple[float, float]]] = {
+    "operating_margin": _PROFITABILITY_BANDS,
+    "roe":              _ROE_BANDS,
+    "revenue_yoy":      _GROWTH_BANDS,
+}
+
+
+def _interpolate_bands(
+    bands: List[Tuple[float, float]], value: float,
+) -> float:
+    """Linear interpolation between (x, y) pairs; clamp outside the range."""
+    if value <= bands[0][0]:
+        return bands[0][1]
+    if value >= bands[-1][0]:
+        return bands[-1][1]
+    for (x0, y0), (x1, y1) in zip(bands, bands[1:]):
+        if x0 <= value <= x1:
+            if x1 - x0 < 1e-9:
+                return y0
+            return y0 + (y1 - y0) * (value - x0) / (x1 - x0)
+    return bands[-1][1]
+
+
+def _absolute_threshold_fallback(
+    metric_key: str, peer_value_pct: float,
+) -> float:
+    """Map a peer's percentage value onto a 0-10 score via fixed bands.
+
+    Used only when the peer's sector has no benchmark row (rare —
+    11 canonical sectors all populated by the daily recompute job).
+    """
+    bands = _FALLBACK_BANDS.get(metric_key, _PROFITABILITY_BANDS)
+    return _interpolate_bands(bands, peer_value_pct)
+
+
+def _absolute_component_score(
+    peer_value_pct: float,
+    sector_median_raw: Optional[float],
+    metric_key: str,
+) -> float:
+    """Score one component on 0-10, anchored at sector median = 5.
+
+    Formula: 5 + (peer - median) / |median| × 5, clamped to [0, 10].
+    - peer == median           → 5
+    - peer == 2 × median       → 10
+    - peer == 0 (median > 0)   → 0
+    - peer < 0 (median > 0)    → 0 (clamped)
+
+    If `sector_median_raw` is None or near-zero, fall back to the
+    absolute-threshold bands so the component still has a number.
+    """
+    if sector_median_raw is None:
+        return _absolute_threshold_fallback(metric_key, peer_value_pct)
+
+    meta = _COMPETITOR_BENCHMARK_METRICS.get(metric_key, {})
+    # Convert sector median to percent if stored as fraction (op_margin,
+    # roe). Growth metrics like revenue_yoy are already in percent.
+    median_pct = (
+        sector_median_raw * 100.0 if meta.get("is_fraction") else sector_median_raw
+    )
+    if abs(median_pct) < 1e-3:
+        # Sector median is ~0 — can't divide by it; fall back to bands.
+        return _absolute_threshold_fallback(metric_key, peer_value_pct)
+
+    raw = 5.0 + ((peer_value_pct - median_pct) / abs(median_pct)) * 5.0
+    return max(0.0, min(10.0, raw))
+
+
+def _absolute_peer_score(
+    op_margin_pct: Optional[float],
+    roe_pct: Optional[float],
+    growth_pct: Optional[float],
+    sector_medians: Dict[str, Optional[float]],
 ) -> Optional[float]:
-    """Composite signal for a peer's competitive strength.
+    """Composite 0-10 competitive score, sector-relative.
 
-    Combines profitability (operating margin), capital efficiency (ROE),
-    and momentum (revenue growth). Each component contributes equally
-    after percentile-clamping so a single outlier doesn't dominate.
+    `sector_medians` is keyed by `_COMPETITOR_BENCHMARK_METRICS` keys
+    ("operating_margin", "roe", "revenue_yoy"); values may be None if
+    a particular metric isn't covered for this sector. Each component
+    falls through to absolute-threshold bands when its median is None.
 
-    Returns None when all three inputs are missing — the peer can't
-    be ranked and is shown without a score downstream.
+    Returns None when ALL three peer inputs are missing — the peer
+    can't be ranked and is dropped downstream.
     """
-    parts: List[float] = []
-    if op_margin is not None:
-        parts.append(max(-50.0, min(50.0, op_margin)))
-    if roe is not None:
-        parts.append(max(-50.0, min(50.0, roe)))
-    if revenue_growth is not None:
-        parts.append(max(-50.0, min(50.0, revenue_growth)))
-    if not parts:
+    components: List[float] = []
+    if op_margin_pct is not None:
+        components.append(_absolute_component_score(
+            op_margin_pct, sector_medians.get("operating_margin"),
+            "operating_margin",
+        ))
+    if roe_pct is not None:
+        components.append(_absolute_component_score(
+            roe_pct, sector_medians.get("roe"), "roe",
+        ))
+    if growth_pct is not None:
+        components.append(_absolute_component_score(
+            growth_pct, sector_medians.get("revenue_yoy"), "revenue_yoy",
+        ))
+    if not components:
         return None
-    return sum(parts) / len(parts)
+    return round(sum(components) / len(components), 1)
 
 
-def _normalize_to_0_10(values: List[float]) -> List[float]:
-    """Map an arbitrary numeric list onto a 0-10 scale by min-max scaling.
+def _latest_sector_medians(
+    benchmarks: Dict[str, Dict[str, float]],
+) -> Dict[str, Optional[float]]:
+    """Pick the most recent period_label per metric.
 
-    Used to project the peer-score distribution onto the iOS moat-score
-    range (0-10). When all peers tie or only one peer exists, every
-    score is 5.0 (the neutral midpoint) — neither the chart nor the
-    threat-level math benefits from spurious differentiation.
+    `benchmarks` is the raw output of
+    `SectorBenchmarkLookup.get_sector_benchmarks(...)` —
+    `{metric: {period_label: median_value}}`. Returns
+    `{metric: latest_value or None}` for the 3 keys we care about.
     """
-    if not values:
-        return []
-    if len(values) == 1:
-        return [5.0]
-    lo, hi = min(values), max(values)
-    if hi - lo < 1e-9:
-        return [5.0] * len(values)
-    return [round(((v - lo) / (hi - lo)) * 10.0, 1) for v in values]
+    out: Dict[str, Optional[float]] = {}
+    for key in _COMPETITOR_BENCHMARK_METRICS:
+        periods = benchmarks.get(key) or {}
+        if periods:
+            latest_label = max(periods.keys())
+            out[key] = periods.get(latest_label)
+        else:
+            out[key] = None
+    return out
 
 
 _COMPETITOR_MKT_CAP_FLOOR_RATIO = 0.05    # 5% of focal mkt cap
 _COMPETITOR_MKT_CAP_FLOOR_ABS = 5_000_000_000.0   # $5B hard floor
 # Variable count: take EVERY peer that survives the mkt-cap floor, up to
-# this ceiling. Industries with many same-tier rivals (mega-cap software
-# like ORCL → MSFT/PLTR/PANW/CRWD/SNPS/FTNT/NET) naturally show 6-7;
-# niche or small-cap tickers with fewer comparable peers show 3-5;
-# outliers (no peer survives the floor) show 0 with the iOS empty state.
-# The floor is the quality gate — this cap just bounds the UI list.
-_COMPETITOR_MAX_N = 7
+# this ceiling. With absolute sector-relative scoring (no min-max), there's
+# no longer a "someone must be at 10" pathology to worry about, so a tighter
+# cap of 5 keeps the card list scannable. WDAY-style edge-of-floor peers
+# get cleanly dropped at the cap.
+_COMPETITOR_MAX_N = 5
 
 
 # ── Industry-universe peer fallback ────────────────────────────────────
@@ -4185,6 +4319,9 @@ def _build_competitors(
     peer_profiles: List[Dict[str, Any]],
     peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
     my_key_metrics: Optional[List[Dict[str, Any]]] = None,
+    sector_medians_by_sector: Optional[
+        Dict[str, Dict[str, Optional[float]]]
+    ] = None,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, top-N by market cap.
 
@@ -4195,20 +4332,25 @@ def _build_competitors(
       2. Sort survivors by mktCap desc and cap at `_COMPETITOR_MAX_N`.
       3. Drop peers we cannot score (score_raw is None) — avoids the
          "0.0 by definition" card that happens when a peer's TTM ratios
-         are empty in FMP and min-max scaling pins them to the floor.
-      4. Compute `market_share_percent` from peer TTM revenue
-         (peer revenue / peer-set revenue), falling back to mkt-cap
-         share when FMP's key-metrics-ttm coverage is patchy. Revenue is
-         a more honest "Market Share" proxy than market cap; mkt-cap
-         share over-rewards investor enthusiasm and under-counts steady
-         revenue earners.
-      5. Drop sub-1% peers and recompute share so the visible cards
-         still sum to ~100% — a peer that is <1% of the peer set isn't
-         a meaningful comparator at this scale.
+         are empty in FMP.
+      4. Score each peer absolutely on 0-10 via `_absolute_peer_score`
+         (each peer compared to ITS OWN sector medians). No min-max
+         scaling — a "9" means top-decile vs sector for any peer in any
+         sector, comparable across reports.
+      5. Sort the final list by moat_score desc so the strongest
+         threats render first.
 
-    Per-peer scoring uses real financial ratios from the peers' own
-    `/stable/ratios-ttm` responses (passed in via `peer_ratios`, keyed
-    by ticker).
+    `market_share_percent` is emitted as 0.0 for every peer for
+    backwards compatibility with the iOS DTO; iOS no longer renders
+    that field. Real market-share data isn't honestly available
+    (peer-set share is misleading, TAM data is US-only / 1-2yr lag
+    against global TTM revenue).
+
+    `sector_medians_by_sector` is keyed by NORMALIZED sector name
+    (e.g., "Technology"); each value is the output of
+    `_latest_sector_medians(...)`. When None or missing for a peer's
+    sector, scoring falls back to absolute-threshold bands so a number
+    still renders.
 
     Returns [] when no peer survives the floor or the rankable-data
     drop.
@@ -4254,9 +4396,23 @@ def _build_competitors(
         )
         return []
 
-    # ── 2. Score the focal so we can compute threat-level deltas ──────
-    my_op_margin = None
-    my_roe = None
+    sector_medians_by_sector = sector_medians_by_sector or {}
+
+    # Local import to avoid pulling sector_benchmark_service into test
+    # paths that don't exercise competitor scoring.
+    from app.services.sector_benchmark_service import _normalize_sector
+
+    def _sector_medians_for(profile: Dict[str, Any]) -> Dict[str, Optional[float]]:
+        """Resolve the sector_medians dict for a given profile. Returns
+        an empty dict when sector is unknown or has no benchmark row —
+        `_absolute_peer_score` falls back to absolute-threshold bands."""
+        raw_sector = (profile or {}).get("sector") or ""
+        sector = _normalize_sector(raw_sector) if raw_sector else ""
+        return sector_medians_by_sector.get(sector, {})
+
+    # ── 2. Score the focal (against its own sector) ───────────────────
+    my_op_margin: Optional[float] = None
+    my_roe: Optional[float] = None
     if my_ratios:
         r0 = my_ratios[0]
         omp = r0.get("operatingProfitMargin")
@@ -4273,21 +4429,25 @@ def _build_competitors(
         km_roe = km0.get("returnOnEquity")
         if km_roe is not None:
             my_roe = float(km_roe) * 100
-    my_raw_score = _peer_score(
-        my_op_margin, my_roe,
-        (my_revenue_growth * 100) if my_revenue_growth is not None else None,
+    # `my_revenue_growth` arrives ALREADY in percent form from
+    # `_safe_pct_change` (which multiplies by 100). Do NOT multiply
+    # again — that bug used to inflate the focal to the clamp ceiling
+    # and forced every peer to "Low" threat.
+    my_score = _absolute_peer_score(
+        my_op_margin, my_roe, my_revenue_growth,
+        _sector_medians_for(my_profile),
     )
 
-    # ── 3. Build peer_data: per-peer raw score + TTM revenue ─────────
+    # ── 3. Score each surviving peer (against its OWN sector) ─────────
     peer_data: List[Dict[str, Any]] = []
     for s in survivors:
         sym = s["symbol"]
         p = s["profile"]
         ratios_row = peer_ratios.get(sym, {}) or {}
 
-        op_margin = None
-        roe_val = None
-        rev_growth = None
+        op_margin: Optional[float] = None
+        roe_val: Optional[float] = None
+        rev_growth: Optional[float] = None
         omp = ratios_row.get("operatingProfitMargin")
         if omp is not None:
             op_margin = float(omp) * 100
@@ -4298,29 +4458,23 @@ def _build_competitors(
         if rg is not None:
             rev_growth = float(rg) * 100
 
-        rev_ttm: Optional[float] = None
-        rev_raw = ratios_row.get("revenue_ttm")
-        if rev_raw is not None:
-            try:
-                v = float(rev_raw)
-                if v > 0:
-                    rev_ttm = v
-            except (TypeError, ValueError):
-                pass
+        score = _absolute_peer_score(
+            op_margin, roe_val, rev_growth,
+            _sector_medians_for(p),
+        )
 
         peer_data.append({
             "name": p.get("companyName") or sym,
             "ticker": sym,
             "mkt_cap": s["mkt_cap"],
-            "revenue_ttm": rev_ttm,
-            "score_raw": _peer_score(op_margin, roe_val, rev_growth),
+            "score": score,
         })
 
     # ── 4. Drop peers we cannot score ────────────────────────────────
-    # A peer with no rankable signal becomes the min-max floor and gets
-    # shipped to iOS as "0.0" — visually punishing a real company for
-    # an FMP coverage gap. Better to render fewer confident rows.
-    peer_data = [p for p in peer_data if p["score_raw"] is not None]
+    # A peer with no rankable signal (all three ratios missing) has no
+    # honest score. Better to render fewer confident rows than fabricate
+    # a number for a coverage gap.
+    peer_data = [p for p in peer_data if p["score"] is not None]
     if not peer_data:
         logger.info(
             f"_build_competitors({my_ticker}): no peers had rankable "
@@ -4328,56 +4482,16 @@ def _build_competitors(
         )
         return []
 
-    # ── 5. Pick the Market Share denominator ──────────────────────────
-    # Prefer TTM revenue (honest "market share" proxy). Fall back to
-    # mkt-cap share when no peer in the set has revenue data — keeps
-    # the metric available during patchy FMP coverage windows.
-    total_peer_revenue = sum(
-        p["revenue_ttm"] for p in peer_data if p["revenue_ttm"]
-    )
-    use_revenue = total_peer_revenue > 0
-    if use_revenue:
-        # Drop peers without revenue_ttm — can't honestly include them
-        # in a revenue-share denominator.
-        peer_data = [p for p in peer_data if p["revenue_ttm"]]
-        total_peer_revenue = sum(p["revenue_ttm"] for p in peer_data)
-        for p in peer_data:
-            p["_share_pct"] = (p["revenue_ttm"] / total_peer_revenue) * 100
-    else:
-        for p in peer_data:
-            p["_share_pct"] = (p["mkt_cap"] / total_peer_cap) * 100
-
-    # ── 6. Drop sub-1% noise peers and recompute share ────────────────
-    peer_data = [p for p in peer_data if p["_share_pct"] >= 1.0]
-    if not peer_data:
-        logger.info(
-            f"_build_competitors({my_ticker}): no peers with share >= 1% "
-            f"— returning empty list"
-        )
-        return []
-    if use_revenue:
-        total_peer_revenue = sum(p["revenue_ttm"] for p in peer_data)
-        for p in peer_data:
-            p["_share_pct"] = (p["revenue_ttm"] / total_peer_revenue) * 100
-    else:
-        total_filtered_cap = sum(p["mkt_cap"] for p in peer_data)
-        for p in peer_data:
-            p["_share_pct"] = (p["mkt_cap"] / total_filtered_cap) * 100
-
-    # ── 7. Min-max scale on the FINAL peer set ────────────────────────
-    # Include the focal so its scaled score drives threat-level deltas.
-    raw_scores: List[float] = [p["score_raw"] for p in peer_data]
-    raw_scores.append(my_raw_score if my_raw_score is not None else 0.0)
-    scaled = _normalize_to_0_10(raw_scores)
-    my_scaled = scaled[-1] if scaled else 5.0
-    peer_scaled = scaled[:-1]
-
-    # ── 8. Emit final rows with threat-level deltas ──────────────────
+    # ── 5. Emit rows with threat-level deltas ─────────────────────────
+    # Both peer and focal scores are on the same absolute 0-10 axis
+    # (each computed against its own sector), so the delta is
+    # apples-to-apples — a peer that beats its sector by more than the
+    # focal beats its sector is "high" threat, etc.
+    focal_score = my_score if my_score is not None else 5.0
     out: List[Dict[str, Any]] = []
-    for i, p in enumerate(peer_data):
-        moat_score = peer_scaled[i] if i < len(peer_scaled) else 5.0
-        share_pct = round(p["_share_pct"], 1)
-        delta = moat_score - my_scaled
+    for p in peer_data:
+        moat_score = round(p["score"], 1)
+        delta = moat_score - focal_score
         if delta >= 1.5:
             threat = "high"
         elif delta <= -1.5:
@@ -4388,11 +4502,14 @@ def _build_competitors(
             "name": p["name"],
             "ticker": p["ticker"],
             "moat_score": moat_score,
-            "market_share_percent": share_pct,
+            # iOS no longer renders Market Share, but the DTO field is
+            # still required — emit 0.0 so old cached reports decode.
+            "market_share_percent": 0.0,
             "threat_level": threat,
         })
 
-    out.sort(key=lambda c: c["market_share_percent"], reverse=True)
+    # Sort strongest threats first.
+    out.sort(key=lambda c: c["moat_score"], reverse=True)
     return out
 
 

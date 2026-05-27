@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 
 from app.services.agents.ticker_report_data_collector import (
     _INDUSTRY_PEERS_CACHE,
+    _absolute_peer_score,
+    _absolute_threshold_fallback,
     _apply_tam_source,
     _build_competitors,
     _build_insider_sections,
@@ -788,20 +790,20 @@ def _peer(symbol: str, name: str, mkt_cap: float, change: float = 0.0) -> dict:
 
 
 def _default_ratios_for(peers: list) -> dict:
-    """Minimal ratios + revenue_ttm for a list of peer profiles.
+    """Minimal ratios for a list of peer profiles.
 
     Tests that exercise non-scoring behavior (floor, cap, sort, threat)
-    use this so each peer ends up rankable (score_raw is not None) and
-    has a revenue denominator. Revenue is set to mkt_cap × 0.3 — a
-    crude but consistent proxy that keeps revenue shares aligned with
-    cap shares when the test asserts on share values.
+    use this so each peer ends up rankable (score_raw is not None).
+    Each metric is set just above the sector-relative midpoint for the
+    default test sector — that way peers land near a score of 5–6
+    without any specific sector benchmarks supplied (falls back to
+    absolute-threshold bands).
     """
     return {
         p["symbol"]: {
             "operatingProfitMargin": 0.20,
             "returnOnEquity": 0.15,
             "revenueGrowth": 0.10,
-            "revenue_ttm": p["mktCap"] * 0.3,
         }
         for p in peers
     }
@@ -814,25 +816,6 @@ def test_build_competitors_empty_when_no_peers():
         my_revenue_growth=None, peer_profiles=[],
     )
     assert out == []
-
-
-def test_build_competitors_market_share_sums_to_100():
-    """Surviving peer market shares must total ~100% — recomputed from
-    the post-filter set so dropped micro-caps don't dilute the visible
-    top-N's percentages. Share is now revenue-based (peer revenue /
-    peer-set revenue) but the sum invariant is unchanged."""
-    peers = [
-        _peer("MSFT", "Microsoft", 3_000_000_000_000),
-        _peer("GOOGL", "Alphabet", 2_000_000_000_000),
-        _peer("META", "Meta", 1_000_000_000_000),
-    ]
-    out = _build_competitors(
-        my_ticker="AAPL", my_profile={}, my_ratios=[],
-        my_revenue_growth=None, peer_profiles=peers,
-        peer_ratios=_default_ratios_for(peers),
-    )
-    total = sum(c["market_share_percent"] for c in out)
-    assert abs(total - 100.0) < 0.5
 
 
 def test_build_competitors_excludes_focal_ticker():
@@ -912,10 +895,10 @@ def test_build_competitors_drops_micro_cap_misclassifications():
 
 def test_build_competitors_caps_at_max_n():
     """When many peers pass the floor, the list is bounded at
-    `_COMPETITOR_MAX_N` (7) — wide enough to surface real competitive
-    depth for mega-caps without flooding the iOS card list. Industries
-    with fewer same-tier peers naturally return fewer; this test
-    exercises the upper bound."""
+    `_COMPETITOR_MAX_N` (5) — enough to surface real competitive depth
+    without flooding the iOS card list. With absolute sector-relative
+    scoring there's no min-max pathology forcing one peer to 10 or 0,
+    so the cap is just a UI-list limit."""
     peers = [
         _peer(f"P{i}", f"Peer {i}", (10 - i) * 50_000_000_000)
         for i in range(10)  # 10 candidates all above $50B → all pass floor
@@ -925,7 +908,7 @@ def test_build_competitors_caps_at_max_n():
         my_revenue_growth=None, peer_profiles=peers,
         peer_ratios=_default_ratios_for(peers),
     )
-    assert len(out) == 7
+    assert len(out) == 5
 
 
 def test_build_competitors_returns_all_survivors_when_below_cap():
@@ -983,34 +966,10 @@ def test_build_competitors_moat_scores_in_0_10_range():
         assert 0.0 <= c["moat_score"] <= 10.0
 
 
-def test_build_competitors_sorted_by_market_share_desc():
-    """Largest competitor first — iOS renders top-N and we don't want
-    the small fish above the whales. Micro-caps below the $5B floor
-    are dropped entirely."""
-    peers = [
-        _peer("SMALL", "Small Co", 1_000_000),       # below $5B floor → dropped
-        _peer("BIG", "Big Co", 1_000_000_000_000),
-        _peer("MEDIUM", "Medium Co", 100_000_000),   # below floor → dropped
-        _peer("MID", "Mid Co", 50_000_000_000),
-    ]
-    out = _build_competitors(
-        my_ticker="AAPL", my_profile={}, my_ratios=[],
-        my_revenue_growth=None, peer_profiles=peers,
-        peer_ratios=_default_ratios_for(peers),
-    )
-    shares = [c["market_share_percent"] for c in out]
-    assert shares == sorted(shares, reverse=True)
-    assert out[0]["ticker"] == "BIG"
-    # Below-floor peers should be gone.
-    tickers = [c["ticker"] for c in out]
-    assert "SMALL" not in tickers
-    assert "MEDIUM" not in tickers
-
-
 def test_build_competitors_uses_peer_ratios_for_scoring():
-    """When peer_ratios are provided, scoring uses real ratios instead
-    of the (now-removed) changes proxy — gives meaningful differentiation.
-    No revenue_ttm in these ratios → share falls back to mkt-cap share."""
+    """When peer_ratios are provided, scoring uses real ratios — a peer
+    with much higher margins/ROE earns a higher absolute moat_score
+    than one with low margins/ROE, regardless of peer-set composition."""
     peers = [
         _peer("HIGHMARGIN", "High Margin Co", 100_000_000_000),
         _peer("LOWMARGIN", "Low Margin Co", 100_000_000_000),
@@ -1061,77 +1020,166 @@ def test_build_competitors_drops_peer_with_all_none_ratios():
     assert out[0]["moat_score"] > 0.0
 
 
-def test_build_competitors_drops_peer_without_revenue_ttm_when_others_have_it():
-    """When at least one peer has revenue_ttm, switch to revenue-based
-    Market Share. Peers without revenue_ttm cannot honestly participate
-    in a revenue denominator, so they're dropped."""
+# ── Absolute (sector-relative) competitive scoring ────────────────────
+
+
+def test_absolute_peer_score_at_sector_median_returns_5():
+    """A peer whose metrics match the sector medians exactly should
+    land at the midpoint score (5.0). Sector medians are in raw
+    fractional form for `operating_margin`/`roe` (the `is_fraction`
+    convention); peer values are in percent form."""
+    medians = {
+        "operating_margin": 0.20,  # 20% as a fraction
+        "roe":              0.15,  # 15%
+        "revenue_yoy":      10.0,  # already a percent
+    }
+    score = _absolute_peer_score(20.0, 15.0, 10.0, medians)
+    assert score == 5.0
+
+
+def test_absolute_peer_score_at_2x_median_returns_10():
+    """A peer at 2× sector median caps at the top of the 0-10 range."""
+    medians = {
+        "operating_margin": 0.20,
+        "roe":              0.15,
+        "revenue_yoy":      10.0,
+    }
+    score = _absolute_peer_score(40.0, 30.0, 20.0, medians)
+    assert score == 10.0
+
+
+def test_absolute_peer_score_at_zero_with_positive_median_returns_0():
+    """A peer with zero on every metric while the sector median is
+    positive should bottom at 0.0."""
+    medians = {
+        "operating_margin": 0.20,
+        "roe":              0.15,
+        "revenue_yoy":      10.0,
+    }
+    score = _absolute_peer_score(0.0, 0.0, 0.0, medians)
+    assert score == 0.0
+
+
+def test_absolute_peer_score_falls_back_to_threshold_bands_when_medians_missing():
+    """When sector benchmarks are unavailable (empty dict), the score
+    falls back to the absolute-threshold bands. A peer at
+    op_margin=20%, roe=15%, growth=10% — landing at the "5" anchor of
+    each band — should still come back near 5.0."""
+    score = _absolute_peer_score(20.0, 15.0, 10.0, {})
+    assert score is not None
+    assert 4.5 <= score <= 5.5
+
+
+def test_absolute_threshold_fallback_clamps_outside_bands():
+    """Values above the top band map to 10, below the bottom band map
+    to 0 — the iOS UI never sees out-of-range numbers."""
+    assert _absolute_threshold_fallback("operating_margin", 100.0) == 10.0
+    assert _absolute_threshold_fallback("operating_margin", -50.0) == 0.0
+    assert _absolute_threshold_fallback("revenue_yoy", 100.0) == 10.0
+
+
+def test_build_competitors_sector_relative_scoring_uses_passed_medians():
+    """When `sector_medians_by_sector` is supplied, each peer is scored
+    against ITS OWN sector's medians (not the focal's). A peer in a
+    weak sector that beats its sector by a lot can outscore a peer in
+    a strong sector that's average for theirs."""
     peers = [
-        _peer("MSFT", "Microsoft", 3_000_000_000_000),
-        _peer("CRM", "Salesforce", 280_000_000_000),
-        _peer("MYSTERY", "Mystery Co", 100_000_000_000),
+        # Strong peer in Technology (median op_margin 25%, roe 20%)
+        {**_peer("STRONG_TECH", "Strong Tech", 100_000_000_000), "sector": "Technology"},
+        # Average peer in Consumer (median op_margin 8%, roe 12%) —
+        # peer is at sector median = score ~5
+        {**_peer("AVG_CONSUMER", "Avg Consumer", 100_000_000_000), "sector": "Consumer Cyclical"},
     ]
     ratios = {
-        "MSFT": {
-            "operatingProfitMargin": 0.35, "returnOnEquity": 0.30,
-            "revenueGrowth": 0.12, "revenue_ttm": 250_000_000_000,
-        },
-        "CRM": {
-            "operatingProfitMargin": 0.20, "returnOnEquity": 0.10,
-            "revenueGrowth": 0.10, "revenue_ttm": 35_000_000_000,
-        },
-        # MYSTERY scoreable but no revenue
-        "MYSTERY": {
-            "operatingProfitMargin": 0.15, "returnOnEquity": 0.10,
-            "revenueGrowth": 0.05,
-        },
+        "STRONG_TECH":  {"operatingProfitMargin": 0.45, "returnOnEquity": 0.40, "revenueGrowth": 0.20},
+        "AVG_CONSUMER": {"operatingProfitMargin": 0.08, "returnOnEquity": 0.12, "revenueGrowth": 0.10},
     }
+    medians = {
+        "Technology":        {"operating_margin": 0.25, "roe": 0.20, "revenue_yoy": 10.0},
+        "Consumer Cyclical": {"operating_margin": 0.08, "roe": 0.12, "revenue_yoy": 10.0},
+    }
+    # Focal has no mktCap → floor falls back to the $5B absolute, so
+    # the $100B peers easily survive.
     out = _build_competitors(
-        my_ticker="ORCL",
-        my_profile={"mktCap": 800_000_000_000},
+        my_ticker="AAPL", my_profile={},
         my_ratios=[], my_revenue_growth=None,
         peer_profiles=peers, peer_ratios=ratios,
+        sector_medians_by_sector=medians,
     )
-    tickers = [c["ticker"] for c in out]
-    assert "MYSTERY" not in tickers
-    assert {"MSFT", "CRM"} == set(tickers)
+    scores = {c["ticker"]: c["moat_score"] for c in out}
+    # STRONG_TECH beats its sector median substantially → high score
+    assert scores["STRONG_TECH"] >= 8.0
+    # AVG_CONSUMER sits AT its sector medians → near 5.0
+    assert 4.5 <= scores["AVG_CONSUMER"] <= 5.5
 
 
-def test_build_competitors_drops_sub_one_percent_peers_and_recomputes_share():
-    """A peer that is <1% of the peer-set revenue is not a meaningful
-    comparator. Drop and recompute so the visible cards still sum to
-    ~100%. Closes the visual `0%` bug from `%.0f%%` rounding on iOS."""
+def test_build_competitors_focal_growth_does_not_clamp_at_50():
+    """The previous bug: `my_revenue_growth` (already in percent form)
+    was multiplied by 100 again inside `_build_competitors`, pushing
+    the focal's growth contribution to the clamp ceiling and inflating
+    its raw score — which then forced every peer to "Low" threat. The
+    fix removes that ×100; growth of 15% should pass through unchanged
+    and result in at least one peer earning a non-"Low" threat."""
     peers = [
-        _peer("BIG1", "Big 1", 500_000_000_000),
-        _peer("BIG2", "Big 2", 500_000_000_000),
-        _peer("TINY", "Tiny Co", 10_000_000_000),  # passes $5B floor
+        _peer("STRONG", "Strong Co", 100_000_000_000),
     ]
     ratios = {
-        "BIG1": {
-            "operatingProfitMargin": 0.30, "returnOnEquity": 0.20,
-            "revenueGrowth": 0.10, "revenue_ttm": 200_000_000_000,
-        },
-        "BIG2": {
-            "operatingProfitMargin": 0.30, "returnOnEquity": 0.20,
-            "revenueGrowth": 0.10, "revenue_ttm": 200_000_000_000,
-        },
-        # Tiny revenue: 1B / (200B + 200B + 1B) ≈ 0.25% — below 1% drop
-        "TINY": {
-            "operatingProfitMargin": 0.10, "returnOnEquity": 0.05,
-            "revenueGrowth": 0.05, "revenue_ttm": 1_000_000_000,
-        },
+        # Strong peer easily exceeds sector medians on all three metrics
+        "STRONG": {"operatingProfitMargin": 0.40, "returnOnEquity": 0.35, "revenueGrowth": 0.20},
     }
+    medians = {
+        "Technology": {"operating_margin": 0.20, "roe": 0.15, "revenue_yoy": 10.0},
+    }
+    # Focal at sector median (would score 5.0). If the old bug were
+    # back, focal_score would inflate to ~10 and the peer at ~8 would
+    # show "low" threat (delta = 8 - 10 = -2). No mktCap on focal so
+    # the floor falls to the $5B absolute and the peer survives.
     out = _build_competitors(
         my_ticker="AAPL",
-        my_profile={"mktCap": 3_000_000_000_000},
+        my_profile={"sector": "Technology"},
+        my_ratios=[{"operatingProfitMargin": 0.20, "returnOnEquity": 0.15}],
+        my_revenue_growth=10.0,   # already percent
+        peer_profiles=[{**peers[0], "sector": "Technology"}],
+        peer_ratios=ratios,
+        sector_medians_by_sector=medians,
+    )
+    # Single strong peer should be "high" threat, not "low".
+    assert out[0]["threat_level"] == "high"
+
+
+def test_build_competitors_sorted_by_moat_score_desc():
+    """The output list is sorted by moat_score desc — the strongest
+    threat renders first, matching the visual hierarchy on iOS."""
+    peers = [
+        _peer("WEAK",   "Weak Co",   100_000_000_000),
+        _peer("MID",    "Mid Co",    100_000_000_000),
+        _peer("STRONG", "Strong Co", 100_000_000_000),
+    ]
+    ratios = {
+        "STRONG": {"operatingProfitMargin": 0.40, "returnOnEquity": 0.35, "revenueGrowth": 0.20},
+        "MID":    {"operatingProfitMargin": 0.20, "returnOnEquity": 0.15, "revenueGrowth": 0.10},
+        "WEAK":   {"operatingProfitMargin": 0.05, "returnOnEquity": 0.03, "revenueGrowth": 0.02},
+    }
+    out = _build_competitors(
+        my_ticker="AAPL", my_profile={},
         my_ratios=[], my_revenue_growth=None,
         peer_profiles=peers, peer_ratios=ratios,
     )
-    tickers = [c["ticker"] for c in out]
-    assert "TINY" not in tickers
-    assert set(tickers) == {"BIG1", "BIG2"}
-    # After dropping TINY, shares recompute to sum to 100%.
-    total = sum(c["market_share_percent"] for c in out)
-    assert abs(total - 100.0) < 0.5
+    tickers_in_order = [c["ticker"] for c in out]
+    assert tickers_in_order == ["STRONG", "MID", "WEAK"]
+
+
+def test_build_competitors_emits_zero_market_share_for_schema_compat():
+    """Market Share is no longer rendered on iOS, but the DTO field is
+    kept in the schema for backwards compatibility with cached
+    reports. Backend always emits 0.0."""
+    peers = [_peer("MSFT", "Microsoft", 3_000_000_000_000)]
+    out = _build_competitors(
+        my_ticker="AAPL", my_profile={}, my_ratios=[],
+        my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
+    )
+    assert all(c["market_share_percent"] == 0.0 for c in out)
 
 
 # ── PR 3: TAM overlay (AI extraction → market_dynamics) ───────────────

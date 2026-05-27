@@ -106,7 +106,7 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "current_ratio",       "source": "ratios",    "field": "currentRatio",           "type": "direct"},
     {"name": "quick_ratio",         "source": "ratios",    "field": "quickRatio",             "type": "direct"},
     {"name": "debt_to_equity",      "source": "ratios",    "field": "debtToEquityRatio",      "type": "direct"},
-    {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverage",       "type": "direct"},
+    {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverageRatio",  "type": "direct"},
     {"name": "debt_to_assets",      "source": "ratios",    "field": "debtRatio",              "type": "direct"},
     # Valuation
     {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},

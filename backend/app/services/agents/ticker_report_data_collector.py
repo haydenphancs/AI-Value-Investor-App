@@ -1331,6 +1331,22 @@ class TickerReportDataCollector:
             peer_ratios=out.peer_ratios,
             my_key_metrics=out.key_metrics,
         )
+        # Coverage-aware competitive_insight: when one or more pillars
+        # fall flat because the industry's real moats live outside the
+        # financial-statement lens (mining, banks, insurers, REITs,
+        # utilities, energy), append a short explanation so the iOS
+        # Industry & Competitive Moat panel doesn't leave the user
+        # wondering why a radar corner collapsed.
+        base_competitive_insight = (
+            ai_moat.get("competitive_insight")
+            or "Data unavailable for this ticker."
+        )
+        coverage_note = None
+        if ai_moat.get("competitive_insight"):
+            # Only append a note when we have a real AI insight to attach
+            # it to — appending to the "Data unavailable" placeholder
+            # would read awkwardly.
+            coverage_note = _build_moat_coverage_note(moat_dims, focal_industry)
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
             "dimensions": moat_dims,
@@ -1340,8 +1356,7 @@ class TickerReportDataCollector:
             ),
             "competitors": deterministic_competitors,
             "competitive_insight": (
-                ai_moat.get("competitive_insight")
-                or "Data unavailable for this ticker."
+                base_competitive_insight + (coverage_note or "")
             ),
         }
         moat_vital = _derive_moat_vital(moat_dims)
@@ -3419,6 +3434,110 @@ def _apply_peer_score_baseline(
         except (TypeError, ValueError):
             d["peer_score"] = 5.0
     return dims
+
+
+# ── Moat coverage note ───────────────────────────────────────────────
+#
+# Some industries (mining, banks, insurers, REITs, utilities) have real
+# moats that don't show up in financial-statement metrics — reserve life
+# for miners, deposit franchises for banks, regulatory licensing for
+# insurers, etc. When a pillar's peer_average sits at 0-1 (no peer
+# carries that metric) or at the 5.0 baseline (no benchmark row exists
+# for this industry yet), users see a flat / collapsed corner of the
+# Moat radar and may assume the report is broken. The helper below
+# detects these "wrong pillar for this industry" cases and emits an
+# explanatory sentence appended to `competitive_insight` so the iOS
+# Industry & Competitive Moat panel can read it inline.
+
+_MOAT_ARCHETYPE_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("mining", (
+        "gold", "silver", "copper", "mining", "precious metals",
+        "aluminum", "steel", "coal", "iron ore",
+    )),
+    ("insurance", ("insurance", "healthcare plans")),
+    ("bank", ("banks", "capital markets", "credit services")),
+    ("reit", ("reit", "real estate")),
+    ("utility", ("utilities",)),
+    ("energy", ("oil", "gas", "pipeline")),
+]
+
+_MOAT_ARCHETYPE_EXPLANATIONS: Dict[str, str] = {
+    "mining":    "mining moats are physical (reserves, cost position), not balance-sheet IP.",
+    "insurance": "insurer moats are scale and regulatory licensing, not balance-sheet IP.",
+    "bank":      "bank moats are deposit franchises, not balance-sheet IP.",
+    "reit":      "REIT moats are property-driven, not R&D-driven.",
+    "utility":   "utility moats are regulated territory, not R&D-driven.",
+    "energy":    "energy moats are physical assets (reserves, infrastructure), not R&D-driven.",
+}
+
+
+def _classify_industry_archetype(industry: Optional[str]) -> Optional[str]:
+    """Map an industry name to one of the archetypes that have a tailored
+    coverage-note. Returns None when no archetype matches; the caller
+    falls back to a generic explanation.
+    """
+    if not industry:
+        return None
+    lo = industry.lower()
+    for archetype, keywords in _MOAT_ARCHETYPE_KEYWORDS:
+        if any(k in lo for k in keywords):
+            return archetype
+    return None
+
+
+def _build_moat_coverage_note(
+    moat_dims: List[Dict[str, Any]],
+    industry: Optional[str],
+) -> Optional[str]:
+    """Detect pillars where the data doesn't really apply to the industry
+    and return a short note to append to `competitive_insight`. Returns
+    None when every pillar resolved cleanly (no weak coverage to flag).
+
+    A pillar is considered weak when either:
+      1. `peer_score <= 1.0` AND `score <= 1.5` — uniformly-low signal,
+         meaning the industry as a whole doesn't carry that metric
+         (e.g. R&D in mining, intangibles in insurance).
+      2. `peer_score == 5.0` AND the pillar's source is grounded or
+         ai_legacy — the deterministic path couldn't resolve AND no
+         industry benchmark row exists, so we fell back twice. The
+         radar's gray corner sits at the sentinel midpoint.
+    """
+    weak: List[str] = []
+    for d in moat_dims:
+        try:
+            peer = float(d.get("peer_score") or 5.0)
+            score = float(d.get("score") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        source = d.get("source")
+        # Uniformly-low — focal AND peer both near zero
+        if peer <= 1.0 and score <= 1.5:
+            weak.append(d.get("name") or "")
+            continue
+        # Baseline-sentinel — peer fell to 5.0 floor AND focal also
+        # couldn't resolve deterministically
+        if peer == 5.0 and source in ("grounded", "ai_legacy"):
+            weak.append(d.get("name") or "")
+
+    weak = [w for w in weak if w]
+    if not weak:
+        return None
+
+    if len(weak) == 1:
+        pillar_phrase = weak[0]
+    elif len(weak) == 2:
+        pillar_phrase = " and ".join(weak)
+    else:
+        pillar_phrase = ", ".join(weak[:-1]) + f", and {weak[-1]}"
+
+    archetype = _classify_industry_archetype(industry)
+    if archetype and archetype in _MOAT_ARCHETYPE_EXPLANATIONS:
+        explanation = _MOAT_ARCHETYPE_EXPLANATIONS[archetype]
+    else:
+        explanation = (
+            "this industry's real moats aren't captured by financial-statement metrics."
+        )
+    return f" Note: {pillar_phrase} flat — {explanation}"
 
 
 # ── Macro risk-factor derivation (PR 4) ──────────────────────────────

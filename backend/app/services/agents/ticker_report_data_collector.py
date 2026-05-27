@@ -774,14 +774,20 @@ class TickerReportDataCollector:
         self, peers: List[str],
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch the three peer signals (op margin, ROE, revenue growth)
-        keyed by ticker.
+        plus TTM revenue, keyed by ticker.
 
         FMP split these across three endpoints in late 2025:
           * /ratios-ttm           → operatingProfitMarginTTM
-          * /key-metrics-ttm      → returnOnEquityTTM
+          * /key-metrics-ttm      → returnOnEquityTTM, marketCapTTM,
+                                    priceToSalesRatioTTM
           * /financial-growth     → revenueGrowth
 
-        We re-emit them under the legacy unsuffixed names so
+        TTM revenue is derived as marketCapTTM / priceToSalesRatioTTM
+        (P/S is mktCap/revenue by definition, so the inverse gives
+        revenue without an extra FMP call). Used by `_build_competitors`
+        as a more honest "Market Share" denominator than mkt cap alone.
+
+        We re-emit ratios under the legacy unsuffixed names so
         `_build_competitors` keeps working with no signature change.
         Returns {} for any peer whose three calls all failed.
         """
@@ -805,9 +811,19 @@ class TickerReportDataCollector:
                     if op is not None:
                         merged["operatingProfitMargin"] = op
                 if isinstance(km, list) and km:
-                    roe = km[0].get("returnOnEquityTTM")
+                    km0 = km[0]
+                    roe = km0.get("returnOnEquityTTM")
                     if roe is not None:
                         merged["returnOnEquity"] = roe
+                    mc_ttm = km0.get("marketCapTTM")
+                    ps_ttm = km0.get("priceToSalesRatioTTM")
+                    try:
+                        if mc_ttm is not None and ps_ttm is not None:
+                            ps_f = float(ps_ttm)
+                            if ps_f > 0:
+                                merged["revenue_ttm"] = float(mc_ttm) / ps_f
+                    except (TypeError, ValueError):
+                        pass
                 if isinstance(growth, list) and growth:
                     rg = growth[0].get("revenueGrowth")
                     if rg is not None:
@@ -4051,27 +4067,32 @@ def _build_competitors(
     peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
     my_key_metrics: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Real competitor list from FMP peer profiles, top-5 by market cap.
+    """Real competitor list from FMP peer profiles, top-N by market cap.
 
     FMP's `stock-peers` endpoint is noisy for mega-caps — it can include
     obvious misclassifications (Helport AI for ORCL, etc.). To keep the
     UI signal-heavy:
-      1. Drop any peer whose mktCap is below max(focal × 5%, $5B). For an
-         $800B focal that filters peers under $40B; for a $30B focal it
-         filters peers under $5B (the absolute floor).
-      2. Sort survivors by mktCap desc and keep the top 5.
-      3. Recompute `market_share_percent` from the *survivor* total so
-         the visible 5 entries' shares add up to 100% (not diluted by
-         dropped misclassifications).
+      1. Drop any peer whose mktCap is below max(focal × 5%, $5B).
+      2. Sort survivors by mktCap desc and cap at `_COMPETITOR_MAX_N`.
+      3. Drop peers we cannot score (score_raw is None) — avoids the
+         "0.0 by definition" card that happens when a peer's TTM ratios
+         are empty in FMP and min-max scaling pins them to the floor.
+      4. Compute `market_share_percent` from peer TTM revenue
+         (peer revenue / peer-set revenue), falling back to mkt-cap
+         share when FMP's key-metrics-ttm coverage is patchy. Revenue is
+         a more honest "Market Share" proxy than market cap; mkt-cap
+         share over-rewards investor enthusiasm and under-counts steady
+         revenue earners.
+      5. Drop sub-1% peers and recompute share so the visible cards
+         still sum to ~100% — a peer that is <1% of the peer set isn't
+         a meaningful comparator at this scale.
 
     Per-peer scoring uses real financial ratios from the peers' own
     `/stable/ratios-ttm` responses (passed in via `peer_ratios`, keyed
-    by ticker). The previous version used the profile-level `changes`
-    field (intraday percent change) as a noise-tier proxy — that
-    clustered every peer near a random value and made the bar chart
-    meaningless.
+    by ticker).
 
-    Returns [] when no peer survives the floor.
+    Returns [] when no peer survives the floor or the rankable-data
+    drop.
     """
     if not peer_profiles:
         return []
@@ -4138,7 +4159,7 @@ def _build_competitors(
         (my_revenue_growth * 100) if my_revenue_growth is not None else None,
     )
 
-    # ── 3. Score each survivor from its own ratios-ttm row ────────────
+    # ── 3. Build peer_data: per-peer raw score + TTM revenue ─────────
     peer_data: List[Dict[str, Any]] = []
     for s in survivors:
         sym = s["symbol"]
@@ -4158,29 +4179,85 @@ def _build_competitors(
         if rg is not None:
             rev_growth = float(rg) * 100
 
+        rev_ttm: Optional[float] = None
+        rev_raw = ratios_row.get("revenue_ttm")
+        if rev_raw is not None:
+            try:
+                v = float(rev_raw)
+                if v > 0:
+                    rev_ttm = v
+            except (TypeError, ValueError):
+                pass
+
         peer_data.append({
             "name": p.get("companyName") or sym,
             "ticker": sym,
             "mkt_cap": s["mkt_cap"],
+            "revenue_ttm": rev_ttm,
             "score_raw": _peer_score(op_margin, roe_val, rev_growth),
         })
 
-    # Build the distribution with the focal included so min-max scaling
-    # places the focal somewhere on the same 0-10 line. Then peel off
-    # the focal's scaled score to compute threat-level deltas.
-    raw_scores: List[float] = [
-        p["score_raw"] if p["score_raw"] is not None else 0.0
-        for p in peer_data
-    ]
+    # ── 4. Drop peers we cannot score ────────────────────────────────
+    # A peer with no rankable signal becomes the min-max floor and gets
+    # shipped to iOS as "0.0" — visually punishing a real company for
+    # an FMP coverage gap. Better to render fewer confident rows.
+    peer_data = [p for p in peer_data if p["score_raw"] is not None]
+    if not peer_data:
+        logger.info(
+            f"_build_competitors({my_ticker}): no peers had rankable "
+            f"ratio data — returning empty list"
+        )
+        return []
+
+    # ── 5. Pick the Market Share denominator ──────────────────────────
+    # Prefer TTM revenue (honest "market share" proxy). Fall back to
+    # mkt-cap share when no peer in the set has revenue data — keeps
+    # the metric available during patchy FMP coverage windows.
+    total_peer_revenue = sum(
+        p["revenue_ttm"] for p in peer_data if p["revenue_ttm"]
+    )
+    use_revenue = total_peer_revenue > 0
+    if use_revenue:
+        # Drop peers without revenue_ttm — can't honestly include them
+        # in a revenue-share denominator.
+        peer_data = [p for p in peer_data if p["revenue_ttm"]]
+        total_peer_revenue = sum(p["revenue_ttm"] for p in peer_data)
+        for p in peer_data:
+            p["_share_pct"] = (p["revenue_ttm"] / total_peer_revenue) * 100
+    else:
+        for p in peer_data:
+            p["_share_pct"] = (p["mkt_cap"] / total_peer_cap) * 100
+
+    # ── 6. Drop sub-1% noise peers and recompute share ────────────────
+    peer_data = [p for p in peer_data if p["_share_pct"] >= 1.0]
+    if not peer_data:
+        logger.info(
+            f"_build_competitors({my_ticker}): no peers with share >= 1% "
+            f"— returning empty list"
+        )
+        return []
+    if use_revenue:
+        total_peer_revenue = sum(p["revenue_ttm"] for p in peer_data)
+        for p in peer_data:
+            p["_share_pct"] = (p["revenue_ttm"] / total_peer_revenue) * 100
+    else:
+        total_filtered_cap = sum(p["mkt_cap"] for p in peer_data)
+        for p in peer_data:
+            p["_share_pct"] = (p["mkt_cap"] / total_filtered_cap) * 100
+
+    # ── 7. Min-max scale on the FINAL peer set ────────────────────────
+    # Include the focal so its scaled score drives threat-level deltas.
+    raw_scores: List[float] = [p["score_raw"] for p in peer_data]
     raw_scores.append(my_raw_score if my_raw_score is not None else 0.0)
     scaled = _normalize_to_0_10(raw_scores)
     my_scaled = scaled[-1] if scaled else 5.0
     peer_scaled = scaled[:-1]
 
+    # ── 8. Emit final rows with threat-level deltas ──────────────────
     out: List[Dict[str, Any]] = []
     for i, p in enumerate(peer_data):
         moat_score = peer_scaled[i] if i < len(peer_scaled) else 5.0
-        share_pct = round((p["mkt_cap"] / total_peer_cap) * 100, 1)
+        share_pct = round(p["_share_pct"], 1)
         delta = moat_score - my_scaled
         if delta >= 1.5:
             threat = "high"

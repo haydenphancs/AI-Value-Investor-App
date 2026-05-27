@@ -787,6 +787,26 @@ def _peer(symbol: str, name: str, mkt_cap: float, change: float = 0.0) -> dict:
     }
 
 
+def _default_ratios_for(peers: list) -> dict:
+    """Minimal ratios + revenue_ttm for a list of peer profiles.
+
+    Tests that exercise non-scoring behavior (floor, cap, sort, threat)
+    use this so each peer ends up rankable (score_raw is not None) and
+    has a revenue denominator. Revenue is set to mkt_cap × 0.3 — a
+    crude but consistent proxy that keeps revenue shares aligned with
+    cap shares when the test asserts on share values.
+    """
+    return {
+        p["symbol"]: {
+            "operatingProfitMargin": 0.20,
+            "returnOnEquity": 0.15,
+            "revenueGrowth": 0.10,
+            "revenue_ttm": p["mktCap"] * 0.3,
+        }
+        for p in peers
+    }
+
+
 def test_build_competitors_empty_when_no_peers():
     """No peers → empty list (don't fabricate competitors)."""
     out = _build_competitors(
@@ -799,7 +819,8 @@ def test_build_competitors_empty_when_no_peers():
 def test_build_competitors_market_share_sums_to_100():
     """Surviving peer market shares must total ~100% — recomputed from
     the post-filter set so dropped micro-caps don't dilute the visible
-    top-N's percentages."""
+    top-N's percentages. Share is now revenue-based (peer revenue /
+    peer-set revenue) but the sum invariant is unchanged."""
     peers = [
         _peer("MSFT", "Microsoft", 3_000_000_000_000),
         _peer("GOOGL", "Alphabet", 2_000_000_000_000),
@@ -808,6 +829,7 @@ def test_build_competitors_market_share_sums_to_100():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     total = sum(c["market_share_percent"] for c in out)
     assert abs(total - 100.0) < 0.5
@@ -824,6 +846,7 @@ def test_build_competitors_excludes_focal_ticker():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     assert all(c["ticker"] != "AAPL" for c in out)
     assert len(out) == 1
@@ -880,6 +903,7 @@ def test_build_competitors_drops_micro_cap_misclassifications():
         my_ticker="ORCL",
         my_profile={"mktCap": 700_000_000_000},
         my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     tickers = [c["ticker"] for c in out]
     assert "HPAI" not in tickers
@@ -899,6 +923,7 @@ def test_build_competitors_caps_at_max_n():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     assert len(out) == 7
 
@@ -917,16 +942,16 @@ def test_build_competitors_returns_all_survivors_when_below_cap():
         my_ticker="AAPL",
         my_profile={"mktCap": 500_000_000_000},
         my_ratios=[], my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     assert len(out) == 3
     assert {c["ticker"] for c in out} == {"BIG1", "BIG2", "BIG3"}
 
 
 def test_build_competitors_threat_level_assigned():
-    """Each competitor gets a threat_level enum value. With no
-    peer_ratios passed in, scores cluster (no signal to differentiate),
-    so threat_level for all survivors lands as "moderate" — still a
-    valid Swift enum member."""
+    """Each competitor gets a threat_level enum value. With default
+    ratios (all peers tied), threat_level lands as "moderate" — still
+    a valid Swift enum member."""
     peers = [
         _peer("STRONG", "Strong Co", 100_000_000_000, change=10.0),
         _peer("AVG", "Average Co", 100_000_000_000, change=0.0),
@@ -935,7 +960,9 @@ def test_build_competitors_threat_level_assigned():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
+    assert len(out) == 3
     assert all(c["threat_level"] in ("low", "moderate", "high") for c in out)
 
 
@@ -950,6 +977,7 @@ def test_build_competitors_moat_scores_in_0_10_range():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     for c in out:
         assert 0.0 <= c["moat_score"] <= 10.0
@@ -968,6 +996,7 @@ def test_build_competitors_sorted_by_market_share_desc():
     out = _build_competitors(
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers,
+        peer_ratios=_default_ratios_for(peers),
     )
     shares = [c["market_share_percent"] for c in out]
     assert shares == sorted(shares, reverse=True)
@@ -980,7 +1009,8 @@ def test_build_competitors_sorted_by_market_share_desc():
 
 def test_build_competitors_uses_peer_ratios_for_scoring():
     """When peer_ratios are provided, scoring uses real ratios instead
-    of the (now-removed) changes proxy — gives meaningful differentiation."""
+    of the (now-removed) changes proxy — gives meaningful differentiation.
+    No revenue_ttm in these ratios → share falls back to mkt-cap share."""
     peers = [
         _peer("HIGHMARGIN", "High Margin Co", 100_000_000_000),
         _peer("LOWMARGIN", "Low Margin Co", 100_000_000_000),
@@ -995,6 +1025,113 @@ def test_build_competitors_uses_peer_ratios_for_scoring():
     )
     scores = {c["ticker"]: c["moat_score"] for c in out}
     assert scores["HIGHMARGIN"] > scores["LOWMARGIN"]
+
+
+def test_build_competitors_drops_peer_with_all_none_ratios():
+    """The Workday-style bug: a peer with no rankable ratio data
+    (operatingProfitMargin/returnOnEquity/revenueGrowth all missing)
+    must be dropped before min-max scaling. Otherwise it gets pinned
+    to 0.0 and ships to iOS as "this real company is worthless" —
+    a UX failure the user explicitly called out."""
+    peers = [
+        _peer("MSFT", "Microsoft", 3_000_000_000_000),
+        _peer("WDAY", "Workday", 50_000_000_000),
+    ]
+    # MSFT has real ratios. WDAY has nothing — simulates FMP's
+    # intermittent empty-ratios response.
+    ratios = {
+        "MSFT": {
+            "operatingProfitMargin": 0.35,
+            "returnOnEquity": 0.30,
+            "revenueGrowth": 0.12,
+            "revenue_ttm": 250_000_000_000,
+        },
+        # WDAY missing entirely
+    }
+    out = _build_competitors(
+        my_ticker="ORCL",
+        my_profile={"mktCap": 800_000_000_000},
+        my_ratios=[], my_revenue_growth=None,
+        peer_profiles=peers, peer_ratios=ratios,
+    )
+    tickers = [c["ticker"] for c in out]
+    assert "WDAY" not in tickers
+    assert "MSFT" in tickers
+    # MSFT alone should not be pinned to 0.0 — single survivor → 5.0 neutral.
+    assert out[0]["moat_score"] > 0.0
+
+
+def test_build_competitors_drops_peer_without_revenue_ttm_when_others_have_it():
+    """When at least one peer has revenue_ttm, switch to revenue-based
+    Market Share. Peers without revenue_ttm cannot honestly participate
+    in a revenue denominator, so they're dropped."""
+    peers = [
+        _peer("MSFT", "Microsoft", 3_000_000_000_000),
+        _peer("CRM", "Salesforce", 280_000_000_000),
+        _peer("MYSTERY", "Mystery Co", 100_000_000_000),
+    ]
+    ratios = {
+        "MSFT": {
+            "operatingProfitMargin": 0.35, "returnOnEquity": 0.30,
+            "revenueGrowth": 0.12, "revenue_ttm": 250_000_000_000,
+        },
+        "CRM": {
+            "operatingProfitMargin": 0.20, "returnOnEquity": 0.10,
+            "revenueGrowth": 0.10, "revenue_ttm": 35_000_000_000,
+        },
+        # MYSTERY scoreable but no revenue
+        "MYSTERY": {
+            "operatingProfitMargin": 0.15, "returnOnEquity": 0.10,
+            "revenueGrowth": 0.05,
+        },
+    }
+    out = _build_competitors(
+        my_ticker="ORCL",
+        my_profile={"mktCap": 800_000_000_000},
+        my_ratios=[], my_revenue_growth=None,
+        peer_profiles=peers, peer_ratios=ratios,
+    )
+    tickers = [c["ticker"] for c in out]
+    assert "MYSTERY" not in tickers
+    assert {"MSFT", "CRM"} == set(tickers)
+
+
+def test_build_competitors_drops_sub_one_percent_peers_and_recomputes_share():
+    """A peer that is <1% of the peer-set revenue is not a meaningful
+    comparator. Drop and recompute so the visible cards still sum to
+    ~100%. Closes the visual `0%` bug from `%.0f%%` rounding on iOS."""
+    peers = [
+        _peer("BIG1", "Big 1", 500_000_000_000),
+        _peer("BIG2", "Big 2", 500_000_000_000),
+        _peer("TINY", "Tiny Co", 10_000_000_000),  # passes $5B floor
+    ]
+    ratios = {
+        "BIG1": {
+            "operatingProfitMargin": 0.30, "returnOnEquity": 0.20,
+            "revenueGrowth": 0.10, "revenue_ttm": 200_000_000_000,
+        },
+        "BIG2": {
+            "operatingProfitMargin": 0.30, "returnOnEquity": 0.20,
+            "revenueGrowth": 0.10, "revenue_ttm": 200_000_000_000,
+        },
+        # Tiny revenue: 1B / (200B + 200B + 1B) ≈ 0.25% — below 1% drop
+        "TINY": {
+            "operatingProfitMargin": 0.10, "returnOnEquity": 0.05,
+            "revenueGrowth": 0.05, "revenue_ttm": 1_000_000_000,
+        },
+    }
+    out = _build_competitors(
+        my_ticker="AAPL",
+        my_profile={"mktCap": 3_000_000_000_000},
+        my_ratios=[], my_revenue_growth=None,
+        peer_profiles=peers, peer_ratios=ratios,
+    )
+    tickers = [c["ticker"] for c in out]
+    assert "TINY" not in tickers
+    assert set(tickers) == {"BIG1", "BIG2"}
+    # After dropping TINY, shares recompute to sum to 100%.
+    total = sum(c["market_share_percent"] for c in out)
+    assert abs(total - 100.0) < 0.5
 
 
 # ── PR 3: TAM overlay (AI extraction → market_dynamics) ───────────────

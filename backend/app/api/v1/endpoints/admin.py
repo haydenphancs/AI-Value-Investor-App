@@ -202,6 +202,107 @@ async def list_industry_dossier(
         raise HTTPException(status_code=500, detail="Failed to load industry dossier")
 
 
+@router.post("/refresh-industry-moat-benchmarks")
+async def refresh_industry_moat_benchmarks(
+    skip_recent_hours: int = 24,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Manually trigger the industry_moat_benchmarks recompute on the
+    Railway worker. Returns immediately; the recompute runs in the
+    background and writes one row per (industry, pillar) to Supabase.
+
+    Auth: pass `X-Admin-Token: <settings.ADMIN_TOKEN>` OR sign in with
+    an email on the admin allowlist.
+
+    Args:
+        skip_recent_hours: Skip any industry that already has a
+            benchmark row newer than this many hours. Lets a previously
+            interrupted run resume without redoing finished work.
+            Default 24. Pass 0 to force a full recompute.
+
+    Notes:
+      - With FMP Premium (3000/min) the full 156-industry backfill
+        takes ~60-90 min at the service's tuned concurrency.
+      - Progress can be inspected via:
+            GET /api/v1/admin/industry-moat-benchmarks-status
+      - The same code runs quarterly inside `_run_industry_dossier_job`
+        in app.main lifespan — this endpoint just lets you trigger it
+        on-demand.
+    """
+    _authorize_admin(user, x_admin_token)
+    try:
+        from app.services.industry_moat_benchmark_service import (
+            get_industry_moat_benchmark_service,
+        )
+
+        service = get_industry_moat_benchmark_service()
+        # Coerce 0/negative to None so the service treats it as "no skip".
+        skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
+        asyncio.create_task(
+            service.recompute_all(skip_if_fresh_hours=skip)
+        )
+        return {
+            "status": "started",
+            "message": (
+                "Industry moat benchmark recompute started in background — "
+                "typically ~60-90 minutes at FMP Premium (3000/min). "
+                "Poll /admin/industry-moat-benchmarks-status for progress."
+            ),
+            "skip_if_fresh_hours": skip,
+        }
+    except Exception as e:
+        logger.error(f"Manual industry moat benchmark refresh failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to start industry moat benchmark refresh",
+        )
+
+
+@router.get("/industry-moat-benchmarks-status")
+async def industry_moat_benchmarks_status(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Live progress view for the moat benchmark recompute. Returns row
+    count, distinct industry count, and per-pillar coverage so the
+    operator can watch the backfill fill in.
+    """
+    _authorize_admin(user, x_admin_token)
+    try:
+        from app.database import get_supabase
+
+        sb = get_supabase()
+        # Total rows
+        total = sb.table("industry_moat_benchmarks").select(
+            "id", count="exact",
+        ).execute()
+        # Per-pillar counts
+        rows = sb.table("industry_moat_benchmarks").select(
+            "industry,pillar_name,sample_size,computed_at",
+        ).execute()
+        pillar_counts: dict[str, int] = {}
+        industries: set[str] = set()
+        latest_computed: Optional[str] = None
+        for r in rows.data or []:
+            pillar_counts[r["pillar_name"]] = pillar_counts.get(r["pillar_name"], 0) + 1
+            industries.add(r["industry"])
+            ts = r.get("computed_at")
+            if ts and (latest_computed is None or ts > latest_computed):
+                latest_computed = ts
+        return {
+            "total_rows": total.count,
+            "distinct_industries": len(industries),
+            "pillar_coverage": pillar_counts,
+            "latest_computed_at": latest_computed,
+        }
+    except Exception as e:
+        logger.error(f"Industry moat benchmark status failed: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to read benchmark status",
+        )
+
+
 @router.post("/refresh-industry-overrides")
 async def refresh_industry_overrides(
     dry_run: bool = False,

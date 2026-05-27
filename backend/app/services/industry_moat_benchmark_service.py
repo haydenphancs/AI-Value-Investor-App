@@ -42,7 +42,7 @@ import logging
 import statistics
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -61,10 +61,21 @@ logger = logging.getLogger(__name__)
 
 MIN_SAMPLE_SIZE = 5
 TOP_TICKERS_PER_INDUSTRY = 200
-PER_TICKER_FMP_CONCURRENCY = 5
-PER_INDUSTRY_CONCURRENCY = 3
+# Concurrency calibrated for FMP Premium (3000/min cap). Each ticker
+# fans out 5 parallel FMP calls + 1 sequential transcript-content call
+# (~6 total). Running 1 industry × 3 tickers in flight stays under
+# ~50 calls/sec sustained = 3000/min, with comfortable headroom for
+# the transcript-content burst tail. Bumping these higher risks 429s
+# (the FMP integration raises FMPRateLimitException on 429 with no
+# retry, so dropped peers shrink the per-pillar sample size).
+PER_TICKER_FMP_CONCURRENCY = 3
+PER_INDUSTRY_CONCURRENCY = 1
 MODEL_VERSION = "moat_v1.2026-05"
 TABLE_NAME = "industry_moat_benchmarks"
+# Re-running the bootstrap with `skip_if_fresh_hours` set lets the
+# operator resume after a Ctrl-C / rate-limit-induced abort — any
+# industry with a benchmark row newer than this is skipped.
+DEFAULT_SKIP_IF_FRESH_HOURS = 24
 _UNIVERSE_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "industry_universe.json"
 )
@@ -239,13 +250,46 @@ class IndustryMoatBenchmarkService:
 
     async def compute_for_industry(
         self, industry: str, *, run_id: Optional[str] = None,
+        skip_if_fresh_hours: Optional[int] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Compute peer averages for one industry. Upserts one row per
         pillar that meets the sample-size threshold. Returns a summary
         dict {pillar_name: {avg, sample_size, p25, p75}} for the rows
         that were actually written.
+
+        When `skip_if_fresh_hours` is set and the industry already has
+        at least one benchmark row computed within that window, the
+        function returns `{"_skipped": "fresh"}` without re-computing.
+        Used by `recompute_all` to resume a partially-finished backfill
+        after a Ctrl-C / rate-limit abort.
         """
         run_id = run_id or str(uuid.uuid4())
+
+        if skip_if_fresh_hours:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=skip_if_fresh_hours)
+            ).isoformat()
+            try:
+                existing = await asyncio.to_thread(
+                    lambda: self.supabase.table(TABLE_NAME)
+                    .select("industry")
+                    .eq("industry", industry)
+                    .gte("computed_at", cutoff)
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    logger.info(
+                        "industry_moat_benchmark: skip %r (fresh row exists "
+                        "within %dh)", industry, skip_if_fresh_hours,
+                    )
+                    return {"_skipped": "fresh"}
+            except Exception as exc:
+                logger.warning(
+                    "industry_moat_benchmark: freshness check failed for "
+                    "%r: %s — proceeding to recompute", industry, exc,
+                )
+
         universe = _load_universe_industries()
         tickers: List[str] = []
         for ind, sorted_tkrs in universe:
@@ -330,10 +374,17 @@ class IndustryMoatBenchmarkService:
 
     async def recompute_all(
         self, *, run_id: Optional[str] = None,
+        skip_if_fresh_hours: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Quarterly batch entry. Iterates every industry from
         `industry_universe.json` and upserts per-pillar peer averages.
         Concurrency-bounded so we don't burst FMP quota.
+
+        `skip_if_fresh_hours` lets the operator resume a partial backfill
+        — any industry with a benchmark row newer than this window is
+        skipped. Pass 0 / None to force a full recompute. The CLI
+        default (24h) means a Ctrl-C abort can be resumed by simply
+        re-running the same command without re-doing finished work.
         """
         run_id = run_id or str(uuid.uuid4())
         started = time.time()
@@ -341,25 +392,32 @@ class IndustryMoatBenchmarkService:
         industries = [ind for ind, _ in universe]
         logger.info(
             "industry_moat_benchmark: recompute_all starting — "
-            "run_id=%s, industries=%d", run_id, len(industries),
+            "run_id=%s, industries=%d, skip_if_fresh_hours=%s",
+            run_id, len(industries), skip_if_fresh_hours,
         )
 
         sem = asyncio.Semaphore(PER_INDUSTRY_CONCURRENCY)
         pillars_written = 0
         skipped_low_sample = 0
+        skipped_fresh = 0
 
-        async def _one(ind: str) -> Tuple[str, int, int]:
+        async def _one(ind: str) -> Tuple[str, int, int, bool]:
             async with sem:
                 try:
-                    written = await self.compute_for_industry(ind, run_id=run_id)
+                    written = await self.compute_for_industry(
+                        ind, run_id=run_id,
+                        skip_if_fresh_hours=skip_if_fresh_hours,
+                    )
                 except Exception as exc:
                     logger.error(
                         "industry_moat_benchmark: compute_for_industry "
                         "failed for %r: %s", ind, exc,
                     )
-                    return ind, 0, len(PILLAR_ORDER)
+                    return ind, 0, len(PILLAR_ORDER), False
+                if written.get("_skipped") == "fresh":
+                    return ind, 0, 0, True
                 wp = len(written)
-                return ind, wp, len(PILLAR_ORDER) - wp
+                return ind, wp, len(PILLAR_ORDER) - wp, False
 
         results = await asyncio.gather(
             *[_one(ind) for ind in industries], return_exceptions=True,
@@ -368,12 +426,15 @@ class IndustryMoatBenchmarkService:
             if isinstance(r, tuple):
                 pillars_written += r[1]
                 skipped_low_sample += r[2]
+                if r[3]:
+                    skipped_fresh += 1
 
         summary = {
             "run_id": run_id,
             "industries": len(industries),
             "pillars_written": pillars_written,
             "skipped_low_sample": skipped_low_sample,
+            "skipped_fresh": skipped_fresh,
             "elapsed_seconds": round(time.time() - started, 1),
         }
         logger.info("industry_moat_benchmark recompute_all summary: %s", summary)

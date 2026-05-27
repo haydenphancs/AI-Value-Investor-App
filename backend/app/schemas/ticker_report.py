@@ -304,6 +304,12 @@ class MoatDimensionResponse(BaseModel):
     # both fields are None — iOS treats absence as "no driver detail".
     drivers: Optional[List[Dict[str, Any]]] = None
     confidence: Optional[str] = None
+    # Which tier produced this pillar: "deterministic" (Phase 3A — FMP
+    # metrics + sector medians), "grounded" (Phase 3D — Gemini grounded
+    # research with web citations), or "ai_legacy" (Stage A AI fallback
+    # when both prior tiers came back empty). Kept separate from
+    # `confidence` so iOS can show provenance independently of strength.
+    source: Optional[str] = None
 
 
 class CompetitorResponse(BaseModel):

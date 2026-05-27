@@ -757,6 +757,13 @@ class TickerReportDataCollector:
                 out.ticker, out.profile,
             )
             out.moat_grounded_pillars = grounded or {}
+            resolved = sorted(out.moat_grounded_pillars.keys())
+            still_missing = sorted(set(low_conf) - set(resolved))
+            logger.info(
+                "Moat grounded fallback for %s: requested=%s resolved=%s "
+                "still_missing=%s (those fall to legacy AI)",
+                out.ticker, low_conf, resolved, still_missing,
+            )
         except Exception as exc:
             logger.warning(
                 "Moat precompute: grounded fallback failed for %s: %s",
@@ -766,27 +773,57 @@ class TickerReportDataCollector:
     async def _fetch_peer_ratios(
         self, peers: List[str],
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch TTM ratios for each peer, keyed by ticker.
+        """Fetch the three peer signals (op margin, ROE, revenue growth)
+        keyed by ticker.
 
-        Returns the latest TTM row (or {} for peers whose call failed)
-        so the caller can grab `operatingProfitMargin` / `returnOnEquity`
-        / `revenueGrowth` for real per-peer moat scoring without a
-        downstream None-check storm.
+        FMP split these across three endpoints in late 2025:
+          * /ratios-ttm           → operatingProfitMarginTTM
+          * /key-metrics-ttm      → returnOnEquityTTM
+          * /financial-growth     → revenueGrowth
+
+        We re-emit them under the legacy unsuffixed names so
+        `_build_competitors` keeps working with no signature change.
+        Returns {} for any peer whose three calls all failed.
         """
         sem = asyncio.Semaphore(8)
 
         async def _one(sym: str) -> Tuple[str, Dict[str, Any]]:
             async with sem:
-                try:
-                    rows = await self.fmp.get_ratios_ttm(sym)
-                    if isinstance(rows, list) and rows:
-                        return sym.upper(), rows[0]
-                except Exception as e:
-                    logger.debug(
-                        f"peer ratios-ttm failed for {sym}: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                return sym.upper(), {}
+                ratios_task = self.fmp.get_ratios_ttm(sym)
+                km_task = self.fmp.get_key_metrics_ttm(sym)
+                growth_task = self.fmp._make_request(
+                    "financial-growth",
+                    params={"symbol": sym.upper(), "period": "annual", "limit": 1},
+                )
+                ratios, km, growth = await asyncio.gather(
+                    ratios_task, km_task, growth_task,
+                    return_exceptions=True,
+                )
+                merged: Dict[str, Any] = {}
+                if isinstance(ratios, list) and ratios:
+                    op = ratios[0].get("operatingProfitMarginTTM")
+                    if op is not None:
+                        merged["operatingProfitMargin"] = op
+                if isinstance(km, list) and km:
+                    roe = km[0].get("returnOnEquityTTM")
+                    if roe is not None:
+                        merged["returnOnEquity"] = roe
+                if isinstance(growth, list) and growth:
+                    rg = growth[0].get("revenueGrowth")
+                    if rg is not None:
+                        merged["revenueGrowth"] = rg
+                if not merged:
+                    for label, result in (
+                        ("ratios-ttm", ratios),
+                        ("key-metrics-ttm", km),
+                        ("financial-growth", growth),
+                    ):
+                        if isinstance(result, Exception):
+                            logger.debug(
+                                f"peer {label} failed for {sym}: "
+                                f"{type(result).__name__}: {result}"
+                            )
+                return sym.upper(), merged
 
         results = await asyncio.gather(*[_one(s) for s in peers])
         return {sym: row for sym, row in results}
@@ -805,6 +842,7 @@ class TickerReportDataCollector:
         profile, quote = out.profile, out.quote
         income, balance, cash_flow = out.income, out.balance, out.cash_flow
         ratios, estimates = out.ratios, out.estimates
+        key_metrics = out.key_metrics
 
         # ── Current price ─────────────────────────────────────────────
         current_price = _safe_float(quote, "price")
@@ -833,21 +871,42 @@ class TickerReportDataCollector:
             c["fcf_negative"] = False
 
         # ── Key ratios ────────────────────────────────────────────────
+        # FMP /stable/ratios renamed several fields in late 2025 (PE, EV/EBITDA,
+        # debt/equity, interest coverage) and moved ROE/ROA to /key-metrics.
+        # We try the new name first, then the legacy name as fallback so this
+        # keeps working if the upstream reverts.
         if ratios:
             r0 = ratios[0]
+            km0 = key_metrics[0] if key_metrics else {}
             c["gross_margin"] = _pct_or_none(r0.get("grossProfitMargin"))
             c["net_margin"] = _pct_or_none(r0.get("netProfitMargin"))
             c["operating_margin"] = _pct_or_none(r0.get("operatingProfitMargin"))
-            c["roe"] = _pct_or_none(r0.get("returnOnEquity"))
-            c["roa"] = _pct_or_none(r0.get("returnOnAssets"))
-            c["pe_ratio"] = _num_or_none(r0.get("priceEarningsRatio"))
+            c["roe"] = _pct_or_none(
+                r0.get("returnOnEquity") or km0.get("returnOnEquity")
+            )
+            c["roa"] = _pct_or_none(
+                r0.get("returnOnAssets") or km0.get("returnOnAssets")
+            )
+            c["pe_ratio"] = _num_or_none(
+                r0.get("priceToEarningsRatio") or r0.get("priceEarningsRatio")
+            )
             c["pb_ratio"] = _num_or_none(r0.get("priceToBookRatio"))
             c["ps_ratio"] = _num_or_none(r0.get("priceToSalesRatio"))
-            c["pfcf_ratio"] = _num_or_none(r0.get("priceToFreeCashFlowsRatio"))
-            c["ev_ebitda"] = _num_or_none(r0.get("enterpriseValueOverEBITDA"))
-            c["debt_equity"] = _num_or_none(r0.get("debtEquityRatio"))
+            c["pfcf_ratio"] = _num_or_none(
+                r0.get("priceToFreeCashFlowRatio")
+                or r0.get("priceToFreeCashFlowsRatio")
+            )
+            c["ev_ebitda"] = _num_or_none(
+                r0.get("enterpriseValueMultiple")
+                or r0.get("enterpriseValueOverEBITDA")
+            )
+            c["debt_equity"] = _num_or_none(
+                r0.get("debtToEquityRatio") or r0.get("debtEquityRatio")
+            )
             c["current_ratio"] = _num_or_none(r0.get("currentRatio"))
-            c["interest_coverage"] = _num_or_none(r0.get("interestCoverage"))
+            c["interest_coverage"] = _num_or_none(
+                r0.get("interestCoverageRatio") or r0.get("interestCoverage")
+            )
         else:
             for k in (
                 "gross_margin", "net_margin", "operating_margin", "roe", "roa",
@@ -1192,10 +1251,13 @@ class TickerReportDataCollector:
         for pillar_name in PILLAR_ORDER:
             det = deterministic_pillars.get(pillar_name)
             if det is not None and det.score is not None:
-                merged_dims.append(det.to_dict())
+                dim = det.to_dict()
+                dim["source"] = "deterministic"
+                merged_dims.append(dim)
                 continue
             grounded = grounded_scores.get(pillar_name)
             if isinstance(grounded, dict) and grounded.get("score") is not None:
+                grounded["source"] = "grounded"
                 merged_dims.append(grounded)
                 continue
             # Final fallback — legacy AI Stage A dimension. The
@@ -1204,6 +1266,7 @@ class TickerReportDataCollector:
             ai_dim = ai_dims_by_name.get(pillar_name) or {
                 "name": pillar_name, "score": 0.0, "peer_score": 5.0,
             }
+            ai_dim["source"] = "ai_legacy"
             merged_dims.append(ai_dim)
         moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
@@ -1225,6 +1288,7 @@ class TickerReportDataCollector:
             my_revenue_growth=c.get("revenue_growth_yoy"),
             peer_profiles=out.peer_profiles,
             peer_ratios=out.peer_ratios,
+            my_key_metrics=out.key_metrics,
         )
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
@@ -3960,6 +4024,7 @@ def _build_competitors(
     my_revenue_growth: Optional[float],
     peer_profiles: List[Dict[str, Any]],
     peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
+    my_key_metrics: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, top-5 by market cap.
 
@@ -4035,6 +4100,14 @@ def _build_competitors(
         roe = r0.get("returnOnEquity")
         if roe is not None:
             my_roe = float(roe) * 100
+    # FMP stopped emitting returnOnEquity on /ratios in late 2025;
+    # /key-metrics still carries it. Fall through so the focal isn't
+    # under-scored vs peers (who already get ROE via /key-metrics-ttm).
+    if my_roe is None and my_key_metrics:
+        km0 = my_key_metrics[0]
+        km_roe = km0.get("returnOnEquity")
+        if km_roe is not None:
+            my_roe = float(km_roe) * 100
     my_raw_score = _peer_score(
         my_op_margin, my_roe,
         (my_revenue_growth * 100) if my_revenue_growth is not None else None,
@@ -4308,9 +4381,12 @@ def build_financial_context(out: CollectedTickerData) -> str:
 
     if ratios:
         r0 = ratios[0]
-        parts.append(f"\nP/E: {r0.get('priceEarningsRatio', 'N/A')}")
-        parts.append(f"EV/EBITDA: {r0.get('enterpriseValueOverEBITDA', 'N/A')}")
-        parts.append(f"P/FCF: {r0.get('priceToFreeCashFlowsRatio', 'N/A')}")
+        pe = r0.get("priceToEarningsRatio") or r0.get("priceEarningsRatio") or "N/A"
+        ev = r0.get("enterpriseValueMultiple") or r0.get("enterpriseValueOverEBITDA") or "N/A"
+        pfcf = r0.get("priceToFreeCashFlowRatio") or r0.get("priceToFreeCashFlowsRatio") or "N/A"
+        parts.append(f"\nP/E: {pe}")
+        parts.append(f"EV/EBITDA: {ev}")
+        parts.append(f"P/FCF: {pfcf}")
 
     if estimates:
         parts.append("\nAnalyst Estimates:")

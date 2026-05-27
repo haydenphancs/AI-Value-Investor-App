@@ -557,9 +557,10 @@ struct MoatDimensionDTO: Codable {
     let name: String
     let score: Double
     let peerScore: Double
+    let source: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, score
+        case name, score, source
         case peerScore = "peer_score"
     }
 }

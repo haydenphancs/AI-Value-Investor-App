@@ -1,10 +1,24 @@
 {
-  "_comment": "Per-ticker override of the USPTO assignee phrase used by ip_intel_service. Only tickers where the FMP companyName + suffix-strip normalizer mismatches the entity USPTO actually files patents under. Source: live USPTO probe in May 2026.",
+  "_comment": "Per-ticker override of the USPTO assignee phrase used by ip_intel_service. Only tickers where the FMP companyName + suffix-strip normalizer mismatches the entity USPTO actually files patents under. Re-discover with backend/scripts/uspto_alias_scan.py. Sources: May 2026 manual probe + May 2026 top-500 bulk scan.",
   "aliases": {
-    "MRNA": "ModernaTX",
+    "APO": "Apollo",
+    "BRK-A": "Berkshire",
+    "BRK-B": "Berkshire",
+    "DIS": "Disney Enterprises",
+    "EPD": "Enterprise",
     "GOOG": "Google",
     "GOOGL": "Google",
-    "DIS": "Disney Enterprises",
+    "IMO.TO": "Imperial",
+    "JCI": "Johnson",
+    "MRNA": "ModernaTX",
+    "MRSH": "Marsh",
+    "NXPI": "NXP",
+    "PM": "Philip",
+    "PWR": "Quanta",
+    "SPOT": "Spotify",
+    "TBB": "AT&T",
+    "TMUS": "T-Mobile",
+    "VZ": "Verizon",
     "XOM": "ExxonMobil"
   }
 }

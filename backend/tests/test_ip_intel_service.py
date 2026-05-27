@@ -81,6 +81,31 @@ def test_normalize_assignee_handles_chained_suffix_and_ampersand():
     assert _normalize_assignee("AstraZeneca PLC") == "AstraZeneca"
 
 
+def test_normalize_assignee_strips_leading_the_and_dotcom():
+    # "The " article and trailing ".com" hide behind the corporate suffix
+    # — both must be stripped so "Amazon.com, Inc." → "Amazon" and
+    # "The Procter & Gamble Company" → "Procter & Gamble". Without this,
+    # AMZN's USPTO lookup returned 66 hits instead of 3,856.
+    assert _normalize_assignee("Amazon.com, Inc.") == "Amazon"
+    assert _normalize_assignee("The Procter & Gamble Company") == "Procter & Gamble"
+    assert _normalize_assignee("The Walt Disney Company") == "Walt Disney"
+
+
+def test_normalize_assignee_uses_per_ticker_alias_map():
+    # For tickers where FMP companyName + suffix-strip mismatches the
+    # USPTO assignee, the alias map (data/uspto_assignee_aliases.json)
+    # takes precedence. Live probe confirmed >2x improvement for each.
+    assert _normalize_assignee("Moderna, Inc.", ticker="MRNA") == "ModernaTX"
+    assert _normalize_assignee("Alphabet Inc.", ticker="GOOG") == "Google"
+    assert _normalize_assignee("Alphabet Inc.", ticker="GOOGL") == "Google"
+    assert _normalize_assignee("The Walt Disney Company", ticker="DIS") == "Disney Enterprises"
+    assert _normalize_assignee("Exxon Mobil Corporation", ticker="XOM") == "ExxonMobil"
+    # Lowercase ticker is normalized via .upper()
+    assert _normalize_assignee("Moderna, Inc.", ticker="mrna") == "ModernaTX"
+    # Unknown ticker falls through to the suffix-strip path
+    assert _normalize_assignee("Apple Inc.", ticker="AAPL") == "Apple"
+
+
 # ── patents_per_employee_to_sub_score ──────────────────────────────────
 
 

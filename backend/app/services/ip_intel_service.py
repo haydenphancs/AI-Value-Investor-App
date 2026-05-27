@@ -26,11 +26,13 @@ expired patents that no longer block competitors.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
@@ -103,24 +105,64 @@ _CORP_SUFFIX_RE = re.compile(
     r")\.?$",
     re.IGNORECASE,
 )
+_LEADING_ARTICLE_RE = re.compile(r"^(The|the)\s+")
+_DOTCOM_SUFFIX_RE = re.compile(r"\.com$", re.IGNORECASE)
+
+# Per-ticker overrides for the small set of names where the FMP
+# companyName + suffix-strip normalizer mismatches the legal entity
+# USPTO actually files patents under. Loaded once per process. The
+# map is intentionally tiny — most tickers work without it; only add
+# entries here after a live USPTO probe confirms a >2x improvement.
+_ALIAS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "uspto_assignee_aliases.json"
+)
+_ASSIGNEE_ALIASES: Optional[Dict[str, str]] = None
 
 
-def _normalize_assignee(name: str) -> str:
+def _load_assignee_aliases() -> Dict[str, str]:
+    global _ASSIGNEE_ALIASES
+    if _ASSIGNEE_ALIASES is None:
+        try:
+            data = json.loads(_ALIAS_PATH.read_text())
+            _ASSIGNEE_ALIASES = data.get("aliases") or {}
+        except Exception as exc:
+            logger.warning(
+                "ip_intel: failed to load USPTO alias map %s: %s",
+                _ALIAS_PATH, exc,
+            )
+            _ASSIGNEE_ALIASES = {}
+    return _ASSIGNEE_ALIASES
+
+
+def _normalize_assignee(name: str, ticker: Optional[str] = None) -> str:
     """Canonicalize a company name for USPTO/FDA search.
 
-    Strips trailing corporate suffixes (Inc., Corporation, Ltd., LLC,
-    Holdings, etc.) because USPTO assignee records often list the
-    operating subsidiary rather than the listed holding company —
+    Order of preference:
+      1. Per-ticker alias map (curated edge cases — MRNA→ModernaTX etc).
+      2. Strip leading "The " article and trailing ".com" / corporate
+         suffix (Inc., Corporation, Ltd., LLC, Holdings, etc.) and
+         orphaned `&`/`+`/`,`.
+
+    The suffix strip exists because USPTO assignee records often list
+    the operating subsidiary rather than the listed holding company —
     e.g. FMP returns "Oracle Corporation" but USPTO has the bulk of
     the IP under "Oracle International Corporation" / "Oracle America,
     Inc.". A bare prefix match catches both. Repeats once so chains
     like "Holdings, Inc." collapse cleanly.
     """
+    if ticker:
+        alias = _load_assignee_aliases().get(ticker.upper())
+        if alias:
+            return alias
     if not isinstance(name, str):
         return ""
-    cleaned = name.strip()
-    for _ in range(2):
+    cleaned = _LEADING_ARTICLE_RE.sub("", name.strip())
+    # Two passes: corporate-suffix strip exposes a trailing ".com" that
+    # was hidden behind ", Inc." (e.g. "Amazon.com, Inc." → "Amazon.com"
+    # → "Amazon"), so re-run the .com strip after each suffix removal.
+    for _ in range(3):
         new = _CORP_SUFFIX_RE.sub("", cleaned).rstrip(", &+").strip()
+        new = _DOTCOM_SUFFIX_RE.sub("", new)
         if new == cleaned or not new:
             break
         cleaned = new
@@ -278,7 +320,7 @@ class IPIntelService:
         run_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         company_name = profile.get("companyName") or ticker
-        assignee = _normalize_assignee(company_name)
+        assignee = _normalize_assignee(company_name, ticker=ticker)
         sponsor = assignee   # FDA sponsor naming usually mirrors USPTO assignee
         run_id_to_use = run_id or str(uuid.uuid4())
 

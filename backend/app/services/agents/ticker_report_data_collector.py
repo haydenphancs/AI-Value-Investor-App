@@ -1268,6 +1268,31 @@ class TickerReportDataCollector:
             }
             ai_dim["source"] = "ai_legacy"
             merged_dims.append(ai_dim)
+        # Overlay real industry peer averages onto each dimension's
+        # peer_score. Without this the gray "Peer Avg" pentagon on the
+        # iOS radar collapses to a flat 5.0 (the legacy sector-median
+        # anchor). Falls back to that 5.0 floor when the industry has
+        # no benchmark row yet — new ticker, niche industry, or before
+        # the first recompute_all() bootstrap completes.
+        focal_industry = (out.profile or {}).get("industry")
+        if focal_industry:
+            try:
+                from app.services.industry_moat_benchmark_service import (
+                    get_industry_moat_benchmark_lookup,
+                )
+                peer_avgs = get_industry_moat_benchmark_lookup().get_pillar_benchmarks(
+                    focal_industry,
+                )
+                for dim in merged_dims:
+                    ind_avg = peer_avgs.get(dim.get("name"))
+                    if ind_avg is not None:
+                        dim["peer_score"] = ind_avg
+            except Exception as exc:
+                logger.warning(
+                    "Moat peer-average overlay failed for %s / %s: %s — "
+                    "falling through to 5.0 baseline",
+                    out.ticker, focal_industry, exc,
+                )
         moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
             out.profile, out.sector_aggregates, out.peer_profiles,

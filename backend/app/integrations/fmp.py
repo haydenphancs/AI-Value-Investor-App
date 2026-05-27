@@ -373,33 +373,39 @@ class FMPClient:
         """
         symbol = ticker.upper()
         # Resolve latest year/quarter when not provided.
+        #
+        # FMP renamed both endpoints in 2026 (underscores → dashes) and
+        # changed the list endpoint's identifying field from `year` to
+        # `fiscalYear`. The legacy `earning-call-transcript-list` and
+        # `earning_call_transcript` paths now return HTTP 404. We accept
+        # both `year` and `fiscalYear` from the listing rows just in case
+        # the response shape shifts again.
         if year is None or quarter is None:
             try:
                 listing = await self._make_request(
-                    "earning-call-transcript-list", params={"symbol": symbol}
+                    "earning-call-transcript-dates", params={"symbol": symbol}
                 )
                 if isinstance(listing, list) and listing:
-                    # Newest first by (year desc, quarter desc).
+                    # Newest first by (fiscalYear desc, quarter desc).
+                    def _yr(row: Dict[str, Any]) -> int:
+                        return int(row.get("fiscalYear") or row.get("year") or 0)
                     listing.sort(
-                        key=lambda x: (
-                            int(x.get("year") or 0),
-                            int(x.get("quarter") or 0),
-                        ),
+                        key=lambda x: (_yr(x), int(x.get("quarter") or 0)),
                         reverse=True,
                     )
                     head = listing[0]
-                    year = int(head.get("year") or 0)
+                    year = _yr(head)
                     quarter = int(head.get("quarter") or 0)
             except Exception as e:
                 logger.warning(
-                    f"earning-call-transcript-list failed for {symbol}: {e}"
+                    f"earning-call-transcript-dates failed for {symbol}: {e}"
                 )
                 return ""
             if not year or not quarter:
                 return ""
         try:
             data = await self._make_request(
-                "earning_call_transcript",
+                "earning-call-transcript",
                 params={"symbol": symbol, "year": year, "quarter": quarter},
             )
             if isinstance(data, list) and data:
@@ -411,7 +417,7 @@ class FMPClient:
                 return content if isinstance(content, str) else ""
         except Exception as e:
             logger.warning(
-                f"earning_call_transcript failed for {symbol} "
+                f"earning-call-transcript failed for {symbol} "
                 f"({year}Q{quarter}): {e}"
             )
         return ""

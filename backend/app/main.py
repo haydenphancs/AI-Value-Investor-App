@@ -235,6 +235,27 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"IP intel quarterly batch failed: {e}", exc_info=True)
 
+        # ── Industry moat benchmarks (Peer Avg overlay) quarterly refresh ──
+        # Heavy compute (~5 FMP calls × top 200 tickers × 156 industries),
+        # but writes ~780 rows total that overlay the moat radar's
+        # gray "Peer Avg" polygon. Without this, peer_score collapses
+        # to a flat 5.0 sector-median anchor.
+        try:
+            from app.services.industry_moat_benchmark_service import (
+                get_industry_moat_benchmark_service,
+            )
+
+            moat_bench_summary = (
+                await get_industry_moat_benchmark_service().recompute_all()
+            )
+            logger.info(
+                f"Industry moat benchmark quarterly batch completed: {moat_bench_summary}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Industry moat benchmark quarterly batch failed: {e}", exc_info=True,
+            )
+
 
 async def _run_whale_hydration_job():
     """Background task: hydrate whale profiles.

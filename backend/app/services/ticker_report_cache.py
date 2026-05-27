@@ -74,7 +74,34 @@ TABLE_NAME = "ticker_report_cache"
 #   * New `revenue_forecast.guidance_speaker` ("CFO" / "CEO" / "IR")
 #     and `revenue_forecast.guidance_period` ("Q4 2025" / "FY 2026")
 #     for iOS attribution.
-CACHE_SCHEMA_FLOOR = datetime(2026, 5, 19, 22, 0, 0, tzinfo=timezone.utc)
+# 2026-05-27 — FMP /profile + /ratios + /ratios-ttm field renames and
+# PatentsView → USPTO ODP migration:
+#   * `moat_competition.competitors` was empty for every ticker because
+#     FMP renamed `mktCap` → `marketCap`; aliased back in fmp.py.
+#   * Each pillar now carries `source ∈ {deterministic, grounded, ai_legacy}`
+#     (new field on MoatDimensionResponse).
+#   * Peer competitor scoring restored: /ratios-ttm renamed
+#     `operatingProfitMargin` → `operatingProfitMarginTTM` and moved
+#     `returnOnEquity` to /key-metrics-ttm, `revenueGrowth` to
+#     /financial-growth. All three now fanned out per peer.
+#   * Focal ratios block now handles FMP renames of priceEarningsRatio,
+#     enterpriseValueOverEBITDA, debtEquityRatio, interestCoverage, and
+#     reads returnOnEquity/Assets from /key-metrics fallback.
+#   * Intangible Assets pillar's `patents_per_employee` driver now
+#     resolves via the USPTO Open Data Portal API (search.patentsview.org
+#     was decommissioned). Alias map at data/uspto_assignee_aliases.json
+#     covers known subsidiary mismatches (MRNA → ModernaTX, GOOG → Google,
+#     plus 16 more from the top-500 bulk scan).
+# 2026-05-27 — Industry moat peer-average overlay:
+#   * `moat_competition.dimensions[*].peer_score` is now sourced from
+#     the new industry_moat_benchmarks table (migration 057) — one
+#     row per (industry, pillar). Previously every pillar carried a
+#     hardcoded 5.0 sector-median anchor regardless of industry, so
+#     the iOS Moat radar's gray "Peer Avg" pentagon was a flat shape
+#     on every ticker. Industries without a benchmark row yet (new
+#     ticker / pre-bootstrap state) still fall through to the 5.0
+#     baseline via `_apply_peer_score_baseline`.
+CACHE_SCHEMA_FLOOR = datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _legacy_tier_from_change(pct: float) -> str:

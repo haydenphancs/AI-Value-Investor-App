@@ -647,3 +647,216 @@ def test_pillar_drivers_to_dict_includes_period_and_sample_size():
     gm_driver = next(d for d in brand_dict["drivers"] if d["metric"] == "gross_margin")
     assert gm_driver["period_used"] == "2025"
     assert gm_driver["sample_size"] == 85
+
+
+# ── Phase 3D: Gemini grounded fallback ────────────────────────────────
+
+
+class _FakeGemini:
+    """Stand-in for the Gemini client used by gemini_grounded_fallback.
+    Returns whatever response dict is given at construction.
+    """
+
+    def __init__(self, response: Dict[str, Any]):
+        self._response = response
+
+    async def generate_grounded_research(self, **_: Any) -> Dict[str, Any]:
+        return self._response
+
+
+def _grounded_response(pillars: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a synthetic Gemini grounded-research response payload with
+    a JSON code fence containing the given per-pillar scores.
+    """
+    pillars_json = ",\n    ".join(
+        '"{name}": {{"score": {score}, "rationale": "{rationale}", "key_drivers": {drivers}}}'.format(
+            name=name,
+            score=p.get("score", 5.0),
+            rationale=p.get("rationale", ""),
+            drivers=str(p.get("drivers", [])).replace("'", '"'),
+        )
+        for name, p in pillars.items()
+    )
+    text = (
+        "Some moat narrative for the company.\n\n"
+        "```json\n{\n"
+        f'  "pillars": {{\n    {pillars_json}\n  }},\n'
+        '  "confidence": "high"\n'
+        "}\n```\n"
+    )
+    return {
+        "text": text,
+        "tokens_used": 4321,
+        "grounding_sources": [
+            {"publisher": "reuters", "title": "reuters.com", "uri": "https://reuters.com/x"},
+            {"publisher": "sec", "title": "sec.gov", "uri": "https://sec.gov/y"},
+        ],
+        "search_queries": ["oracle competitive moat 10-K"],
+        "model": "gemini-2.5-flash",
+    }
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_returns_validated_scores():
+    """Happy path: Gemini returns 5 valid pillar scores → all 5 land in
+    the returned pillar_scores dict with status='applied' and source
+    labels derived from grounding metadata.
+    """
+    from app.services.moat_scoring_service import PILLAR_ORDER
+    svc = MoatScoringService()
+    svc._gemini = _FakeGemini(_grounded_response({  # type: ignore[assignment]
+        PILLAR_ORDER[0]: {"score": 8.5, "rationale": "10-K cites lock-in",
+                          "drivers": ["high migration cost"]},
+        PILLAR_ORDER[1]: {"score": 6.0, "rationale": "moderate network",
+                          "drivers": ["growing user base"]},
+        PILLAR_ORDER[2]: {"score": 7.0, "rationale": "premium gross margin",
+                          "drivers": ["loyalty"]},
+        PILLAR_ORDER[3]: {"score": 7.5, "rationale": "scale advantage",
+                          "drivers": ["low unit cost"]},
+        PILLAR_ORDER[4]: {"score": 9.0, "rationale": "patent portfolio",
+                          "drivers": ["50+ active patents"]},
+    }))
+
+    result = await svc._do_grounded_extraction(
+        ticker="ORCL",
+        profile={"companyName": "Oracle Corporation", "sector": "Technology",
+                 "industry": "Software - Infrastructure",
+                 "description": "Enterprise software."},
+    )
+    assert result["status"] == "applied"
+    assert set(result["pillar_scores"].keys()) == set(PILLAR_ORDER)
+    # Each pillar score has the expected iOS-decoder shape.
+    for pillar_name, payload in result["pillar_scores"].items():
+        assert payload["name"] == pillar_name
+        assert 0 <= payload["score"] <= 10
+        assert payload["peer_score"] == 5.0
+        assert payload["confidence"] == "grounded"
+        assert payload["drivers"][0]["metric"] == "grounded_research"
+        assert payload["drivers"][0]["rationale"]
+    # Source labels derived from publisher field on grounding sources
+    assert "Reuters" in result["source_labels"]
+    assert "Sec" in result["source_labels"]
+    assert result["rejected"] == []
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_rejects_out_of_range_scores():
+    """Gemini hallucinates a 15.0 score → rejected; other valid pillars
+    kept; status='applied_with_rejections'.
+    """
+    from app.services.moat_scoring_service import PILLAR_ORDER
+    svc = MoatScoringService()
+    svc._gemini = _FakeGemini(_grounded_response({  # type: ignore[assignment]
+        PILLAR_ORDER[0]: {"score": 15.0},      # out of range — rejected
+        PILLAR_ORDER[1]: {"score": -2.0},      # negative — rejected
+        PILLAR_ORDER[2]: {"score": 7.5},
+        PILLAR_ORDER[3]: {"score": 6.0},
+        PILLAR_ORDER[4]: {"score": 8.0},
+    }))
+    result = await svc._do_grounded_extraction(
+        ticker="X", profile={"companyName": "X"},
+    )
+    assert result["status"] == "applied_with_rejections"
+    assert PILLAR_ORDER[0] not in result["pillar_scores"]
+    assert PILLAR_ORDER[1] not in result["pillar_scores"]
+    assert PILLAR_ORDER[2] in result["pillar_scores"]
+    # Rejected list captures both bad ones with the right reason prefix
+    rejected_pillars = {r["pillar"]: r["reason"] for r in result["rejected"]}
+    assert "score_out_of_range" in rejected_pillars[PILLAR_ORDER[0]]
+    assert "score_out_of_range" in rejected_pillars[PILLAR_ORDER[1]]
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_missing_pillar_key():
+    """If Gemini drops a pillar entirely, it gets rejected with reason
+    'missing_or_not_object' (not silently invented)."""
+    from app.services.moat_scoring_service import PILLAR_ORDER
+    svc = MoatScoringService()
+    # Send only 3 of 5 pillars.
+    svc._gemini = _FakeGemini(_grounded_response({  # type: ignore[assignment]
+        PILLAR_ORDER[0]: {"score": 7.0},
+        PILLAR_ORDER[2]: {"score": 6.0},
+        PILLAR_ORDER[4]: {"score": 8.0},
+    }))
+    result = await svc._do_grounded_extraction(
+        ticker="X", profile={"companyName": "X"},
+    )
+    assert result["status"] == "applied_with_rejections"
+    rejected_pillars = {r["pillar"]: r["reason"] for r in result["rejected"]}
+    assert rejected_pillars.get(PILLAR_ORDER[1]) == "missing_or_not_object"
+    assert rejected_pillars.get(PILLAR_ORDER[3]) == "missing_or_not_object"
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_no_json_fence():
+    """Plain text without ```json``` block → status='gemini_error',
+    no pillar scores returned, raw text preserved in audit payload.
+    """
+    svc = MoatScoringService()
+    svc._gemini = _FakeGemini({  # type: ignore[assignment]
+        "text": "Just a paragraph of moat narrative without a JSON block.",
+        "tokens_used": 100, "grounding_sources": [],
+        "search_queries": [], "model": "gemini-2.5-flash",
+    })
+    result = await svc._do_grounded_extraction(
+        ticker="X", profile={"companyName": "X"},
+    )
+    assert result["status"] == "gemini_error"
+    assert result["pillar_scores"] == {}
+    assert "no ```json``` code fence" in result["raw_response"].get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_malformed_json():
+    """JSON code fence with bad JSON inside → gemini_error, raw_json
+    preserved in audit payload."""
+    svc = MoatScoringService()
+    svc._gemini = _FakeGemini({  # type: ignore[assignment]
+        "text": '```json\n{ "pillars": this is not valid json }\n```',
+        "tokens_used": 100, "grounding_sources": [],
+        "search_queries": [], "model": "gemini-2.5-flash",
+    })
+    result = await svc._do_grounded_extraction(
+        ticker="X", profile={"companyName": "X"},
+    )
+    assert result["status"] == "gemini_error"
+    assert "json parse" in result["raw_response"].get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_grounded_extraction_gemini_throws():
+    """Underlying gemini call raises → caught, status='gemini_error',
+    no propagation up to caller."""
+    class _Throwing:
+        async def generate_grounded_research(self, **_):
+            raise RuntimeError("quota exhausted")
+
+    svc = MoatScoringService()
+    svc._gemini = _Throwing()  # type: ignore[assignment]
+    result = await svc._do_grounded_extraction(
+        ticker="X", profile={"companyName": "X"},
+    )
+    assert result["status"] == "gemini_error"
+    assert "quota exhausted" in result["raw_response"]["error"]
+    assert result["pillar_scores"] == {}
+
+
+def test_derive_source_labels_dedupe_and_cap():
+    """Helper mirrors the competitor_intel publisher dedupe logic."""
+    from app.services.moat_scoring_service import _derive_source_labels
+    sources = [
+        {"publisher": "reuters"},
+        {"publisher": "reuters"},   # dup
+        {"publisher": "sec"},
+        {"publisher": "bloomberg"},
+        {"publisher": "wsj"},
+        {"publisher": "ft"},        # over the cap of 4
+    ]
+    labels = _derive_source_labels(sources)
+    assert labels == ["Reuters", "Sec", "Bloomberg", "Wsj"]
+
+
+def test_derive_source_labels_empty_and_non_dict():
+    from app.services.moat_scoring_service import _derive_source_labels
+    assert _derive_source_labels([]) == []
+    assert _derive_source_labels([None, "garbage", {"publisher": ""}]) == []  # type: ignore[list-item]

@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # outages or bad-research-run incidents.
     COMPETITOR_INTEL_AI_ENABLED: bool = True
 
+    # Moat intel — Phase 3D Gemini grounded fallback for moat pillars
+    # the deterministic scorer left at confidence='low'. When False,
+    # low-confidence pillars fall back to the legacy AI Stage A
+    # dimension (ungrounded). Kill switch for quota outages.
+    MOAT_INTEL_AI_ENABLED: bool = True
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

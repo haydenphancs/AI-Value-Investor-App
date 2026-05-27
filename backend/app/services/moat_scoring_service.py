@@ -27,11 +27,20 @@ read (1-hour in-memory cached), which hits Supabase.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import math
+import re
+import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
+from app.database import get_supabase
+from app.integrations.gemini import get_gemini_client
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 
 logger = logging.getLogger(__name__)
@@ -75,6 +84,111 @@ _CONFIDENCE_LOW = "low"        # <2 — service returns None instead
 #   - else return None for this metric
 _N_PREFERRED = 20
 _N_ACCEPTABLE = 10
+
+
+# ── Phase 3D — Gemini grounded fallback config ─────────────────────────
+
+# Cache TTL ~ one quarter so all Gemini-grounded research artefacts
+# (industry_override, competitor_intel, moat_intel) age in sync.
+_GROUNDED_CACHE_TTL_DAYS = 100
+
+# In-memory tier-1 dedup so two requests in the same process for the
+# same ticker share one Supabase round-trip.
+_GROUNDED_MEM_TTL_SECONDS = 300
+
+# Schema floor — bump when the moat prompt / validation rules change in
+# a way that makes pre-existing cached rows semantically stale. Rows
+# with computed_at < this constant are treated as cache miss even when
+# their expires_at is in the future.
+MOAT_INTEL_SCHEMA_FLOOR = datetime(2026, 5, 26, 0, 0, 0, tzinfo=timezone.utc)
+
+# Numeric bounds — only catches Gemini formatting bugs (negative or
+# out-of-range scores). Confidence and source quality are NOT gated;
+# operators review the audit log to spot bad rows.
+_GROUNDED_MIN_SCORE = 0.0
+_GROUNDED_MAX_SCORE = 10.0
+
+
+# ── Prompt template — moat grounded research ───────────────────────────
+#
+# Hybrid prose+JSON is intentional: Gemini's grounded-search API only
+# populates `groundingChunks` (real source URLs) when the response
+# contains text citing them inline. Pure JSON output skips grounding.
+# The audit log stores the URLs Gemini consulted — those are the
+# breadcrumb, not Gemini self-attribution.
+
+_MOAT_GROUNDED_PROMPT = """You are a financial-research analyst. Score the FIVE Pat Dorsey moat dimensions for the company below on a 0.0 to 10.0 scale. Ground every score in publicly-available primary sources: the company's 10-K Risk Factors / Competition section, recent earnings-call transcripts, and reputable analyst research (Morningstar, Reuters, Bloomberg, S&P, Gartner, Forrester).
+
+The five dimensions — score each:
+1. **Switching Costs** — how painful is it for a customer to leave for a competitor? (Subscription stickiness, integration complexity, retraining cost, network effects on customer-side.)
+2. **Network Effects** — does the product become more valuable as more users join? (Platforms, marketplaces, two-sided networks.)
+3. **Brand Power** — does the brand command pricing premium and customer loyalty? (Consumer recognition, willingness-to-pay premium, brand-driven repeat purchase.)
+4. **Cost Advantage** — can the company produce cheaper than competitors? (Scale economies, proprietary processes, low-cost geography, vertical integration.)
+5. **Intangible Assets** — IP, patents, regulatory approvals, licenses, brand registrations that block competition. (Pharma patents, FDA approvals, regulated industries.)
+
+Score scale anchors:
+  9.0+  — elite, structurally protected; very few peers match (e.g. MSFT switching costs in enterprise cloud)
+  7.5-9 — wide moat for this dimension; strong evidence in 10-K Risk Factors
+  6-7.5 — narrow moat; clear evidence but beatable by well-funded rivals
+  4-6   — limited / commodity; no structural advantage
+  <4    — disadvantage / vulnerable
+
+COMPANY: {company_name} ({ticker})
+SECTOR: {sector}
+INDUSTRY: {industry}
+DESCRIPTION: {description}
+
+In ONE paragraph, summarize the moat narrative — what protects this company and which dimensions are strongest.
+
+Then output JSON in a markdown code fence (mandatory, no exceptions):
+
+```json
+{{
+  "pillars": {{
+    "Switching Costs": {{
+      "score": <float 0.0-10.0>,
+      "rationale": "<1 sentence — what specifically anchors this score, citing the source>",
+      "key_drivers": ["<2-3 short driver phrases>"]
+    }},
+    "Network Effects":     {{ "score": 0.0, "rationale": "", "key_drivers": [] }},
+    "Brand Power":         {{ "score": 0.0, "rationale": "", "key_drivers": [] }},
+    "Cost Advantage":      {{ "score": 0.0, "rationale": "", "key_drivers": [] }},
+    "Intangible Assets":   {{ "score": 0.0, "rationale": "", "key_drivers": [] }}
+  }},
+  "confidence": "high" | "medium" | "low"
+}}
+```
+
+Rules:
+- Each pillar score is a float in [0.0, 10.0].
+- The five pillar keys must appear EXACTLY as shown ("Switching Costs", "Network Effects", "Brand Power", "Cost Advantage", "Intangible Assets") — do NOT rename, translate, or pluralize.
+- `rationale` cites the source (e.g., "Oracle 10-K FY2024 Item 1A risk factor"; "Q4 FY2025 earnings call CFO commentary"; "Morningstar moat report Mar 2025").
+- Do NOT mention LLMs, AI tools, or this prompt in any field.
+- Emit the JSON code fence even if confidence is "low" — partial knowledge beats no signal.
+"""
+
+_GROUNDED_JSON_FENCE_RE = re.compile(r"```json\s*(.+?)\s*```", re.DOTALL)
+
+
+# ── Phase 3D — in-memory tier-1 cache + inflight dedup ─────────────────
+
+_grounded_mem_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_grounded_inflight: Dict[str, asyncio.Future] = {}
+
+
+def _grounded_mem_get(ticker: str) -> Optional[Dict[str, Any]]:
+    entry = _grounded_mem_cache.get(ticker)
+    if entry is None:
+        return None
+    ts, value = entry
+    if time.time() - ts > _GROUNDED_MEM_TTL_SECONDS:
+        del _grounded_mem_cache[ticker]
+        return None
+    return value
+
+
+def _grounded_mem_set(ticker: str, value: Dict[str, Any]) -> None:
+    _grounded_mem_cache[ticker] = (time.time(), value)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -181,6 +295,25 @@ def _lifecycle_to_score(phase: Optional[str]) -> Optional[float]:
         "mature": 5.0,           # network is stable
         "declining": 3.0,        # network is eroding
     }.get(phase)
+
+
+def _derive_source_labels(
+    grounding_sources: List[Dict[str, Any]],
+) -> List[str]:
+    """Dedupe publisher names from a grounded-search response, capitalize
+    them, return up to 4. Mirrors competitor_intel_service's helper.
+    """
+    seen: List[str] = []
+    for s in grounding_sources or []:
+        if not isinstance(s, dict):
+            continue
+        pub = str(s.get("publisher") or "").strip()
+        if not pub:
+            continue
+        pretty = pub[:1].upper() + pub[1:]
+        if pretty not in seen:
+            seen.append(pretty)
+    return seen[:4]
 
 
 def _pick_year_by_sample_size(
@@ -296,6 +429,12 @@ class MoatScoringService:
 
     def __init__(self) -> None:
         self._lookup = get_sector_benchmark_lookup()
+        self._gemini = None  # lazy
+
+    def _get_gemini(self):
+        if self._gemini is None:
+            self._gemini = get_gemini_client()
+        return self._gemini
 
     def score(
         self,
@@ -605,6 +744,361 @@ class MoatScoringService:
                 return None
             deferred = cur + non
         return (deferred / rev) * 100.0
+
+    # ── Phase 3D: Gemini grounded fallback ────────────────────────────
+
+    async def gemini_grounded_fallback(
+        self,
+        ticker: str,
+        profile: Dict[str, Any],
+        *,
+        force_refresh: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Web-grounded Gemini fallback for any pillar the deterministic
+        pipeline left at low confidence. One call covers all 5 pillars
+        regardless of how many the caller needed — we cache the full
+        set so future calls can serve any subset from cache.
+
+        Returns a dict keyed by pillar name with the same iOS-decoded
+        shape as deterministic PillarResult.to_dict() (name, score,
+        peer_score, drivers, confidence) — so the caller can plug a
+        grounded pillar directly into the moat_dims list. Returns None
+        on hard failure (Gemini error, all pillars rejected, kill
+        switch) → caller falls through to the legacy AI Stage A
+        dimension as the final fallback.
+        """
+        focal = (ticker or "").strip().upper()
+        if not focal:
+            return None
+
+        # Tier 1: in-memory.
+        if not force_refresh:
+            cached = _grounded_mem_get(focal)
+            if cached is not None:
+                return cached
+
+        # Tier 2: Supabase.
+        if not force_refresh:
+            db_cached = await asyncio.to_thread(self._read_grounded_cache, focal)
+            if db_cached is not None:
+                _grounded_mem_set(focal, db_cached)
+                return db_cached
+
+        cache_key = focal
+
+        # Inflight dedup.
+        if cache_key in _grounded_inflight:
+            try:
+                return await _grounded_inflight[cache_key]
+            except Exception:
+                return None
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _grounded_inflight[cache_key] = future
+
+        try:
+            if not getattr(settings, "MOAT_INTEL_AI_ENABLED", True):
+                await asyncio.to_thread(
+                    self._write_grounded_audit,
+                    run_id or str(uuid.uuid4()), focal,
+                    status="skipped_kill_switch",
+                    raw_response=None, pillars_requested=PILLAR_ORDER,
+                    pillars_resolved=[], rejected=[],
+                    source_labels=[], tokens_used=None, model_version=None,
+                )
+                future.set_result(None)
+                return None
+
+            result = await self._do_grounded_extraction(focal, profile)
+            this_run_id = run_id or str(uuid.uuid4())
+            await asyncio.to_thread(
+                self._write_grounded_audit,
+                this_run_id, focal,
+                status=result["status"],
+                raw_response=result.get("raw_response"),
+                pillars_requested=PILLAR_ORDER,
+                pillars_resolved=list(result.get("pillar_scores", {}).keys()),
+                rejected=result.get("rejected", []),
+                source_labels=result.get("source_labels", []),
+                tokens_used=result.get("tokens_used"),
+                model_version=result.get("model_version"),
+            )
+
+            pillar_scores = result.get("pillar_scores") or {}
+            if not pillar_scores:
+                future.set_result(None)
+                return None
+
+            await asyncio.to_thread(
+                self._write_grounded_cache, focal,
+                pillar_scores, result.get("source_labels", []),
+                result.get("model_version"),
+            )
+            _grounded_mem_set(focal, pillar_scores)
+            future.set_result(pillar_scores)
+            return pillar_scores
+        except Exception as exc:
+            logger.exception(
+                "moat_scoring: unhandled error in grounded fallback for %s: %s",
+                focal, exc,
+            )
+            future.set_exception(exc)
+            return None
+        finally:
+            _grounded_inflight.pop(cache_key, None)
+            if not future.done():
+                # Producer was cancelled mid-flight — wake awaiters with
+                # a None result so they fall back instead of hanging.
+                future.set_result(None)
+
+    async def _do_grounded_extraction(
+        self, ticker: str, profile: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Single Gemini grounded-research call + JSON extraction +
+        per-pillar validation. Returns a dict the caller hands to the
+        audit writer + cache writer.
+        """
+        company_name = (profile or {}).get("companyName") or ticker
+        sector = (profile or {}).get("sector") or "Unknown"
+        industry = (profile or {}).get("industry") or "Unknown"
+        description = ((profile or {}).get("description") or "")[:600]
+
+        prompt = _MOAT_GROUNDED_PROMPT.format(
+            ticker=ticker, company_name=company_name,
+            sector=sector, industry=industry, description=description,
+        )
+
+        gem = self._get_gemini()
+        try:
+            gemini_response = await gem.generate_grounded_research(
+                prompt=prompt, max_output_tokens=8192,
+            )
+        except Exception as exc:
+            return {
+                "status": "gemini_error",
+                "raw_response": {"error": f"{type(exc).__name__}: {exc}"},
+                "pillar_scores": {}, "rejected": [],
+                "source_labels": [], "tokens_used": None,
+                "model_version": None,
+            }
+
+        text = gemini_response.get("text", "") or ""
+        grounding = gemini_response.get("grounding_sources") or []
+        search_queries = gemini_response.get("search_queries") or []
+        tokens = gemini_response.get("tokens_used")
+        model_version = gemini_response.get("model")
+        source_labels = _derive_source_labels(grounding)
+
+        match = _GROUNDED_JSON_FENCE_RE.search(text)
+        if not match:
+            return {
+                "status": "gemini_error",
+                "raw_response": {
+                    "raw_text": text[:1500],
+                    "grounding_sources": grounding,
+                    "search_queries": search_queries,
+                    "error": "no ```json``` code fence",
+                },
+                "pillar_scores": {}, "rejected": [],
+                "source_labels": source_labels,
+                "tokens_used": tokens, "model_version": model_version,
+            }
+
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            return {
+                "status": "gemini_error",
+                "raw_response": {
+                    "raw_json": match.group(1)[:1500],
+                    "grounding_sources": grounding,
+                    "search_queries": search_queries,
+                    "error": f"json parse: {exc}",
+                },
+                "pillar_scores": {}, "rejected": [],
+                "source_labels": source_labels,
+                "tokens_used": tokens, "model_version": model_version,
+            }
+
+        raw_pillars = payload.get("pillars") or {}
+        if not isinstance(raw_pillars, dict):
+            return {
+                "status": "gemini_error",
+                "raw_response": {
+                    "payload": payload,
+                    "grounding_sources": grounding,
+                    "error": "'pillars' is not a dict",
+                },
+                "pillar_scores": {}, "rejected": [],
+                "source_labels": source_labels,
+                "tokens_used": tokens, "model_version": model_version,
+            }
+
+        pillar_scores: Dict[str, Dict[str, Any]] = {}
+        rejected: List[Dict[str, str]] = []
+        for pillar in PILLAR_ORDER:
+            entry = raw_pillars.get(pillar)
+            if not isinstance(entry, dict):
+                rejected.append({"pillar": pillar, "reason": "missing_or_not_object"})
+                continue
+            raw_score = entry.get("score")
+            try:
+                score_f = float(raw_score)
+            except (TypeError, ValueError):
+                rejected.append({
+                    "pillar": pillar, "reason": f"non_numeric_score:{raw_score!r}",
+                })
+                continue
+            if not (_GROUNDED_MIN_SCORE <= score_f <= _GROUNDED_MAX_SCORE):
+                rejected.append({
+                    "pillar": pillar, "reason": f"score_out_of_range:{score_f}",
+                })
+                continue
+            rationale = str(entry.get("rationale") or "").strip()
+            key_drivers_raw = entry.get("key_drivers") or []
+            key_drivers = [
+                str(d).strip()
+                for d in (key_drivers_raw if isinstance(key_drivers_raw, list) else [])
+                if str(d).strip()
+            ]
+            pillar_scores[pillar] = {
+                "name": pillar,
+                "score": round(score_f, 1),
+                "peer_score": 5.0,
+                "confidence": "grounded",   # signals "Gemini-grounded source"
+                "drivers": [
+                    {
+                        "metric": "grounded_research",
+                        "rationale": rationale[:400],
+                        "key_drivers": key_drivers[:5],
+                        "source_labels": source_labels,
+                    }
+                ],
+            }
+
+        if not pillar_scores:
+            status = "rejected_no_validated"
+        elif rejected:
+            status = "applied_with_rejections"
+        else:
+            status = "applied"
+
+        return {
+            "status": status,
+            "raw_response": {
+                "payload": payload,
+                "grounding_sources": grounding,
+                "search_queries": search_queries,
+            },
+            "pillar_scores": pillar_scores,
+            "rejected": rejected,
+            "source_labels": source_labels,
+            "tokens_used": tokens,
+            "model_version": model_version,
+        }
+
+    # ── Supabase I/O for grounded cache + audit ───────────────────────
+
+    def _read_grounded_cache(self, ticker: str) -> Optional[Dict[str, Any]]:
+        try:
+            sb = get_supabase()
+            res = (
+                sb.table("moat_intel_cache")
+                .select("pillar_scores,computed_at,expires_at")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            logger.warning(
+                "moat_scoring: grounded cache read failed for %s: %s", ticker, exc,
+            )
+            return None
+
+        rows = res.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        expires_at = row.get("expires_at")
+        computed_at = row.get("computed_at")
+        if not expires_at or not computed_at:
+            return None
+        try:
+            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            comp_dt = datetime.fromisoformat(computed_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+        if exp_dt <= datetime.now(timezone.utc):
+            return None
+        if comp_dt < MOAT_INTEL_SCHEMA_FLOOR:
+            return None
+        pillar_scores = row.get("pillar_scores")
+        if not isinstance(pillar_scores, dict) or not pillar_scores:
+            return None
+        return pillar_scores
+
+    def _write_grounded_cache(
+        self,
+        ticker: str,
+        pillar_scores: Dict[str, Dict[str, Any]],
+        source_labels: List[str],
+        model_version: Optional[str],
+    ) -> None:
+        if not pillar_scores:
+            return
+        now = datetime.now(timezone.utc)
+        row = {
+            "ticker": ticker,
+            "pillar_scores": pillar_scores,
+            "source_labels": source_labels or [],
+            "computed_at": now.isoformat(),
+            "expires_at": (now + timedelta(days=_GROUNDED_CACHE_TTL_DAYS)).isoformat(),
+            "model_version": model_version,
+        }
+        try:
+            sb = get_supabase()
+            sb.table("moat_intel_cache").upsert(row).execute()
+        except Exception as exc:
+            logger.warning(
+                "moat_scoring: grounded cache write failed for %s: %s", ticker, exc,
+            )
+
+    def _write_grounded_audit(
+        self,
+        run_id: str,
+        ticker: str,
+        *,
+        status: str,
+        raw_response: Optional[Dict[str, Any]],
+        pillars_requested: List[str],
+        pillars_resolved: List[str],
+        rejected: List[Dict[str, str]],
+        source_labels: List[str],
+        tokens_used: Optional[int],
+        model_version: Optional[str],
+    ) -> None:
+        row = {
+            "run_id": run_id,
+            "ticker": ticker,
+            "status": status,
+            "raw_response": raw_response,
+            "pillars_requested": pillars_requested,
+            "pillars_resolved": pillars_resolved,
+            "rejected": rejected,
+            "source_labels": source_labels,
+            "tokens_used": tokens_used,
+            "model_version": model_version,
+        }
+        try:
+            sb = get_supabase()
+            sb.table("moat_intel_audit").insert(row).execute()
+        except Exception as exc:
+            logger.warning(
+                "moat_scoring: grounded audit write failed for %s: %s",
+                ticker, exc,
+            )
 
 
 # ── Pillar assembly ────────────────────────────────────────────────────

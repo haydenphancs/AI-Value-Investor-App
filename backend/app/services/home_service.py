@@ -195,7 +195,15 @@ class HomeService:
             if not data:
                 return _synthetic_sparkline(True)
 
-            historical = data.get("historical", [])
+            # FMP /stable/historical-price-eod/full returns either a flat
+            # list or a {"historical": [...]} dict depending on plan tier.
+            # Normalize so we don't .get() on a list (silent .warning() spam).
+            if isinstance(data, list):
+                historical = data
+            elif isinstance(data, dict):
+                historical = data.get("historical", []) or []
+            else:
+                historical = []
             if not historical:
                 return _synthetic_sparkline(True)
 

@@ -218,6 +218,23 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(f"Competitor intel quarterly batch failed: {e}", exc_info=True)
 
+        # ── Phase 3C chained: ip_intel (USPTO + FDA) quarterly refresh ──
+        # USPTO patents and FDA approvals change very slowly. Chained
+        # here so all moat-relevant external data refreshes on the same
+        # quarterly anchor. Its own try/except so an upstream API outage
+        # can't break the dossier loop.
+        try:
+            from app.services.ip_intel_service import get_ip_intel_service
+
+            ip_summary = (
+                await get_ip_intel_service().refresh_top_tickers()
+            )
+            logger.info(
+                f"IP intel quarterly batch completed: {ip_summary}"
+            )
+        except Exception as e:
+            logger.error(f"IP intel quarterly batch failed: {e}", exc_info=True)
+
 
 async def _run_whale_hydration_job():
     """Background task: hydrate whale profiles.

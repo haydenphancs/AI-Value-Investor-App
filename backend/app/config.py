@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # dimension (ungrounded). Kill switch for quota outages.
     MOAT_INTEL_AI_ENABLED: bool = True
 
+    # USPTO PatentsView API key (Phase 3C) — used by ip_intel_service to
+    # fetch patent counts that boost the Intangible Assets pillar for
+    # tech / biotech / pharma tickers. Optional: when missing, the
+    # integration silently no-ops and the patents driver simply doesn't
+    # contribute. Register at https://search.patentsview.org/docs/
+    USPTO_API_KEY: str = ""
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

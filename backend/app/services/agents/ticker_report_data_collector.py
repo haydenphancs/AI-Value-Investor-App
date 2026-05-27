@@ -274,6 +274,9 @@ class CollectedTickerData:
     # fallback). Filled at the end of `_fetch_dependent` so assemble_report
     # stays synchronous.
     moat_grounded_pillars: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # ── Phase 3C: USPTO + FDA payload for Intangible Assets pillar.
+    # None when both sources resolve empty (caller treats as absent).
+    ip_intel: Optional[Dict[str, Any]] = None
 
     # ── Computed metrics (real numbers / None) ────────────────────────
     computed: Dict[str, Any] = field(default_factory=dict)
@@ -674,6 +677,23 @@ class TickerReportDataCollector:
         else:
             out.industry_tam = industry_tam
 
+        # ── Phase 3C: fetch USPTO patents + FDA approvals for the
+        # Intangible Assets pillar. Cached 180-day in ip_intel_cache so
+        # the second user benefits. Runs BEFORE _precompute_moat_grounded
+        # so the deterministic scorer can use the IP data when deciding
+        # whether grounded fallback is needed.
+        try:
+            from app.services.ip_intel_service import get_ip_intel_service
+            out.ip_intel = await get_ip_intel_service().get_ip_intel(
+                out.ticker, out.profile or {},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Collector pass 2: ip_intel fetch failed for %s: %s",
+                out.ticker, exc,
+            )
+            out.ip_intel = None
+
         # ── Phase 3D: precompute Gemini grounded fallback for pillars
         # the deterministic moat scorer would leave at low confidence.
         # Runs here (async context) so the synchronous assemble_report
@@ -714,6 +734,8 @@ class TickerReportDataCollector:
                 balance=out.balance or [],
                 ratios=out.ratios or [],
                 industry_tam=out.industry_tam,
+                transcript=out.transcript or None,
+                ip_intel=out.ip_intel,
             )
         except Exception as exc:
             logger.warning(
@@ -1146,6 +1168,8 @@ class TickerReportDataCollector:
                 balance=out.balance or [],
                 ratios=out.ratios or [],
                 industry_tam=out.industry_tam,
+                transcript=out.transcript or None,
+                ip_intel=out.ip_intel,
             )
         except Exception as exc:
             logger.warning(

@@ -1060,7 +1060,7 @@ struct CompetitorComparison: Identifiable {
     let id = UUID()
     let name: String
     let ticker: String
-    let moatScore: Double       // 0-10
+    let competitiveScore: Double       // 0-10
     let marketSharePercent: Double
     let threatLevel: CompetitorThreatLevel
 }
@@ -1496,10 +1496,10 @@ extension TickerReportData {
             ],
             durabilityNote: "Oracle's moat is anchored by extremely high switching costs in enterprise database and ERP. Customers face multi-year migration timelines and significant retraining costs, creating durable lock-in.",
             competitors: [
-                CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", moatScore: 9.0, marketSharePercent: 31.0, threatLevel: .high),
-                CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", moatScore: 8.5, marketSharePercent: 25.0, threatLevel: .high),
-                CompetitorComparison(name: "Google Cloud", ticker: "GOOGL", moatScore: 7.2, marketSharePercent: 11.0, threatLevel: .moderate),
-                CompetitorComparison(name: "SAP", ticker: "SAP", moatScore: 7.0, marketSharePercent: 5.0, threatLevel: .low)
+                CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", competitiveScore: 9.0, marketSharePercent: 31.0, threatLevel: .high),
+                CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", competitiveScore: 8.5, marketSharePercent: 25.0, threatLevel: .high),
+                CompetitorComparison(name: "Google Cloud", ticker: "GOOGL", competitiveScore: 7.2, marketSharePercent: 11.0, threatLevel: .moderate),
+                CompetitorComparison(name: "SAP", ticker: "SAP", competitiveScore: 7.0, marketSharePercent: 5.0, threatLevel: .low)
             ],
             competitiveInsight: "Oracle holds dominant position in enterprise databases but faces intense hyperscaler competition in cloud infrastructure. Switching cost moat remains the primary defensive asset."
         ),

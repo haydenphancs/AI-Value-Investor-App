@@ -22,6 +22,8 @@ from app.services.agents.ticker_report_data_collector import (
     _absolute_threshold_fallback,
     _apply_tam_source,
     _build_competitors,
+    _moat_multiplier,
+    _relative_peer_score,
     _build_insider_sections,
     _build_macro_risk_factors_from_fred,
     _build_macro_risk_factors_from_indicators,
@@ -949,9 +951,9 @@ def test_build_competitors_threat_level_assigned():
     assert all(c["threat_level"] in ("low", "moderate", "high") for c in out)
 
 
-def test_build_competitors_moat_scores_in_0_10_range():
-    """Moat scores must always land in [0, 10] (clamped by the iOS
-    rendering layer otherwise)."""
+def test_build_competitors_competitive_scores_in_0_10_range():
+    """Competitive scores must always land in [0, 10] (clamped by the
+    iOS rendering layer otherwise)."""
     peers = [
         _peer("A", "A", 100_000_000_000, change=50.0),
         _peer("B", "B", 100_000_000_000, change=-50.0),
@@ -963,13 +965,15 @@ def test_build_competitors_moat_scores_in_0_10_range():
         peer_ratios=_default_ratios_for(peers),
     )
     for c in out:
-        assert 0.0 <= c["moat_score"] <= 10.0
+        assert 0.0 <= c["competitive_score"] <= 10.0
 
 
 def test_build_competitors_uses_peer_ratios_for_scoring():
     """When peer_ratios are provided, scoring uses real ratios — a peer
-    with much higher margins/ROE earns a higher absolute moat_score
-    than one with low margins/ROE, regardless of peer-set composition."""
+    with much higher margins/ROE earns a higher absolute competitive
+    score than one with low margins/ROE, regardless of peer-set
+    composition. Inputs deliberately omit ROIC so the absolute-path
+    fallback (op_margin + ROE) is the codepath under test."""
     peers = [
         _peer("HIGHMARGIN", "High Margin Co", 100_000_000_000),
         _peer("LOWMARGIN", "Low Margin Co", 100_000_000_000),
@@ -982,7 +986,7 @@ def test_build_competitors_uses_peer_ratios_for_scoring():
         my_ticker="AAPL", my_profile={}, my_ratios=[],
         my_revenue_growth=None, peer_profiles=peers, peer_ratios=ratios,
     )
-    scores = {c["ticker"]: c["moat_score"] for c in out}
+    scores = {c["ticker"]: c["competitive_score"] for c in out}
     assert scores["HIGHMARGIN"] > scores["LOWMARGIN"]
 
 
@@ -1017,7 +1021,7 @@ def test_build_competitors_drops_peer_with_all_none_ratios():
     assert "WDAY" not in tickers
     assert "MSFT" in tickers
     # MSFT alone should not be pinned to 0.0 — single survivor → 5.0 neutral.
-    assert out[0]["moat_score"] > 0.0
+    assert out[0]["competitive_score"] > 0.0
 
 
 # ── Absolute (sector-relative) competitive scoring ────────────────────
@@ -1078,6 +1082,169 @@ def test_absolute_threshold_fallback_clamps_outside_bands():
     assert _absolute_threshold_fallback("revenue_yoy", 100.0) == 10.0
 
 
+# ── Relative (ROIC-delta + moat-multiplier) competitive scoring ───────
+
+
+def test_moat_multiplier_neutral_when_unknown():
+    """Cache miss on peer moat → 1.0× multiplier, neither boost nor
+    penalty. Guarantees that peers without a cached moat score don't
+    silently get dragged toward zero."""
+    assert _moat_multiplier(None) == 1.0
+
+
+def test_moat_multiplier_endpoints():
+    """0 moat → 0.7×, 10 moat → 1.3×, 5 moat → 1.0× (neutral anchor)."""
+    assert _moat_multiplier(0.0) == pytest.approx(0.7)
+    assert _moat_multiplier(5.0) == pytest.approx(1.0)
+    assert _moat_multiplier(10.0) == pytest.approx(1.3)
+
+
+def test_relative_peer_score_equal_roic_neutral_moat_is_5():
+    """Peer matches focal on ROIC and has neutral moat (5.0) → 5.0
+    score, the "equal threat" anchor."""
+    score = _relative_peer_score(
+        peer_roic=0.15, focal_roic=0.15, peer_moat_avg=5.0,
+    )
+    assert score == pytest.approx(5.0)
+
+
+def test_relative_peer_score_plus_10pp_roic_high_moat_caps_at_10():
+    """Peer beats focal by +10pp ROIC with high moat (8.0). Financial
+    component caps at 10; multiplier ~1.18 pushes the product past 10
+    and the clamp brings it back to 10.0 — strongest possible threat."""
+    score = _relative_peer_score(
+        peer_roic=0.25, focal_roic=0.15, peer_moat_avg=8.0,
+    )
+    assert score == pytest.approx(10.0)
+
+
+def test_relative_peer_score_minus_5pp_roic_low_moat_is_low_threat():
+    """Peer trails focal by 5pp ROIC with weak moat (2.0). Financial
+    component = 5 + (-5/10)*5 = 2.5; multiplier = 0.7 + 0.2*0.6 = 0.82;
+    product ≈ 2.05 — well under the 3.5 "low" threshold."""
+    score = _relative_peer_score(
+        peer_roic=0.10, focal_roic=0.15, peer_moat_avg=2.0,
+    )
+    assert score is not None
+    assert score == pytest.approx(2.05, abs=0.01)
+    assert score < 3.5  # threat-label cutoff
+
+
+def test_relative_peer_score_returns_none_when_either_roic_missing():
+    """A missing ROIC on either side disables the relative path so
+    `_build_competitors` can fall back to the absolute composite
+    rather than fabricate a 5.0 anchor for a coverage gap."""
+    assert _relative_peer_score(None, 0.15, 5.0) is None
+    assert _relative_peer_score(0.15, None, 5.0) is None
+    assert _relative_peer_score(None, None, 5.0) is None
+
+
+def test_relative_peer_score_clamps_extreme_negative_delta():
+    """A 50pp ROIC trail (peer 5% vs focal 55%) would compute
+    financial = -20 unclamped. Verify the floor at 0.0 holds even with
+    a high moat multiplier — score can't slip below zero."""
+    score = _relative_peer_score(
+        peer_roic=0.05, focal_roic=0.55, peer_moat_avg=10.0,
+    )
+    assert score == pytest.approx(0.0)
+
+
+def test_build_competitors_uses_relative_path_when_roic_present():
+    """End-to-end: when both focal and peer have ROIC, _build_competitors
+    uses the ROIC-relative path with moat-as-multiplier. Peer matches
+    focal on ROIC with neutral moat → ~5.0 score → "moderate" threat,
+    even when the peer's sector-relative absolute composite would have
+    produced a much higher number."""
+    peers = [
+        {**_peer("PEER", "Peer Co", 100_000_000_000), "sector": "Technology"},
+    ]
+    # Peer crushes sector medians on op_margin/ROE/growth — would score
+    # ~10 on the absolute path. But ROIC matches focal, so the relative
+    # path should anchor at 5.0 with neutral moat.
+    ratios = {
+        "PEER": {
+            "operatingProfitMargin": 0.40,
+            "returnOnEquity": 0.35,
+            "revenueGrowth": 0.20,
+            "returnOnCapitalEmployed": 0.15,
+        },
+    }
+    medians = {
+        "Technology": {"operating_margin": 0.10, "roe": 0.10, "revenue_yoy": 5.0},
+    }
+    out = _build_competitors(
+        my_ticker="FOCAL",
+        my_profile={"sector": "Technology"},
+        my_ratios=[{
+            "operatingProfitMargin": 0.10, "returnOnEquity": 0.10,
+            "returnOnCapitalEmployed": 0.15,
+        }],
+        my_revenue_growth=5.0,
+        peer_profiles=peers, peer_ratios=ratios,
+        sector_medians_by_sector=medians,
+        peer_moats={},  # cache miss → neutral
+    )
+    assert len(out) == 1
+    assert out[0]["competitive_score"] == pytest.approx(5.0, abs=0.1)
+    assert out[0]["threat_level"] == "moderate"
+
+
+def test_build_competitors_falls_back_to_absolute_when_focal_roic_missing():
+    """If focal lacks ROIC, every peer scores via the absolute composite
+    regardless of whether the peer has ROIC. Peer is dropped only if
+    both paths come back None."""
+    peers = [_peer("MSFT", "Microsoft", 3_000_000_000_000)]
+    ratios = {
+        "MSFT": {
+            "operatingProfitMargin": 0.35,
+            "returnOnEquity": 0.30,
+            "revenueGrowth": 0.12,
+            "returnOnCapitalEmployed": 0.20,  # peer has ROIC
+        },
+    }
+    # Focal has op_margin/ROE/growth but NO ROIC → relative path returns
+    # None for every peer, absolute path takes over.
+    out = _build_competitors(
+        my_ticker="ORCL",
+        my_profile={"mktCap": 800_000_000_000},
+        my_ratios=[{"operatingProfitMargin": 0.30, "returnOnEquity": 0.25}],
+        my_revenue_growth=10.0,
+        peer_profiles=peers, peer_ratios=ratios,
+    )
+    assert len(out) == 1
+    # MSFT scores high on the absolute path against generic bands.
+    assert out[0]["competitive_score"] > 0.0
+
+
+def test_build_competitors_peer_moats_amplify_threat_score():
+    """End-to-end: two peers with identical ROIC delta vs focal. The
+    one with higher cached moat should score higher because the
+    durability multiplier scales up its threat score."""
+    peers = [
+        _peer("MOATY",   "Moaty Co",   100_000_000_000),
+        _peer("NOMOAT",  "No Moat Co", 100_000_000_000),
+    ]
+    # Both peers beat focal by +5pp ROIC.
+    ratios = {
+        "MOATY":  {"returnOnCapitalEmployed": 0.20},
+        "NOMOAT": {"returnOnCapitalEmployed": 0.20},
+    }
+    out = _build_competitors(
+        my_ticker="FOCAL", my_profile={"mktCap": 800_000_000_000},
+        my_ratios=[{"returnOnCapitalEmployed": 0.15}],
+        my_revenue_growth=None,
+        peer_profiles=peers, peer_ratios=ratios,
+        peer_moats={"MOATY": 9.0, "NOMOAT": 2.0},
+    )
+    scores = {c["ticker"]: c["competitive_score"] for c in out}
+    # Same +5pp ROIC delta produces financial=7.5. MOATY at 9.0 moat →
+    # multiplier 1.24 → score ≈ 9.3. NOMOAT at 2.0 moat → multiplier
+    # 0.82 → score ≈ 6.15. Strict ordering matters.
+    assert scores["MOATY"] > scores["NOMOAT"]
+    assert scores["MOATY"] >= 6.5  # high threat
+    assert scores["NOMOAT"] < 6.5  # not high
+
+
 def test_build_competitors_sector_relative_scoring_uses_passed_medians():
     """When `sector_medians_by_sector` is supplied, each peer is scored
     against ITS OWN sector's medians (not the focal's). A peer in a
@@ -1106,7 +1273,7 @@ def test_build_competitors_sector_relative_scoring_uses_passed_medians():
         peer_profiles=peers, peer_ratios=ratios,
         sector_medians_by_sector=medians,
     )
-    scores = {c["ticker"]: c["moat_score"] for c in out}
+    scores = {c["ticker"]: c["competitive_score"] for c in out}
     # STRONG_TECH beats its sector median substantially → high score
     assert scores["STRONG_TECH"] >= 8.0
     # AVG_CONSUMER sits AT its sector medians → near 5.0
@@ -1147,9 +1314,10 @@ def test_build_competitors_focal_growth_does_not_clamp_at_50():
     assert out[0]["threat_level"] == "high"
 
 
-def test_build_competitors_sorted_by_moat_score_desc():
-    """The output list is sorted by moat_score desc — the strongest
-    threat renders first, matching the visual hierarchy on iOS."""
+def test_build_competitors_sorted_by_competitive_score_desc():
+    """The output list is sorted by competitive_score desc — the
+    strongest threat renders first, matching the visual hierarchy on
+    iOS."""
     peers = [
         _peer("WEAK",   "Weak Co",   100_000_000_000),
         _peer("MID",    "Mid Co",    100_000_000_000),

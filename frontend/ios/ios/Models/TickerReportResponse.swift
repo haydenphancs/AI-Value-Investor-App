@@ -568,13 +568,13 @@ struct MoatDimensionDTO: Codable {
 struct CompetitorDTO: Codable {
     let name: String
     let ticker: String
-    let moatScore: Double
+    let competitiveScore: Double
     let marketSharePercent: Double
     let threatLevel: String
 
     enum CodingKeys: String, CodingKey {
         case name, ticker
-        case moatScore = "moat_score"
+        case competitiveScore = "competitive_score"
         case marketSharePercent = "market_share_percent"
         case threatLevel = "threat_level"
     }
@@ -1008,7 +1008,7 @@ extension TickerReportAPIResponse {
             competitors: moatCompetition.competitors.map { c in
                 CompetitorComparison(
                     name: c.name, ticker: c.ticker,
-                    moatScore: c.moatScore,
+                    competitiveScore: c.competitiveScore,
                     marketSharePercent: c.marketSharePercent,
                     threatLevel: Self.mapCompetitorThreat(c.threatLevel)
                 )

@@ -2,7 +2,7 @@
 //  ReportPeerComparisonRow.swift
 //  ios
 //
-//  Molecule: Single competitor row with visual score bar for moat comparison
+//  Molecule: Single competitor row with visual score bar for competitive threat
 //
 
 import SwiftUI
@@ -53,14 +53,14 @@ struct ReportPeerComparisonRow: View {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(barColor)
                             .frame(
-                                width: geo.size.width * (competitor.moatScore / maxScore),
+                                width: geo.size.width * (competitor.competitiveScore / maxScore),
                                 height: 6
                             )
                     }
                 }
                 .frame(height: 6)
 
-                Text(String(format: "%.1f", competitor.moatScore))
+                Text(String(format: "%.1f", competitor.competitiveScore))
                     .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 28, alignment: .trailing)

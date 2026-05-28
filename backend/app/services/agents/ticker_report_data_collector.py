@@ -773,11 +773,12 @@ class TickerReportDataCollector:
     async def _fetch_peer_ratios(
         self, peers: List[str],
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch the three peer signals (op margin, ROE, revenue growth)
+        """Fetch the four peer signals (op margin, ROE, revenue growth, ROIC)
         keyed by ticker.
 
         FMP split these across three endpoints in late 2025:
-          * /ratios-ttm           → operatingProfitMarginTTM
+          * /ratios-ttm           → operatingProfitMarginTTM,
+                                    returnOnCapitalEmployedTTM
           * /key-metrics-ttm      → returnOnEquityTTM
           * /financial-growth     → revenueGrowth
 
@@ -804,6 +805,11 @@ class TickerReportDataCollector:
                     op = ratios[0].get("operatingProfitMarginTTM")
                     if op is not None:
                         merged["operatingProfitMargin"] = op
+                    roic = ratios[0].get("returnOnCapitalEmployedTTM")
+                    if roic is None:
+                        roic = ratios[0].get("returnOnCapitalEmployed")
+                    if roic is not None:
+                        merged["returnOnCapitalEmployed"] = roic
                 if isinstance(km, list) and km:
                     roe = km[0].get("returnOnEquityTTM")
                     if roe is not None:
@@ -1342,6 +1348,32 @@ class TickerReportDataCollector:
                 out.ticker, exc,
             )
 
+        # Batch-read aggregate moat for surviving peer tickers so the
+        # relative-path scorer can apply the durability multiplier
+        # without triggering a per-peer moat recompute. Missing peers
+        # default to neutral inside `_build_competitors`. One Supabase
+        # `.in_()` query for up to `_COMPETITOR_MAX_N` tickers.
+        peer_moats: Dict[str, float] = {}
+        try:
+            from app.services.moat_scoring_service import (
+                get_aggregate_moat_for_tickers,
+            )
+            peer_symbols_for_moat = [
+                (p.get("symbol") or "").upper()
+                for p in (out.peer_profiles or [])
+                if p.get("symbol")
+            ]
+            if peer_symbols_for_moat:
+                peer_moats = get_aggregate_moat_for_tickers(
+                    peer_symbols_for_moat,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Competitor peer-moat lookup failed for %s: %s — "
+                "scoring will use neutral 1.0× durability multiplier",
+                out.ticker, exc,
+            )
+
         deterministic_competitors = _build_competitors(
             my_ticker=out.ticker,
             my_profile=out.profile,
@@ -1351,6 +1383,7 @@ class TickerReportDataCollector:
             peer_ratios=out.peer_ratios,
             my_key_metrics=out.key_metrics,
             sector_medians_by_sector=sector_medians_by_sector,
+            peer_moats=peer_moats,
         )
         # Coverage-aware competitive_insight: when one or more pillars
         # fall flat because the industry's real moats live outside the
@@ -4186,6 +4219,62 @@ def _absolute_component_score(
     return max(0.0, min(10.0, raw))
 
 
+# ── ROIC-relative peer scoring with moat-as-durability multiplier ────
+#
+# Replaces the older absolute sector-relative composite for peers that
+# report ROIC. Anchors at "equal to focal" = 5.0, ±10pp ROIC swing maps
+# to the score endpoints, and each peer's aggregate moat (mean of its
+# 5 cached pillar scores) scales the result by 0.7–1.3× to reward
+# durability. Falls back to `_absolute_peer_score` for ROIC-gap peers.
+#
+# `_RELATIVE_ROIC_SCALE_PP` controls how much the peer must beat the
+# focal by (in percentage points of ROIC) to hit a 10.0 financial
+# score. 10pp keeps the scale aligned with real cross-sector ROIC
+# spreads — top-tier S&P names cluster around 20-30% ROIC while
+# focal-sector peers typically sit in the 10-20% band.
+_RELATIVE_ROIC_SCALE_PP = 10.0
+
+# Score-threshold thresholds for the threat-level label, applied to
+# the final multiplier-adjusted score. Mirrors the previous ±1.5
+# delta-to-focal bands transformed to absolute thresholds around the
+# 5.0 "equal threat" anchor.
+_THREAT_HIGH_THRESHOLD = 6.5
+_THREAT_LOW_THRESHOLD = 3.5
+
+
+def _moat_multiplier(peer_moat_avg: Optional[float]) -> float:
+    """Map aggregate moat (0–10) to a durability multiplier (0.7–1.3).
+
+    Neutral (5.0 moat) → 1.0×. Returns 1.0 when moat is unknown so
+    cache misses neither penalize nor boost the threat score.
+    """
+    if peer_moat_avg is None:
+        return 1.0
+    clamped = max(0.0, min(10.0, float(peer_moat_avg)))
+    return 0.7 + (clamped / 10.0) * 0.6
+
+
+def _relative_peer_score(
+    peer_roic: Optional[float],
+    focal_roic: Optional[float],
+    peer_moat_avg: Optional[float],
+) -> Optional[float]:
+    """Relative-delta ROIC score with moat-as-durability multiplier.
+
+    Inputs are ROIC as fractions (0.15 for 15%) — same shape FMP emits.
+    Returns None when either ROIC is missing so the caller can fall
+    back to the absolute path; a peer with no ROIC shouldn't get a 5.0
+    "equal threat" anchor by default.
+    """
+    if peer_roic is None or focal_roic is None:
+        return None
+    delta_pp = (float(peer_roic) - float(focal_roic)) * 100.0
+    financial = 5.0 + (delta_pp / _RELATIVE_ROIC_SCALE_PP) * 5.0
+    financial = max(0.0, min(10.0, financial))
+    score = financial * _moat_multiplier(peer_moat_avg)
+    return max(0.0, min(10.0, score))
+
+
 def _absolute_peer_score(
     op_margin_pct: Optional[float],
     roe_pct: Optional[float],
@@ -4322,35 +4411,44 @@ def _build_competitors(
     sector_medians_by_sector: Optional[
         Dict[str, Dict[str, Optional[float]]]
     ] = None,
+    peer_moats: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, top-N by market cap.
 
-    FMP's `stock-peers` endpoint is noisy for mega-caps — it can include
-    obvious misclassifications (Helport AI for ORCL, etc.). To keep the
-    UI signal-heavy:
+    Scoring is a two-path hybrid:
+      * Preferred — `_relative_peer_score`: ROIC delta vs focal mapped
+        to 0-10 around a 5.0 "equal threat" anchor, then scaled by the
+        peer's aggregate moat (mean of 5 cached pillar scores) as a
+        durability multiplier (0.7–1.3×). Implements the literature
+        consensus that ROIC vs hurdle is the single best competitive
+        signal, with moat as the durability lever.
+      * Fallback — `_absolute_peer_score`: original sector-relative
+        composite of op margin, ROE, and revenue growth. Used when the
+        peer (or focal) lacks ROIC coverage in FMP.
+
+    Pipeline:
       1. Drop any peer whose mktCap is below max(focal × 5%, $5B).
       2. Sort survivors by mktCap desc and cap at `_COMPETITOR_MAX_N`.
-      3. Drop peers we cannot score (score_raw is None) — avoids the
-         "0.0 by definition" card that happens when a peer's TTM ratios
-         are empty in FMP.
-      4. Score each peer absolutely on 0-10 via `_absolute_peer_score`
-         (each peer compared to ITS OWN sector medians). No min-max
-         scaling — a "9" means top-decile vs sector for any peer in any
-         sector, comparable across reports.
-      5. Sort the final list by moat_score desc so the strongest
-         threats render first.
+      3. Score each survivor via the relative path when ROIC is on
+         both sides; absolute path otherwise.
+      4. Drop peers we cannot score at all.
+      5. Bucket threat by absolute score thresholds (≥6.5 high, ≤3.5
+         low, else moderate) — the focal-relative delta is already
+         baked into the score by construction.
+
+    `peer_moats` is `{ticker: aggregate_moat (0-10)}` from
+    `get_aggregate_moat_for_tickers`. Missing tickers default to a
+    neutral 5.0 → multiplier 1.0 (no boost or penalty), keeping cache
+    misses honest.
 
     `market_share_percent` is emitted as 0.0 for every peer for
     backwards compatibility with the iOS DTO; iOS no longer renders
-    that field. Real market-share data isn't honestly available
-    (peer-set share is misleading, TAM data is US-only / 1-2yr lag
-    against global TTM revenue).
+    that field.
 
     `sector_medians_by_sector` is keyed by NORMALIZED sector name
     (e.g., "Technology"); each value is the output of
-    `_latest_sector_medians(...)`. When None or missing for a peer's
-    sector, scoring falls back to absolute-threshold bands so a number
-    still renders.
+    `_latest_sector_medians(...)`. Used only on the absolute-path
+    fallback.
 
     Returns [] when no peer survives the floor or the rankable-data
     drop.
@@ -4358,6 +4456,7 @@ def _build_competitors(
     if not peer_profiles:
         return []
     peer_ratios = peer_ratios or {}
+    peer_moats = peer_moats or {}
 
     focal_mkt_cap = float((my_profile or {}).get("mktCap") or 0.0)
     floor = max(
@@ -4410,9 +4509,10 @@ def _build_competitors(
         sector = _normalize_sector(raw_sector) if raw_sector else ""
         return sector_medians_by_sector.get(sector, {})
 
-    # ── 2. Score the focal (against its own sector) ───────────────────
+    # ── 2a. Focal absolute components (for the absolute-path fallback) ─
     my_op_margin: Optional[float] = None
     my_roe: Optional[float] = None
+    my_roic_frac: Optional[float] = None
     if my_ratios:
         r0 = my_ratios[0]
         omp = r0.get("operatingProfitMargin")
@@ -4421,6 +4521,11 @@ def _build_competitors(
         roe = r0.get("returnOnEquity")
         if roe is not None:
             my_roe = float(roe) * 100
+        # ROIC stays as a fraction for `_relative_peer_score`; the helper
+        # converts to percentage points internally.
+        roic_raw = r0.get("returnOnCapitalEmployed")
+        if roic_raw is not None:
+            my_roic_frac = float(roic_raw)
     # FMP stopped emitting returnOnEquity on /ratios in late 2025;
     # /key-metrics still carries it. Fall through so the focal isn't
     # under-scored vs peers (who already get ROE via /key-metrics-ttm).
@@ -4429,51 +4534,67 @@ def _build_competitors(
         km_roe = km0.get("returnOnEquity")
         if km_roe is not None:
             my_roe = float(km_roe) * 100
-    # `my_revenue_growth` arrives ALREADY in percent form from
-    # `_safe_pct_change` (which multiplies by 100). Do NOT multiply
-    # again — that bug used to inflate the focal to the clamp ceiling
-    # and forced every peer to "Low" threat.
-    my_score = _absolute_peer_score(
+    # Focal absolute score is computed only as the fallback anchor for
+    # peers without ROIC; the new relative path keeps the focal at the
+    # 5.0 anchor by construction.
+    my_abs_score = _absolute_peer_score(
         my_op_margin, my_roe, my_revenue_growth,
         _sector_medians_for(my_profile),
     )
 
-    # ── 3. Score each surviving peer (against its OWN sector) ─────────
+    # ── 3. Score each surviving peer ──────────────────────────────────
     peer_data: List[Dict[str, Any]] = []
     for s in survivors:
         sym = s["symbol"]
         p = s["profile"]
         ratios_row = peer_ratios.get(sym, {}) or {}
 
-        op_margin: Optional[float] = None
-        roe_val: Optional[float] = None
-        rev_growth: Optional[float] = None
-        omp = ratios_row.get("operatingProfitMargin")
-        if omp is not None:
-            op_margin = float(omp) * 100
-        roe_v = ratios_row.get("returnOnEquity")
-        if roe_v is not None:
-            roe_val = float(roe_v) * 100
-        rg = ratios_row.get("revenueGrowth")
-        if rg is not None:
-            rev_growth = float(rg) * 100
+        peer_roic_frac: Optional[float] = None
+        roic_raw = ratios_row.get("returnOnCapitalEmployed")
+        if roic_raw is not None:
+            peer_roic_frac = float(roic_raw)
 
-        score = _absolute_peer_score(
-            op_margin, roe_val, rev_growth,
-            _sector_medians_for(p),
+        # Prefer the ROIC-relative path with moat-as-durability multiplier.
+        # Falls back to the absolute composite when either ROIC is missing
+        # so a peer with a coverage gap still renders a number rather than
+        # disappearing from the list.
+        score_relative = _relative_peer_score(
+            peer_roic_frac, my_roic_frac, peer_moats.get(sym),
         )
+        if score_relative is not None:
+            score = score_relative
+            scoring_path = "relative"
+        else:
+            op_margin: Optional[float] = None
+            roe_val: Optional[float] = None
+            rev_growth: Optional[float] = None
+            omp = ratios_row.get("operatingProfitMargin")
+            if omp is not None:
+                op_margin = float(omp) * 100
+            roe_v = ratios_row.get("returnOnEquity")
+            if roe_v is not None:
+                roe_val = float(roe_v) * 100
+            rg = ratios_row.get("revenueGrowth")
+            if rg is not None:
+                rev_growth = float(rg) * 100
+            score = _absolute_peer_score(
+                op_margin, roe_val, rev_growth,
+                _sector_medians_for(p),
+            )
+            scoring_path = "absolute"
 
         peer_data.append({
             "name": p.get("companyName") or sym,
             "ticker": sym,
             "mkt_cap": s["mkt_cap"],
             "score": score,
+            "scoring_path": scoring_path,
         })
 
     # ── 4. Drop peers we cannot score ────────────────────────────────
-    # A peer with no rankable signal (all three ratios missing) has no
-    # honest score. Better to render fewer confident rows than fabricate
-    # a number for a coverage gap.
+    # A peer with no rankable signal (no ROIC AND all three ratios
+    # missing) has no honest score. Better to render fewer confident
+    # rows than fabricate a number for a coverage gap.
     peer_data = [p for p in peer_data if p["score"] is not None]
     if not peer_data:
         logger.info(
@@ -4482,26 +4603,24 @@ def _build_competitors(
         )
         return []
 
-    # ── 5. Emit rows with threat-level deltas ─────────────────────────
-    # Both peer and focal scores are on the same absolute 0-10 axis
-    # (each computed against its own sector), so the delta is
-    # apples-to-apples — a peer that beats its sector by more than the
-    # focal beats its sector is "high" threat, etc.
-    focal_score = my_score if my_score is not None else 5.0
+    # ── 5. Emit rows with threat thresholds on the score ─────────────
+    # Relative-path scores are already focal-anchored at 5.0, so threat
+    # buckets read directly off the absolute score. Absolute-fallback
+    # rows live on the same 0-10 axis, anchored at the peer's sector
+    # median, so the same thresholds apply with comparable semantics.
     out: List[Dict[str, Any]] = []
     for p in peer_data:
-        moat_score = round(p["score"], 1)
-        delta = moat_score - focal_score
-        if delta >= 1.5:
+        competitive_score = round(p["score"], 1)
+        if competitive_score >= _THREAT_HIGH_THRESHOLD:
             threat = "high"
-        elif delta <= -1.5:
+        elif competitive_score <= _THREAT_LOW_THRESHOLD:
             threat = "low"
         else:
             threat = "moderate"
         out.append({
             "name": p["name"],
             "ticker": p["ticker"],
-            "moat_score": moat_score,
+            "competitive_score": competitive_score,
             # iOS no longer renders Market Share, but the DTO field is
             # still required — emit 0.0 so old cached reports decode.
             "market_share_percent": 0.0,
@@ -4509,7 +4628,7 @@ def _build_competitors(
         })
 
     # Sort strongest threats first.
-    out.sort(key=lambda c: c["moat_score"], reverse=True)
+    out.sort(key=lambda c: c["competitive_score"], reverse=True)
     return out
 
 

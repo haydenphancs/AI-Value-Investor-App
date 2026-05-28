@@ -1283,3 +1283,72 @@ def score_moat_dimensions(
         industry_tam=industry_tam, transcript=transcript,
         ip_intel=ip_intel,
     )
+
+
+def get_aggregate_moat_for_tickers(
+    tickers: List[str],
+) -> Dict[str, float]:
+    """Batch-read aggregate moat scores from moat_intel_cache.
+
+    Returns `{ticker: mean(pillar_scores.values()[*].score)}` for every
+    cached, unexpired ticker in the input. Tickers without a fresh cache
+    row are absent from the result — the caller defaults to a neutral
+    5.0 so a cache miss neither boosts nor penalizes the threat score.
+
+    One `.in_()` query covers all peers. Read-only: never triggers a
+    moat recompute (which would balloon report latency).
+    """
+    if not tickers:
+        return {}
+    uniq = sorted({t.upper() for t in tickers if t})
+    if not uniq:
+        return {}
+    try:
+        sb = get_supabase()
+        res = (
+            sb.table("moat_intel_cache")
+            .select("ticker,pillar_scores,computed_at,expires_at")
+            .in_("ticker", uniq)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning(
+            "moat_scoring: batch aggregate read failed for %s: %s",
+            uniq, exc,
+        )
+        return {}
+
+    now = datetime.now(timezone.utc)
+    out: Dict[str, float] = {}
+    for row in res.data or []:
+        ticker = (row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        expires_at = row.get("expires_at")
+        computed_at = row.get("computed_at")
+        if not expires_at or not computed_at:
+            continue
+        try:
+            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            comp_dt = datetime.fromisoformat(computed_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if exp_dt <= now or comp_dt < MOAT_INTEL_SCHEMA_FLOOR:
+            continue
+        pillar_scores = row.get("pillar_scores")
+        if not isinstance(pillar_scores, dict) or not pillar_scores:
+            continue
+        scores: List[float] = []
+        for entry in pillar_scores.values():
+            if not isinstance(entry, dict):
+                continue
+            s = entry.get("score")
+            if s is None:
+                continue
+            try:
+                scores.append(float(s))
+            except (TypeError, ValueError):
+                continue
+        if scores:
+            out[ticker] = sum(scores) / len(scores)
+    return out

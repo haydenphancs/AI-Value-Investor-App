@@ -1109,7 +1109,7 @@ Return ONLY valid JSON (no markdown fences):
     ],
     "durability_note": "",
     "competitors": [
-      {{"name": "Competitor", "ticker": "TICK", "moat_score": 0.0, "market_share_percent": 0.0, "threat_level": "low|moderate|high"}}
+      {{"name": "Competitor", "ticker": "TICK", "competitive_score": 0.0, "market_share_percent": 0.0, "threat_level": "low|moderate|high"}}
     ],
     "competitive_insight": ""
   }},

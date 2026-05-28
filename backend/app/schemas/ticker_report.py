@@ -315,7 +315,11 @@ class MoatDimensionResponse(BaseModel):
 class CompetitorResponse(BaseModel):
     name: str
     ticker: str
-    moat_score: float
+    # 0–10 — peer's competitive threat to the focal company, computed
+    # from ROIC delta vs focal × moat-as-durability multiplier
+    # (`_relative_peer_score` in ticker_report_data_collector). 5.0 is
+    # the "equal threat" anchor; >6.5 = high, <3.5 = low.
+    competitive_score: float
     market_share_percent: float
     threat_level: str  # "low" | "moderate" | "high"
 

@@ -38,46 +38,19 @@ struct ReportMoatCompetitionSection: View {
 
     private var marketDynamicsSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Section Title
-            Text("Market Dynamics")
-                .font(AppTypography.bodySmallEmphasis)
+            // Industry name — centered, sized to match the TAM value
+            // numerics (`labelSmall` 12pt bold) so the section anchor
+            // sits on the same visual scale as the data below it. The
+            // "Market Dynamics" subtitle and the small "Industry"
+            // caption are intentionally removed — the parent card
+            // header ("Industry & Competitive Moat") already names the
+            // topic, so the industry string only needs to identify
+            // *which* industry without competing labels.
+            Text(data.marketDynamics.industry)
+                .font(AppTypography.labelSmall).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
-
-            // Industry and Concentration row
-            HStack(spacing: AppSpacing.lg) {
-                // Industry
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text("Industry")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-
-                    Text(data.marketDynamics.industry)
-                        .font(AppTypography.label)
-                        .fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                }
-
-                Spacer()
-
-                // Concentration
-                VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                    Text("Concentration")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-
-                    Text(data.marketDynamics.concentration.rawValue)
-                        .font(AppTypography.caption).fontWeight(.bold)
-                        .foregroundColor(data.marketDynamics.concentration.color)
-                        .padding(.horizontal, AppSpacing.sm)
-                        .padding(.vertical, AppSpacing.xs)
-                        .background(
-                            Capsule()
-                                .fill(data.marketDynamics.concentration.backgroundColor)
-                        )
-                }
-                .alignmentGuide(.firstTextBaseline) { d in d[.top] }
-            }
-            .padding(.top, AppSpacing.xs)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .multilineTextAlignment(.center)
 
             // 3-column metrics — `.top` alignment so the value rows of all
             // three columns share a baseline. The TAM column's year row
@@ -98,12 +71,13 @@ struct ReportMoatCompetitionSection: View {
                     .background(AppColors.cardBackgroundLight)
 
                 // Column 2: Market Size (TAM) — value row uses the same
-                // `labelSmall` 12pt-bold font as CAGR / Lifecycle so the
-                // three values share a baseline. The year row below shows
-                // current → future and is projected forward to today's
-                // year via the CAGR (see MarketDynamics.displayedCurrentYear
-                // in TickerReportModels.swift) so stale Census source
-                // years don't show on a report opened years later.
+                // `labelSmall` 12pt-bold font as CAGR / Concentration so
+                // the three values share a baseline. The year row below
+                // shows current → future and is projected forward to
+                // today's year via the CAGR (see
+                // MarketDynamics.displayedCurrentYear in
+                // TickerReportModels.swift) so stale Census source years
+                // don't show on a report opened years later.
                 VStack(alignment: .center, spacing: AppSpacing.xxs) {
                     Text("Market Size (TAM)")
                         .font(AppTypography.caption)
@@ -148,13 +122,17 @@ struct ReportMoatCompetitionSection: View {
                     .frame(height: 40)
                     .background(AppColors.cardBackgroundLight)
 
-                // Column 3: Lifecycle Phase
+                // Column 3: Concentration — rendered as a pill via
+                // `isBadge: true` so the strongest-moat signal still
+                // reads as a colored chip (Monopoly = bullish green,
+                // Fragmented = alert orange) even after moving out of
+                // the right-side slot in the industry row.
                 marketMetricColumn(
-                    label: "Lifecycle Phase",
-                    value: data.marketDynamics.lifecyclePhase.rawValue,
-                    valueColor: AppColors.textPrimary,
+                    label: "Concentration",
+                    value: data.marketDynamics.concentration.rawValue,
+                    valueColor: data.marketDynamics.concentration.color,
                     subtitle: nil,
-                    isBadge: false
+                    isBadge: true
                 )
                 .frame(maxWidth: 105)
             }

@@ -244,6 +244,13 @@ class CollectedTickerData:
     # revenue_growth into `_build_competitors` per-peer scoring (replaces
     # the old proxy that scored every peer off intraday %-change).
     peer_ratios: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Peer ranks keyed by uppercased ticker (1 = most central competitor
+    # per the source's ordering). Populated from Phase 2 Gemini grounded
+    # suggested order when available, or from Phase 1's FMP + industry-
+    # universe heuristic order otherwise. `_build_competitors()` feeds
+    # this into `_relative_peer_score`'s directness blend so the most
+    # directly competing peer (per grounded research) leads the display.
+    peer_ranks: Dict[str, int] = field(default_factory=dict)
     sector_aggregates: Optional[SectorAggregates] = None
     # Industry-size projection from a FRED BEA value-added series, used
     # as a fallback when AI Stage A didn't extract an explicit TAM quote
@@ -581,9 +588,11 @@ class TickerReportDataCollector:
 
         if intel_peers:
             # Trust Phase-2 list verbatim — already FMP-validated +
-            # capped at 7 inside the service. Downstream
-            # `_build_competitors()` still computes per-peer scores +
-            # market-share, just from this curated list.
+            # capped at 7 inside the service AND already in Gemini's
+            # grounded-research order (preserved by the service's
+            # post-validation trim). Downstream `_build_competitors()`
+            # still computes per-peer scores, just from this curated
+            # list with the rank fed in as a directness signal.
             peers = intel_peers
         else:
             # ── Phase 1 fallback (deterministic peer assembly) ──
@@ -602,6 +611,15 @@ class TickerReportDataCollector:
                     exclude={ticker.upper(), *(p.upper() for p in peers)},
                 )
                 peers = list(dict.fromkeys(peers + augment))[:12]
+
+        # Persist 1-based rank per peer ticker so downstream scoring
+        # (in a different method on the same class) can blend Gemini's
+        # directness signal into the threat score. Stored uppercased to
+        # match the casing convention `_build_competitors` uses to look
+        # up peer ratios + moats.
+        out.peer_ranks = {
+            p.upper(): i + 1 for i, p in enumerate(peers) if p
+        }
 
         peer_profiles_task = (
             self.fmp.get_company_profiles_batch(peers)
@@ -1384,33 +1402,51 @@ class TickerReportDataCollector:
             my_key_metrics=out.key_metrics,
             sector_medians_by_sector=sector_medians_by_sector,
             peer_moats=peer_moats,
+            peer_ranks=out.peer_ranks,
+            # n_total_peers stays at the ORIGINAL upstream peer count
+            # (Phase 2: usually 4-7; Phase 1: up to 12) so the directness
+            # denominator is stable even when the mkt-cap floor drops
+            # peers downstream. Rank 1 is always 10.0 directness, rank n
+            # is 10/n — regardless of how many survive scoring.
+            n_total_peers=len(out.peer_ranks),
         )
-        # Coverage-aware competitive_insight: when one or more pillars
-        # fall flat because the industry's real moats live outside the
-        # financial-statement lens (mining, banks, insurers, REITs,
-        # utilities, energy), append a short explanation so the iOS
-        # Industry & Competitive Moat panel doesn't leave the user
-        # wondering why a radar corner collapsed.
+        # Coverage-aware insight + durability note: when one or more
+        # pillars fall flat because the industry's real moats live
+        # outside the financial-statement lens (mining, banks, insurers,
+        # REITs, utilities, energy), append a short explanation so the
+        # user understands a low radar corner is industry-normal rather
+        # than a company weakness. The same note is appended to BOTH
+        # the durability note (rendered as "Insight" under the radar)
+        # AND the competitive insight (rendered under Competitors) —
+        # whichever section the user reads first, the reassurance is
+        # there. Suffix is suppressed on the "Data unavailable"
+        # placeholder for each field, since appending to a placeholder
+        # reads awkwardly.
+        ai_competitive_insight = ai_moat.get("competitive_insight")
+        ai_durability_note = ai_moat.get("durability_note")
         base_competitive_insight = (
-            ai_moat.get("competitive_insight")
-            or "Data unavailable for this ticker."
+            ai_competitive_insight or "Data unavailable for this ticker."
         )
-        coverage_note = None
-        if ai_moat.get("competitive_insight"):
-            # Only append a note when we have a real AI insight to attach
-            # it to — appending to the "Data unavailable" placeholder
-            # would read awkwardly.
+        base_durability_note = (
+            ai_durability_note or "Data unavailable for this ticker."
+        )
+        coverage_note: Optional[str] = None
+        if ai_competitive_insight or ai_durability_note:
+            # Compute once; reuse across both fields. Returns None when
+            # every pillar resolved cleanly, in which case no suffix is
+            # added anywhere.
             coverage_note = _build_moat_coverage_note(moat_dims, focal_industry)
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
             "dimensions": moat_dims,
             "durability_note": (
-                ai_moat.get("durability_note")
-                or "Data unavailable for this ticker."
+                base_durability_note
+                + (coverage_note if (coverage_note and ai_durability_note) else "")
             ),
             "competitors": deterministic_competitors,
             "competitive_insight": (
-                base_competitive_insight + (coverage_note or "")
+                base_competitive_insight
+                + (coverage_note if (coverage_note and ai_competitive_insight) else "")
             ),
         }
         moat_vital = _derive_moat_vital(moat_dims)
@@ -3548,7 +3584,7 @@ def _build_moat_coverage_note(
     None when every pillar resolved cleanly (no weak coverage to flag).
 
     A pillar is considered weak when either:
-      1. `peer_score <= 1.0` AND `score <= 1.5` — uniformly-low signal,
+      1. `peer_score <= 2.0` AND `score <= 2.5` — uniformly-low signal,
          meaning the industry as a whole doesn't carry that metric
          (e.g. R&D in mining, intangibles in insurance).
       2. `peer_score == 5.0` AND the pillar's source is grounded or
@@ -3565,7 +3601,7 @@ def _build_moat_coverage_note(
             continue
         source = d.get("source")
         # Uniformly-low — focal AND peer both near zero
-        if peer <= 1.0 and score <= 1.5:
+        if peer <= 2.0 and score <= 2.5:
             weak.append(d.get("name") or "")
             continue
         # Baseline-sentinel — peer fell to 5.0 floor AND focal also
@@ -4229,17 +4265,26 @@ def _absolute_component_score(
 #
 # `_RELATIVE_ROIC_SCALE_PP` controls how much the peer must beat the
 # focal by (in percentage points of ROIC) to hit a 10.0 financial
-# score. 10pp keeps the scale aligned with real cross-sector ROIC
-# spreads — top-tier S&P names cluster around 20-30% ROIC while
-# focal-sector peers typically sit in the 10-20% band.
-_RELATIVE_ROIC_SCALE_PP = 10.0
+# score. 15pp keeps the scale aligned with real cross-sector ROIC
+# spreads — top-tier S&P names cluster around 25-30% ROIC while
+# mature large-caps sit in the 10-20% band. A 15pp delta means the
+# peer's ROIC is roughly double the focal's — a top-decile competitive
+# advantage, not a routine single-digit-pp gap.
+_RELATIVE_ROIC_SCALE_PP = 15.0
 
-# Score-threshold thresholds for the threat-level label, applied to
-# the final multiplier-adjusted score. Mirrors the previous ±1.5
-# delta-to-focal bands transformed to absolute thresholds around the
-# 5.0 "equal threat" anchor.
-_THREAT_HIGH_THRESHOLD = 6.5
-_THREAT_LOW_THRESHOLD = 3.5
+# Threshold bands for the threat-level label, applied to the final
+# multiplier-adjusted score. Symmetric in semantic weight around the
+# 5.0 "equal threat" anchor: ≥7 means "peer is clearly ahead of focal
+# on competitiveness × durability," ≤3 means clearly behind.
+_THREAT_HIGH_THRESHOLD = 7.0
+_THREAT_LOW_THRESHOLD = 3.0
+
+# Blend weight for Gemini's grounded-research directness rank vs. the
+# ROIC-derived financial score. 60% directness reflects that "who the
+# peer competes with directly" is a stronger signal than "who has the
+# highest absolute ROIC" — but ROIC firepower still moves the needle
+# because dominant-capital peers genuinely threaten more.
+_DIRECTNESS_BLEND_WEIGHT = 0.6
 
 
 def _moat_multiplier(peer_moat_avg: Optional[float]) -> float:
@@ -4254,24 +4299,62 @@ def _moat_multiplier(peer_moat_avg: Optional[float]) -> float:
     return 0.7 + (clamped / 10.0) * 0.6
 
 
+def _directness_from_rank(
+    gemini_rank: Optional[int], n_peers: int,
+) -> float:
+    """Convert a peer's Gemini grounding rank to a 0-10 directness score.
+
+    Rank 1 (the most central revenue-mix competitor per Gemini's
+    grounded research) → 10.0. Rank n → 10/n. The denominator stays at
+    the ORIGINAL peer count so scores are stable when peers get dropped
+    downstream (mkt-cap floor, ratios gap, etc.); ranks are absolute,
+    not relative to the surviving set.
+
+    Returns the neutral 5.0 anchor when rank or n_peers is missing —
+    Phase 1 fallback paths and peers we couldn't position in the
+    Gemini list both fall back to "average directness" rather than
+    silently penalizing.
+    """
+    if gemini_rank is None or n_peers <= 0:
+        return 5.0
+    rank = max(1, min(n_peers, int(gemini_rank)))
+    return 10.0 * (n_peers - rank + 1) / n_peers
+
+
 def _relative_peer_score(
     peer_roic: Optional[float],
     focal_roic: Optional[float],
     peer_moat_avg: Optional[float],
+    gemini_rank: Optional[int] = None,
+    n_peers: int = 0,
 ) -> Optional[float]:
-    """Relative-delta ROIC score with moat-as-durability multiplier.
+    """Blended directness + ROIC score with moat-as-durability multiplier.
 
     Inputs are ROIC as fractions (0.15 for 15%) — same shape FMP emits.
+    `gemini_rank` is 1-indexed (1 = most direct competitor per Gemini's
+    grounded research); when None, directness defaults to the neutral
+    5.0 anchor so Phase 1 fallback peers (FMP `/stock-peers` heuristic)
+    aren't silently penalized for lacking a Gemini rank.
+
     Returns None when either ROIC is missing so the caller can fall
-    back to the absolute path; a peer with no ROIC shouldn't get a 5.0
-    "equal threat" anchor by default.
+    back to the absolute path — a peer with no ROIC signal shouldn't
+    get a 5.0 anchor by default.
     """
     if peer_roic is None or focal_roic is None:
         return None
     delta_pp = (float(peer_roic) - float(focal_roic)) * 100.0
     financial = 5.0 + (delta_pp / _RELATIVE_ROIC_SCALE_PP) * 5.0
     financial = max(0.0, min(10.0, financial))
-    score = financial * _moat_multiplier(peer_moat_avg)
+    directness = _directness_from_rank(gemini_rank, n_peers)
+    # 60% directness, 40% financial — the blend means a peer Gemini
+    # ranks as most central gets a strong head start, with ROIC
+    # firepower as a secondary modifier. Moat multiplier then scales
+    # the blended result by durability (0.7–1.3×).
+    blended = (
+        _DIRECTNESS_BLEND_WEIGHT * directness
+        + (1.0 - _DIRECTNESS_BLEND_WEIGHT) * financial
+    )
+    score = blended * _moat_multiplier(peer_moat_avg)
     return max(0.0, min(10.0, score))
 
 
@@ -4412,16 +4495,19 @@ def _build_competitors(
         Dict[str, Dict[str, Optional[float]]]
     ] = None,
     peer_moats: Optional[Dict[str, float]] = None,
+    peer_ranks: Optional[Dict[str, int]] = None,
+    n_total_peers: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Real competitor list from FMP peer profiles, top-N by market cap.
+    """Real competitor list from FMP peer profiles, ranked by blended
+    directness × financial × moat threat score.
 
     Scoring is a two-path hybrid:
-      * Preferred — `_relative_peer_score`: ROIC delta vs focal mapped
-        to 0-10 around a 5.0 "equal threat" anchor, then scaled by the
-        peer's aggregate moat (mean of 5 cached pillar scores) as a
-        durability multiplier (0.7–1.3×). Implements the literature
-        consensus that ROIC vs hurdle is the single best competitive
-        signal, with moat as the durability lever.
+      * Preferred — `_relative_peer_score`: blends Gemini grounded-
+        research directness rank (60%) with ROIC delta vs focal (40%),
+        then scales by the peer's aggregate moat (mean of 5 cached
+        pillar scores) as a durability multiplier (0.7–1.3×). Captures
+        BOTH "how directly does this peer compete with the focal" AND
+        "does this peer have the firepower to do so."
       * Fallback — `_absolute_peer_score`: original sector-relative
         composite of op margin, ROE, and revenue growth. Used when the
         peer (or focal) lacks ROIC coverage in FMP.
@@ -4430,16 +4516,27 @@ def _build_competitors(
       1. Drop any peer whose mktCap is below max(focal × 5%, $5B).
       2. Sort survivors by mktCap desc and cap at `_COMPETITOR_MAX_N`.
       3. Score each survivor via the relative path when ROIC is on
-         both sides; absolute path otherwise.
+         both sides; absolute path otherwise. Pass each peer's Gemini
+         rank into the relative scorer so the most directly competing
+         peer (per grounded research) gets a directness boost.
       4. Drop peers we cannot score at all.
-      5. Bucket threat by absolute score thresholds (≥6.5 high, ≤3.5
-         low, else moderate) — the focal-relative delta is already
-         baked into the score by construction.
+      5. Bucket threat by absolute score thresholds (≥7.0 high, ≤3.0
+         low, else moderate) and sort by score desc — the most
+         threatening peer leads the display.
 
     `peer_moats` is `{ticker: aggregate_moat (0-10)}` from
     `get_aggregate_moat_for_tickers`. Missing tickers default to a
     neutral 5.0 → multiplier 1.0 (no boost or penalty), keeping cache
     misses honest.
+
+    `peer_ranks` is `{ticker: 1-based-rank}` from the upstream peer
+    source (Phase 2 = Gemini's grounded suggested order; Phase 1 =
+    FMP `/stock-peers` + industry-universe heuristic order). Earlier
+    rank = more direct competitor. `n_total_peers` is the denominator
+    for the directness math — kept fixed at the original peer count
+    so scores remain stable when peers get dropped by the mkt-cap
+    floor downstream. Both default to None/0 → directness defaults to
+    the neutral 5.0 anchor, preserving the pre-blend behavior.
 
     `market_share_percent` is emitted as 0.0 for every peer for
     backwards compatibility with the iOS DTO; iOS no longer renders
@@ -4457,6 +4554,7 @@ def _build_competitors(
         return []
     peer_ratios = peer_ratios or {}
     peer_moats = peer_moats or {}
+    peer_ranks = peer_ranks or {}
 
     focal_mkt_cap = float((my_profile or {}).get("mktCap") or 0.0)
     floor = max(
@@ -4554,12 +4652,18 @@ def _build_competitors(
         if roic_raw is not None:
             peer_roic_frac = float(roic_raw)
 
-        # Prefer the ROIC-relative path with moat-as-durability multiplier.
-        # Falls back to the absolute composite when either ROIC is missing
-        # so a peer with a coverage gap still renders a number rather than
-        # disappearing from the list.
+        # Prefer the blended directness + ROIC path with moat-as-
+        # durability multiplier. Falls back to the absolute composite
+        # when either ROIC is missing so a peer with a coverage gap
+        # still renders a number rather than disappearing from the list.
+        # `peer_ranks.get(sym)` returns None for peers we couldn't
+        # position (e.g. an industry-universe augment that wasn't in
+        # Gemini's suggested list); the scorer then falls back to the
+        # neutral 5.0 directness anchor for that peer alone.
         score_relative = _relative_peer_score(
             peer_roic_frac, my_roic_frac, peer_moats.get(sym),
+            gemini_rank=peer_ranks.get(sym),
+            n_peers=n_total_peers,
         )
         if score_relative is not None:
             score = score_relative

@@ -540,26 +540,27 @@ class CompetitorIntelService:
         validated, validation_rejected = await self._fmp_validate(suggested, ticker)
         rejected.extend(validation_rejected)
 
-        # Trim only when Gemini returned more than _COMPETITOR_MAX_N.
-        # Below the cap, take the full 4-6 as-is even if some are
-        # smaller-cap (the whole Phase-2 thesis is that Gemini's grounded
-        # research outranks pure mkt-cap ranking).
+        # Preserve Gemini's order — earlier-suggested competitors are
+        # more central per the grounded research (revenue-mix overlap is
+        # the prompt's primary criterion). Position in the input list
+        # IS the priority signal; do NOT re-sort by mktCap or we erase
+        # the rank that downstream scoring needs. `validated` is already
+        # in Gemini order because `_fmp_validate` iterates `candidates`
+        # (suggested list) and appends in order.
+        #
+        # When Gemini returns more than `_COMPETITOR_MAX_N`, keep the
+        # top-N by Gemini rank and drop the tail with a clear rejection
+        # reason so the audit row makes the trimming decision traceable.
         trimmed_off: List[Dict[str, str]] = []
         if len(validated) > _COMPETITOR_MAX_N:
-            sorted_by_cap = sorted(
-                validated, key=lambda v: v["mkt_cap"], reverse=True,
-            )
-            kept = sorted_by_cap[:_COMPETITOR_MAX_N]
-            dropped = sorted_by_cap[_COMPETITOR_MAX_N:]
+            kept = validated[:_COMPETITOR_MAX_N]
+            dropped = validated[_COMPETITOR_MAX_N:]
             validated = kept
             for d in dropped:
                 trimmed_off.append({
                     "ticker": d["ticker"],
-                    "reason": f"trimmed_to_{_COMPETITOR_MAX_N}_by_mkt_cap",
+                    "reason": f"trimmed_to_{_COMPETITOR_MAX_N}_by_gemini_rank",
                 })
-        else:
-            # Keep order: sort survivors by mktCap desc for stable display.
-            validated = sorted(validated, key=lambda v: v["mkt_cap"], reverse=True)
 
         rejected.extend(trimmed_off)
         survivor_tickers = [v["ticker"] for v in validated]

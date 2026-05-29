@@ -38,17 +38,17 @@ struct ReportMoatCompetitionSection: View {
 
     private var marketDynamicsSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Industry name — centered, sized to match the TAM value
-            // numerics (`labelSmall` 12pt bold) so the section anchor
-            // sits on the same visual scale as the data below it. The
-            // "Market Dynamics" subtitle and the small "Industry"
-            // caption are intentionally removed — the parent card
-            // header ("Industry & Competitive Moat") already names the
-            // topic, so the industry string only needs to identify
-            // *which* industry without competing labels.
+            // Industry name — centered, styled to match the "Insider
+            // Activity" subsection header (`bodySmallEmphasis` 14pt
+            // semibold, `textSecondary` muted-white) so subsection
+            // anchors read consistently across the report. The "Market
+            // Dynamics" subtitle and the small "Industry" caption are
+            // intentionally removed — the parent card header ("Industry
+            // & Competitive Moat") already names the topic, so the
+            // industry string only needs to identify *which* industry.
             Text(data.marketDynamics.industry)
-                .font(AppTypography.labelSmall).fontWeight(.bold)
-                .foregroundColor(AppColors.textPrimary)
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .multilineTextAlignment(.center)
 
@@ -245,8 +245,23 @@ struct ReportMoatCompetitionSection: View {
     // MARK: - Radar Chart
 
     private var radarChartSection: some View {
+        // The radar chart frame is 340pt while the actual chart is 200pt,
+        // leaving ~70pt of empty margin above and below for axis labels.
+        // Asymmetric negative padding: a small top pull keeps breathing
+        // room under the "Primary Driver" caption (which sits close to
+        // the "Switching Costs" top-axis label), while a larger bottom
+        // pull tightens the visible gap before the durability Insight.
+        // Labels continue to draw inside the chart's own frame — no
+        // clipping risk from negative padding here.
         ReportMoatRadarChart(dimensions: data.dimensions)
             .frame(maxWidth: .infinity)
+            .padding(.top, -AppSpacing.md)
+            // -44 is past the largest AppSpacing token (xxxl=32); the
+            // bottom of the chart frame holds the largest dead-space
+            // gap (Cost Advantage / Brand Power labels sit shallow
+            // inside it), so an extra-tight pull here lands cleanly
+            // above the Insight box.
+            .padding(.bottom, -44)
     }
 
     // MARK: - Durability Insight

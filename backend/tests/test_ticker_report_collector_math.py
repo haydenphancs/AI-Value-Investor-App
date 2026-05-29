@@ -22,6 +22,7 @@ from app.services.agents.ticker_report_data_collector import (
     _absolute_threshold_fallback,
     _apply_tam_source,
     _build_competitors,
+    _directness_from_rank,
     _moat_multiplier,
     _relative_peer_score,
     _build_insider_sections,
@@ -1108,26 +1109,62 @@ def test_relative_peer_score_equal_roic_neutral_moat_is_5():
     assert score == pytest.approx(5.0)
 
 
-def test_relative_peer_score_plus_10pp_roic_high_moat_caps_at_10():
-    """Peer beats focal by +10pp ROIC with high moat (8.0). Financial
-    component caps at 10; multiplier ~1.18 pushes the product past 10
-    and the clamp brings it back to 10.0 — strongest possible threat."""
+def test_relative_peer_score_plus_10pp_roic_neutral_rank_lands_in_high_band():
+    """Peer beats focal by +10pp ROIC, high moat (8.0), no Gemini rank
+    passed (so directness defaults to 5.0 neutral).
+
+    Math (new 15pp scale + 60/40 directness blend):
+      financial = 5 + (10/15)×5 = 8.33
+      directness = 5.0 (neutral)
+      blended = 0.6×5.0 + 0.4×8.33 = 6.33
+      moat_mult = 0.7 + 0.8×0.6 = 1.18
+      score = 6.33 × 1.18 ≈ 7.47 → above 7.0 High threshold.
+    """
     score = _relative_peer_score(
         peer_roic=0.25, focal_roic=0.15, peer_moat_avg=8.0,
+    )
+    assert score is not None
+    assert score == pytest.approx(7.47, abs=0.05)
+    assert score >= 7.0
+
+
+def test_relative_peer_score_top_rank_plus_high_roic_high_moat_caps_at_10():
+    """Worst-case threat: Gemini ranks peer #1, peer's ROIC is +10pp,
+    and peer has a wide moat. All three signals point to maximum threat;
+    the blended math overshoots 10 and the final clamp catches it.
+
+    Math:
+      financial = 5 + (10/15)×5 = 8.33
+      directness = 10.0 (rank 1 of n)
+      blended = 0.6×10.0 + 0.4×8.33 = 9.33
+      moat_mult = 1.18
+      product = 11.0 → clamped to 10.0
+    """
+    score = _relative_peer_score(
+        peer_roic=0.25, focal_roic=0.15, peer_moat_avg=8.0,
+        gemini_rank=1, n_peers=5,
     )
     assert score == pytest.approx(10.0)
 
 
-def test_relative_peer_score_minus_5pp_roic_low_moat_is_low_threat():
-    """Peer trails focal by 5pp ROIC with weak moat (2.0). Financial
-    component = 5 + (-5/10)*5 = 2.5; multiplier = 0.7 + 0.2*0.6 = 0.82;
-    product ≈ 2.05 — well under the 3.5 "low" threshold."""
+def test_relative_peer_score_last_rank_minus_5pp_roic_low_moat_is_low_threat():
+    """Peer trails focal by 5pp ROIC, weak moat (2.0), AND is Gemini's
+    last pick — all three signals point to low threat.
+
+    Math:
+      financial = 5 + (-5/15)×5 = 3.33
+      directness = 10×(5−5+1)/5 = 2.0 (rank 5 of 5)
+      blended = 0.6×2.0 + 0.4×3.33 = 2.53
+      moat_mult = 0.7 + 0.2×0.6 = 0.82
+      score ≈ 2.07 — well under the 3.0 Low threshold.
+    """
     score = _relative_peer_score(
         peer_roic=0.10, focal_roic=0.15, peer_moat_avg=2.0,
+        gemini_rank=5, n_peers=5,
     )
     assert score is not None
-    assert score == pytest.approx(2.05, abs=0.01)
-    assert score < 3.5  # threat-label cutoff
+    assert score == pytest.approx(2.07, abs=0.05)
+    assert score <= 3.0  # threat-label cutoff
 
 
 def test_relative_peer_score_returns_none_when_either_roic_missing():
@@ -1139,14 +1176,88 @@ def test_relative_peer_score_returns_none_when_either_roic_missing():
     assert _relative_peer_score(None, None, 5.0) is None
 
 
-def test_relative_peer_score_clamps_extreme_negative_delta():
-    """A 50pp ROIC trail (peer 5% vs focal 55%) would compute
-    financial = -20 unclamped. Verify the floor at 0.0 holds even with
-    a high moat multiplier — score can't slip below zero."""
+def test_relative_peer_score_extreme_negative_delta_clamped_above_zero():
+    """A 50pp ROIC trail (peer 5% vs focal 55%) drives the financial
+    component to its 0.0 floor. With neutral directness (no rank) the
+    blended math still lands above zero because directness contributes
+    60% of the pre-multiplier score — but the high-moat multiplier
+    can't lift the result above the moderate band.
+
+    Math:
+      financial = clamp(5 + (-50/15)×5, 0, 10) = 0.0 (clamped)
+      directness = 5.0 (neutral, no rank)
+      blended = 0.6×5.0 + 0.4×0.0 = 3.0
+      moat_mult = 0.7 + 1.0×0.6 = 1.3
+      score = 3.0 × 1.3 = 3.9
+    Demonstrates the floor still works (financial=0 doesn't make the
+    whole score 0 because of directness) and that the formula is
+    stable under extreme inputs.
+    """
     score = _relative_peer_score(
         peer_roic=0.05, focal_roic=0.55, peer_moat_avg=10.0,
     )
-    assert score == pytest.approx(0.0)
+    assert score == pytest.approx(3.9, abs=0.05)
+
+
+def test_directness_from_rank_top_pick_is_10():
+    """Rank 1 (Gemini's top pick) maps to 10.0 directness — the most
+    central competitor per grounded research."""
+    assert _directness_from_rank(1, 5) == pytest.approx(10.0)
+    assert _directness_from_rank(1, 7) == pytest.approx(10.0)
+
+
+def test_directness_from_rank_last_pick_is_10_over_n():
+    """Rank n (Gemini's last pick) maps to 10/n — non-zero but minimal."""
+    assert _directness_from_rank(5, 5) == pytest.approx(2.0)
+    assert _directness_from_rank(7, 7) == pytest.approx(10 / 7, abs=0.01)
+
+
+def test_directness_from_rank_neutral_when_missing():
+    """Missing rank or zero n_peers (Phase 1 fallback, or peers we can't
+    position in Gemini's list) → 5.0 neutral anchor, not a silent
+    penalty."""
+    assert _directness_from_rank(None, 5) == 5.0
+    assert _directness_from_rank(3, 0) == 5.0
+    assert _directness_from_rank(None, 0) == 5.0
+
+
+def test_directness_from_rank_clamps_out_of_range():
+    """Rank > n or rank < 1 gets clamped — defensive against caller
+    bugs without silently producing weird values."""
+    assert _directness_from_rank(0, 5) == pytest.approx(10.0)   # clamps to rank 1
+    assert _directness_from_rank(10, 5) == pytest.approx(2.0)   # clamps to rank 5
+    assert _directness_from_rank(-3, 5) == pytest.approx(10.0)  # negatives → rank 1
+
+
+def test_relative_peer_score_rank_outweighs_higher_roic_at_60pct_blend():
+    """The key end-to-end claim of the blend: a peer Gemini ranks #1
+    with neutral ROIC should outscore a peer Gemini ranks last with
+    much higher ROIC. Captures the user-facing intent ("MSFT is the
+    bigger competitor even though GOOGL has higher ROIC").
+
+    Peer A (Gemini #1, equal ROIC, neutral moat):
+      financial = 5.0, directness = 10.0
+      blended = 0.6×10 + 0.4×5 = 8.0
+      score = 8.0 × 1.0 = 8.0  → High
+    Peer B (Gemini last, +10pp ROIC, neutral moat):
+      financial = 8.33, directness = 2.0
+      blended = 0.6×2 + 0.4×8.33 = 4.53
+      score = 4.53 × 1.0 = 4.53  → Moderate
+    """
+    score_top = _relative_peer_score(
+        peer_roic=0.15, focal_roic=0.15, peer_moat_avg=5.0,
+        gemini_rank=1, n_peers=5,
+    )
+    score_last = _relative_peer_score(
+        peer_roic=0.25, focal_roic=0.15, peer_moat_avg=5.0,
+        gemini_rank=5, n_peers=5,
+    )
+    assert score_top is not None and score_last is not None
+    assert score_top > score_last
+    assert score_top == pytest.approx(8.0, abs=0.05)
+    assert score_last == pytest.approx(4.53, abs=0.05)
+    assert score_top >= 7.0    # High threat
+    assert score_last < 7.0    # Moderate
 
 
 def test_build_competitors_uses_relative_path_when_roic_present():
@@ -1217,9 +1328,18 @@ def test_build_competitors_falls_back_to_absolute_when_focal_roic_missing():
 
 
 def test_build_competitors_peer_moats_amplify_threat_score():
-    """End-to-end: two peers with identical ROIC delta vs focal. The
-    one with higher cached moat should score higher because the
-    durability multiplier scales up its threat score."""
+    """End-to-end: two peers with identical ROIC delta vs focal and
+    identical neutral directness (no Gemini ranks passed). The one with
+    higher cached moat should score higher because the durability
+    multiplier scales up its threat score.
+
+    Math (new 15pp scale, 60/40 blend, neutral directness):
+      financial   = 5 + (5/15)×5 = 6.67
+      directness  = 5.0 (neutral, no rank)
+      blended     = 0.6×5.0 + 0.4×6.67 = 5.67
+      MOATY moat=9.0  → mult 1.24 → score ≈ 7.03 (just above 7.0 High)
+      NOMOAT moat=2.0 → mult 0.82 → score ≈ 4.65 (Moderate)
+    """
     peers = [
         _peer("MOATY",   "Moaty Co",   100_000_000_000),
         _peer("NOMOAT",  "No Moat Co", 100_000_000_000),
@@ -1237,12 +1357,43 @@ def test_build_competitors_peer_moats_amplify_threat_score():
         peer_moats={"MOATY": 9.0, "NOMOAT": 2.0},
     )
     scores = {c["ticker"]: c["competitive_score"] for c in out}
-    # Same +5pp ROIC delta produces financial=7.5. MOATY at 9.0 moat →
-    # multiplier 1.24 → score ≈ 9.3. NOMOAT at 2.0 moat → multiplier
-    # 0.82 → score ≈ 6.15. Strict ordering matters.
     assert scores["MOATY"] > scores["NOMOAT"]
-    assert scores["MOATY"] >= 6.5  # high threat
-    assert scores["NOMOAT"] < 6.5  # not high
+    assert scores["MOATY"] >= 7.0  # high threat under new threshold
+    assert scores["NOMOAT"] < 7.0  # not high
+
+
+def test_build_competitors_gemini_rank_shifts_order():
+    """End-to-end: two peers identical on ROIC, moat, mkt cap. The one
+    Gemini ranks #1 should score higher than the one ranked last —
+    captures the user-facing fix where MSFT (Gemini's #1 for ORCL)
+    must lead even when GOOGL has higher ROIC.
+    """
+    peers = [
+        _peer("TOP",  "Top Pick",  100_000_000_000),
+        _peer("LAST", "Last Pick", 100_000_000_000),
+    ]
+    # Identical ROIC vs focal (equal financial score = 5.0).
+    ratios = {
+        "TOP":  {"returnOnCapitalEmployed": 0.15},
+        "LAST": {"returnOnCapitalEmployed": 0.15},
+    }
+    out = _build_competitors(
+        my_ticker="FOCAL", my_profile={"mktCap": 800_000_000_000},
+        my_ratios=[{"returnOnCapitalEmployed": 0.15}],
+        my_revenue_growth=None,
+        peer_profiles=peers, peer_ratios=ratios,
+        peer_moats={"TOP": 5.0, "LAST": 5.0},
+        peer_ranks={"TOP": 1, "LAST": 5},
+        n_total_peers=5,
+    )
+    scores = {c["ticker"]: c["competitive_score"] for c in out}
+    # TOP: directness=10, financial=5, blended=7, moat=1.0 → 7.0 High
+    # LAST: directness=2, financial=5, blended=3.2, moat=1.0 → 3.2 Mod
+    assert scores["TOP"] > scores["LAST"]
+    assert scores["TOP"] >= 7.0
+    assert scores["LAST"] < 7.0
+    # Output sorts by score desc, so TOP renders first on iOS.
+    assert out[0]["ticker"] == "TOP"
 
 
 def test_build_competitors_sector_relative_scoring_uses_passed_medians():

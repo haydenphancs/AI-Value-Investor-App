@@ -445,9 +445,18 @@ class CompetitorIntelService:
 
         gem = self._get_gemini()
         try:
+            # temperature=0.0 → as deterministic as the model allows.
+            # Without this, identical re-runs return slightly different
+            # peer sets (GOOGL vs AVGO vs CRM swapping in/out of the
+            # last 1-2 slots) because the model samples its own ranking.
+            # The 100-day cache TTL mostly hides this from users, but
+            # any time the cache is purged (or expires) we want the
+            # next regeneration to land on the same list the previous
+            # one did.
             gemini_response = await gem.generate_grounded_research(
                 prompt=prompt,
                 max_output_tokens=_GEMINI_MAX_OUTPUT_TOKENS,
+                temperature=0.0,
             )
         except Exception as exc:
             return CompetitorResult(

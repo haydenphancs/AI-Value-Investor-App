@@ -41,8 +41,11 @@ from app.schemas.research import (
     RateReportRequest,
     TrendingAnalysisResponse,
 )
-from app.services.credit_service import CreditService
 from app.services.agents.persona_config import PERSONA_KEYS
+from app.services.agents.ticker_report_data_collector import (
+    patch_wall_street_consensus_live,
+)
+from app.services.credit_service import CreditService
 from app.services.ticker_report_cache import patch_legacy_price_action
 
 logger = logging.getLogger(__name__)
@@ -280,7 +283,7 @@ async def get_research_ticker_report(
     from "doesn't exist" (REPORT_NOT_FOUND).
     """
     result = supabase.table("research_reports").select(
-        "id, status, ticker_report_data"
+        "id, status, ticker, ticker_report_data"
     ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
 
     if not result.data:
@@ -308,6 +311,15 @@ async def get_research_ticker_report(
             details={"report_id": report_id, "step": "db_lookup"},
         )
 
+    # Overlay live Wall Street Consensus so saved reports match what
+    # `/stocks/{ticker}/analyst-analysis` and `/stocks/{ticker}/holders`
+    # are showing right now. Best-effort: silently no-ops on FMP /
+    # service failure.
+    ticker = result.data.get("ticker") or ""
+    if ticker:
+        ticker_report = await patch_wall_street_consensus_live(
+            ticker_report, ticker,
+        )
     return patch_legacy_price_action(ticker_report)
 
 

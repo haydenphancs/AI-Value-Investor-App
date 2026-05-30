@@ -36,6 +36,9 @@ from app.api.error_response import (
 )
 from app.database import get_supabase
 from app.schemas.ticker_report import TickerReportResponse
+from app.services.agents.ticker_report_data_collector import (
+    patch_wall_street_consensus_live,
+)
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
     patch_legacy_price_action,
@@ -91,6 +94,10 @@ async def get_ticker_report(
             logger.info(
                 f"Legacy cache HIT for {ticker}/{persona} — serving stored report"
             )
+            # Overlay live Wall Street Consensus so saved reports match
+            # what `/stocks/{ticker}/analyst-analysis` and
+            # `/stocks/{ticker}/holders` are showing right now.
+            cached = await patch_wall_street_consensus_live(cached, ticker)
             return patch_legacy_price_action(cached)
     except Exception as e:
         # Cache lookup failures must never break the request — log and

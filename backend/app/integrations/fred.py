@@ -226,11 +226,30 @@ def get_fred_client() -> FREDClient:
 
 # Short-list of FRED series the ticker-report Macro module pulls. Each
 # is mapped to a deterministic risk factor in `ticker_report_data_collector`.
+#
+# Cadence note: get_snapshot returns the latest observation + 6-month
+# (index 6) and 12-month (index 12) deltas. The math is observation-
+# index based, not calendar based, so weekly series (ICSA → ~6 wk
+# window for index 6) and daily series (T5YIE, BAMLH0A0HYM2 → ~6 d
+# window) report a much shorter horizon than monthly ones. Callers in
+# `ticker_report_data_collector` re-derive the appropriate moving
+# average / level reading from `latest` directly when the windowed
+# delta isn't the right shape.
 MACRO_SERIES: Dict[str, Dict[str, str]] = {
     "CPIAUCSL": {
         "label": "Consumer Price Index (CPI)",
         "category": "inflation",
         "unit": "YoY %",
+    },
+    "PCEPILFE": {
+        "label": "Core PCE Price Index",
+        "category": "inflation",
+        "unit": "YoY %",
+    },
+    "T5YIE": {
+        "label": "5-Year Breakeven Inflation",
+        "category": "inflation",
+        "unit": "%",
     },
     "FEDFUNDS": {
         "label": "Federal Funds Rate",
@@ -245,6 +264,21 @@ MACRO_SERIES: Dict[str, Dict[str, str]] = {
     "T10Y2Y": {
         "label": "10Y-2Y Treasury Spread",
         "category": "interest_rates",
+        "unit": "%",
+    },
+    "UNRATE": {
+        "label": "Unemployment Rate",
+        "category": "recession",
+        "unit": "%",
+    },
+    "ICSA": {
+        "label": "Initial Jobless Claims (4-wk avg)",
+        "category": "recession",
+        "unit": "k",
+    },
+    "BAMLH0A0HYM2": {
+        "label": "ICE BofA US High-Yield Spread",
+        "category": "credit",
         "unit": "%",
     },
 }

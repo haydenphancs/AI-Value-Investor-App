@@ -521,25 +521,38 @@ class TickerReportDataCollector:
         return out
 
     async def _fetch_macro_indicators(self) -> List[Dict[str, Any]]:
-        """Fetch the latest 1M/1Y change for every macro symbol in one pass.
+        """Fetch the latest level + multi-period changes per macro symbol.
 
-        Each lookup is a single FMP `stock-price-change` call that
-        returns intraday + multi-period percentages, so we don't pay
-        for a separate historical fetch per symbol. Failures degrade
-        silently — missing symbols just drop out of the output list
+        Two parallel FMP calls per symbol:
+          * `stock-price-change` for 5D/1M/3M/1Y % windows
+          * `quote` for the current price level (needed for VIX
+            level-based tiering — a 35→36 reading is HIGH stress
+            even though the Δ is tiny)
+        Failures degrade silently — missing symbols just drop out
         rather than corrupt the parallel gather.
         """
         async def _one(sym: str) -> Optional[Dict[str, Any]]:
             try:
-                row = await self.fmp.get_stock_price_change(sym)
-                if not isinstance(row, dict) or not row:
+                change_row, quote_row = await asyncio.gather(
+                    self.fmp.get_stock_price_change(sym),
+                    self.fmp.get_stock_price_quote(sym),
+                    return_exceptions=True,
+                )
+                if isinstance(change_row, Exception) or not isinstance(
+                    change_row, dict
+                ) or not change_row:
                     return None
-                # FMP returns numeric % changes already — no math here.
+                quote_dict = quote_row if isinstance(quote_row, dict) else {}
+                level = _num_or_none(
+                    quote_dict.get("price") or quote_dict.get("previousClose")
+                )
                 return {
                     "symbol": sym,
-                    "change_1m_pct": _num_or_none(row.get("1M")),
-                    "change_1y_pct": _num_or_none(row.get("1Y")),
-                    "change_5d_pct": _num_or_none(row.get("5D")),
+                    "level": level,
+                    "change_5d_pct": _num_or_none(change_row.get("5D")),
+                    "change_1m_pct": _num_or_none(change_row.get("1M")),
+                    "change_3m_pct": _num_or_none(change_row.get("3M")),
+                    "change_1y_pct": _num_or_none(change_row.get("1Y")),
                 }
             except Exception as e:
                 logger.warning(
@@ -1472,11 +1485,14 @@ class TickerReportDataCollector:
 
         # ── Macro: deterministic numeric factors merge into AI's qualitative
         # ones. Order of priority (real data wins on category collision):
-        #   1. FRED snapshots (CPI / Fed Funds / yield curve) — PR 5
-        #   2. FMP commodities/FX/VIX/rates — PR 4
-        #   3. AI-generated geopolitical / regulatory / sector factors
-        # FRED comes first because the underlying series are the most
-        # authoritative (BLS / Treasury) and least noisy.
+        #   1. FRED snapshots (CPI / Fed Funds / yield curve / unemployment
+        #      / claims / HY spread) — primary authoritative tier
+        #   2. FMP commodities/FX/VIX (level-gated) — secondary
+        #   3. AI-generated geopolitical / regulatory factors — overlay
+        #
+        # Threat tier is computed deterministically via the composite
+        # formula in `_compute_macro_threat` (0.5×breadth + 0.5×tail)
+        # with sector β sensitivity — never delegated to Gemini.
         ai_macro = ai.get("macro_data") or {}
         ai_risk_factors = [
             _sanitize_risk_factor(rf) for rf in (ai_macro.get("risk_factors") or [])
@@ -1485,16 +1501,45 @@ class TickerReportDataCollector:
         fmp_factors = _build_macro_risk_factors_from_indicators(
             out.macro_indicators
         )
-        # Two-pass merge: FRED first (most authoritative), then FMP
-        # commodities, then AI. The merge helper already de-dupes by
-        # category, so a FRED `interest_rates` entry will block both an
-        # FMP yield-curve factor and an AI rate-policy factor.
+
+        # Compute composite on the FULL (uncapped) factor set so breadth
+        # isn't truncated by the 6-card UI ceiling — the cap is a render
+        # concern, not a math concern. AI factors that duplicate a
+        # deterministic category get filtered out first so the AI's
+        # vibey re-naming of "rate policy" doesn't double-count an
+        # existing FRED yield-curve emission.
+        ai_keyed_categories = {
+            f.get("category") for f in (fred_factors + fmp_factors)
+        }
+        ai_factors_kept = [
+            f for f in ai_risk_factors
+            if f.get("category") not in ai_keyed_categories
+        ]
+        full_factor_set = fred_factors + fmp_factors + ai_factors_kept
+
+        macro_sector = (out.profile or {}).get("sector")
+        threat_level, composite = _compute_macro_threat(
+            full_factor_set, macro_sector,
+        )
+
+        # Now the display list — the merge helper caps at 6 cards and
+        # de-dupes by category for the rendered grid.
         merged_after_fred = _merge_macro_risk_factors(fred_factors, fmp_factors)
-        risk_factors = _merge_macro_risk_factors(merged_after_fred, ai_risk_factors)
-        threat_level = ai_macro.get("overall_threat_level") or "low"
+        risk_factors_internal = _merge_macro_risk_factors(
+            merged_after_fred, ai_risk_factors,
+        )
+        # Strip internal `_risk_group` markers before the list goes to
+        # Pydantic — extra keys are silently ignored, but explicit is
+        # better than implicit (and the JSONB persist layer skips
+        # serializing dropped keys anyway).
+        risk_factors = [_strip_risk_group(rf) for rf in risk_factors_internal]
         macro_data = {
             "overall_threat_level": threat_level,
-            "headline": ai_macro.get("headline") or "Macro overview unavailable.",
+            "headline": ai_macro.get("headline") or (
+                "Benign macro backdrop — no indicators tripping risk thresholds."
+                if not risk_factors
+                else "Macro overview unavailable."
+            ),
             "risk_factors": risk_factors,
             "intelligence_brief": (
                 ai_macro.get("intelligence_brief")
@@ -1502,7 +1547,7 @@ class TickerReportDataCollector:
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
-        macro_vital = _derive_macro_vital(risk_factors, threat_level)
+        macro_vital = _derive_macro_vital(risk_factors, threat_level, composite)
 
         # ── Key vitals (assembled) ────────────────────────────────────
         key_vitals = {
@@ -3649,27 +3694,7 @@ def _build_moat_coverage_note(
     return f" Note: {pillar_phrase} flat — {explanation}"
 
 
-# ── Macro risk-factor derivation (PR 4) ──────────────────────────────
-
-
-def _classify_macro_severity(
-    abs_change: float, mild: float, elevated: float, severe: float,
-) -> Tuple[str, float]:
-    """Return (severity_enum, impact_0_to_1) for a |%| change.
-
-    Banded thresholds keep the iOS color coding stable: a 0.1% bump
-    won't flip a card from "low" to "high". Impact is a 0-1 score the
-    iOS view uses to set bar fill width — saturating at the top band
-    so a one-week oil shock still maxes out the indicator.
-    """
-    a = abs(abs_change)
-    if a >= severe:
-        return "severe", 1.0
-    if a >= elevated:
-        return "high", min(1.0, 0.5 + (a - elevated) / max(severe - elevated, 1e-6) * 0.5)
-    if a >= mild:
-        return "elevated", 0.4
-    return "low", 0.2
+# ── Macro risk-factor derivation ─────────────────────────────────────
 
 
 def _macro_trend(change_pct: Optional[float]) -> str:
@@ -3688,20 +3713,207 @@ def _macro_trend(change_pct: Optional[float]) -> str:
     return "stable"
 
 
+# ── Threat-level math (composite breadth + tail) ──────────────────────
+
+
+# String severity ↔ 1–5 int mapping. The deterministic builders emit
+# severities ≥ "elevated" (2); a "low" reading is silenced rather than
+# emitted, so the composite formula only sees materially-active factors.
+_SEVERITY_INT: Dict[str, int] = {
+    "low": 1,
+    "elevated": 2,
+    "high": 3,
+    "severe": 4,
+    "critical": 5,
+}
+_INT_TO_SEVERITY: Dict[int, str] = {v: k for k, v in _SEVERITY_INT.items()}
+
+
+# Tier cutoffs for the composite score (0.5×breadth + 0.5×tail).
+# Calibrated so a lone HIGH (3) signal reads HIGH, a multi-front SEVERE
+# stack lands SEVERE, and a full-blown crisis hits CRITICAL.
+def _composite_to_tier(composite: float) -> str:
+    if composite > 4.5:
+        return "critical"
+    if composite > 3.5:
+        return "severe"
+    if composite > 2.5:
+        return "high"
+    if composite > 1.5:
+        return "elevated"
+    return "low"
+
+
+# Sector → risk_group → β sensitivity multiplier. β ∈ [0.5, 1.5].
+# Defaults to 1.0 for any (sector, group) not listed. Inverted-exposure
+# cases (e.g. Energy benefits from high oil) are NOT modeled with
+# negative β — instead the relevant indicator emission rule is gated
+# by sector elsewhere. Risk groups:
+#   rates, yield_curve, real_rate, inflation, inflation_exp,
+#   credit, oil, fx, vix, manufacturing, unemployment, claims,
+#   geopolitical, regulation
+_MACRO_SENSITIVITY_BY_SECTOR: Dict[str, Dict[str, float]] = {
+    "Real Estate": {
+        "rates": 1.5, "real_rate": 1.5, "yield_curve": 1.3,
+        "credit": 1.3, "oil": 0.6, "inflation": 1.1,
+    },
+    "Financial Services": {
+        "yield_curve": 1.4, "credit": 1.4, "rates": 1.2,
+        "real_rate": 1.2, "unemployment": 1.2,
+    },
+    "Financials": {  # alternative naming sometimes returned by FMP
+        "yield_curve": 1.4, "credit": 1.4, "rates": 1.2,
+        "real_rate": 1.2, "unemployment": 1.2,
+    },
+    "Utilities": {
+        "rates": 1.3, "real_rate": 1.3, "oil": 0.6, "inflation": 0.9,
+    },
+    "Consumer Defensive": {  # FMP wording for staples
+        "inflation": 0.8, "oil": 0.7, "fx": 1.1, "unemployment": 0.8,
+    },
+    "Consumer Cyclical": {  # FMP wording for discretionary
+        "inflation": 1.3, "unemployment": 1.3, "rates": 1.2,
+        "claims": 1.3, "credit": 1.2,
+    },
+    "Energy": {
+        "oil": 1.5, "credit": 1.2, "fx": 1.1, "inflation": 0.9,
+    },
+    "Industrials": {
+        "oil": 1.2, "fx": 1.2, "claims": 1.3, "manufacturing": 1.4,
+        "rates": 1.1,
+    },
+    "Technology": {
+        "rates": 1.3, "real_rate": 1.3, "oil": 0.5,
+        "inflation": 0.9, "fx": 1.2, "geopolitical": 1.3,
+    },
+    "Communication Services": {
+        "rates": 1.2, "regulation": 1.3, "fx": 1.1,
+    },
+    "Healthcare": {
+        "regulation": 1.4, "rates": 0.8, "oil": 0.7, "inflation": 0.9,
+    },
+    "Basic Materials": {  # FMP wording for materials
+        "oil": 1.2, "fx": 1.3, "manufacturing": 1.4, "inflation": 1.2,
+    },
+}
+
+
+# category/title → risk_group fallback for AI-emitted factors and any
+# deterministic factor that didn't carry `_risk_group`. Tries category
+# first, then title-keyword. Returns "geopolitical" as a default since
+# that's where un-categorized AI factors usually live.
+def _infer_risk_group(category: str, title: str = "") -> str:
+    cat = (category or "").lower()
+    t = (title or "").lower()
+    if cat == "inflation":
+        if "breakeven" in t or "expectation" in t:
+            return "inflation_exp"
+        return "inflation"
+    if cat == "interest_rates":
+        if "curve" in t or "spread" in t or "2y" in t:
+            return "yield_curve"
+        if "real" in t:
+            return "real_rate"
+        return "rates"
+    if cat == "currency":
+        if "gold" in t or "safe-haven" in t:
+            return "credit"  # gold flow ≈ risk-off / credit stress proxy
+        return "fx"
+    if cat == "energy":
+        return "oil"
+    if cat == "credit":
+        return "credit"
+    if cat == "supply_chain":
+        return "manufacturing"
+    if cat == "recession":
+        if "unemploy" in t or "sahm" in t:
+            return "unemployment"
+        if "claim" in t or "icsa" in t:
+            return "claims"
+        return "unemployment"
+    if cat == "regulation":
+        if "volatility" in t or "vix" in t:
+            return "vix"
+        return "regulation"
+    if cat == "geopolitical":
+        return "geopolitical"
+    return "geopolitical"
+
+
+# Threshold band evaluator. `bands` is an ordered tuple of upper
+# bounds keyed to (elevated, high, severe, critical) — anything below
+# the first bound is LOW. Direction-aware: with reverse=True, lower
+# values trip higher severities (used for yield curve, where spread
+# < 0 is severe).
+def _classify_indicator_severity(
+    value: float,
+    bands: Tuple[float, float, float, float],
+    *,
+    reverse: bool = False,
+) -> Tuple[str, int, float]:
+    """Return (severity_str, severity_int 1-5, impact 0-1).
+
+    Bands are interpreted as boundary thresholds. With reverse=False
+    and bands=(2, 3, 4, 5): value<2 LOW (1), 2≤v<3 ELEV (2), 3≤v<4
+    HIGH (3), 4≤v<5 SEVERE (4), v≥5 CRIT (5). With reverse=True the
+    comparisons flip.
+    """
+    elev, high, severe, crit = bands
+    if reverse:
+        if value <= crit:
+            sev_int = 5
+        elif value <= severe:
+            sev_int = 4
+        elif value <= high:
+            sev_int = 3
+        elif value <= elev:
+            sev_int = 2
+        else:
+            sev_int = 1
+    else:
+        if value >= crit:
+            sev_int = 5
+        elif value >= severe:
+            sev_int = 4
+        elif value >= high:
+            sev_int = 3
+        elif value >= elev:
+            sev_int = 2
+        else:
+            sev_int = 1
+    impact = max(0.05, min(1.0, sev_int / 5.0))
+    return _INT_TO_SEVERITY[sev_int], sev_int, impact
+
+
+def _beta(sector: Optional[str], risk_group: str) -> float:
+    """Look up the (sector, risk_group) sensitivity multiplier.
+
+    Defaults to 1.0 for any unmapped combo so the composite degrades
+    gracefully when FMP returns an unfamiliar sector string.
+    """
+    if not sector:
+        return 1.0
+    table = _MACRO_SENSITIVITY_BY_SECTOR.get(sector)
+    if not table:
+        return 1.0
+    return float(table.get(risk_group, 1.0))
+
+
 def _build_macro_risk_factors_from_indicators(
     indicators: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Translate the macro indicator snapshot into MacroRiskFactor entries.
+    """Translate the FMP macro indicator snapshot into MacroRiskFactor
+    entries.
 
-    Per-indicator thresholds are calibrated to the typical month-over-
-    month behavior of each series — an 8% oil move is normal noise,
-    a 25% move is a regime shift. Indicators with unavailable 1M data
-    are skipped (no fabricated risks).
+    Calibration is shifted vs PR 4: oil/gold/DXY now use 3-month
+    windows (regime shifts, not weekly noise) and VIX is gated on
+    *absolute level* not 1-month % change — a 35 → 36 reading is
+    HIGH stress even though the Δ is invisible. The 3M window prefers
+    `change_3m_pct` from the new dict shape; falls back to
+    `change_1m_pct` if 3M is unavailable.
 
-    Returns a list of dicts shaped for `MacroRiskFactorResponse`. The
-    `assemble_report` step merges these with AI-generated qualitative
-    factors (geopolitical events, regulation), with deterministic
-    factors winning when the categories collide.
+    Each emitted factor carries `_risk_group` for `_compute_macro_threat`
+    sector β lookup.
     """
     if not indicators:
         return []
@@ -3709,132 +3921,153 @@ def _build_macro_risk_factors_from_indicators(
     by_sym = {row["symbol"]: row for row in indicators}
     out: List[Dict[str, Any]] = []
 
-    def _add(*, symbol: str, factor: Dict[str, Any]) -> None:
-        row = by_sym.get(symbol)
-        if not row or row.get("change_1m_pct") is None:
-            return
-        out.append(factor)
+    def _three_month(row: Dict[str, Any]) -> Optional[float]:
+        v = row.get("change_3m_pct")
+        if v is None:
+            v = row.get("change_1m_pct")
+        return None if v is None else float(v)
 
-    # ── WTI Crude oil ───────────────────────────────────────────────
+    # ── WTI Crude oil — 3-mo % (energy shock window) ────────────────
     oil = by_sym.get("CLUSD")
-    if oil and oil.get("change_1m_pct") is not None:
-        change = float(oil["change_1m_pct"])
-        sev, impact = _classify_macro_severity(
-            change, mild=5.0, elevated=15.0, severe=30.0,
-        )
-        out.append({
-            "category": "energy",
-            "title": "Oil Price Pressure",
-            "impact": round(impact, 2),
-            "trend": _macro_trend(change),
-            "severity": sev if change > 0 else ("low" if sev == "low" else "elevated"),
-            "description": (
-                f"WTI crude is {'+' if change >= 0 else ''}{change:.1f}% over the "
-                f"last month. {'Energy costs feed CPI and weigh on margin.' if change > 5 else 'Energy backdrop neutral.'}"
-            ),
-        })
-
-    # ── Gold (flight-to-safety / real-rate / dollar-weakness proxy) ──
-    gold = by_sym.get("GCUSD")
-    if gold and gold.get("change_1m_pct") is not None:
-        change = float(gold["change_1m_pct"])
-        if abs(change) >= 3.0:  # below this, gold is just noise
-            sev, impact = _classify_macro_severity(
-                change, mild=3.0, elevated=8.0, severe=15.0,
+    if oil:
+        change_3m = _three_month(oil)
+        if change_3m is not None:
+            sev, sev_int, impact = _classify_indicator_severity(
+                abs(change_3m), (10.0, 20.0, 35.0, 50.0),
             )
-            out.append({
-                "category": "currency",
-                "title": "Gold / Safe-Haven Flow",
-                "impact": round(impact, 2),
-                "trend": "worsening" if change > 0 else "improving",
-                "severity": sev,
-                "description": (
-                    f"Gold is {'+' if change >= 0 else ''}{change:.1f}% MoM — "
-                    f"{'classic flight-to-safety signal.' if change > 3 else 'risk appetite improving.'}"
-                ),
-            })
+            if sev_int >= 2:
+                out.append({
+                    "category": "energy",
+                    "title": "Oil Price Pressure",
+                    "impact": round(impact, 2),
+                    "trend": _macro_trend(change_3m),
+                    "severity": sev,
+                    "description": (
+                        f"WTI crude {'+' if change_3m >= 0 else ''}{change_3m:.1f}% "
+                        "over the last 3 months — "
+                        f"{'energy shock feeds CPI and pressures margins.' if change_3m > 0 else 'sharp drawdown weighs on energy-linked earnings.'}"
+                    ),
+                    "_risk_group": "oil",
+                })
 
-    # ── Copper (global industrial demand) ───────────────────────────
+    # ── Gold — 3-mo % (flight-to-safety / risk-off proxy) ───────────
+    gold = by_sym.get("GCUSD")
+    if gold:
+        change_3m = _three_month(gold)
+        if change_3m is not None:
+            # Only RISING gold is risk-off; falling gold is neutral.
+            if change_3m >= 3.0:
+                sev, sev_int, impact = _classify_indicator_severity(
+                    change_3m, (3.0, 8.0, 15.0, 25.0),
+                )
+                if sev_int >= 2:
+                    out.append({
+                        "category": "currency",
+                        "title": "Gold / Safe-Haven Flow",
+                        "impact": round(impact, 2),
+                        "trend": "worsening",
+                        "severity": sev,
+                        "description": (
+                            f"Gold +{change_3m:.1f}% over 3 months — classic "
+                            "flight-to-safety signal alongside other risk-off flows."
+                        ),
+                        "_risk_group": "credit",
+                    })
+
+    # ── Copper — 1-mo % (industrial demand collapse signal) ────────
     copper = by_sym.get("HGUSD")
     if copper and copper.get("change_1m_pct") is not None:
         change = float(copper["change_1m_pct"])
         if change <= -5.0:
-            sev, impact = _classify_macro_severity(
-                change, mild=5.0, elevated=10.0, severe=20.0,
+            sev, sev_int, impact = _classify_indicator_severity(
+                abs(change), (5.0, 10.0, 20.0, 30.0),
             )
-            out.append({
-                "category": "supply_chain",
-                "title": "Industrial Demand Weakness",
-                "impact": round(impact, 2),
-                "trend": "worsening",
-                "severity": sev,
-                "description": (
-                    f"Copper {change:.1f}% MoM — Dr. Copper signaling slowing "
-                    f"industrial activity."
-                ),
-            })
+            if sev_int >= 2:
+                out.append({
+                    "category": "supply_chain",
+                    "title": "Industrial Demand Weakness",
+                    "impact": round(impact, 2),
+                    "trend": "worsening",
+                    "severity": sev,
+                    "description": (
+                        f"Copper {change:.1f}% MoM — Dr. Copper signaling slowing "
+                        "industrial activity."
+                    ),
+                    "_risk_group": "manufacturing",
+                })
 
-    # ── VIX (volatility regime) ──────────────────────────────────────
+    # ── VIX — absolute LEVEL (volatility regime) ────────────────────
     vix = by_sym.get("^VIX")
-    if vix and vix.get("change_1m_pct") is not None:
-        change = float(vix["change_1m_pct"])
-        # VIX cares about absolute level too, but stock-price-change
-        # gives us only deltas. A large positive 1M move is the signal.
-        if change >= 15.0:
-            sev, impact = _classify_macro_severity(
-                change, mild=15.0, elevated=30.0, severe=60.0,
-            )
+    if vix and vix.get("level") is not None:
+        vix_level = float(vix["level"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            vix_level, (16.0, 22.0, 30.0, 40.0),
+        )
+        change_1m = vix.get("change_1m_pct")
+        if sev_int >= 2:
             out.append({
-                "category": "regulation",  # closest enum slot for "market regime"
-                "title": "Volatility Spike",
+                "category": "regulation",  # iOS enum slot for "market regime"
+                "title": "Risk-Off Volatility Regime",
                 "impact": round(impact, 2),
-                "trend": "worsening",
+                "trend": (
+                    "worsening" if change_1m and float(change_1m) > 5
+                    else "stable"
+                ),
                 "severity": sev,
                 "description": (
-                    f"VIX up {change:.1f}% MoM — equity volatility regime "
-                    f"shifting risk-off."
+                    f"VIX at {vix_level:.1f} — equity vol regime "
+                    f"{'in stress band.' if sev_int >= 3 else 'above benign-cycle norms.'}"
                 ),
+                "_risk_group": "vix",
             })
 
-    # ── 10Y Treasury (rates / discount rate) ─────────────────────────
+    # ── 10Y Treasury yield 3-mo move (^TNX, FMP-side rate move) ────
+    # The FRED block already emits a level-based factor; this catches
+    # sharp moves between the monthly FRED snapshots.
     tnx = by_sym.get("^TNX")
-    if tnx and tnx.get("change_1m_pct") is not None:
-        change = float(tnx["change_1m_pct"])
-        if abs(change) >= 5.0:
-            sev, impact = _classify_macro_severity(
-                change, mild=5.0, elevated=12.0, severe=25.0,
+    if tnx:
+        change_3m = _three_month(tnx)
+        if change_3m is not None and abs(change_3m) >= 8.0:
+            sev, sev_int, impact = _classify_indicator_severity(
+                abs(change_3m), (8.0, 15.0, 25.0, 40.0),
             )
-            out.append({
-                "category": "interest_rates",
-                "title": "Yield Curve Move",
-                "impact": round(impact, 2),
-                "trend": "worsening" if change > 0 else "improving",
-                "severity": sev,
-                "description": (
-                    f"10Y Treasury yield {'+' if change >= 0 else ''}{change:.1f}% MoM. "
-                    f"{'Higher rates pressure equity multiples.' if change > 0 else 'Lower rates support multiples.'}"
-                ),
-            })
+            if sev_int >= 2:
+                out.append({
+                    "category": "interest_rates",
+                    "title": "Sharp Rate Move",
+                    "impact": round(impact, 2),
+                    "trend": "worsening" if change_3m > 0 else "improving",
+                    "severity": sev,
+                    "description": (
+                        f"10Y Treasury yield {'+' if change_3m >= 0 else ''}{change_3m:.1f}% "
+                        "over 3 months — "
+                        f"{'multiple compression risk.' if change_3m > 0 else 'multiple-expansion tailwind.'}"
+                    ),
+                    "_risk_group": "rates",
+                })
 
-    # ── USD index (multinational FX translation risk) ────────────────
+    # ── USD index — 3-mo % (multinational FX translation risk) ─────
     dxy = by_sym.get("DXY")
-    if dxy and dxy.get("change_1m_pct") is not None:
-        change = float(dxy["change_1m_pct"])
-        if abs(change) >= 2.0:
-            sev, impact = _classify_macro_severity(
-                change, mild=2.0, elevated=4.0, severe=8.0,
+    if dxy:
+        change_3m = _three_month(dxy)
+        if change_3m is not None:
+            sev, sev_int, impact = _classify_indicator_severity(
+                abs(change_3m), (2.0, 5.0, 8.0, 12.0),
             )
-            out.append({
-                "category": "currency",
-                "title": "USD Strength" if change > 0 else "USD Weakness",
-                "impact": round(impact, 2),
-                "trend": "worsening" if change > 0 else "improving",
-                "severity": sev,
-                "description": (
-                    f"DXY {'+' if change >= 0 else ''}{change:.1f}% MoM — "
-                    f"{'foreign revenue translation drag.' if change > 0 else 'tailwind for international revenue.'}"
-                ),
-            })
+            if sev_int >= 2:
+                out.append({
+                    "category": "currency",
+                    "title": "USD Strength" if change_3m > 0 else "USD Weakness",
+                    "impact": round(impact, 2),
+                    "trend": "worsening" if change_3m > 0 else "improving",
+                    "severity": sev,
+                    "description": (
+                        f"DXY {'+' if change_3m >= 0 else ''}{change_3m:.1f}% over "
+                        "3 months — "
+                        f"{'foreign-revenue translation drag.' if change_3m > 0 else 'tailwind for international revenue.'}"
+                    ),
+                    "_risk_group": "fx",
+                })
 
     return out
 
@@ -3845,109 +4078,278 @@ def _build_macro_risk_factors_from_fred(
     """Translate FRED snapshots into MacroRiskFactor entries.
 
     Each snapshot becomes at most one factor — silenced entirely when
-    the latest value isn't actionable (e.g. CPI YoY in the 0-2% normal
-    range). Embeds the actual number in `description` so iOS users see
-    the source figure ("CPI: 4.2% YoY").
+    the latest value is below the ELEVATED threshold (severity_int=1).
+    Embeds the actual number in `description` so iOS users see the
+    source figure (e.g. "CPI: 4.2% YoY").
 
-    Calibration:
-      * CPI YoY > 4% → high (cost-of-capital / margin compression)
-      * CPI YoY 2.5-4% → elevated
-      * Fed Funds 6-month rise >= 100 bps → elevated (tightening cycle)
-      * 10Y-2Y spread < 0 → severe (recession signal historically reliable)
-      * 10Y-2Y 0-0.5% → elevated (warning band)
-      * 10Y yield > 5% → elevated (discount-rate pressure)
+    Calibration windows are bound to the 0–5 severity scale defined
+    in `_classify_indicator_severity`. Bands (elev/high/severe/crit):
+
+      Inflation
+      * CPI YoY → (2, 3, 5, 8)
+      * Core PCE YoY → (2, 3, 4.5, 6)
+      * 5Y breakeven → (2, 2.5, 3.5, 5)
+      Monetary
+      * Fed Funds level → (2, 4, 5.5, 7)
+      * Fed Funds 6-mo Δ (|pp|) → (0.5, 1, 2, 3)
+      * 10Y level → (3, 4.5, 5.5, 7)
+      * Real 10Y (DGS10 − CPI YoY) → (0, 1, 2.5, 4)
+      Recession
+      * Unemployment 6-mo Δ (pp) → (0.1, 0.3, 0.5, 0.7) — Sahm proxy
+      * Initial claims (k) → (275, 325, 400, 500)
+      * 10Y-2Y spread (reverse) → (1, 0.3, -0.3, -1)
+      Credit
+      * HY OAS → (3, 4, 6, 8)
+
+    Each emitted factor carries `_risk_group` for β sensitivity lookup
+    by `_compute_macro_threat`. Pydantic ignores the underscore field
+    on serialize (extra="ignore" default), but `_strip_internal_fields`
+    in the assembler still clears it defensively.
     """
     if not fred:
         return []
     by_id: Dict[str, Dict[str, Any]] = {row["series_id"]: row for row in fred}
     out: List[Dict[str, Any]] = []
 
-    # ── CPI (CPIAUCSL) ──────────────────────────────────────────────
+    # ── CPI (CPIAUCSL) — headline inflation ─────────────────────────
     cpi = by_id.get("CPIAUCSL")
+    cpi_yoy: Optional[float] = None
     if cpi and cpi.get("yoy_pct") is not None:
-        yoy = float(cpi["yoy_pct"])
-        if yoy >= 4.0:
-            sev, impact, label = "high", min(1.0, 0.5 + (yoy - 4.0) / 4.0), "Elevated Inflation"
-        elif yoy >= 2.5:
-            sev, impact, label = "elevated", 0.5, "Above-Target Inflation"
-        else:
-            sev, impact, label = None, None, None
-        if sev is not None:
+        cpi_yoy = float(cpi["yoy_pct"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            cpi_yoy, (2.0, 3.0, 5.0, 8.0),
+        )
+        if sev_int >= 2:
             out.append({
                 "category": "inflation",
-                "title": label,
+                "title": "Headline CPI Above Target" if sev_int == 2 else "Elevated Inflation",
                 "impact": round(impact, 2),
-                "trend": "worsening" if yoy >= 4 else "stable",
+                "trend": "worsening" if sev_int >= 3 else "stable",
                 "severity": sev,
                 "description": (
-                    f"CPI is +{yoy:.1f}% YoY (as of {cpi.get('as_of', 'recent')}) — "
-                    f"{'pressure on margins and consumer spend.' if yoy >= 4 else 'still above the Fed 2% target.'}"
+                    f"CPI is +{cpi_yoy:.1f}% YoY (as of {cpi.get('as_of', 'recent')}) — "
+                    f"{'pressure on margins and consumer spend.' if sev_int >= 3 else 'above the Fed 2% target.'}"
                 ),
+                "_risk_group": "inflation",
             })
 
-    # ── Fed Funds (FEDFUNDS): rate of change matters ────────────────
+    # ── Core PCE (PCEPILFE) — Fed's preferred gauge ─────────────────
+    pce = by_id.get("PCEPILFE")
+    if pce and pce.get("yoy_pct") is not None:
+        pce_yoy = float(pce["yoy_pct"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            pce_yoy, (2.0, 3.0, 4.5, 6.0),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "inflation",
+                "title": "Sticky Core Inflation",
+                "impact": round(impact, 2),
+                "trend": "worsening" if sev_int >= 3 else "stable",
+                "severity": sev,
+                "description": (
+                    f"Core PCE is +{pce_yoy:.1f}% YoY (as of {pce.get('as_of', 'recent')}) — "
+                    "the Fed's preferred inflation gauge."
+                ),
+                "_risk_group": "inflation",
+            })
+
+    # ── 5Y breakeven (T5YIE) — inflation expectations ───────────────
+    bei = by_id.get("T5YIE")
+    if bei and bei.get("latest") is not None:
+        bei_val = float(bei["latest"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            bei_val, (2.0, 2.5, 3.5, 5.0),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "inflation",
+                "title": "Unanchored Inflation Expectations",
+                "impact": round(impact, 2),
+                "trend": "worsening" if sev_int >= 3 else "stable",
+                "severity": sev,
+                "description": (
+                    f"5Y breakeven at {bei_val:.2f}% — markets pricing inflation "
+                    "above the Fed's 2% target over the next half-decade."
+                ),
+                "_risk_group": "inflation_exp",
+            })
+
+    # ── Fed Funds level (FEDFUNDS) ──────────────────────────────────
     ff = by_id.get("FEDFUNDS")
+    ff_level: Optional[float] = None
+    if ff and ff.get("latest") is not None:
+        ff_level = float(ff["latest"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            ff_level, (2.0, 4.0, 5.5, 7.0),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "interest_rates",
+                "title": "Restrictive Policy Rate",
+                "impact": round(impact, 2),
+                "trend": "stable",
+                "severity": sev,
+                "description": (
+                    f"Effective Fed Funds at {ff_level:.2f}% — capital-cost "
+                    "headwind for rate-sensitive sectors."
+                ),
+                "_risk_group": "rates",
+            })
+
+    # ── Fed Funds 6-mo Δ (FEDFUNDS) — tightening pace ──────────────
     if ff and ff.get("change_6mo_pct") is not None:
         delta = float(ff["change_6mo_pct"])
-        latest = float(ff.get("latest") or 0.0)
-        if abs(delta) >= 1.0:
-            sev = "elevated" if abs(delta) < 2.0 else "high"
+        sev, sev_int, impact = _classify_indicator_severity(
+            abs(delta), (0.5, 1.0, 2.0, 3.0),
+        )
+        if sev_int >= 2:
             out.append({
                 "category": "interest_rates",
                 "title": "Fed Funds Tightening" if delta > 0 else "Fed Funds Easing",
-                "impact": min(1.0, 0.4 + abs(delta) / 4.0),
+                "impact": round(impact, 2),
                 "trend": "worsening" if delta > 0 else "improving",
                 "severity": sev,
                 "description": (
-                    f"Effective Fed Funds Rate is {latest:.2f}% — "
-                    f"{'+' if delta >= 0 else ''}{delta:.2f}pp over the last 6 months."
+                    f"Fed Funds {'+' if delta >= 0 else ''}{delta:.2f}pp over the "
+                    "last 6 months — policy-stance shift."
                 ),
+                "_risk_group": "rates",
             })
 
-    # ── 10Y-2Y Treasury spread: inversion = recession signal ────────
+    # ── 10Y Treasury level (DGS10) ──────────────────────────────────
+    tnx = by_id.get("DGS10")
+    tnx_level: Optional[float] = None
+    if tnx and tnx.get("latest") is not None:
+        tnx_level = float(tnx["latest"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            tnx_level, (3.0, 4.5, 5.5, 7.0),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "interest_rates",
+                "title": "Elevated Long-Term Rates",
+                "impact": round(impact, 2),
+                "trend": "stable",
+                "severity": sev,
+                "description": (
+                    f"10Y Treasury at {tnx_level:.2f}% — discount-rate "
+                    "pressure on equity multiples."
+                ),
+                "_risk_group": "rates",
+            })
+
+    # ── Real 10Y rate (derived: DGS10 − CPI YoY) ────────────────────
+    # Bands tuned so mildly positive real rates (a feature of normal
+    # late-cycle expansions, not a stress signal) sit in LOW. ≥1.5%
+    # is "genuinely tight" — the typical 2023-2024 reading that
+    # actually drove the duration drawdown.
+    if tnx_level is not None and cpi_yoy is not None:
+        real_rate = tnx_level - cpi_yoy
+        sev, sev_int, impact = _classify_indicator_severity(
+            real_rate, (1.5, 2.5, 3.5, 4.5),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "interest_rates",
+                "title": "High Real Rates",
+                "impact": round(impact, 2),
+                "trend": "worsening" if sev_int >= 3 else "stable",
+                "severity": sev,
+                "description": (
+                    f"Real 10Y yield {real_rate:+.2f}% (10Y nominal − CPI YoY) — "
+                    "monetary policy genuinely tight in real terms."
+                ),
+                "_risk_group": "real_rate",
+            })
+
+    # ── 10Y-2Y spread (T10Y2Y) — recession signal ──────────────────
     spread = by_id.get("T10Y2Y")
     if spread and spread.get("latest") is not None:
         s = float(spread["latest"])
-        if s < 0:
+        # Reverse: a *low* value trips severity (-1pp inversion = CRIT).
+        sev, sev_int, impact = _classify_indicator_severity(
+            s, (1.0, 0.3, -0.3, -1.0), reverse=True,
+        )
+        if sev_int >= 2:
+            inverted = s < 0
             out.append({
                 "category": "interest_rates",
-                "title": "Inverted Yield Curve",
-                "impact": min(1.0, 0.7 + abs(s) / 2.0),
+                "title": "Inverted Yield Curve" if inverted else "Flattening Yield Curve",
+                "impact": round(impact, 2),
                 "trend": "worsening",
-                "severity": "severe",
+                "severity": sev,
                 "description": (
-                    f"10Y-2Y spread at {s:+.2f}% — historically a leading "
-                    f"recession indicator."
+                    f"10Y-2Y spread at {s:+.2f}% — "
+                    f"{'historically reliable recession signal.' if inverted else 'curve flattening, slowdown risk.'}"
                 ),
-            })
-        elif s < 0.5:
-            out.append({
-                "category": "interest_rates",
-                "title": "Flat Yield Curve",
-                "impact": 0.5,
-                "trend": "worsening",
-                "severity": "elevated",
-                "description": (
-                    f"10Y-2Y spread at {s:+.2f}% — flattening curve signals "
-                    f"slowdown risk."
-                ),
+                "_risk_group": "yield_curve",
             })
 
-    # ── 10Y Treasury level (DGS10): only emit when very high ────────
-    tnx = by_id.get("DGS10")
-    if tnx and tnx.get("latest") is not None:
-        level = float(tnx["latest"])
-        if level >= 5.0:
+    # ── Unemployment 6-mo Δ (UNRATE) — Sahm-rule proxy ─────────────
+    unemp = by_id.get("UNRATE")
+    if unemp and unemp.get("change_6mo_pct") is not None:
+        unemp_delta = float(unemp["change_6mo_pct"])
+        unemp_level = float(unemp.get("latest") or 0.0)
+        if unemp_delta > 0:  # only emit on rising unemployment
+            sev, sev_int, impact = _classify_indicator_severity(
+                unemp_delta, (0.1, 0.3, 0.5, 0.7),
+            )
+            if sev_int >= 2:
+                out.append({
+                    "category": "recession",
+                    "title": "Rising Unemployment (Sahm Watch)",
+                    "impact": round(impact, 2),
+                    "trend": "worsening",
+                    "severity": sev,
+                    "description": (
+                        f"Unemployment at {unemp_level:.1f}%, +{unemp_delta:.2f}pp over 6 months — "
+                        f"{'Sahm-rule recession trigger near.' if sev_int >= 3 else 'labor market softening.'}"
+                    ),
+                    "_risk_group": "unemployment",
+                })
+
+    # ── Initial claims (ICSA) — high-frequency labor signal ────────
+    claims = by_id.get("ICSA")
+    if claims and claims.get("latest") is not None:
+        claims_level = float(claims["latest"])  # FRED reports raw, not in thousands
+        claims_k = claims_level / 1000.0 if claims_level > 10_000 else claims_level
+        sev, sev_int, impact = _classify_indicator_severity(
+            claims_k, (275.0, 325.0, 400.0, 500.0),
+        )
+        if sev_int >= 2:
             out.append({
-                "category": "interest_rates",
-                "title": "High Long-Term Rates",
-                "impact": min(1.0, 0.4 + (level - 5.0) / 2.0),
-                "trend": "stable",
-                "severity": "elevated",
+                "category": "recession",
+                "title": "Elevated Jobless Claims",
+                "impact": round(impact, 2),
+                "trend": "worsening",
+                "severity": sev,
                 "description": (
-                    f"10Y Treasury yield at {level:.2f}% — discount-rate "
-                    f"pressure on equity multiples."
+                    f"Initial claims at {claims_k:.0f}k — labor market stress "
+                    "leading indicator."
                 ),
+                "_risk_group": "claims",
+            })
+
+    # ── HY credit spread (BAMLH0A0HYM2) — financial stress ─────────
+    hy = by_id.get("BAMLH0A0HYM2")
+    if hy and hy.get("latest") is not None:
+        hy_level = float(hy["latest"])
+        sev, sev_int, impact = _classify_indicator_severity(
+            hy_level, (3.0, 4.0, 6.0, 8.0),
+        )
+        if sev_int >= 2:
+            out.append({
+                "category": "credit",
+                "title": "Widening Credit Spreads",
+                "impact": round(impact, 2),
+                "trend": "worsening" if sev_int >= 3 else "stable",
+                "severity": sev,
+                "description": (
+                    f"ICE BofA HY OAS at {hy_level:.2f}% — credit markets "
+                    "pricing default risk above benign-cycle norms."
+                ),
+                "_risk_group": "credit",
             })
 
     return out
@@ -4824,31 +5226,95 @@ def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _sanitize_risk_factor(rf: Dict[str, Any]) -> Dict[str, Any]:
-    """Clamp impact to [0,1] and provide defaults so Pydantic doesn't reject."""
+    """Clamp impact to [0,1] and provide defaults so Pydantic doesn't
+    reject. Preserves `_risk_group` if present, otherwise infers it
+    from category + title so the AI-emitted factor still routes
+    through sector β in `_compute_macro_threat`.
+    """
     impact = rf.get("impact")
     try:
         impact = max(0.0, min(1.0, float(impact)))
     except (TypeError, ValueError):
         impact = 0.5
+    category = rf.get("category") or "regulation"
+    title = rf.get("title") or "Unknown Risk"
+    risk_group = rf.get("_risk_group") or _infer_risk_group(category, title)
     return {
-        "category": rf.get("category") or "regulation",
-        "title": rf.get("title") or "Unknown Risk",
+        "category": category,
+        "title": title,
         "impact": impact,
         "description": rf.get("description") or "Data unavailable.",
         "trend": rf.get("trend") or "stable",
         "severity": rf.get("severity") or "elevated",
+        "_risk_group": risk_group,
     }
 
 
+def _compute_macro_threat(
+    risk_factors: List[Dict[str, Any]],
+    sector: Optional[str],
+) -> Tuple[str, float]:
+    """Composite threat = 0.5 × breadth + 0.5 × tail.
+
+    breadth = mean(weighted severities of emitted factors)
+    tail    = max(weighted severities of emitted factors)
+    weighted_i = severity_int_i × β(sector, risk_group_i), capped to 5.0
+
+    Empty risk-factor set → ("low", 1.0). No fabrication.
+
+    Returns (tier_string, composite_score). Tier mapping is in
+    `_composite_to_tier`. Sector β is looked up by `_beta`; an
+    un-mapped (sector, group) pair degrades to β=1.0.
+    """
+    if not risk_factors:
+        return "low", 1.0
+
+    weighted: List[float] = []
+    for rf in risk_factors:
+        sev_str = (rf.get("severity") or "low").lower()
+        sev_int = _SEVERITY_INT.get(sev_str, 1)
+        risk_group = rf.get("_risk_group") or _infer_risk_group(
+            rf.get("category") or "", rf.get("title") or "",
+        )
+        beta = _beta(sector, risk_group)
+        w = min(5.0, max(0.5, sev_int * beta))
+        weighted.append(w)
+
+    breadth = sum(weighted) / len(weighted)
+    tail = max(weighted)
+    composite = 0.5 * breadth + 0.5 * tail
+    return _composite_to_tier(composite), round(composite, 3)
+
+
+def _strip_risk_group(rf: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop internal `_risk_group` so the Pydantic response stays
+    minimal (extra fields are ignored by the schema anyway, but we
+    strip explicitly to avoid surprises in downstream consumers)."""
+    return {k: v for k, v in rf.items() if not k.startswith("_")}
+
+
 def _derive_macro_vital(
-    risk_factors: List[Dict[str, Any]], threat_level: str,
+    risk_factors: List[Dict[str, Any]],
+    threat_level: str,
+    composite: float,
 ) -> Dict[str, Any]:
+    """Build the Macro tile shown in Key Vitals.
+
+    `composite` is the 1.0–5.0 score from `_compute_macro_threat`.
+    Mapped to a 0–10 vitality score so the iOS Key-Vitals tile
+    rendering stays on its existing 10-point scale:
+      composite 1.0 (benign)   → score 8.0
+      composite 5.0 (critical) → score 0.0
+    """
     if threat_level in ("severe", "critical"):
         status = "critical"
     elif threat_level in ("high", "elevated"):
         status = "warning"
     else:
         status = "good"
+
+    score_value = round(10.0 - 2.0 * composite, 1)
+    score_value = max(0.0, min(10.0, score_value))
 
     top_risk = risk_factors[0]["title"] if risk_factors else "No Major Risks"
 
@@ -4869,7 +5335,7 @@ def _derive_macro_vital(
     )
 
     return {
-        "score": {"value": 7.0, "status": status},
+        "score": {"value": score_value, "status": status},
         "threat_level": threat_level,
         "top_risk": top_risk,
         "risk_trend": dominant_trend,

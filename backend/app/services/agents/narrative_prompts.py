@@ -341,7 +341,7 @@ def _macro_intelligence_brief_prompt(
         f"{f.get('title')} ({f.get('severity')}, {f.get('trend')})"
         for f in factors[:5]
     ) or "no significant macro risks"
-    return f"""Write the macro intelligence brief — three sentences setting the macro context for this stock.
+    return f"""Write the macro intelligence brief — two tight sentences.
 
 RISK FACTORS: {factor_str}
 
@@ -349,9 +349,9 @@ EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-{_length_brief(3, 70)}
+{_length_brief(2, 45)}
 
-Sentence 1: the macro environment for this company. Sentence 2: which specific risk hits this business hardest, and why. Sentence 3: what would change the picture (ratecut, election, regulation, etc.)."""
+Sentence 1: which one risk above hits THIS business hardest, and the specific number from EVIDENCE that proves it (debt ratio, foreign rev %, capex sensitivity, etc.). Sentence 2: what concrete macro shift would flip the picture. Do NOT restate the risk factors themselves — the user already sees them as cards above."""
 
 
 def _price_action_narrative_prompt(

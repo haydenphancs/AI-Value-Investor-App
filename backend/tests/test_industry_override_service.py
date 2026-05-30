@@ -1,11 +1,13 @@
 """Unit tests for the dossier Phase B (AI-driven research overrides).
 
 Pins the validation gates so the operator can trust the audit log:
-  - Confidence threshold (low → reject)
-  - Source-count threshold (<2 sources → reject)
   - Numeric bounds on TAM and CAGR
-  - Sanity-vs-Phase-A divergence (warn at 3x, reject at 10x)
+  - Year sanity (parseable, future > current)
+  - Phase-A floor: Gemini TAM < Phase A → reject (override only RAISES)
   - Kill switch (env var) skips entire phase
+
+Per migration 053, confidence and source-count gates were dropped —
+operators review the audit log instead.
 
 No network — Gemini responses are constructed inline.
 """
@@ -27,66 +29,32 @@ def _ok_payload(**overrides) -> dict:
         "cagr_5y_pct": 10.0,
         "source_label": "SIA / WSTS Global Semi Forecast 2025",
         "research_notes": "Median across SIA, WSTS, McKinsey.",
-        "sources_cited": [
-            {"publisher": "SIA", "title": "Global Semi Forecast", "url": "https://semiconductors.org/x"},
-            {"publisher": "WSTS", "title": "Spring 2025", "url": "https://wsts.org/y"},
-        ],
-        "confidence": "high",
     }
     base.update(overrides)
     return base
 
 
 def test_validate_response_accepts_clean_response():
+    """Gemini TAM (791) above Phase A (117) — accepted. The 6.8x ratio
+    is logged but no longer gated."""
     svc = IndustryOverrideService()
     v = svc._validate_response(_ok_payload(), phase_a_tam=117.0)
-    # 791/117 ≈ 6.8x → warn but accept
     assert v["status"] == "ok"
-    assert v["warn"] is True
 
 
-def test_validate_response_no_warn_when_phase_a_close():
+def test_validate_response_accepts_when_phase_a_close():
+    """Gemini TAM (600) above Phase A (500) — accepted, no divergence flag."""
     svc = IndustryOverrideService()
     v = svc._validate_response(_ok_payload(current_tam_b=600.0), phase_a_tam=500.0)
-    # 600/500 = 1.2x → no warn
     assert v["status"] == "ok"
-    assert v["warn"] is False
 
 
 def test_validate_response_no_phase_a_baseline():
-    """First-deploy scenario: no Phase A row exists yet for this industry.
-    Divergence check is skipped (no baseline) so no warn fires."""
+    """First-deploy scenario: no Phase A row exists yet — divergence
+    check is skipped entirely."""
     svc = IndustryOverrideService()
     v = svc._validate_response(_ok_payload(), phase_a_tam=None)
     assert v["status"] == "ok"
-    assert v["warn"] is False
-
-
-def test_validate_response_rejects_low_confidence():
-    svc = IndustryOverrideService()
-    v = svc._validate_response(_ok_payload(confidence="low"), phase_a_tam=100.0)
-    assert v["status"] == "rejected_low_confidence"
-
-
-def test_validate_response_rejects_single_source():
-    svc = IndustryOverrideService()
-    p = _ok_payload(sources_cited=[
-        {"publisher": "SIA", "title": "x", "url": "https://x"},
-    ])
-    v = svc._validate_response(p, phase_a_tam=100.0)
-    assert v["status"] == "rejected_validation"
-    assert "1 valid source" in v["reason"]
-
-
-def test_validate_response_rejects_zero_sources():
-    """sources_cited empty or missing → reject."""
-    svc = IndustryOverrideService()
-    v1 = svc._validate_response(_ok_payload(sources_cited=[]), phase_a_tam=100.0)
-    v2 = svc._validate_response(
-        {**_ok_payload(), **{"sources_cited": None}}, phase_a_tam=100.0,
-    )
-    assert v1["status"] == "rejected_validation"
-    assert v2["status"] == "rejected_validation"
 
 
 def test_validate_response_rejects_out_of_bounds_cagr():
@@ -123,19 +91,16 @@ def test_validate_response_rejects_future_tam_explosion():
     assert "5x" in v["reason"] or "5.0x" in v["reason"]
 
 
-def test_validate_response_rejects_sanity_10x_divergence():
-    """When Gemini's TAM is >10x Phase A's TAM, reject as a hallucination.
-
-    Use a future_tam below the 5x bounds check so we exercise the
-    sanity gate specifically (not the prior numeric-bounds gate)."""
+def test_validate_response_rejects_below_phase_a():
+    """When Gemini's TAM is below Phase A, reject — the override exists
+    to FIX undercounting and only raises TAM, never lowers it."""
     svc = IndustryOverrideService()
-    # Phase A=10, Gemini=200 → 20x divergence; future_tam=300 (1.5x) → bounds OK
     v = svc._validate_response(
-        _ok_payload(current_tam_b=200.0, future_tam_b=300.0, cagr_5y_pct=8.4),
-        phase_a_tam=10.0,
+        _ok_payload(current_tam_b=80.0, future_tam_b=120.0),
+        phase_a_tam=100.0,
     )
-    assert v["status"] == "rejected_sanity"
-    assert "divergence" in v["reason"].lower()
+    assert v["status"] == "rejected_below_phase_a"
+    assert "phase a" in v["reason"].lower()
 
 
 def test_validate_response_rejects_invalid_years():
@@ -197,29 +162,3 @@ def test_curated_list_industries_unique():
     industries = [i for i, _ in CURATED_OVERRIDE_INDUSTRIES]
     assert len(industries) == len(set(industries)), \
         f"Duplicate industries in CURATED_OVERRIDE_INDUSTRIES: {industries}"
-
-
-def test_validate_response_uses_grounding_urls_when_present():
-    """When the response carries `_grounding_sources` (real URLs from
-    Google Search), the validation gate uses those as the source count
-    — even if `sources_cited` is empty (Gemini didn't self-report).
-    Grounding URLs are the trusted breadcrumb."""
-    svc = IndustryOverrideService()
-    payload = _ok_payload(sources_cited=[])  # Gemini didn't self-report
-    payload["_grounding_sources"] = [
-        {"uri": "https://semiconductors.org/x", "title": "SIA forecast", "publisher": "semiconductors"},
-        {"uri": "https://wsts.org/y", "title": "WSTS spring 2025", "publisher": "wsts"},
-        {"uri": "https://mckinsey.com/z", "title": "Semi outlook", "publisher": "mckinsey"},
-    ]
-    v = svc._validate_response(payload, phase_a_tam=500.0)
-    assert v["status"] == "ok"
-
-
-def test_validate_response_rejects_when_grounding_empty_and_self_report_empty():
-    """When BOTH grounding and self-reported are empty/missing, reject —
-    we have no evidence Gemini consulted any real source."""
-    svc = IndustryOverrideService()
-    payload = _ok_payload(sources_cited=[])
-    payload["_grounding_sources"] = []
-    v = svc._validate_response(payload, phase_a_tam=500.0)
-    assert v["status"] == "rejected_validation"

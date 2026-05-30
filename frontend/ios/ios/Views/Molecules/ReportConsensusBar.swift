@@ -92,24 +92,27 @@ struct ReportConsensusBar: View {
             let leadingPadding: CGFloat = 20 // Align with Swift Charts leading space
             let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges and 20pts for leading
 
-            ZStack(alignment: .leading) {
+            // Single coordinate system: every element below resolves its y
+            // through `yPosition(for:in:)` in the GeometryReader's top-origin
+            // space, and its x relative to `leadingPadding`. The price line,
+            // dashed line, current-price pill, pole, and badges therefore
+            // share one vertical scale — so the line terminates exactly at the
+            // current-price pill and the dashed line crosses the pole at the
+            // current-price level.
+            ZStack {
                 // Price line chart
                 if !consensus.hedgeFundPriceData.isEmpty {
-                    priceLineChart(chartWidth: chartWidth, in: geometry)
-                        .offset(x: leadingPadding, y: -120) // Move up 10 more points
+                    priceLineChart(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
                 }
 
                 // Current price indicator and dashed line
-                currentPriceIndicator(chartWidth: chartWidth, in: geometry)
-                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
+                currentPriceIndicator(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
 
                 // Target pole with points (far right)
-                targetPole(chartWidth: chartWidth, in: geometry)
-                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
+                targetPole(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
 
                 // Target badges on the right
-                targetBadges(chartWidth: chartWidth, in: geometry)
-                    .offset(x: leadingPadding, y: -120) // Move up 10 more points
+                targetBadges(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
             }
         }
         .frame(height: 260)
@@ -133,7 +136,7 @@ struct ReportConsensusBar: View {
         return points
     }
 
-    private func priceLineChart(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+    private func priceLineChart(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
         Path { path in
             let points = pinnedPricePoints
             guard !points.isEmpty else { return }
@@ -142,11 +145,11 @@ struct ReportConsensusBar: View {
 
             // Start path
             let firstY = yPosition(for: points[0].price, in: geometry)
-            path.move(to: CGPoint(x: 0, y: firstY))
+            path.move(to: CGPoint(x: leadingPadding, y: firstY))
 
             // Draw line through all points
             for (index, point) in points.enumerated() {
-                let x = CGFloat(index) * xStep
+                let x = leadingPadding + CGFloat(index) * xStep
                 let y = yPosition(for: point.price, in: geometry)
                 path.addLine(to: CGPoint(x: x, y: y))
             }
@@ -154,27 +157,26 @@ struct ReportConsensusBar: View {
         .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
     }
 
-    private func currentPriceIndicator(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+    private func currentPriceIndicator(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
         let yPos = yPosition(for: consensus.currentPrice, in: geometry)
         let points = pinnedPricePoints
 
         return Group {
-            // Dashed horizontal line
+            // Dashed horizontal line at the current-price y
             Path { path in
-                path.move(to: CGPoint(x: 0, y: yPos))
-                path.addLine(to: CGPoint(x: chartWidth, y: yPos))
+                path.move(to: CGPoint(x: leadingPadding, y: yPos))
+                path.addLine(to: CGPoint(x: leadingPadding + chartWidth, y: yPos))
             }
             .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
 
-            // Current price pill — trailing-anchored at the line's terminal
-            // x so its right edge sits exactly at the chart endpoint (which
-            // is also where the Min/Avg/Max pole starts). Width-agnostic:
-            // the frame-with-trailing-alignment pushes the pill flush
-            // against the right edge regardless of pillWidth.
+            // Current price pill — right edge flush at the line's terminal x,
+            // vertical center on the dashed line. Uses the SAME `yPosition`
+            // and the same terminal x as the price line endpoint, so the pill,
+            // the line end, and the dashed line all coincide by construction.
             if !points.isEmpty {
                 let lastIndex = points.count - 1
                 let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
-                let xPos = CGFloat(lastIndex) * xStep
+                let terminalX = leadingPadding + CGFloat(lastIndex) * xStep
 
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
@@ -188,52 +190,53 @@ struct ReportConsensusBar: View {
                                 .fill(AppColors.primaryBlue)
                         )
                 }
-                .frame(width: max(xPos, 1), alignment: .trailing)
-                .offset(y: yPos - 16)
+                .frame(width: max(terminalX, 1), alignment: .trailing)
+                .position(x: max(terminalX, 1) / 2, y: yPos)
             }
         }
     }
 
-    private func targetPole(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
-        let xPos = chartWidth - 3 // Position slightly left of the edge
+    private func targetPole(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
+        let xPos = leadingPadding + chartWidth - 3 // Position slightly left of the edge
         let highY = yPosition(for: consensus.highTarget, in: geometry)
         let avgY = yPosition(for: consensus.targetPrice, in: geometry)
         let lowY = yPosition(for: consensus.lowTarget, in: geometry)
-        
+
         // Extend the pole beyond the points
         let poleExtension: CGFloat = 20
         let extendedHighY = highY - poleExtension
         let extendedLowY = lowY + poleExtension
 
-        return ZStack(alignment: .leading) {
+        return Group {
             // Thick vertical pole from low to high (extended)
             RoundedRectangle(cornerRadius: 2)
                 .fill(AppColors.textMuted.opacity(0.4))
-                .frame(width: 6, height: extendedLowY - extendedHighY)
-                .offset(x: xPos - 3, y: extendedHighY + (extendedLowY - extendedHighY) / 2)
+                .frame(width: 6, height: max(extendedLowY - extendedHighY, 1))
+                .position(x: xPos, y: (extendedHighY + extendedLowY) / 2)
 
             // High target point (green) - smaller
             Circle()
                 .fill(AppColors.bullish)
                 .frame(width: 10, height: 10)
-                .offset(x: xPos - 5, y: highY)
+                .position(x: xPos, y: highY)
 
             // Average target point (blue) - smaller
             Circle()
                 .fill(AppColors.primaryBlue)
                 .frame(width: 10, height: 10)
-                .offset(x: xPos - 5, y: avgY)
+                .position(x: xPos, y: avgY)
 
             // Low target point (red) - smaller
             Circle()
                 .fill(AppColors.bearish)
                 .frame(width: 10, height: 10)
-                .offset(x: xPos - 5, y: lowY)
+                .position(x: xPos, y: lowY)
         }
     }
 
-    private func targetBadges(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
-        let xPos = chartWidth + 5 // Position badges closer to pole
+    private func targetBadges(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
+        let badgeGutter: CGFloat = 50 // Matches the 50pt reserved in chartWidth
+        let badgeLeadingX = leadingPadding + chartWidth // Just right of the pole
         let highY = yPosition(for: consensus.highTarget, in: geometry)
         let avgY = yPosition(for: consensus.targetPrice, in: geometry)
         let lowY = yPosition(for: consensus.lowTarget, in: geometry)
@@ -246,7 +249,8 @@ struct ReportConsensusBar: View {
                 percent: consensus.formattedHighTargetPercent,
                 color: AppColors.bullish
             )
-            .offset(x: xPos, y: highY + 1)
+            .frame(width: badgeGutter, alignment: .leading)
+            .position(x: badgeLeadingX + badgeGutter / 2, y: highY)
 
             // Average target badge - centered vertically with the point
             targetBadge(
@@ -255,7 +259,8 @@ struct ReportConsensusBar: View {
                 percent: consensus.formattedAvgTargetPercent,
                 color: AppColors.primaryBlue
             )
-            .offset(x: xPos, y: avgY + 1)
+            .frame(width: badgeGutter, alignment: .leading)
+            .position(x: badgeLeadingX + badgeGutter / 2, y: avgY)
 
             // Low target badge - centered vertically with the point
             targetBadge(
@@ -264,7 +269,8 @@ struct ReportConsensusBar: View {
                 percent: consensus.formattedLowTargetPercent,
                 color: AppColors.bearish
             )
-            .offset(x: xPos, y: lowY + 1)
+            .frame(width: badgeGutter, alignment: .leading)
+            .position(x: badgeLeadingX + badgeGutter / 2, y: lowY)
         }
     }
 
@@ -338,30 +344,60 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
 
-                    // Hedge Fund Flow Chart (Price on top, Buy/Sell volume below)
-                    if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
-                        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                            Text("12-Month Flow")
-                                .font(AppTypography.labelSmall)
-                                .foregroundColor(AppColors.textMuted)
-                                .padding(.top, AppSpacing.md)
-
-                            SmartMoneyFlowChart(
-                                priceData: consensus.hedgeFundPriceData,
-                                dailyPrices: [],
-                                flowData: consensus.hedgeFundFlowData
-                            )
-
-                            SmartMoneyFlowLegend()
-                                .padding(.top, AppSpacing.xs)
-                        }
-                    }
+                    hedgeFundFlowContent
 
                     Text(hedgeFundNote)
                         .font(AppTypography.label)
                         .foregroundColor(AppColors.textSecondary)
                         .padding(.top, AppSpacing.sm)
                 }
+            }
+        }
+    }
+
+    /// Hedge-fund flow chart. Prefers the quarterly institutional payload
+    /// mirrored verbatim from the Holders tab (same chart + net-flow badge,
+    /// same `SmartMoneySection` layout). Falls back to the legacy monthly
+    /// projection for reports persisted before `hedge_fund_smart_money`
+    /// existed.
+    @ViewBuilder
+    private var hedgeFundFlowContent: some View {
+        if let smartMoney = consensus.hedgeFundSmartMoney,
+           smartMoney.flowData.contains(where: { $0.hasActivity }) {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                Text("\(smartMoney.summary.periodDescription) Flow")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.top, AppSpacing.md)
+
+                SmartMoneyFlowChart(
+                    priceData: smartMoney.priceData,
+                    dailyPrices: smartMoney.dailyPrices,
+                    flowData: smartMoney.flowData
+                )
+
+                SmartMoneyFlowLegend()
+                    .padding(.top, AppSpacing.xs)
+
+                SmartMoneyNetFlowBadge(summary: smartMoney.summary)
+                    .padding(.top, AppSpacing.sm)
+            }
+        } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
+            // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports)
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                Text("12-Month Flow")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.top, AppSpacing.md)
+
+                SmartMoneyFlowChart(
+                    priceData: consensus.hedgeFundPriceData,
+                    dailyPrices: [],
+                    flowData: consensus.hedgeFundFlowData
+                )
+
+                SmartMoneyFlowLegend()
+                    .padding(.top, AppSpacing.xs)
             }
         }
     }

@@ -9,6 +9,8 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
+from app.schemas.holders import SmartMoneyDataSchema
+
 
 # ── Atomic Sub-Models ──────────────────────────────────────────────────────────
 
@@ -377,6 +379,11 @@ class WallStreetConsensusResponse(BaseModel):
     hedge_fund_note: Optional[str] = None
     hedge_fund_price_data: List[StockPricePointResponse]
     hedge_fund_flow_data: List[SmartMoneyFlowPointResponse]
+    # Quarterly institutional 13F flow, mirrored verbatim from the Holders
+    # tab's `hedge_funds_data` so the report's Hedge Funds chart + net-flow
+    # badge match TickerDetail exactly. Optional: legacy persisted reports
+    # predate this field (iOS falls back to the monthly chart above).
+    hedge_fund_smart_money: Optional[SmartMoneyDataSchema] = None
     momentum_upgrades: int
     momentum_downgrades: int
 

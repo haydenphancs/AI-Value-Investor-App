@@ -667,7 +667,11 @@ struct ReportWallStreetConsensus {
     let discountPercent: Double         // "Trading 33.4% below fair value estimate"
     let hedgeFundNote: String?          // "Net inflow of $430M from institutional..."
     let hedgeFundPriceData: [StockPriceDataPoint]   // Price data for hedge fund chart
-    let hedgeFundFlowData: [SmartMoneyFlowDataPoint] // Buy/sell volume data
+    let hedgeFundFlowData: [SmartMoneyFlowDataPoint] // Buy/sell volume data (legacy monthly fallback)
+    // Quarterly institutional flow mirrored from the Holders tab. When
+    // present, the Hedge Funds chart renders this (quarterly bars +
+    // net-flow badge) instead of the monthly fallback above.
+    let hedgeFundSmartMoney: SmartMoneyData?
     let momentumUpgrades: Int
     let momentumDowngrades: Int
 
@@ -1596,6 +1600,7 @@ extension TickerReportData {
                 SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 48.5, sellVolume: 33.2),
                 SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 55.8, sellVolume: 31.2)
             ],
+            hedgeFundSmartMoney: SmartMoneyData.hedgeFundsSampleData,
             momentumUpgrades: 8,
             momentumDowngrades: 3
         ),

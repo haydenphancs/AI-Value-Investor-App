@@ -117,9 +117,25 @@ struct ReportConsensusBar: View {
 
     // MARK: - Chart Components
 
+    /// Override the last point's price to `consensus.currentPrice` so the
+    /// chart line terminates exactly at the current-price y. The backend
+    /// already pins this in `_build_wall_street_sections`, but legacy
+    /// `research_reports` snapshots persisted before that fix landed
+    /// still carry the prior-month close as the last point — overriding
+    /// here makes the view safe regardless of the saved JSON's age.
+    private var pinnedPricePoints: [StockPriceDataPoint] {
+        var points = consensus.hedgeFundPriceData
+        guard !points.isEmpty else { return points }
+        let last = points[points.count - 1]
+        points[points.count - 1] = StockPriceDataPoint(
+            month: last.month, price: consensus.currentPrice,
+        )
+        return points
+    }
+
     private func priceLineChart(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         Path { path in
-            let points = consensus.hedgeFundPriceData
+            let points = pinnedPricePoints
             guard !points.isEmpty else { return }
 
             let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
@@ -140,6 +156,7 @@ struct ReportConsensusBar: View {
 
     private func currentPriceIndicator(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
         let yPos = yPosition(for: consensus.currentPrice, in: geometry)
+        let points = pinnedPricePoints
 
         return Group {
             // Dashed horizontal line
@@ -149,22 +166,30 @@ struct ReportConsensusBar: View {
             }
             .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
 
-            // Current price badge - positioned at the end of the price line
-            if !consensus.hedgeFundPriceData.isEmpty {
-                let lastIndex = consensus.hedgeFundPriceData.count - 1
-                let xStep = chartWidth / CGFloat(max(consensus.hedgeFundPriceData.count - 1, 1))
+            // Current price pill — trailing-anchored at the line's terminal
+            // x so its right edge sits exactly at the chart endpoint (which
+            // is also where the Min/Avg/Max pole starts). Width-agnostic:
+            // the frame-with-trailing-alignment pushes the pill flush
+            // against the right edge regardless of pillWidth.
+            if !points.isEmpty {
+                let lastIndex = points.count - 1
+                let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
                 let xPos = CGFloat(lastIndex) * xStep
 
-                Text(consensus.formattedCurrentPrice)
-                    .font(AppTypography.labelSmall).fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(AppColors.primaryBlue)
-                    )
-                    .offset(x: max(0, min(xPos - 20, chartWidth - 50)), y: yPos - 16)
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Text(consensus.formattedCurrentPrice)
+                        .font(AppTypography.labelSmall).fontWeight(.bold)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(AppColors.primaryBlue)
+                        )
+                }
+                .frame(width: max(xPos, 1), alignment: .trailing)
+                .offset(y: yPos - 16)
             }
         }
     }

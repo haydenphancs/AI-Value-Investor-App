@@ -2248,6 +2248,143 @@ def _hedge_fund_flow_from_holders(
     return out
 
 
+# ── Saved-report live overlay (Wall Street Consensus only) ───────────
+
+
+async def refresh_wall_street_consensus_block(
+    ticker: str,
+    persisted_block: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Overlay live analyst + holders + price data onto a persisted
+    `wall_street_consensus` block.
+
+    Why: a research_reports row is an immutable snapshot taken at
+    generation time. The WS Consensus block is purely numeric (analyst
+    targets, hedge-fund flow, current price), so a saved report can
+    drift from what `/stocks/{ticker}/analyst-analysis` and
+    `/stocks/{ticker}/holders` are currently showing. This helper
+    refreshes the live-derivable fields while preserving
+    DCF-dependent fields (`valuation_status`, `discount_percent`) and
+    the AI-written `hedge_fund_note` from the persisted snapshot.
+
+    Best-effort: on ANY failure (FMP outage, service down, missing
+    quote, analyst service empty) we return the persisted block
+    unchanged so the read path never breaks.
+
+    Live-overwritten fields:
+      * rating, current_price, target_price, low_target, high_target
+      * hedge_fund_price_data, hedge_fund_flow_data
+      * momentum_upgrades, momentum_downgrades
+
+    Preserved-from-snapshot fields:
+      * valuation_status, discount_percent (depend on the original
+        report's DCF model — re-deriving without that fair_value
+        would either need to re-run the DCF or fall back to a
+        degraded sentinel)
+      * hedge_fund_note (AI-written prose from the original generation)
+    """
+    if not isinstance(persisted_block, dict):
+        return persisted_block
+
+    try:
+        # Lazy imports — keep these services out of test paths that
+        # don't exercise the WS overlay (matches the pattern at the
+        # top of `collect`).
+        from app.services.analyst_service import AnalystService
+        from app.services.holders_service import HoldersService
+
+        fmp = get_fmp_client()
+        analyst_service = AnalystService()
+        holders_service = HoldersService()
+
+        quote, analyst, holders, historical = await asyncio.gather(
+            fmp.get_stock_price_quote(ticker),
+            analyst_service.get_analysis(ticker),
+            holders_service.get_holders(ticker),
+            fmp.get_historical_prices(ticker),
+            return_exceptions=True,
+        )
+
+        # Current price is mandatory — without it the chart pinning
+        # at the end of `_build_wall_street_sections` would
+        # short-circuit, and the iOS chart endpoint wouldn't land on
+        # the pill we just refreshed.
+        if isinstance(quote, Exception) or not isinstance(quote, dict):
+            return persisted_block
+        current_price = float(quote.get("price") or 0.0)
+        if current_price <= 0:
+            return persisted_block
+
+        # Analyst data is what feeds the Low/High/Target fields the
+        # user wants to match Analysis tab. If AnalystService failed,
+        # the builder would fall back to current_price * 0.85 / 1.3
+        # sentinels — strictly worse than the persisted real numbers.
+        # Skip the refresh in that case.
+        analyst_obj = analyst if not isinstance(analyst, Exception) else None
+        if analyst_obj is None:
+            return persisted_block
+
+        # Holders data feeds hedge_fund_price_data / hedge_fund_flow_data.
+        # If absent, flow rows degrade to all-zero placeholders — also
+        # strictly worse than persisted real data. Skip on failure.
+        holders_obj = holders if not isinstance(holders, Exception) else None
+        if holders_obj is None:
+            return persisted_block
+
+        historical_list = _hist_list(historical) if not isinstance(
+            historical, Exception
+        ) else []
+        monthly_prices = _monthly_closes(historical_list, count=12)
+
+        # `_build_wall_street_sections` returns (vital, consensus_partial).
+        # fair_value=None is fine: with analyst_obj populated, the
+        # builder's fallback at line ~2160 never triggers for the
+        # analyst-derived fields. valuation_status / discount_percent
+        # come out as sentinels from None, but we discard those and
+        # keep the persisted block's values below.
+        _, fresh_block = _build_wall_street_sections(
+            analyst_obj, holders_obj, current_price, None, monthly_prices,
+        )
+
+        merged = dict(persisted_block)
+        for k in (
+            "rating", "current_price", "target_price", "low_target",
+            "high_target", "hedge_fund_price_data", "hedge_fund_flow_data",
+            "momentum_upgrades", "momentum_downgrades",
+        ):
+            if k in fresh_block:
+                merged[k] = fresh_block[k]
+        return merged
+    except Exception as e:
+        logger.warning(
+            f"WS Consensus refresh failed for {ticker}: "
+            f"{type(e).__name__}: {e} — serving persisted block as-is"
+        )
+        return persisted_block
+
+
+async def patch_wall_street_consensus_live(
+    payload: Dict[str, Any], ticker: str,
+) -> Dict[str, Any]:
+    """Top-level wrapper used by the saved-report read endpoints to
+    splice a live `wall_street_consensus` block into the persisted
+    `ticker_report_data` payload. Mutates and returns the payload.
+
+    Paired with `patch_legacy_price_action` in the same call sites so
+    the saved-report read path stays a single readable transform
+    pipeline (load → live-overlay WS → patch legacy price action →
+    return).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    persisted_block = payload.get("wall_street_consensus")
+    if not isinstance(persisted_block, dict):
+        return payload
+    refreshed = await refresh_wall_street_consensus_block(ticker, persisted_block)
+    payload["wall_street_consensus"] = refreshed
+    return payload
+
+
 def _build_revenue_segments(
     segments_raw: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:

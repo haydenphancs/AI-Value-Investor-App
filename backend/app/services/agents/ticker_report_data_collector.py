@@ -4355,7 +4355,20 @@ def _relative_peer_score(
         + (1.0 - _DIRECTNESS_BLEND_WEIGHT) * financial
     )
     score = blended * _moat_multiplier(peer_moat_avg)
-    return max(0.0, min(10.0, score))
+    final = max(0.0, min(10.0, score))
+    # TEMP DEBUG PROBE — verify L2 path is reached in production. Remove
+    # after confirming Railway is running the cbbe23a code. If this line
+    # appears in Railway logs, the blended directness scoring IS active;
+    # if not, an older deploy is still serving requests.
+    logger.info(
+        "L2_PROBE peer_roic=%.4f focal_roic=%.4f rank=%s n_peers=%s "
+        "financial=%.2f directness=%.2f blended=%.2f moat_mult=%.2f "
+        "final=%.2f",
+        peer_roic, focal_roic, gemini_rank, n_peers,
+        financial, directness, blended,
+        _moat_multiplier(peer_moat_avg), final,
+    )
+    return final
 
 
 def _absolute_peer_score(

@@ -2165,6 +2165,15 @@ def _build_wall_street_sections(
         "hedge_fund_note": None,  # filled by AI in assemble_report
         "hedge_fund_price_data": hf_price_data,
         "hedge_fund_flow_data": hf_flow_data,
+        # Pass the Holders quarterly smart-money payload through verbatim so
+        # the report's Hedge Funds chart + net-flow badge mirror the Holders
+        # tab. Stored as a plain dict (the partial is persisted as JSON and
+        # re-validated by TickerReportResponse.model_validate).
+        "hedge_fund_smart_money": (
+            holders.hedge_funds_data.model_dump()
+            if holders is not None and holders.hedge_funds_data is not None
+            else None
+        ),
         "momentum_upgrades": upgrades,
         "momentum_downgrades": downgrades,
     }
@@ -2273,7 +2282,7 @@ async def refresh_wall_street_consensus_block(
 
     Live-overwritten fields:
       * rating, current_price, target_price, low_target, high_target
-      * hedge_fund_price_data, hedge_fund_flow_data
+      * hedge_fund_price_data, hedge_fund_flow_data, hedge_fund_smart_money
       * momentum_upgrades, momentum_downgrades
 
     Preserved-from-snapshot fields:
@@ -2350,6 +2359,7 @@ async def refresh_wall_street_consensus_block(
         for k in (
             "rating", "current_price", "target_price", "low_target",
             "high_target", "hedge_fund_price_data", "hedge_fund_flow_data",
+            "hedge_fund_smart_money",
             "momentum_upgrades", "momentum_downgrades",
         ):
             if k in fresh_block:

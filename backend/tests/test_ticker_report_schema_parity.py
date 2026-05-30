@@ -621,3 +621,77 @@ def test_overall_assessment_averages_card_ratings():
     assert out["average_rating"] == 3.8
     assert out["strong_count"] == 2   # Profitability=4 and Health=5
     assert out["weak_count"] == 0
+
+
+# ── Wall Street Consensus: hedge-fund smart-money passthrough ─────────
+
+
+def _monthly_prices_12() -> list[dict]:
+    return [{"month": f"{m:02d}/2025", "price": 200.0 + m} for m in range(1, 13)]
+
+
+def test_wall_street_consensus_carries_hedge_fund_smart_money():
+    """The report's WS Consensus must pass the Holders quarterly smart-money
+    payload through verbatim (snake_case) so the iOS Hedge Funds chart +
+    net-flow badge mirror the Holders tab. Guards the nested shape iOS
+    decodes via SmartMoneyDataDTO."""
+    from app.schemas.holders import (
+        HoldersResponse,
+        SmartMoneyDataSchema,
+        SmartMoneyFlowDataPointSchema,
+        SmartMoneyFlowSummarySchema,
+        StockPriceDataPointSchema,
+    )
+    from app.schemas.ticker_report import WallStreetConsensusResponse
+    from app.services.agents.ticker_report_data_collector import (
+        _build_wall_street_sections,
+    )
+
+    hedge = SmartMoneyDataSchema(
+        tab="Institutions",
+        price_data=[StockPriceDataPointSchema(month="Q3\n'25", price=210.0)],
+        daily_prices=[],
+        flow_data=[
+            SmartMoneyFlowDataPointSchema(
+                month="Q3\n'25", buy_volume=12.0, sell_volume=4.0, has_activity=True
+            )
+        ],
+        summary=SmartMoneyFlowSummarySchema(
+            total_net_flow=8.0, total_buy=12.0, total_sell=4.0,
+            is_positive=True, period_description="2-Year",
+        ),
+    )
+    holders = HoldersResponse(symbol="AAPL", hedge_funds_data=hedge)
+
+    _, consensus = _build_wall_street_sections(
+        analyst=None, holders=holders, current_price=215.0,
+        fair_value=None, monthly_prices=_monthly_prices_12(),
+    )
+
+    sm = consensus["hedge_fund_smart_money"]
+    assert sm is not None, "holders present → smart-money payload must be populated"
+    assert set(sm.keys()) >= {"tab", "price_data", "daily_prices", "flow_data", "summary"}
+    assert sm["summary"]["period_description"] == "2-Year"
+    assert sm["flow_data"][0]["buy_volume"] == 12.0
+    assert sm["flow_data"][0]["has_activity"] is True
+
+    # The whole consensus block must still validate (note filled by AI later).
+    consensus["hedge_fund_note"] = "test note"
+    WallStreetConsensusResponse.model_validate(consensus)
+
+
+def test_wall_street_consensus_smart_money_none_without_holders():
+    """Legacy / holders-missing path: optional field is None and the
+    block still validates (iOS falls back to the monthly chart)."""
+    from app.schemas.ticker_report import WallStreetConsensusResponse
+    from app.services.agents.ticker_report_data_collector import (
+        _build_wall_street_sections,
+    )
+
+    _, consensus = _build_wall_street_sections(
+        analyst=None, holders=None, current_price=215.0,
+        fair_value=None, monthly_prices=_monthly_prices_12(),
+    )
+    assert consensus["hedge_fund_smart_money"] is None
+    consensus["hedge_fund_note"] = None
+    WallStreetConsensusResponse.model_validate(consensus)

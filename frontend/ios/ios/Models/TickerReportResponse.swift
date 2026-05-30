@@ -661,6 +661,10 @@ struct WallStreetConsensusDTO: Codable {
     let hedgeFundNote: String?
     let hedgeFundPriceData: [StockPricePointDTO]
     let hedgeFundFlowData: [SmartMoneyFlowPointDTO]
+    /// Quarterly institutional 13F flow, identical to the Holders tab's
+    /// `hedge_funds_data`. Optional: legacy persisted reports predate it,
+    /// in which case the view falls back to the monthly chart above.
+    let hedgeFundSmartMoney: SmartMoneyDataDTO?
     let momentumUpgrades: Int
     let momentumDowngrades: Int
 
@@ -675,6 +679,7 @@ struct WallStreetConsensusDTO: Codable {
         case hedgeFundNote = "hedge_fund_note"
         case hedgeFundPriceData = "hedge_fund_price_data"
         case hedgeFundFlowData = "hedge_fund_flow_data"
+        case hedgeFundSmartMoney = "hedge_fund_smart_money"
         case momentumUpgrades = "momentum_upgrades"
         case momentumDowngrades = "momentum_downgrades"
     }
@@ -1049,6 +1054,7 @@ extension TickerReportAPIResponse {
             hedgeFundFlowData: wallStreetConsensus.hedgeFundFlowData.map { f in
                 SmartMoneyFlowDataPoint(month: f.month, buyVolume: f.buyVolume, sellVolume: f.sellVolume)
             },
+            hedgeFundSmartMoney: wallStreetConsensus.hedgeFundSmartMoney?.toDisplayModel(),
             momentumUpgrades: wallStreetConsensus.momentumUpgrades,
             momentumDowngrades: wallStreetConsensus.momentumDowngrades
         )

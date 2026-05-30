@@ -794,10 +794,13 @@ class TickerReportDataCollector:
         """Fetch the four peer signals (op margin, ROE, revenue growth, ROIC)
         keyed by ticker.
 
-        FMP split these across three endpoints in late 2025:
-          * /ratios-ttm           → operatingProfitMarginTTM,
+        FMP split these across three endpoints in late 2025 and then
+        reorganized again — ROIC moved off /ratios-ttm onto
+        /key-metrics-ttm. Current field locations:
+          * /ratios-ttm           → operatingProfitMarginTTM
+          * /key-metrics-ttm      → returnOnEquityTTM,
+                                    returnOnInvestedCapitalTTM,
                                     returnOnCapitalEmployedTTM
-          * /key-metrics-ttm      → returnOnEquityTTM
           * /financial-growth     → revenueGrowth
 
         We re-emit them under the legacy unsuffixed names so
@@ -823,6 +826,9 @@ class TickerReportDataCollector:
                     op = ratios[0].get("operatingProfitMarginTTM")
                     if op is not None:
                         merged["operatingProfitMargin"] = op
+                    # ROIC may live on /ratios-ttm in older FMP shape;
+                    # the canonical 2026 location is /key-metrics-ttm
+                    # (extracted below) so this is a fallback only.
                     roic = ratios[0].get("returnOnCapitalEmployedTTM")
                     if roic is None:
                         roic = ratios[0].get("returnOnCapitalEmployed")
@@ -832,6 +838,19 @@ class TickerReportDataCollector:
                     roe = km[0].get("returnOnEquityTTM")
                     if roe is not None:
                         merged["returnOnEquity"] = roe
+                    # ROIC primary source — FMP /key-metrics-ttm is the
+                    # endpoint that reliably carries it across all
+                    # tickers. Prefer `returnOnInvestedCapitalTTM` (the
+                    # textbook ROIC). Fall back to
+                    # `returnOnCapitalEmployedTTM` (ROCE — slightly
+                    # broader denominator) if ROIC is missing. Only
+                    # overwrite a prior value when this one resolves so
+                    # we never erase the /ratios-ttm fallback.
+                    km_roic = km[0].get("returnOnInvestedCapitalTTM")
+                    if km_roic is None:
+                        km_roic = km[0].get("returnOnCapitalEmployedTTM")
+                    if km_roic is not None:
+                        merged["returnOnCapitalEmployed"] = km_roic
                 if isinstance(growth, list) and growth:
                     rg = growth[0].get("revenueGrowth")
                     if rg is not None:
@@ -4355,20 +4374,7 @@ def _relative_peer_score(
         + (1.0 - _DIRECTNESS_BLEND_WEIGHT) * financial
     )
     score = blended * _moat_multiplier(peer_moat_avg)
-    final = max(0.0, min(10.0, score))
-    # TEMP DEBUG PROBE — verify L2 path is reached in production. Remove
-    # after confirming Railway is running the cbbe23a code. If this line
-    # appears in Railway logs, the blended directness scoring IS active;
-    # if not, an older deploy is still serving requests.
-    logger.info(
-        "L2_PROBE peer_roic=%.4f focal_roic=%.4f rank=%s n_peers=%s "
-        "financial=%.2f directness=%.2f blended=%.2f moat_mult=%.2f "
-        "final=%.2f",
-        peer_roic, focal_roic, gemini_rank, n_peers,
-        financial, directness, blended,
-        _moat_multiplier(peer_moat_avg), final,
-    )
-    return final
+    return max(0.0, min(10.0, score))
 
 
 def _absolute_peer_score(
@@ -4633,10 +4639,34 @@ def _build_competitors(
         if roe is not None:
             my_roe = float(roe) * 100
         # ROIC stays as a fraction for `_relative_peer_score`; the helper
-        # converts to percentage points internally.
+        # converts to percentage points internally. Try annual /ratios
+        # first as a fallback, but the canonical 2026 source is
+        # /key-metrics-ttm (read below) — FMP's /ratios endpoint stopped
+        # carrying `returnOnCapitalEmployed` and `returnOnInvestedCapital`
+        # at some point, which silently disabled the relative-path
+        # scoring for every ticker before this fix.
         roic_raw = r0.get("returnOnCapitalEmployed")
+        if roic_raw is None:
+            roic_raw = r0.get("returnOnInvestedCapital")
         if roic_raw is not None:
             my_roic_frac = float(roic_raw)
+    # /key-metrics(-ttm) is the canonical ROIC source. Always check it,
+    # and let it override the /ratios fallback (which is usually None
+    # anyway for ROIC). Prefer ROIC (investedCapital denominator) over
+    # ROCE (capitalEmployed denominator) — they differ slightly, but
+    # ROIC is the textbook formula and what the comment in
+    # `_relative_peer_score` documents.
+    if my_key_metrics:
+        km0 = my_key_metrics[0]
+        km_roic = km0.get("returnOnInvestedCapitalTTM")
+        if km_roic is None:
+            km_roic = km0.get("returnOnInvestedCapital")
+        if km_roic is None:
+            km_roic = km0.get("returnOnCapitalEmployedTTM")
+        if km_roic is None:
+            km_roic = km0.get("returnOnCapitalEmployed")
+        if km_roic is not None:
+            my_roic_frac = float(km_roic)
     # FMP stopped emitting returnOnEquity on /ratios in late 2025;
     # /key-metrics still carries it. Fall through so the focal isn't
     # under-scored vs peers (who already get ROE via /key-metrics-ttm).

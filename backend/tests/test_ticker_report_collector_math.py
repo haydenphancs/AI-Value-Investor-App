@@ -1900,11 +1900,25 @@ def test_excerpt_caps_at_5k_chars():
 # ── PR 4: Macro risk factor derivation ────────────────────────────────
 
 
-def _ind(symbol: str, change_1m_pct: float) -> dict:
-    """Minimal indicator row mirroring `_fetch_macro_indicators` output."""
+def _ind(
+    symbol: str,
+    change_1m_pct: float | None = None,
+    *,
+    level: float | None = None,
+    change_3m_pct: float | None = None,
+) -> dict:
+    """Minimal indicator row mirroring `_fetch_macro_indicators` output.
+
+    Post-threat-level-rework: `level` (current price) and
+    `change_3m_pct` (3-month window) are the primary signals for VIX
+    and oil/gold/DXY respectively. The 1M change remains as a
+    fallback for back-compat with older callers.
+    """
     return {
         "symbol": symbol,
+        "level": level,
         "change_1m_pct": change_1m_pct,
+        "change_3m_pct": change_3m_pct,
         "change_1y_pct": None,
         "change_5d_pct": None,
     }
@@ -1916,9 +1930,10 @@ def test_macro_no_indicators_returns_empty():
 
 
 def test_macro_oil_spike_emits_high_severity_energy():
-    """Oil up 18% MoM → high-severity energy risk."""
+    """Oil up 25% over 3 months → HIGH-severity energy risk (bands
+    10/20/35/50 → 25 lands in HIGH)."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", 18.0),
+        _ind("CLUSD", change_3m_pct=25.0),
     ])
     assert len(factors) == 1
     f = factors[0]
@@ -1926,95 +1941,112 @@ def test_macro_oil_spike_emits_high_severity_energy():
     assert f["severity"] == "high"
     assert f["trend"] == "worsening"
     # Description must include the actual % so iOS users see the source number.
-    assert "18.0%" in f["description"] or "18.0" in f["description"]
+    assert "25.0%" in f["description"] or "25.0" in f["description"]
 
 
-def test_macro_oil_drop_does_not_emit_high_risk():
-    """Oil down 18% MoM is *good news* for energy consumers — should
-    NOT emit a high-severity 'energy risk' card."""
+def test_macro_oil_drop_emits_under_magnitude_band():
+    """Oil DOWN 25% is itself a regime event — the magnitude-based
+    bands surface it as a risk factor (downside oil shocks signal
+    demand collapse / disinflation surprise, both market-moving)."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", -18.0),
+        _ind("CLUSD", change_3m_pct=-25.0),
     ])
-    # Either the factor is downgraded to elevated/low or omitted entirely;
-    # what matters is that we don't claim 'high' risk on a price drop.
-    if factors:
-        assert factors[0]["severity"] != "high"
+    assert len(factors) == 1
+    assert factors[0]["severity"] == "high"
+    assert factors[0]["trend"] == "improving"
 
 
 def test_macro_oil_small_move_low_severity():
-    """3% oil move is normal noise — low severity, neutral framing."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("CLUSD", 3.0)])
-    assert factors[0]["severity"] == "low"
+    """3% oil move is normal noise — no card emitted (dead-band)."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("CLUSD", change_3m_pct=3.0),
+    ])
+    assert factors == []
 
 
 def test_macro_gold_rally_signals_flight_to_safety():
-    """Gold up 5% MoM → flight-to-safety entry under category 'currency'."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("GCUSD", 5.0)])
+    """Gold up 5% over 3 months → flight-to-safety, currency category."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("GCUSD", change_3m_pct=5.0),
+    ])
     assert any(f["category"] == "currency" for f in factors)
 
 
 def test_macro_gold_quiet_does_not_emit():
-    """Sub-3% gold move is too quiet to justify a card."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("GCUSD", 1.0)])
+    """Sub-3% 3M gold move is too quiet to justify a card."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("GCUSD", change_3m_pct=1.0),
+    ])
     assert factors == []
 
 
 def test_macro_copper_decline_signals_demand_weakness():
     """Copper down 10% MoM → industrial demand weakness, supply_chain category."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("HGUSD", -10.0)])
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("HGUSD", change_1m_pct=-10.0),
+    ])
     assert any(f["category"] == "supply_chain" for f in factors)
 
 
 def test_macro_copper_rally_does_not_emit():
     """Copper up is good for industrial demand; no risk card."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("HGUSD", 8.0)])
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("HGUSD", change_1m_pct=8.0),
+    ])
     assert factors == []
 
 
-def test_macro_vix_spike_emits_volatility_card():
-    """VIX up 30% MoM → volatility regime risk, severity high."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("^VIX", 30.0)])
+def test_macro_vix_level_emits_volatility_card():
+    """VIX at 32 → HIGH-stress regime (bands 16/22/30/40 → 32 ≥ 30).
+    Note: the rework switched from % Δ to absolute level — a 35→36
+    reading is HIGH stress even though the delta is invisible."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("^VIX", level=32.0, change_1m_pct=10.0),
+    ])
     assert len(factors) == 1
     assert factors[0]["severity"] in ("high", "severe")
 
 
 def test_macro_treasury_yield_jump_emits_rate_risk():
-    """10Y Treasury up 8% MoM → interest_rates risk."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("^TNX", 8.0)])
+    """10Y Treasury 3-mo move ≥8% trips the FMP-side rate factor."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("^TNX", change_3m_pct=10.0),
+    ])
     assert any(f["category"] == "interest_rates" for f in factors)
 
 
 def test_macro_dxy_strength_signals_translation_drag():
-    """Dollar up 4% MoM → multinational FX translation risk."""
-    factors = _build_macro_risk_factors_from_indicators([_ind("DXY", 4.0)])
+    """Dollar up 4% over 3 months → ELEV multinational FX risk."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("DXY", change_3m_pct=4.0),
+    ])
     assert any(f["category"] == "currency" for f in factors)
 
 
 def test_macro_indicator_with_missing_change_skipped():
-    """Indicator without `change_1m_pct` is silently skipped — better
-    than emitting a fake risk."""
+    """Indicator without any change/level fields is silently skipped —
+    better than emitting a fake risk."""
     factors = _build_macro_risk_factors_from_indicators([
-        {"symbol": "CLUSD", "change_1m_pct": None,
-         "change_1y_pct": None, "change_5d_pct": None},
+        {"symbol": "CLUSD", "level": None, "change_1m_pct": None,
+         "change_3m_pct": None, "change_1y_pct": None, "change_5d_pct": None},
     ])
     assert factors == []
 
 
 def test_macro_full_basket_realistic_scenario():
-    """End-to-end: a realistic macro environment produces 4-6 risk
-    factors covering energy, rates, vol — confirming the basket fans
-    out across categories rather than collapsing to one."""
+    """End-to-end: a realistic macro environment produces multiple
+    risk factors covering energy, rates, vol — confirming the basket
+    fans out across categories rather than collapsing to one."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", 12.0),  # oil bid
-        _ind("GCUSD", 6.0),   # gold flight-to-safety
-        _ind("HGUSD", -8.0),  # copper weakness
-        _ind("^VIX", 25.0),   # vol spike
-        _ind("^TNX", 10.0),   # rates higher
-        _ind("DXY", 3.5),     # USD stronger
-        _ind("SIUSD", 5.0),   # silver — currently no rule, ignored
+        _ind("CLUSD", change_3m_pct=22.0),       # oil bid → HIGH
+        _ind("GCUSD", change_3m_pct=10.0),       # gold flight → HIGH
+        _ind("HGUSD", change_1m_pct=-12.0),      # copper weakness → HIGH
+        _ind("^VIX", level=28.0,                # vol elevated
+             change_1m_pct=20.0),
+        _ind("^TNX", change_3m_pct=18.0),        # rates higher → HIGH
+        _ind("DXY", change_3m_pct=6.0),          # USD stronger → HIGH
+        _ind("SIUSD", change_1m_pct=5.0),        # silver — no rule
     ])
-    # Should produce one factor per applicable indicator (6 enabled rules
-    # above, silver has no rule).
     assert 4 <= len(factors) <= 6
     categories = {f["category"] for f in factors}
     assert "energy" in categories
@@ -2108,28 +2140,28 @@ def test_fred_no_indicators_returns_empty():
     assert _build_macro_risk_factors_from_fred([]) == []
 
 
-def test_fred_cpi_high_emits_high_severity_inflation():
-    """CPI YoY at 5.5% → high severity; inflation category."""
+def test_fred_cpi_high_emits_severe_inflation():
+    """CPI YoY at 5.5% → SEVERE severity under bands (2,3,5,8)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("CPIAUCSL", latest=315.0, yoy_pct=5.5),
     ])
     assert len(factors) == 1
     f = factors[0]
     assert f["category"] == "inflation"
-    assert f["severity"] == "high"
+    assert f["severity"] == "severe"
     assert "5.5%" in f["description"]
 
 
-def test_fred_cpi_above_target_but_not_high():
-    """CPI YoY in the 2.5-4% band → elevated, not high."""
+def test_fred_cpi_above_target_reads_high():
+    """CPI YoY at 3.0% → HIGH under tighter post-rework bands."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("CPIAUCSL", latest=305.0, yoy_pct=3.0),
     ])
-    assert factors[0]["severity"] == "elevated"
+    assert factors[0]["severity"] == "high"
 
 
 def test_fred_cpi_at_target_no_factor():
-    """CPI YoY in the 0-2% band → no factor (normal range)."""
+    """CPI YoY below 2% → no factor (LOW silenced)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("CPIAUCSL", latest=300.0, yoy_pct=1.8),
     ])
@@ -2137,34 +2169,43 @@ def test_fred_cpi_at_target_no_factor():
 
 
 def test_fred_fed_funds_rapid_tightening_emits_factor():
-    """Fed Funds up 1.5pp in 6 months → elevated tightening signal."""
+    """Fed Funds up 1.5pp in 6 months → HIGH tightening pace factor.
+    Note: post-rework also emits a separate level factor when the
+    level is itself ≥2%, so we check for any interest_rates with
+    worsening trend (the Δ factor)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("FEDFUNDS", latest=5.25, change_6mo_pct=1.5),
     ])
-    assert any(f["category"] == "interest_rates" for f in factors)
-    f = next(f for f in factors if f["category"] == "interest_rates")
-    assert f["trend"] == "worsening"
+    rate_factors = [f for f in factors if f["category"] == "interest_rates"]
+    assert rate_factors
+    assert any(f["trend"] == "worsening" for f in rate_factors)
 
 
 def test_fred_fed_funds_easing_signals_improving():
-    """Fed Funds down 1.5pp in 6mo → trend improving."""
+    """Fed Funds down 1.5pp in 6mo → Δ factor trend=improving.
+    Level factor (4.0% level) also emits at HIGH but with stable
+    trend; we look up the Δ-specific factor by title."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("FEDFUNDS", latest=4.0, change_6mo_pct=-1.5),
     ])
-    f = factors[0]
-    assert f["trend"] == "improving"
+    easing = next(f for f in factors if "Easing" in f["title"])
+    assert easing["trend"] == "improving"
 
 
-def test_fred_fed_funds_steady_no_factor():
-    """Sub-1pp 6mo move = steady policy → no factor."""
+def test_fred_fed_funds_steady_level_emits_only_level():
+    """Sub-0.5pp 6mo move = steady policy → Δ factor silenced; only
+    the level-based factor remains (5.25% is in the ELEVATED band)."""
     factors = _build_macro_risk_factors_from_fred([
-        _fred("FEDFUNDS", latest=5.25, change_6mo_pct=0.5),
+        _fred("FEDFUNDS", latest=5.25, change_6mo_pct=0.3),
     ])
-    assert factors == []
+    # No 'Tightening' / 'Easing' Δ factor; level factor present.
+    titles = [f["title"] for f in factors]
+    assert not any("Tightening" in t or "Easing" in t for t in titles)
+    assert any("Restrictive Policy Rate" in t for t in titles)
 
 
 def test_fred_yield_curve_inversion_severe():
-    """T10Y2Y < 0 → severe (recession signal)."""
+    """T10Y2Y at -0.45 → SEVERE under reverse bands (1,0.3,-0.3,-1)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("T10Y2Y", latest=-0.45),
     ])
@@ -2174,16 +2215,16 @@ def test_fred_yield_curve_inversion_severe():
     assert "Inverted" in factors[0]["title"]
 
 
-def test_fred_yield_curve_flattening_elevated():
-    """T10Y2Y between 0 and 0.5% → elevated warning."""
+def test_fred_yield_curve_flattening_high():
+    """T10Y2Y at 0.30 → HIGH under reverse bands (≤0.3 trips HIGH)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("T10Y2Y", latest=0.30),
     ])
-    assert factors[0]["severity"] == "elevated"
+    assert factors[0]["severity"] == "high"
 
 
 def test_fred_yield_curve_normal_no_factor():
-    """T10Y2Y > 0.5% → normal, no factor."""
+    """T10Y2Y > 1.0 → LOW skipped (>1 is the new normal-curve band)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("T10Y2Y", latest=1.50),
     ])
@@ -2191,17 +2232,17 @@ def test_fred_yield_curve_normal_no_factor():
 
 
 def test_fred_high_10y_yield_emits_factor():
-    """10Y at 5.5% → elevated discount-rate pressure."""
+    """10Y at 5.5% → SEVERE long-rate pressure (bands 3/4.5/5.5/7)."""
     factors = _build_macro_risk_factors_from_fred([
         _fred("DGS10", latest=5.50),
     ])
-    assert any(f["title"] == "High Long-Term Rates" for f in factors)
+    assert any(f["title"] == "Elevated Long-Term Rates" for f in factors)
 
 
 def test_fred_low_10y_yield_no_factor():
-    """10Y below 5% → no factor (it's a level, not a delta)."""
+    """10Y below 3% → no factor (LOW band)."""
     factors = _build_macro_risk_factors_from_fred([
-        _fred("DGS10", latest=4.20),
+        _fred("DGS10", latest=2.50),
     ])
     assert factors == []
 
@@ -2220,7 +2261,8 @@ def test_fred_full_macro_environment():
     # interest_rates should appear at least once (multiple sources contribute)
     assert categories.count("interest_rates") >= 1
     severities = {f["severity"] for f in factors}
-    assert "severe" in severities  # yield-curve inversion
+    # yield-curve inversion at -0.3 → SEVERE under reverse bands
+    assert "severe" in severities
 
 
 def test_fred_indicator_with_missing_value_skipped():

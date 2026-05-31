@@ -141,6 +141,7 @@ struct TickerReportView: View {
                 companyName: report.companyName,
                 ticker: report.symbol,
                 exchange: report.exchange,
+                currentPrice: report.wallStreetConsensus.currentPrice,
                 onBack: { dismiss() },
                 onShare: viewModel.shareTapped,
                 onViewDetailedAnalysis: viewModel.viewDetailedAnalysis,

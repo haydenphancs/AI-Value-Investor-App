@@ -17,7 +17,7 @@ struct ReportConsensusBar: View {
 
     private var minPrice: Double {
         let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
-        let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
+        let historicalPrices = chartPrices
         let allPrices = targetPrices + historicalPrices
         // Add extra padding at the bottom to push content up
         let minValue = allPrices.min() ?? consensus.lowTarget
@@ -28,7 +28,7 @@ struct ReportConsensusBar: View {
 
     private var maxPrice: Double {
         let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
-        let historicalPrices = consensus.hedgeFundPriceData.map { $0.price }
+        let historicalPrices = chartPrices
         let allPrices = targetPrices + historicalPrices
         // Add less padding at the top
         let maxValue = allPrices.max() ?? consensus.highTarget
@@ -56,16 +56,16 @@ struct ReportConsensusBar: View {
             analystPriceTargetHeader
                 .padding(.bottom, AppSpacing.lg)
 
-            // Price Chart with Target Zones
+            // Price line + Min/Avg/Max pole + dashed current-price line
             analystPriceChart
 
-            // Momentum
-            momentumSection
-                .padding(.top, -20)
-                .padding(.bottom, AppSpacing.lg)
-
-            // Hedge Funds
+            // Buy/Sell volume bars (no second price line — the price line
+            // lives in the analyst chart above)
             hedgeFundsSection
+
+            // Momentum — now the last element
+            momentumSection
+                .padding(.top, AppSpacing.sm)
         }
     }
 
@@ -100,8 +100,11 @@ struct ReportConsensusBar: View {
             // current-price pill and the dashed line crosses the pole at the
             // current-price level.
             ZStack {
-                // Price line chart
-                if !consensus.hedgeFundPriceData.isEmpty {
+                // Price line chart — nudged up a hair so its endpoint reads
+                // as meeting the gray current-price dot. Purely cosmetic; the
+                // dot, dashed line, pole, and badges stay anchored to their
+                // true price y so nothing misrepresents the data.
+                if !chartPrices.isEmpty {
                     priceLineChart(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
                 }
 
@@ -120,37 +123,47 @@ struct ReportConsensusBar: View {
 
     // MARK: - Chart Components
 
-    /// Override the last point's price to `consensus.currentPrice` so the
-    /// chart line terminates exactly at the current-price y. The backend
-    /// already pins this in `_build_wall_street_sections`, but legacy
-    /// `research_reports` snapshots persisted before that fix landed
-    /// still carry the prior-month close as the last point — overriding
-    /// here makes the view safe regardless of the saved JSON's age.
-    private var pinnedPricePoints: [StockPriceDataPoint] {
-        var points = consensus.hedgeFundPriceData
-        guard !points.isEmpty else { return points }
-        let last = points[points.count - 1]
-        points[points.count - 1] = StockPriceDataPoint(
-            month: last.month, price: consensus.currentPrice,
-        )
-        return points
+    /// Price series for the analyst price-target line. Prefers the detailed
+    /// ~2-year daily series carried by the hedge-fund smart-money payload —
+    /// the SAME data the Hedge Funds chart below plots — then its quarterly
+    /// series, then the legacy monthly series. The last point is pinned to
+    /// the live `currentPrice` so the line terminates exactly at the gray
+    /// current-price dot.
+    private var chartPrices: [Double] {
+        let source: [Double]
+        if let daily = consensus.hedgeFundSmartMoney?.dailyPrices, daily.count >= 10 {
+            source = daily.map { $0.price }
+        } else if let quarterly = consensus.hedgeFundSmartMoney?.priceData, !quarterly.isEmpty {
+            source = quarterly.map { $0.price }
+        } else {
+            source = consensus.hedgeFundPriceData.map { $0.price }
+        }
+        guard !source.isEmpty else { return [] }
+        var prices = source
+        prices[prices.count - 1] = consensus.currentPrice
+        return prices
     }
 
     private func priceLineChart(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
         Path { path in
-            let points = pinnedPricePoints
-            guard !points.isEmpty else { return }
+            let prices = chartPrices
+            guard !prices.isEmpty else { return }
 
-            let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
+            // End the line short of the Min/Avg/Max pole so its endpoint just
+            // touches the dashed current-price line without crowding the pole.
+            // The dashed line continues from here across to the pole.
+            let poleGap: CGFloat = 24
+            let lineWidth = max(chartWidth - poleGap, 1)
+            let xStep = lineWidth / CGFloat(max(prices.count - 1, 1))
 
             // Start path
-            let firstY = yPosition(for: points[0].price, in: geometry)
+            let firstY = yPosition(for: prices[0], in: geometry)
             path.move(to: CGPoint(x: leadingPadding, y: firstY))
 
             // Draw line through all points
-            for (index, point) in points.enumerated() {
+            for (index, price) in prices.enumerated() {
                 let x = leadingPadding + CGFloat(index) * xStep
-                let y = yPosition(for: point.price, in: geometry)
+                let y = yPosition(for: price, in: geometry)
                 path.addLine(to: CGPoint(x: x, y: y))
             }
         }
@@ -159,41 +172,16 @@ struct ReportConsensusBar: View {
 
     private func currentPriceIndicator(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
         let yPos = yPosition(for: consensus.currentPrice, in: geometry)
-        let points = pinnedPricePoints
 
-        return Group {
-            // Dashed horizontal line at the current-price y
-            Path { path in
-                path.move(to: CGPoint(x: leadingPadding, y: yPos))
-                path.addLine(to: CGPoint(x: leadingPadding + chartWidth, y: yPos))
-            }
-            .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-
-            // Current price pill — right edge flush at the line's terminal x,
-            // vertical center on the dashed line. Uses the SAME `yPosition`
-            // and the same terminal x as the price line endpoint, so the pill,
-            // the line end, and the dashed line all coincide by construction.
-            if !points.isEmpty {
-                let lastIndex = points.count - 1
-                let xStep = chartWidth / CGFloat(max(points.count - 1, 1))
-                let terminalX = leadingPadding + CGFloat(lastIndex) * xStep
-
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    Text(consensus.formattedCurrentPrice)
-                        .font(AppTypography.labelSmall).fontWeight(.bold)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(AppColors.primaryBlue)
-                        )
-                }
-                .frame(width: max(terminalX, 1), alignment: .trailing)
-                .position(x: max(terminalX, 1) / 2, y: yPos)
-            }
+        // Dashed horizontal line at the current-price y, read straight across
+        // to the gray current-price dot on the target pole (see `targetPole`).
+        // Gray to match that dot, distinct from the blue price-history line and
+        // the blue Avg marker.
+        return Path { path in
+            path.move(to: CGPoint(x: leadingPadding, y: yPos))
+            path.addLine(to: CGPoint(x: leadingPadding + chartWidth, y: yPos))
         }
+        .stroke(AppColors.textSecondary, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
     }
 
     private func targetPole(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
@@ -370,11 +358,17 @@ struct ReportConsensusBar: View {
                     .foregroundColor(AppColors.textMuted)
                     .padding(.top, AppSpacing.md)
 
+                // Volume bars only — the price line lives in the analyst
+                // chart above. Trailing inset keeps the bars in the same
+                // horizontal band as that line (clear of the pole/badge gutter).
                 SmartMoneyFlowChart(
                     priceData: smartMoney.priceData,
                     dailyPrices: smartMoney.dailyPrices,
-                    flowData: smartMoney.flowData
+                    flowData: smartMoney.flowData,
+                    showPriceChart: false,
+                    showVolumeYAxis: false
                 )
+                .padding(.trailing, 50)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)
@@ -393,8 +387,11 @@ struct ReportConsensusBar: View {
                 SmartMoneyFlowChart(
                     priceData: consensus.hedgeFundPriceData,
                     dailyPrices: [],
-                    flowData: consensus.hedgeFundFlowData
+                    flowData: consensus.hedgeFundFlowData,
+                    showPriceChart: false,
+                    showVolumeYAxis: false
                 )
+                .padding(.trailing, 50)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)

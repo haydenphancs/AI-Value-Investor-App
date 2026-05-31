@@ -12,6 +12,7 @@ struct ReportHeaderBar: View {
     let companyName: String
     let ticker: String
     let exchange: String
+    let currentPrice: Double
     let onBack: () -> Void
     let onShare: () -> Void
     let onViewDetailedAnalysis: () -> Void
@@ -49,13 +50,27 @@ struct ReportHeaderBar: View {
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
 
-                        Text("•")
-                            .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.textMuted)
+                        // Live current price, right next to the ticker (e.g.
+                        // "ORCL • $226"). Emphasized so it reads as the key number.
+                        if currentPrice > 0 {
+                            Text("•")
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textMuted)
 
-                        Text(exchange)
-                            .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.textSecondary)
+                            Text(String(format: "$%.0f", currentPrice))
+                                .font(AppTypography.labelSmall).fontWeight(.semibold)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        if !exchange.isEmpty {
+                            Text("•")
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textMuted)
+
+                            Text(exchange)
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
                     }
                 }
             }
@@ -92,6 +107,7 @@ struct ReportHeaderBar: View {
         companyName: "Oracle",
         ticker: "ORCL",
         exchange: "Nasdaq",
+        currentPrice: 226,
         onBack: {},
         onShare: {},
         onViewDetailedAnalysis: {},

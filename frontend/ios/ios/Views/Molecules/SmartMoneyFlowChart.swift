@@ -15,6 +15,15 @@ struct SmartMoneyFlowChart: View {
     let priceData: [StockPriceDataPoint]
     let dailyPrices: [DailyPricePoint]
     let flowData: [SmartMoneyFlowDataPoint]
+    /// When false, only the buy/sell volume bars render (no price line on
+    /// top). Used by the Ticker Report's merged chart, where the price line
+    /// already lives in the Analyst Price Target chart above. Defaults true
+    /// so the Holders tab is unaffected.
+    var showPriceChart: Bool = true
+    /// When false, the volume bars hide their trailing magnitude y-axis (the
+    /// net-flow badge conveys the totals instead). Lets the report align the
+    /// bars under the analyst price line. Defaults true for the Holders tab.
+    var showVolumeYAxis: Bool = true
 
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
@@ -68,11 +77,14 @@ struct SmartMoneyFlowChart: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top: Stock Price Line Chart
-            if useDailyPrices {
-                dailyPriceChart
-            } else {
-                monthlyPriceChart
+            // Top: Stock Price Line Chart (optional — hidden in the report's
+            // merged chart where the price line lives above).
+            if showPriceChart {
+                if useDailyPrices {
+                    dailyPriceChart
+                } else {
+                    monthlyPriceChart
+                }
             }
 
             // Bottom: Buy/Sell Volume Bar Chart
@@ -236,14 +248,16 @@ struct SmartMoneyFlowChart: View {
             }
         }
         .chartYAxis {
-            AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine()
-                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
-                AxisValueLabel {
-                    if let doubleValue = value.as(Double.self) {
-                        Text(formatVolumeValue(doubleValue))
-                            .font(AppTypography.caption)
-                            .foregroundStyle(AppColors.textMuted)
+            if showVolumeYAxis {
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
+                    AxisGridLine()
+                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                    AxisValueLabel {
+                        if let doubleValue = value.as(Double.self) {
+                            Text(formatVolumeValue(doubleValue))
+                                .font(AppTypography.caption)
+                                .foregroundStyle(AppColors.textMuted)
+                        }
                     }
                 }
             }

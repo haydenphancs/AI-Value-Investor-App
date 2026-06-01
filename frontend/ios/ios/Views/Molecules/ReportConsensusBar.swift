@@ -54,7 +54,15 @@ struct ReportConsensusBar: View {
         VStack(alignment: .leading, spacing: 0) {
             // Title and Description
             analystPriceTargetHeader
-                .padding(.bottom, AppSpacing.lg)
+                .padding(.bottom, AppSpacing.sm)
+
+            // Period label for the whole view (price chart + volume bars below
+            // both span this window). Sits right under the range/current-price
+            // description.
+            Text(flowPeriodLabel)
+                .font(AppTypography.labelSmall)
+                .foregroundColor(AppColors.textMuted)
+                .padding(.bottom, AppSpacing.sm)
 
             // Price line + Min/Avg/Max pole + dashed current-price line
             analystPriceChart
@@ -67,6 +75,16 @@ struct ReportConsensusBar: View {
             momentumSection
                 .padding(.top, AppSpacing.sm)
         }
+    }
+
+    /// Period label for the merged view (e.g. "2-Year Flow"), shown once at
+    /// the top since both the price chart and the volume bars span it.
+    private var flowPeriodLabel: String {
+        if let sm = consensus.hedgeFundSmartMoney,
+           sm.flowData.contains(where: { $0.hasActivity }) {
+            return "\(sm.summary.periodDescription) Flow"
+        }
+        return "12-Month Flow"
     }
 
     // MARK: - Analyst Price Target Header
@@ -89,8 +107,8 @@ struct ReportConsensusBar: View {
 
     private var analystPriceChart: some View {
         GeometryReader { geometry in
-            let leadingPadding: CGFloat = 20 // Align with Swift Charts leading space
-            let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges and 20pts for leading
+            let leadingPadding: CGFloat = 8 // Stretch the line toward the left edge
+            let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges/pole on the right
 
             // Single coordinate system: every element below resolves its y
             // through `yPosition(for:in:)` in the GeometryReader's top-origin
@@ -353,22 +371,20 @@ struct ReportConsensusBar: View {
         if let smartMoney = consensus.hedgeFundSmartMoney,
            smartMoney.flowData.contains(where: { $0.hasActivity }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text("\(smartMoney.summary.periodDescription) Flow")
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(.top, AppSpacing.md)
-
                 // Volume bars only — the price line lives in the analyst
-                // chart above. Trailing inset keeps the bars in the same
-                // horizontal band as that line (clear of the pole/badge gutter).
+                // chart above. Small trailing inset lines the billions y-axis
+                // up with the target price badges' column (the badges sit in a
+                // ~50pt right gutter; this nudges the axis off the far edge to
+                // match).
                 SmartMoneyFlowChart(
                     priceData: smartMoney.priceData,
                     dailyPrices: smartMoney.dailyPrices,
                     flowData: smartMoney.flowData,
                     showPriceChart: false,
-                    showVolumeYAxis: false
+                    showVolumeYAxis: true
                 )
-                .padding(.trailing, 50)
+                .padding(.top, AppSpacing.md)
+                .padding(.trailing, 22)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)
@@ -379,19 +395,15 @@ struct ReportConsensusBar: View {
         } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
             // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports)
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text("12-Month Flow")
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(.top, AppSpacing.md)
-
                 SmartMoneyFlowChart(
                     priceData: consensus.hedgeFundPriceData,
                     dailyPrices: [],
                     flowData: consensus.hedgeFundFlowData,
                     showPriceChart: false,
-                    showVolumeYAxis: false
+                    showVolumeYAxis: true
                 )
-                .padding(.trailing, 50)
+                .padding(.top, AppSpacing.md)
+                .padding(.trailing, 22)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)

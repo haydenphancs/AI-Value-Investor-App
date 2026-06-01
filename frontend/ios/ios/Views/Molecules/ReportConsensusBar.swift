@@ -371,20 +371,11 @@ struct ReportConsensusBar: View {
         if let smartMoney = consensus.hedgeFundSmartMoney,
            smartMoney.flowData.contains(where: { $0.hasActivity }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Volume bars only — the price line lives in the analyst
-                // chart above. Small trailing inset lines the billions y-axis
-                // up with the target price badges' column (the badges sit in a
-                // ~50pt right gutter; this nudges the axis off the far edge to
-                // match).
-                SmartMoneyFlowChart(
-                    priceData: smartMoney.priceData,
-                    dailyPrices: smartMoney.dailyPrices,
-                    flowData: smartMoney.flowData,
-                    showPriceChart: false,
-                    showVolumeYAxis: true
-                )
-                .padding(.top, AppSpacing.md)
-                .padding(.trailing, 22)
+                // Volume bars drawn in the analyst chart's exact coordinate
+                // system, so the billions y-axis lands in the same gutter as
+                // the Min/Avg/Max badges and the bars span under the price line.
+                volumeBarsChart(smartMoney.flowData)
+                    .padding(.top, AppSpacing.md)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)
@@ -395,20 +386,114 @@ struct ReportConsensusBar: View {
         } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
             // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports)
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                SmartMoneyFlowChart(
-                    priceData: consensus.hedgeFundPriceData,
-                    dailyPrices: [],
-                    flowData: consensus.hedgeFundFlowData,
-                    showPriceChart: false,
-                    showVolumeYAxis: true
-                )
-                .padding(.top, AppSpacing.md)
-                .padding(.trailing, 22)
+                volumeBarsChart(consensus.hedgeFundFlowData)
+                    .padding(.top, AppSpacing.md)
 
                 SmartMoneyFlowLegend()
                     .padding(.top, AppSpacing.xs)
             }
         }
+    }
+
+    // MARK: - Hedge Fund Volume Bars (custom-aligned)
+
+    /// Buy/sell volume bars drawn in the SAME coordinate system as
+    /// `analystPriceChart`: bars span the price line's x-range and the billions
+    /// y-axis labels sit in the identical right-hand gutter as the Min/Avg/Max
+    /// badges. Custom (not `SmartMoneyFlowChart`) so the axis aligns with the
+    /// price targets exactly — Swift Charts' auto-placed axis can't guarantee it.
+    private func volumeBarsChart(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
+        GeometryReader { geometry in
+            let leadingPadding: CGFloat = 8
+            let chartWidth = geometry.size.width - 50 - leadingPadding
+            let poleGap: CGFloat = 24
+            let span = max(chartWidth - poleGap, 1)            // == price line's x-span
+            let count = max(bars.count, 1)
+            let slot = span / CGFloat(count)
+            let barWidth = min(slot * 0.5, 22)
+            let labelStride = count > 8 ? 2 : 1
+
+            let labelStripHeight: CGFloat = 24
+            let plotHeight = geometry.size.height - labelStripHeight
+            let zeroY = plotHeight / 2
+            let maxBarHeight = max(zeroY - 10, 1)
+
+            let dataMax = bars.flatMap { [$0.buyVolume, $0.sellVolume] }.max() ?? 0
+            let axisMax = max(niceAxisMax(dataMax), 1)
+            let gutterCenterX = leadingPadding + chartWidth + 25   // == targetBadges center
+
+            ZStack(alignment: .topLeading) {
+                // Gridlines + billions y-axis labels (in the badge gutter)
+                ForEach(volumeAxisTicks(axisMax), id: \.self) { tick in
+                    let y = zeroY - CGFloat(tick / axisMax) * maxBarHeight
+
+                    Path { path in
+                        path.move(to: CGPoint(x: leadingPadding, y: y))
+                        path.addLine(to: CGPoint(x: leadingPadding + span, y: y))
+                    }
+                    .stroke(AppColors.cardBackgroundLight.opacity(0.3),
+                            style: StrokeStyle(lineWidth: tick == 0 ? 0.75 : 0.5))
+
+                    Text(formatVolumeAxis(tick))
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .frame(width: 50, alignment: .center)
+                        .position(x: gutterCenterX, y: y)
+                }
+
+                // Bars + period labels
+                ForEach(Array(bars.enumerated()), id: \.offset) { index, bar in
+                    let cx = leadingPadding + (CGFloat(index) + 0.5) * slot
+                    let buyHeight = bar.buyVolume > 0
+                        ? max(CGFloat(min(bar.buyVolume / axisMax, 1.0)) * maxBarHeight, 1.5) : 0
+                    let sellHeight = bar.sellVolume > 0
+                        ? max(CGFloat(min(bar.sellVolume / axisMax, 1.0)) * maxBarHeight, 1.5) : 0
+
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(HoldersColors.buyVolume)
+                        .frame(width: barWidth, height: buyHeight)
+                        .position(x: cx, y: zeroY - buyHeight / 2)
+
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(HoldersColors.sellVolume)
+                        .frame(width: barWidth, height: sellHeight)
+                        .position(x: cx, y: zeroY + sellHeight / 2)
+
+                    if index % labelStride == 0 {
+                        Text(formatMonthLabel(bar.month))
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .multilineTextAlignment(.center)
+                            .frame(width: slot * CGFloat(labelStride))
+                            .position(x: cx, y: plotHeight + labelStripHeight / 2)
+                    }
+                }
+            }
+        }
+        .frame(height: 150)
+    }
+
+    /// Round a positive value up to a "nice" axis maximum (1/2/2.5/5 × 10ⁿ).
+    private func niceAxisMax(_ value: Double) -> Double {
+        guard value > 0 else { return 0 }
+        let exponent = floor(log10(value))
+        let base = pow(10.0, exponent)
+        let frac = value / base
+        let niceFrac: Double = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 2.5 ? 2.5 : frac <= 5 ? 5 : 10
+        return niceFrac * base
+    }
+
+    /// Five symmetric ticks for the volume axis: +max, +½max, 0, −½max, −max.
+    private func volumeAxisTicks(_ axisMax: Double) -> [Double] {
+        [axisMax, axisMax / 2, 0, -axisMax / 2, -axisMax]
+    }
+
+    /// Format a volume (in millions) for the y-axis: "200B" / "50M" / "0".
+    private func formatVolumeAxis(_ millions: Double) -> String {
+        let magnitude = abs(millions)
+        if magnitude >= 1000 { return String(format: "%.0fB", millions / 1000) }
+        if magnitude >= 1 { return String(format: "%.0fM", millions) }
+        return "0"
     }
 }
 

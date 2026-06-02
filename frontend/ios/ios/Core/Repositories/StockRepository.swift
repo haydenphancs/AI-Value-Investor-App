@@ -2099,12 +2099,21 @@ struct SmartMoneyFlowDataPointDTO: Codable {
     let sellVolume: Double
     let month: String
     let hasActivity: Bool?
+    // Real 13F signals for the hedge-fund chart (nil for insider/congress and
+    // legacy reports). netFlow is the real net share change; the counts are how
+    // many institutions added vs trimmed.
+    let netFlow: Double?
+    let buyersCount: Int?
+    let sellersCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case month
         case buyVolume = "buy_volume"
         case sellVolume = "sell_volume"
         case hasActivity = "has_activity"
+        case netFlow = "net_flow"
+        case buyersCount = "buyers_count"
+        case sellersCount = "sellers_count"
     }
 
     func toDisplayModel() -> SmartMoneyFlowDataPoint {
@@ -2112,7 +2121,10 @@ struct SmartMoneyFlowDataPointDTO: Codable {
             month: month,
             buyVolume: buyVolume,
             sellVolume: sellVolume,
-            hasActivity: hasActivity ?? (buyVolume > 0 || sellVolume > 0)
+            hasActivity: hasActivity ?? (buyVolume > 0 || sellVolume > 0),
+            netShares: netFlow,
+            buyersCount: buyersCount,
+            sellersCount: sellersCount
         )
     }
 }

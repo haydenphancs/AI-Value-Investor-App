@@ -115,16 +115,25 @@ struct SmartMoneyFlowDataPoint: Identifiable {
     let buyVolume: Double   // In millions
     let sellVolume: Double  // In millions
     let hasActivity: Bool   // False when both buy and sell are 0
+    // Real 13F signals (hedge-fund chart only; nil for insider/congress & legacy).
+    let netShares: Double?  // Real net share change (millions); preferred over buy−sell
+    let buyersCount: Int?   // Real # institutions that added
+    let sellersCount: Int?  // Real # institutions that trimmed
 
-    init(month: String, buyVolume: Double, sellVolume: Double, hasActivity: Bool = true) {
+    init(month: String, buyVolume: Double, sellVolume: Double, hasActivity: Bool = true,
+         netShares: Double? = nil, buyersCount: Int? = nil, sellersCount: Int? = nil) {
         self.month = month
         self.buyVolume = buyVolume
         self.sellVolume = sellVolume
         self.hasActivity = hasActivity
+        self.netShares = netShares
+        self.buyersCount = buyersCount
+        self.sellersCount = sellersCount
     }
 
+    /// Real net when present (from FMP), else derived from buy−sell (legacy/other tabs).
     var netFlow: Double {
-        buyVolume - sellVolume
+        netShares ?? (buyVolume - sellVolume)
     }
 
     var isPositiveNet: Bool {

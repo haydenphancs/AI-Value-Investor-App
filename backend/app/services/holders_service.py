@@ -1332,6 +1332,15 @@ class HoldersService:
         """Upsert computed quarter rows into Supabase."""
         if not rows:
             return
+        # Stamp computed_at before upsert: Postgres DEFAULT now() only fires on
+        # INSERT, so an upsert-UPDATE of an existing (ticker, year, quarter) row
+        # would keep its OLD computed_at — leaving it permanently below
+        # _HFQ_SHARES_FLOOR, so _load_existing_quarters treats it as stale and
+        # every holders build re-fetches all 8 quarters from FMP. setdefault lets
+        # a caller (e.g. the bulk hydrator) pass an explicit stamp.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for r in rows:
+            r.setdefault("computed_at", now_iso)
         try:
             self.supabase.table("hedge_fund_quarters").upsert(
                 rows, on_conflict="ticker,year,quarter"
@@ -1455,8 +1464,15 @@ class HoldersService:
             if row:
                 bv = float(row.get("buy_volume", 0))
                 sv = float(row.get("sell_volume", 0))
+                # Real signals straight from the positions-summary (no estimate).
+                nf_raw = row.get("net_flow")
+                nf = float(nf_raw) if nf_raw is not None else round(bv - sv, 2)
+                bc_raw = row.get("buyers_count")
+                sc_raw = row.get("sellers_count")
+                bc = int(bc_raw) if bc_raw is not None else None
+                sc = int(sc_raw) if sc_raw is not None else None
             else:
-                bv, sv = 0.0, 0.0
+                bv, sv, nf, bc, sc = 0.0, 0.0, 0.0, None, None
             total_buy += bv
             total_sell += sv
             flow_data.append(SmartMoneyFlowDataPointSchema(
@@ -1464,6 +1480,9 @@ class HoldersService:
                 buy_volume=round(bv, 2),
                 sell_volume=round(sv, 2),
                 has_activity=(bv > 0 or sv > 0),
+                net_flow=round(nf, 2),
+                buyers_count=bc,
+                sellers_count=sc,
             ))
 
         net = round(total_buy - total_sell, 2)

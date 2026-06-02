@@ -73,6 +73,14 @@ class SmartMoneyFlowDataPointSchema(BaseModel):
     buy_volume: float = Field(0.0)
     sell_volume: float = Field(0.0)
     has_activity: bool = True
+    # Real 13F signal for the hedge-fund (Institutions) chart: the net share
+    # change and the real counts of institutions that added vs trimmed. These
+    # come straight from the positions-summary (no estimation). Optional so the
+    # insider/congress tabs — which don't populate them — still validate, and so
+    # legacy persisted reports decode.
+    net_flow: Optional[float] = None
+    buyers_count: Optional[int] = None
+    sellers_count: Optional[int] = None
 
 
 class SmartMoneyFlowSummarySchema(BaseModel):

@@ -57,7 +57,7 @@ struct ReportHeaderBar: View {
                                 .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textMuted)
 
-                            Text(String(format: "$%.0f", currentPrice))
+                            Text(String(format: "$%.2f", currentPrice))
                                 .font(AppTypography.labelSmall).fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
                         }

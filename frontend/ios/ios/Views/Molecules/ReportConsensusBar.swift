@@ -10,29 +10,27 @@ import SwiftUI
 struct ReportConsensusBar: View {
     let consensus: ReportWallStreetConsensus
 
-    private var pricePosition: Double {
-        guard consensus.highTarget > consensus.lowTarget else { return 0.5 }
-        return (consensus.currentPrice - consensus.lowTarget) / (consensus.highTarget - consensus.lowTarget)
+    /// Every price the chart must keep on-screen: the analyst targets (when
+    /// present), the live current price, and the historical line. Targets are
+    /// optional — when absent (no analyst coverage) the chart scales to the
+    /// price line + current price alone.
+    private var priceUniverse: [Double] {
+        let targets = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget].compactMap { $0 }
+        return targets + [consensus.currentPrice] + chartPrices
     }
 
     private var minPrice: Double {
-        let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
-        let historicalPrices = chartPrices
-        let allPrices = targetPrices + historicalPrices
-        // Add extra padding at the bottom to push content up
-        let minValue = allPrices.min() ?? consensus.lowTarget
-        let maxValue = allPrices.max() ?? consensus.highTarget
+        let allPrices = priceUniverse
+        let minValue = allPrices.min() ?? consensus.currentPrice
+        let maxValue = allPrices.max() ?? consensus.currentPrice
         let range = maxValue - minValue
         return minValue - (range * 0.3) // Add 30% padding below
     }
 
     private var maxPrice: Double {
-        let targetPrices = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget, consensus.currentPrice]
-        let historicalPrices = chartPrices
-        let allPrices = targetPrices + historicalPrices
-        // Add less padding at the top
-        let maxValue = allPrices.max() ?? consensus.highTarget
-        let minValue = allPrices.min() ?? consensus.lowTarget
+        let allPrices = priceUniverse
+        let maxValue = allPrices.max() ?? consensus.currentPrice
+        let minValue = allPrices.min() ?? consensus.currentPrice
         let range = maxValue - minValue
         return maxValue + (range * 0.1) // Add 10% padding above
     }
@@ -95,7 +93,7 @@ struct ReportConsensusBar: View {
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
-            Text("One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus. Target \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget)). Current price: \(consensus.formattedCurrentPrice).")
+            Text(analystPriceTargetSummary)
                 .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
@@ -103,12 +101,22 @@ struct ReportConsensusBar: View {
         }
     }
 
+    /// Forecast copy. With real analyst coverage it states the consensus +
+    /// target range; without it, an honest "no targets" line so we never
+    /// imply a forecast the data doesn't support.
+    private var analystPriceTargetSummary: String {
+        guard consensus.hasAnalystTargets else {
+            return "No analyst price targets are available for this company yet. Current price: \(consensus.formattedCurrentPrice)."
+        }
+        return "One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus. Target \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget)). Current price: \(consensus.formattedCurrentPrice)."
+    }
+
     // MARK: - Analyst Price Chart
 
     private var analystPriceChart: some View {
         GeometryReader { geometry in
             let leadingPadding: CGFloat = 8 // Stretch the line toward the left edge
-            let chartWidth = geometry.size.width - 50 - leadingPadding // Reserve 50pts for badges/pole on the right
+            let chartWidth = geometry.size.width - 60 - leadingPadding // Reserve 60pts for the pole + badges (with breathing room) on the right
 
             // Single coordinate system: every element below resolves its y
             // through `yPosition(for:in:)` in the GeometryReader's top-origin
@@ -202,90 +210,103 @@ struct ReportConsensusBar: View {
         .stroke(AppColors.textSecondary, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
     }
 
+    @ViewBuilder
     private func targetPole(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        let xPos = leadingPadding + chartWidth - 3 // Position slightly left of the edge
-        let highY = yPosition(for: consensus.highTarget, in: geometry)
-        let avgY = yPosition(for: consensus.targetPrice, in: geometry)
-        let lowY = yPosition(for: consensus.lowTarget, in: geometry)
+        if let highTarget = consensus.highTarget,
+           let targetPrice = consensus.targetPrice,
+           let lowTarget = consensus.lowTarget {
+            let xPos = leadingPadding + chartWidth - 3 // Position slightly left of the edge
+            let highY = yPosition(for: highTarget, in: geometry)
+            let avgY = yPosition(for: targetPrice, in: geometry)
+            let lowY = yPosition(for: lowTarget, in: geometry)
 
-        // Extend the pole beyond the points
-        let poleExtension: CGFloat = 20
-        let extendedHighY = highY - poleExtension
-        let extendedLowY = lowY + poleExtension
+            // Extend the pole beyond the points
+            let poleExtension: CGFloat = 20
+            let extendedHighY = highY - poleExtension
+            let extendedLowY = lowY + poleExtension
 
-        return Group {
-            // Thick vertical pole from low to high (extended)
-            RoundedRectangle(cornerRadius: 2)
-                .fill(AppColors.textMuted.opacity(0.4))
-                .frame(width: 6, height: max(extendedLowY - extendedHighY, 1))
-                .position(x: xPos, y: (extendedHighY + extendedLowY) / 2)
+            Group {
+                // Thick vertical pole from low to high (extended)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(AppColors.textMuted.opacity(0.4))
+                    .frame(width: 6, height: max(extendedLowY - extendedHighY, 1))
+                    .position(x: xPos, y: (extendedHighY + extendedLowY) / 2)
 
-            // High target point (green) - smaller
-            Circle()
-                .fill(AppColors.bullish)
-                .frame(width: 10, height: 10)
-                .position(x: xPos, y: highY)
+                // High target point (green) - smaller
+                Circle()
+                    .fill(AppColors.bullish)
+                    .frame(width: 10, height: 10)
+                    .position(x: xPos, y: highY)
 
-            // Average target point (blue) - smaller
-            Circle()
-                .fill(AppColors.primaryBlue)
-                .frame(width: 10, height: 10)
-                .position(x: xPos, y: avgY)
+                // Average target point (blue) - smaller
+                Circle()
+                    .fill(AppColors.primaryBlue)
+                    .frame(width: 10, height: 10)
+                    .position(x: xPos, y: avgY)
 
-            // Low target point (red) - smaller
-            Circle()
-                .fill(AppColors.bearish)
-                .frame(width: 10, height: 10)
-                .position(x: xPos, y: lowY)
+                // Low target point (red) - smaller
+                Circle()
+                    .fill(AppColors.bearish)
+                    .frame(width: 10, height: 10)
+                    .position(x: xPos, y: lowY)
+            }
         }
     }
 
+    @ViewBuilder
     private func targetBadges(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        let badgeGutter: CGFloat = 50 // Matches the 50pt reserved in chartWidth
-        let badgeLeadingX = leadingPadding + chartWidth // Just right of the pole
-        let highY = yPosition(for: consensus.highTarget, in: geometry)
-        let avgY = yPosition(for: consensus.targetPrice, in: geometry)
-        let lowY = yPosition(for: consensus.lowTarget, in: geometry)
+        if let highTarget = consensus.highTarget,
+           let targetPrice = consensus.targetPrice,
+           let lowTarget = consensus.lowTarget {
+            let badgeGutter: CGFloat = 50  // badge frame width
+            let badgeGap: CGFloat = 7      // breathing room between the pole and the badge text
+            let badgeCenterX = leadingPadding + chartWidth + badgeGutter / 2 + badgeGap
+            let highY = yPosition(for: highTarget, in: geometry)
+            let avgY = yPosition(for: targetPrice, in: geometry)
+            let lowY = yPosition(for: lowTarget, in: geometry)
 
-        return Group {
-            // High target badge - centered vertically with the point
-            targetBadge(
-                label: "Max",
-                price: consensus.formattedHighTarget,
-                percent: consensus.formattedHighTargetPercent,
-                color: AppColors.bullish
-            )
-            .frame(width: badgeGutter, alignment: .leading)
-            .position(x: badgeLeadingX + badgeGutter / 2, y: highY)
+            Group {
+                // High target badge - centered vertically with the point
+                targetBadge(
+                    price: formatTargetPrice(highTarget),
+                    percent: consensus.formattedHighTargetPercent,
+                    color: AppColors.bullish
+                )
+                .frame(width: badgeGutter, alignment: .leading)
+                .position(x: badgeCenterX, y: highY)
 
-            // Average target badge - centered vertically with the point
-            targetBadge(
-                label: "Avg",
-                price: consensus.formattedTargetPrice,
-                percent: consensus.formattedAvgTargetPercent,
-                color: AppColors.primaryBlue
-            )
-            .frame(width: badgeGutter, alignment: .leading)
-            .position(x: badgeLeadingX + badgeGutter / 2, y: avgY)
+                // Average target badge - centered vertically with the point
+                targetBadge(
+                    price: formatTargetPrice(targetPrice),
+                    percent: consensus.formattedAvgTargetPercent,
+                    color: AppColors.primaryBlue
+                )
+                .frame(width: badgeGutter, alignment: .leading)
+                .position(x: badgeCenterX, y: avgY)
 
-            // Low target badge - centered vertically with the point
-            targetBadge(
-                label: "Min",
-                price: consensus.formattedLowTarget,
-                percent: consensus.formattedLowTargetPercent,
-                color: AppColors.bearish
-            )
-            .frame(width: badgeGutter, alignment: .leading)
-            .position(x: badgeLeadingX + badgeGutter / 2, y: lowY)
+                // Low target badge - centered vertically with the point
+                targetBadge(
+                    price: formatTargetPrice(lowTarget),
+                    percent: consensus.formattedLowTargetPercent,
+                    color: AppColors.bearish
+                )
+                .frame(width: badgeGutter, alignment: .leading)
+                .position(x: badgeCenterX, y: lowY)
+            }
         }
     }
 
-    private func targetBadge(label: String, price: String, percent: String, color: Color) -> some View {
-        VStack(alignment: .center, spacing: 2) {
-            Text(label)
-                .font(AppTypography.captionTiny)
-                .foregroundColor(AppColors.textMuted)
+    /// Target price for the badges — shows cents only when the value actually
+    /// has them ("$249.53"); whole numbers stay clean ("$400").
+    private func formatTargetPrice(_ value: Double) -> String {
+        if value == value.rounded() {
+            return String(format: "$%.0f", value)
+        }
+        return String(format: "$%.2f", value)
+    }
 
+    private func targetBadge(price: String, percent: String, color: Color) -> some View {
+        VStack(alignment: .center, spacing: 2) {
             Text(price)
                 .font(AppTypography.caption).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
@@ -405,7 +426,7 @@ struct ReportConsensusBar: View {
     private func volumeBarsChart(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
         GeometryReader { geometry in
             let leadingPadding: CGFloat = 8
-            let chartWidth = geometry.size.width - 50 - leadingPadding
+            let chartWidth = geometry.size.width - 60 - leadingPadding
             let poleGap: CGFloat = 24
             let span = max(chartWidth - poleGap, 1)            // == price line's x-span
             let count = max(bars.count, 1)
@@ -502,4 +523,26 @@ struct ReportConsensusBar: View {
         .padding()
         .background(AppColors.cardBackground)
         .preferredColorScheme(.dark)
+}
+
+#Preview("No analyst coverage") {
+    let base = TickerReportData.sampleOracle.wallStreetConsensus
+    return ReportConsensusBar(consensus: ReportWallStreetConsensus(
+        rating: base.rating,
+        currentPrice: base.currentPrice,
+        targetPrice: nil,
+        lowTarget: nil,
+        highTarget: nil,
+        valuationStatus: base.valuationStatus,
+        discountPercent: base.discountPercent,
+        hedgeFundNote: base.hedgeFundNote,
+        hedgeFundPriceData: base.hedgeFundPriceData,
+        hedgeFundFlowData: base.hedgeFundFlowData,
+        hedgeFundSmartMoney: base.hedgeFundSmartMoney,
+        momentumUpgrades: base.momentumUpgrades,
+        momentumDowngrades: base.momentumDowngrades
+    ))
+    .padding()
+    .background(AppColors.cardBackground)
+    .preferredColorScheme(.dark)
 }

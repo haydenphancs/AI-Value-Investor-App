@@ -364,13 +364,13 @@ struct ReportConsensusBar: View {
         }
     }
 
-    // MARK: - Hedge Funds Section
+    // MARK: - Institutions Section
 
     private var hedgeFundsSection: some View {
         Group {
             if let hedgeFundNote = consensus.hedgeFundNote {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    Text("Hedge Funds")
+                    Text("Institutions")
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
 

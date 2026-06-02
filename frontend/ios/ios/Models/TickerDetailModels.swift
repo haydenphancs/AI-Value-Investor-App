@@ -707,7 +707,6 @@ extension SnapshotItem {
             rating: .weak,
             metrics: [
                 SnapshotMetric(name: "Institutional Ownership", value: "61.0%"),
-                SnapshotMetric(name: "Hedge Fund Holdings", value: "7.2%"),
                 SnapshotMetric(name: "Insider Sold (6M shares)", value: "$2.4M"),
                 SnapshotMetric(name: "Top 10 Holders", value: "42.6%"),
                 SnapshotMetric(name: "Institutional Activity", value: "-3.2%")

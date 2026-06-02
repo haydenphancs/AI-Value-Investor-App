@@ -1280,13 +1280,26 @@ class HoldersService:
         )
         net_shares = float(data.get("numberOf13FsharesChange") or 0)
         if split_ratio and split_ratio != 1.0:
-            # Restate last quarter's (pre-split) shares onto this quarter's
-            # post-split basis so the change reflects real position moves.
             cur = float(data.get("numberOf13Fshares") or 0)
             last_raw = data.get("lastNumberOf13Fshares")
             last = float(last_raw) if last_raw is not None else (cur - net_shares)
-            net_shares = cur - last * split_ratio
+            # Only treat it as a real split when the reported share count
+            # actually moved by ~the split ratio (the physical signature of a
+            # split). FMP's /splits ALSO returns spinoffs, ADR-ratio changes,
+            # and reverse splits with odd ratios where the count did NOT
+            # multiply — adjusting those fabricates a huge false change
+            # (e.g. GE's 1.253 "split" is a spinoff: shares didn't grow 1.25x).
+            if last > 0 and abs(cur / last - split_ratio) <= 0.15 * split_ratio:
+                net_shares = cur - last * split_ratio
         net_shares_m = net_shares / 1_000_000
+        # Magnitude safety guard: a quarterly net change can't plausibly exceed
+        # ~half the institutional shares HELD. Anything above that is a corporate
+        # action / data artifact (reverse-split micro-caps, mergers like SIRI) —
+        # not real flow. Suppress it (zero flow, but keep the real holder counts)
+        # so the chart renders NO bar for that quarter instead of garbage.
+        total_m = float(data.get("numberOf13Fshares") or 0) / 1_000_000
+        if total_m > 0 and abs(net_shares_m) > 0.5 * total_m:
+            return 0.0, 0.0, 0.0, buyers, sellers
         buy_m, sell_m = HoldersService._estimate_buy_sell(
             net_shares_m, buyers, sellers
         )
@@ -1350,14 +1363,17 @@ class HoldersService:
                 if key not in target_set:
                     continue
                 # Skip rows that need re-computation:
-                # 1) All values zeroed out
+                # 1) Truly empty rows (no flow AND no holders) — recompute.
+                #    A magnitude-suppressed quarter (see _compute_quarter_flow)
+                #    has zero flow but REAL buyer/seller counts; KEEP it so it
+                #    isn't refetched forever — the chart just renders no bar.
                 # 2) Old logic: one side is zero while both buyers & sellers exist
                 bv = r.get("buy_volume", 0) or 0
                 sv = r.get("sell_volume", 0) or 0
                 nf = r.get("net_flow", 0) or 0
                 bc = r.get("buyers_count", 0) or 0
                 sc = r.get("sellers_count", 0) or 0
-                if bv == 0 and sv == 0 and nf == 0:
+                if bv == 0 and sv == 0 and nf == 0 and bc == 0 and sc == 0:
                     continue
                 if nf != 0 and bc > 0 and sc > 0 and (bv == 0 or sv == 0):
                     continue

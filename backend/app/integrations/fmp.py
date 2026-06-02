@@ -872,6 +872,24 @@ class FMPClient:
             params={"query": query, "limit": limit},
         )
 
+    async def get_stock_splits(self, ticker: str) -> List[Dict[str, Any]]:
+        """Stock split history for a symbol (stable ``/splits``).
+
+        Used to normalize 13F share-count changes across splits: FMP reports
+        raw (unadjusted) historical 13F counts, so a split quarter's raw change
+        is dominated by the split (e.g. NVDA Q2'24 = +14.2B from the 10:1).
+        Rows carry ``date`` + ``numerator`` / ``denominator``. Returns [] on
+        failure (caller treats as "no splits").
+        """
+        try:
+            data = await self._make_request(
+                "splits", params={"symbol": ticker.upper()}
+            )
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Splits fetch failed for {ticker}: {e}")
+            return []
+
     # ── SEC filings (may require higher-tier subscription) ──────────
 
     async def get_sec_filings(

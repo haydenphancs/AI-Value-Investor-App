@@ -1304,7 +1304,6 @@ class StockOverviewService:
         metrics = [
             SnapshotMetricResponse(name="Institutional Ownership", value=_fmt_own(inst_pct)),
             SnapshotMetricResponse(name="Insider Ownership", value=_fmt_own(insider_pct)),
-            SnapshotMetricResponse(name="Hedge Fund Holdings", value="—"),
             SnapshotMetricResponse(name="Top 10 Holders", value="—"),
             SnapshotMetricResponse(name="Institutional Activity", value="—"),
         ]

@@ -140,20 +140,34 @@ struct SmartMoneyFlowDataPoint: Identifiable {
     }
 }
 
+/// Unit a smart-money flow is denominated in. Hedge-fund (13F) flow is shown
+/// in SHARES — share counts are comparable across quarters, whereas dollars are
+/// distorted by price drift. Insider/Congress flow stays in dollars.
+enum SmartMoneyFlowUnit {
+    case dollars
+    case shares
+}
+
 /// Summary of smart money activity
 struct SmartMoneyFlowSummary {
-    let totalNetFlow: Double  // Total net in millions
-    let totalBuy: Double      // Total buy volume in millions
-    let totalSell: Double     // Total sell volume in millions
+    let totalNetFlow: Double  // Total net (millions of $ or millions of shares)
+    let totalBuy: Double      // Total buy (millions of $ or millions of shares)
+    let totalSell: Double     // Total sell (millions of $ or millions of shares)
     let isPositive: Bool
     let periodDescription: String  // e.g., "12-Month"
+    var unit: SmartMoneyFlowUnit = .dollars
 
     var formattedNetFlow: String {
         let sign = totalNetFlow >= 0 ? "+" : "-"
-        if abs(totalNetFlow) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow) / 1000))B"
+        let mag = abs(totalNetFlow)
+        switch unit {
+        case .dollars:
+            if mag >= 1000 { return "\(sign)$\(String(format: "%.2f", mag / 1000))B" }
+            return "\(sign)$\(String(format: "%.2f", mag))M"
+        case .shares:
+            if mag >= 1000 { return "\(sign)\(String(format: "%.2f", mag / 1000))B shares" }
+            return "\(sign)\(String(format: "%.2f", mag))M shares"
         }
-        return "\(sign)$\(String(format: "%.2f", abs(totalNetFlow)))M"
     }
 
     var formattedBuy: String {
@@ -790,12 +804,17 @@ struct InsiderActivity: Identifiable {
         changeInMillions >= 0
     }
 
+    // Insider change is in millions of SHARES (Form 4 share counts). Format the
+    // raw share count so small trades read exactly (e.g. "+200 shares").
     var formattedChange: String {
         let sign = changeInMillions >= 0 ? "+" : "-"
-        if abs(changeInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
-        }
-        return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
+        let shares = (abs(changeInMillions) * 1_000_000).rounded()
+        let body: String
+        if shares >= 1e9 { body = String(format: "%.2fB shares", shares / 1e9) }
+        else if shares >= 1e6 { body = String(format: "%.2fM shares", shares / 1e6) }
+        else if shares >= 1e3 { body = String(format: "%.0fK shares", shares / 1e3) }
+        else { body = String(format: "%.0f shares", shares) }
+        return sign + body
     }
 
     var formattedDate: String {
@@ -832,26 +851,23 @@ struct InsiderActivitySummary {
         netInformativeFlowInMillions >= 0
     }
 
-    var formattedBuys: String {
-        if informativeBuysInMillions >= 1000 {
-            return String(format: "$%.2fB", informativeBuysInMillions / 1000)
-        }
-        return String(format: "$%.2fM", informativeBuysInMillions)
+    // Insider informative buys/sells are in millions of SHARES. Format the raw
+    // share count so small trades read exactly (e.g. "200 shares"), not "0".
+    private func formatShares(_ millions: Double) -> String {
+        let shares = (millions * 1_000_000).rounded()
+        if shares >= 1e9 { return String(format: "%.2fB shares", shares / 1e9) }
+        if shares >= 1e6 { return String(format: "%.2fM shares", shares / 1e6) }
+        if shares >= 1e3 { return String(format: "%.0fK shares", shares / 1e3) }
+        return String(format: "%.0f shares", shares)
     }
 
-    var formattedSells: String {
-        if informativeSellsInMillions >= 1000 {
-            return String(format: "$%.2fB", informativeSellsInMillions / 1000)
-        }
-        return String(format: "$%.2fM", informativeSellsInMillions)
-    }
+    var formattedBuys: String { formatShares(informativeBuysInMillions) }
+
+    var formattedSells: String { formatShares(informativeSellsInMillions) }
 
     var formattedNetFlow: String {
         let sign = netInformativeFlowInMillions >= 0 ? "+ " : "- "
-        if abs(netInformativeFlowInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", abs(netInformativeFlowInMillions) / 1000))B"
-        }
-        return "\(sign)$\(String(format: "%.2f", abs(netInformativeFlowInMillions)))M"
+        return sign + formatShares(abs(netInformativeFlowInMillions))
     }
 
     var netFlowColor: Color {

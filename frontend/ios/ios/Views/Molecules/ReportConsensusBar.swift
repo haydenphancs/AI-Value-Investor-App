@@ -398,7 +398,7 @@ struct ReportConsensusBar: View {
                 volumeBarsChart(smartMoney.flowData)
                     .padding(.top, AppSpacing.md)
 
-                SmartMoneyFlowLegend()
+                SmartMoneyFlowLegend(buyLabel: "Shares Bought", sellLabel: "Shares Sold")
                     .padding(.top, AppSpacing.xs)
 
                 SmartMoneyNetFlowBadge(summary: smartMoney.summary)
@@ -410,7 +410,7 @@ struct ReportConsensusBar: View {
                 volumeBarsChart(consensus.hedgeFundFlowData)
                     .padding(.top, AppSpacing.md)
 
-                SmartMoneyFlowLegend()
+                SmartMoneyFlowLegend(buyLabel: "Shares Bought", sellLabel: "Shares Sold")
                     .padding(.top, AppSpacing.xs)
             }
         }

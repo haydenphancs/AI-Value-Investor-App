@@ -10,6 +10,9 @@ import SwiftUI
 struct ReportConsensusBar: View {
     let consensus: ReportWallStreetConsensus
 
+    /// Tapped quarter in the hedge-fund net-flow chart; nil → show the latest.
+    @State private var selectedFlowIndex: Int? = nil
+
     /// Every price the chart must keep on-screen: the analyst targets (when
     /// present), the live current price, and the historical line. Targets are
     /// optional — when absent (no analyst coverage) the chart scales to the
@@ -392,26 +395,68 @@ struct ReportConsensusBar: View {
         if let smartMoney = consensus.hedgeFundSmartMoney,
            smartMoney.flowData.contains(where: { $0.hasActivity }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Volume bars drawn in the analyst chart's exact coordinate
-                // system, so the billions y-axis lands in the same gutter as
-                // the Min/Avg/Max badges and the bars span under the price line.
-                volumeBarsChart(smartMoney.flowData)
-                    .padding(.top, AppSpacing.md)
+                // Per-quarter real summary (latest, or the tapped bar).
+                flowQuarterSummary(smartMoney.flowData)
 
-                SmartMoneyFlowLegend(buyLabel: "Shares Bought", sellLabel: "Shares Sold")
+                // Net-flow bars drawn in the analyst chart's exact coordinate
+                // system, so the y-axis lands in the same gutter as the
+                // Min/Avg/Max badges and the bars span under the price line.
+                volumeBarsChart(smartMoney.flowData)
+                    .padding(.top, AppSpacing.xs)
+
+                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
                     .padding(.top, AppSpacing.xs)
 
                 SmartMoneyNetFlowBadge(summary: smartMoney.summary)
                     .padding(.top, AppSpacing.sm)
             }
         } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
-            // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports)
+            // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports).
+            // Net derives from buy−sell here (no counts), so the bar still works.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                volumeBarsChart(consensus.hedgeFundFlowData)
-                    .padding(.top, AppSpacing.md)
+                flowQuarterSummary(consensus.hedgeFundFlowData)
 
-                SmartMoneyFlowLegend(buyLabel: "Shares Bought", sellLabel: "Shares Sold")
+                volumeBarsChart(consensus.hedgeFundFlowData)
                     .padding(.top, AppSpacing.xs)
+
+                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
+                    .padding(.top, AppSpacing.xs)
+            }
+        }
+    }
+
+    /// One-line REAL summary for the selected quarter (or the latest with
+    /// activity): net share change + how many institutions added vs trimmed.
+    /// Counts render only when present (hedge-fund data); legacy/other tabs show
+    /// net alone.
+    @ViewBuilder
+    private func flowQuarterSummary(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
+        let activeIndex = selectedFlowIndex
+            ?? bars.lastIndex(where: { $0.hasActivity })
+            ?? (bars.isEmpty ? nil : bars.count - 1)
+        if let idx = activeIndex, bars.indices.contains(idx) {
+            let bar = bars[idx]
+            let net = bar.netFlow
+            let isBuy = net >= 0
+            let mag = abs(net)
+            let netStr = mag >= 1000
+                ? String(format: "%@%.2fB shares", isBuy ? "+" : "−", mag / 1000)
+                : String(format: "%@%.0fM shares", isBuy ? "+" : "−", mag)
+            HStack(spacing: 6) {
+                Text(formatMonthLabel(bar.month).replacingOccurrences(of: "\n", with: " "))
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                Text("·").foregroundColor(AppColors.textMuted)
+                Text(netStr)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(isBuy ? HoldersColors.buyVolume : HoldersColors.sellVolume)
+                if let buyers = bar.buyersCount, let sellers = bar.sellersCount {
+                    Text("·").foregroundColor(AppColors.textMuted)
+                    Text("\(buyers.formatted()) added / \(sellers.formatted()) trimmed")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                Spacer(minLength: 0)
             }
         }
     }
@@ -439,7 +484,7 @@ struct ReportConsensusBar: View {
             let zeroY = plotHeight / 2
             let maxBarHeight = max(zeroY - 10, 1)
 
-            let dataMax = bars.flatMap { [$0.buyVolume, $0.sellVolume] }.max() ?? 0
+            let dataMax = bars.map { abs($0.netFlow) }.max() ?? 0
             let axisMax = max(niceAxisMax(dataMax), 1)
             let gutterCenterX = leadingPadding + chartWidth + 25   // == targetBadges center
 
@@ -462,23 +507,30 @@ struct ReportConsensusBar: View {
                         .position(x: gutterCenterX, y: y)
                 }
 
-                // Bars + period labels
+                // One net bar per quarter — up & green when net buying, down &
+                // red when net selling; height ∝ |net shares|. Tap to inspect.
                 ForEach(Array(bars.enumerated()), id: \.offset) { index, bar in
                     let cx = leadingPadding + (CGFloat(index) + 0.5) * slot
-                    let buyHeight = bar.buyVolume > 0
-                        ? max(CGFloat(min(bar.buyVolume / axisMax, 1.0)) * maxBarHeight, 1.5) : 0
-                    let sellHeight = bar.sellVolume > 0
-                        ? max(CGFloat(min(bar.sellVolume / axisMax, 1.0)) * maxBarHeight, 1.5) : 0
+                    let net = bar.netFlow
+                    let isBuy = net >= 0
+                    let netHeight = abs(net) > 0
+                        ? max(CGFloat(min(abs(net) / axisMax, 1.0)) * maxBarHeight, 1.5) : 0
 
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(HoldersColors.buyVolume)
-                        .frame(width: barWidth, height: buyHeight)
-                        .position(x: cx, y: zeroY - buyHeight / 2)
+                        .fill(isBuy ? HoldersColors.buyVolume : HoldersColors.sellVolume)
+                        .frame(width: barWidth, height: netHeight)
+                        .opacity(selectedFlowIndex == nil || selectedFlowIndex == index ? 1.0 : 0.4)
+                        .position(x: cx, y: isBuy ? zeroY - netHeight / 2 : zeroY + netHeight / 2)
 
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(HoldersColors.sellVolume)
-                        .frame(width: barWidth, height: sellHeight)
-                        .position(x: cx, y: zeroY + sellHeight / 2)
+                    // Full-height transparent hit area: tap to select (toggle).
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .frame(width: slot, height: plotHeight)
+                        .position(x: cx, y: plotHeight / 2)
+                        .onTapGesture {
+                            selectedFlowIndex = (selectedFlowIndex == index) ? nil : index
+                        }
 
                     if index % labelStride == 0 {
                         Text(formatMonthLabel(bar.month))

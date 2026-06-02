@@ -1247,17 +1247,24 @@ class HoldersService:
     @staticmethod
     def _compute_quarter_flow(
         data: Dict[str, Any],
+        split_ratio: float = 1.0,
     ) -> Tuple[float, float, float, int, int]:
         """Pure per-quarter flow math, in MILLIONS OF SHARES.
 
         Returns ``(buy_shares_m, sell_shares_m, net_shares_m, buyers, sellers)``.
 
-        The net is ``numberOf13FsharesChange`` (the real net 13F share change
-        from the positions-summary — the ONE institutional-flow figure FMP
-        reports completely), expressed in millions of shares. We deliberately
-        use shares, not dollars: share counts are comparable across quarters,
-        whereas dollar values are distorted by price drift (and multiplying by
-        a price is what produced the old axis-dominating outlier bug).
+        The net is the real net 13F share change from the positions-summary —
+        the ONE institutional-flow figure FMP reports completely — in millions
+        of shares. We use shares, not dollars: share counts are comparable
+        across quarters, whereas dollar values are distorted by price drift.
+
+        ``split_ratio`` corrects a stock split that took effect DURING this
+        quarter. FMP reports raw (unadjusted) 13F counts, so ``lastNumberOf13F
+        shares`` is pre-split while ``numberOf13Fshares`` is post-split, making
+        the raw ``numberOf13FsharesChange`` mostly the split (e.g. NVDA Q2'24 =
+        +14.2B from the 10:1, not buying). We restate last quarter onto the
+        post-split basis: ``net = cur - last*ratio``. Default ``1.0`` = no split
+        = identical to the raw change. (See ``_quarter_split_ratios``.)
 
         Only the net is measured — 13F discloses end-of-quarter positions, not
         transactions — so the gross buy/sell SPLIT is estimated from the net +
@@ -1271,11 +1278,55 @@ class HoldersService:
             int(data.get("closedPositions") or 0)
             + int(data.get("reducedPositions") or 0)
         )
-        net_shares_m = float(data.get("numberOf13FsharesChange") or 0) / 1_000_000
+        net_shares = float(data.get("numberOf13FsharesChange") or 0)
+        if split_ratio and split_ratio != 1.0:
+            # Restate last quarter's (pre-split) shares onto this quarter's
+            # post-split basis so the change reflects real position moves.
+            cur = float(data.get("numberOf13Fshares") or 0)
+            last_raw = data.get("lastNumberOf13Fshares")
+            last = float(last_raw) if last_raw is not None else (cur - net_shares)
+            net_shares = cur - last * split_ratio
+        net_shares_m = net_shares / 1_000_000
         buy_m, sell_m = HoldersService._estimate_buy_sell(
             net_shares_m, buyers, sellers
         )
         return buy_m, sell_m, round(net_shares_m, 2), buyers, sellers
+
+    @staticmethod
+    def _quarter_split_ratios(
+        splits: Optional[List[Dict[str, Any]]],
+        pairs: List[Tuple[int, int]],
+    ) -> Dict[Tuple[int, int], float]:
+        """Map each (year, quarter) → product of stock-split ratios that took
+        effect DURING that quarter (prev quarter-end < split date <= quarter-end).
+
+        A split inflates the prior quarter's reported 13F share count, so the
+        split quarter's net must restate last quarter onto the post-split basis
+        (see ``_compute_quarter_flow``). FMP ``/splits`` rows carry ``date`` +
+        ``numerator``/``denominator`` (e.g. 10/1 = 10:1). Quarters with no split
+        map to ``1.0``.
+        """
+        events: List[Tuple[str, float]] = []
+        for s in splits or []:
+            d = str(s.get("date") or "")[:10]
+            num = s.get("numerator")
+            den = s.get("denominator")
+            if d and num and den:
+                try:
+                    events.append((d, float(num) / float(den)))
+                except (ValueError, ZeroDivisionError, TypeError):
+                    continue
+        _Q_END = {1: "-03-31", 2: "-06-30", 3: "-09-30", 4: "-12-31"}
+        out: Dict[Tuple[int, int], float] = {}
+        for (y, q) in pairs:
+            qend = f"{y}{_Q_END[q]}"
+            pend = f"{y - 1}-12-31" if q == 1 else f"{y}{_Q_END[q - 1]}"
+            ratio = 1.0
+            for sdate, sr in events:
+                if pend < sdate <= qend:
+                    ratio *= sr
+            out[(y, q)] = ratio
+        return out
 
     # ── DB helpers for hedge_fund_quarters ──────────────────────
 
@@ -1418,6 +1469,12 @@ class HoldersService:
         # 3. Fetch missing from FMP in parallel
         new_rows: List[Dict[str, Any]] = []
         if missing:
+            # Split ratios for the quarters we're (re)computing, so a split
+            # quarter's raw 13F change isn't mistaken for buying (see
+            # _compute_quarter_flow). One extra FMP call per build.
+            split_ratios = HoldersService._quarter_split_ratios(
+                await self.fmp.get_stock_splits(ticker), missing
+            )
             fmp_results = await asyncio.gather(
                 *[
                     self.fmp.get_institutional_ownership_for_quarter(
@@ -1431,7 +1488,7 @@ class HoldersService:
                     continue
 
                 buy_m, sell_m, net_m, buyers, sellers = (
-                    self._compute_quarter_flow(data)
+                    self._compute_quarter_flow(data, split_ratios.get((y, q), 1.0))
                 )
                 row = {
                     "ticker": ticker,

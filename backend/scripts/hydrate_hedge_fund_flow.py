@@ -329,6 +329,14 @@ class HedgeFundFlowHydrator:
         if not to_fetch:
             return
 
+        # Split ratios so a split quarter's raw 13F change isn't read as buying
+        # (FMP reports raw counts; see HoldersService._compute_quarter_flow).
+        async with self.sem:
+            await self.limiter.acquire()
+            splits = await self.fmp.get_stock_splits(ticker)
+        self.stats["fmp_calls"] += 1
+        split_ratios = HoldersService._quarter_split_ratios(splits, to_fetch)
+
         results = await asyncio.gather(
             *[self._fetch_one_quarter(ticker, y, q) for (y, q) in to_fetch],
             return_exceptions=True,
@@ -348,7 +356,9 @@ class HedgeFundFlowHydrator:
                 if self.dry_run:
                     verify.append({"y": y, "q": q, "status": "nodata"})
                 continue
-            buy_m, sell_m, net_m, buyers, sellers = HoldersService._compute_quarter_flow(data)
+            buy_m, sell_m, net_m, buyers, sellers = HoldersService._compute_quarter_flow(
+                data, split_ratios.get((y, q), 1.0)
+            )
             # Mirrors holders_service.py live row dict + the computed_at stamp.
             row = {
                 "ticker": ticker,

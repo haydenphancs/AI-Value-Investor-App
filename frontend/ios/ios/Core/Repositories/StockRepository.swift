@@ -2070,12 +2070,17 @@ struct SmartMoneyDataDTO: Codable {
         default: smartTab = .insider
         }
 
+        // Hedge-fund (13F) and insider (Form 4) flow are denominated in SHARES
+        // — both report exact share counts. Congress is dollars (STOCK Act
+        // discloses only dollar ranges, no shares).
+        let flowUnit: SmartMoneyFlowUnit =
+            (smartTab == .hedgeFunds || smartTab == .insider) ? .shares : .dollars
         return SmartMoneyData(
             tab: smartTab,
             priceData: priceData.map { $0.toDisplayModel() },
             dailyPrices: (dailyPrices ?? []).map { $0.toDisplayModel() },
             flowData: flowData.map { $0.toDisplayModel() },
-            summary: summary.toDisplayModel()
+            summary: summary.toDisplayModel(unit: flowUnit)
         )
     }
 }
@@ -2127,13 +2132,14 @@ struct SmartMoneyFlowSummaryDTO: Codable {
         case periodDescription = "period_description"
     }
 
-    func toDisplayModel() -> SmartMoneyFlowSummary {
+    func toDisplayModel(unit: SmartMoneyFlowUnit = .dollars) -> SmartMoneyFlowSummary {
         return SmartMoneyFlowSummary(
             totalNetFlow: totalNetFlow,
             totalBuy: totalBuy ?? 0,
             totalSell: totalSell ?? 0,
             isPositive: isPositive,
-            periodDescription: periodDescription
+            periodDescription: periodDescription,
+            unit: unit
         )
     }
 }

@@ -111,6 +111,13 @@ _SUPABASE_CACHE_TTL_HOURS = 24
 # hedge_fund_quarters cache for these — always recompute + re-upsert them.
 _REFRESH_RECENT_QUARTERS = 2
 
+# Hedge-fund quarterly flow is now stored in MILLIONS OF SHARES (not dollars):
+# 13F share changes are comparable across quarters, whereas dollar values are
+# distorted by price drift. Any cached row computed before this instant holds
+# the legacy dollar values and must be recomputed. Bump this when the flow
+# unit/formula changes again.
+_HFQ_SHARES_FLOOR = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+
 
 # ── Service class ─────────────────────────────────────────────────
 
@@ -760,13 +767,20 @@ class HoldersService:
             price = _safe_float(tx, "price", 0.0)
             value_millions = (shares * price) / 1_000_000 if price > 0 else 0.0
 
-            # Skip zero-value entries (RSU conversions at price $0)
+            # Skip zero-value entries (RSU conversions at price $0). We keep this
+            # price-based filter to exclude the same non-open-market trades as
+            # before, even though the stored figure below is now in SHARES.
             if value_millions == 0.0:
                 continue
 
+            # Insider activity is now denominated in SHARES (millions of shares)
+            # to match the insider flow chart — Form 4 reports exact share
+            # counts, comparable over time without a price.
+            change_millions = shares / 1_000_000
+
             # Sign convention: negative for sells
             if "Sell" in classified:
-                value_millions = -value_millions
+                change_millions = -change_millions
 
             # Get date
             date_str = tx.get("filingDate", tx.get("transactionDate", ""))
@@ -780,7 +794,9 @@ class HoldersService:
                 name=reporting_name,
                 title=title,
                 date=date_str[:10],
-                change_in_millions=round(value_millions, 2),
+                # 6 dp keeps single-share precision (millions → 1e-6 = 1 share);
+                # 2 dp would zero out small trades (a 200-share sale = 0.0002M).
+                change_in_millions=round(change_millions, 6),  # millions of SHARES
                 transaction_type=classified,
                 price_at_transaction=round(price, 2),
             ))
@@ -808,8 +824,9 @@ class HoldersService:
 
         return InsiderActivitySummarySchema(
             period_description="Last 12 Months",
-            informative_buys_in_millions=round(informative_buys, 2),
-            informative_sells_in_millions=round(informative_sells, 2),
+            # 6 dp: these are now millions of SHARES — keep share-level precision.
+            informative_buys_in_millions=round(informative_buys, 6),
+            informative_sells_in_millions=round(informative_sells, 6),
             num_buyers=len(buyer_names),
             num_sellers=len(seller_names),
         )
@@ -1101,26 +1118,22 @@ class HoldersService:
             if m_key not in monthly_flows:
                 continue
 
+            # Insider flow is denominated in SHARES (millions of shares), like
+            # the hedge-fund chart. Form 4 reports the exact share count
+            # (`securitiesTransacted`); shares are comparable over time and
+            # need no price. (Price is still used below for the price line.)
             shares = abs(_safe_float(tx, "securitiesTransacted", 0.0))
-            price = _safe_float(tx, "price", 0.0)
-
-            # If price is 0, use the monthly stock price as estimate
-            if price <= 0:
-                price = monthly_prices.get(m_key, 0.0)
-
-            # Skip if we still have no price — can't compute meaningful value
-            if price <= 0:
+            if shares <= 0:
                 continue
-
-            value_millions = (shares * price) / 1_000_000
+            shares_millions = shares / 1_000_000
 
             # Determine buy vs sell from acquisitionOrDisposition field
             acq_disp = (tx.get("acquisitionOrDisposition") or "").upper()
             if acq_disp == "A":
-                monthly_flows[m_key]["buy"] += value_millions
+                monthly_flows[m_key]["buy"] += shares_millions
                 informative_count += 1
             elif acq_disp == "D":
-                monthly_flows[m_key]["sell"] += value_millions
+                monthly_flows[m_key]["sell"] += shares_millions
                 informative_count += 1
 
         logger.info(
@@ -1232,63 +1245,23 @@ class HoldersService:
         return round(buy_vol, 2), round(sell_vol, 2)
 
     @staticmethod
-    def _nearest_quarter_price(
-        qtr_prices: Dict[Tuple[int, int], float],
-        key: Tuple[int, int],
-    ) -> float:
-        """Closest available quarter-end price to ``key`` by quarter distance.
-
-        Used as a safe fallback when a specific quarter's close is missing
-        from the price history — far better than ``totalInvested / shares``,
-        which explodes when 13F filings for the quarter are still incomplete.
-        """
-        if not qtr_prices:
-            return 0.0
-        y0, q0 = key
-        ref = y0 * 4 + q0
-        nearest = min(
-            qtr_prices.keys(), key=lambda k: abs((k[0] * 4 + k[1]) - ref)
-        )
-        return float(qtr_prices.get(nearest, 0.0) or 0.0)
-
-    @staticmethod
-    def _resolve_quarter_price(
-        data: Dict[str, Any],
-        qtr_prices: Dict[Tuple[int, int], float],
-        y: int,
-        q: int,
-    ) -> float:
-        """Quarter-end share price used to value net 13F share changes.
-
-        Priority: (1) the quarter's own close, (2) the nearest known
-        quarter-end close, (3) ``totalInvested / numberOf13Fshares`` as a last
-        resort. Step 2 exists because step 3 yields a wildly inflated price
-        when filings are incomplete (tiny share count) — which previously froze
-        a bogus, axis-dominating quarter into the cache.
-        """
-        price = float(qtr_prices.get((y, q), 0.0) or 0.0)
-        if price > 0:
-            return price
-        nearest = HoldersService._nearest_quarter_price(qtr_prices, (y, q))
-        if nearest > 0:
-            return nearest
-        total_inv = float(data.get("totalInvested") or 0)
-        total_shares = float(data.get("numberOf13Fshares") or 1)
-        return total_inv / total_shares if total_shares > 0 else 0.0
-
-    @staticmethod
     def _compute_quarter_flow(
         data: Dict[str, Any],
-        qtr_prices: Dict[Tuple[int, int], float],
-        y: int,
-        q: int,
     ) -> Tuple[float, float, float, int, int]:
-        """Pure per-quarter flow math.
+        """Pure per-quarter flow math, in MILLIONS OF SHARES.
 
-        Returns ``(buy_vol, sell_vol, net_millions, buyers, sellers)``. The net
-        is ``numberOf13FsharesChange × quarter-end price`` — the real dollar
-        value of institutional trading, free of price drift; gross buy/sell are
-        estimated from net + buyer/seller counts via ``_estimate_buy_sell``.
+        Returns ``(buy_shares_m, sell_shares_m, net_shares_m, buyers, sellers)``.
+
+        The net is ``numberOf13FsharesChange`` (the real net 13F share change
+        from the positions-summary — the ONE institutional-flow figure FMP
+        reports completely), expressed in millions of shares. We deliberately
+        use shares, not dollars: share counts are comparable across quarters,
+        whereas dollar values are distorted by price drift (and multiplying by
+        a price is what produced the old axis-dominating outlier bug).
+
+        Only the net is measured — 13F discloses end-of-quarter positions, not
+        transactions — so the gross buy/sell SPLIT is estimated from the net +
+        buyer/seller counts via ``_estimate_buy_sell`` (the green/red bars).
         """
         buyers = (
             int(data.get("newPositions") or 0)
@@ -1298,13 +1271,11 @@ class HoldersService:
             int(data.get("closedPositions") or 0)
             + int(data.get("reducedPositions") or 0)
         )
-        shares_change = float(data.get("numberOf13FsharesChange") or 0)
-        price = HoldersService._resolve_quarter_price(data, qtr_prices, y, q)
-        net_millions = (shares_change * price) / 1_000_000
-        buy_vol, sell_vol = HoldersService._estimate_buy_sell(
-            net_millions, buyers, sellers
+        net_shares_m = float(data.get("numberOf13FsharesChange") or 0) / 1_000_000
+        buy_m, sell_m = HoldersService._estimate_buy_sell(
+            net_shares_m, buyers, sellers
         )
-        return buy_vol, sell_vol, round(net_millions, 2), buyers, sellers
+        return buy_m, sell_m, round(net_shares_m, 2), buyers, sellers
 
     # ── DB helpers for hedge_fund_quarters ──────────────────────
 
@@ -1339,6 +1310,16 @@ class HoldersService:
                     continue
                 if nf != 0 and bc > 0 and sc > 0 and (bv == 0 or sv == 0):
                     continue
+                # 3) Legacy DOLLAR rows (computed before the shares switch):
+                #    flow is now stored in millions of SHARES, so the old dollar
+                #    values are the wrong unit — recompute.
+                ca = r.get("computed_at")
+                try:
+                    ca_dt = datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+                    if ca_dt < _HFQ_SHARES_FLOOR:
+                        continue
+                except (ValueError, TypeError, AttributeError):
+                    continue  # missing/unparseable timestamp → recompute to be safe
                 result[key] = r
             return result
         except Exception as e:
@@ -1388,10 +1369,12 @@ class HoldersService:
     ) -> SmartMoneyDataSchema:
         """Build hedge fund smart money with incremental quarterly DB store.
 
-        Uses ``numberOf13FsharesChange * quarter-end price`` to compute
-        the actual dollar value of net institutional buying/selling,
-        stripping out the stock-price-appreciation component that
-        contaminates ``totalInvestedChange``.
+        Flow is expressed in MILLIONS OF SHARES (not dollars): the net is
+        ``numberOf13FsharesChange`` straight from the positions-summary — the
+        real net 13F share change, comparable across quarters (dollar values
+        would be distorted by price drift). Gross buy/sell are estimated from
+        the net + buyer/seller counts (only the net is measured; 13F reports
+        positions, not transactions).
 
         1. Determine the 8 target quarters (last 2 years).
         2. Load already-computed rows from ``hedge_fund_quarters``.
@@ -1400,7 +1383,6 @@ class HoldersService:
         5. Return 8 quarterly flow-data points.
         """
         target_pairs = self._generate_quarter_keys(8)
-        qtr_prices = self._quarter_end_prices(daily_prices)
 
         # 1. Load existing rows from DB
         existing = await asyncio.to_thread(
@@ -1439,17 +1421,17 @@ class HoldersService:
                 if data is None:
                     continue
 
-                buy_vol, sell_vol, net_millions, buyers, sellers = (
-                    self._compute_quarter_flow(data, qtr_prices, y, q)
+                buy_m, sell_m, net_m, buyers, sellers = (
+                    self._compute_quarter_flow(data)
                 )
                 row = {
                     "ticker": ticker,
                     "year": y,
                     "quarter": q,
                     "quarter_date": (data.get("date") or "")[:10],
-                    "buy_volume": buy_vol,
-                    "sell_volume": sell_vol,
-                    "net_flow": net_millions,
+                    "buy_volume": buy_m,
+                    "sell_volume": sell_m,
+                    "net_flow": net_m,
                     "buyers_count": buyers,
                     "sellers_count": sellers,
                 }

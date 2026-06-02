@@ -63,9 +63,12 @@ struct SmartMoneySection: View {
                 .id(selectedTab.rawValue)
                 .animation(.easeInOut(duration: 0.3), value: selectedTab)
 
-                // Legend
-                SmartMoneyFlowLegend()
-                    .padding(.top, AppSpacing.sm)
+                // Legend — hedge-fund & insider flow are in shares, congress in $
+                SmartMoneyFlowLegend(
+                    buyLabel: selectedTab == .congress ? "Buy Volume" : "Shares Bought",
+                    sellLabel: selectedTab == .congress ? "Sell Volume" : "Shares Sold"
+                )
+                .padding(.top, AppSpacing.sm)
 
                 // Net flow badge
                 SmartMoneyNetFlowBadge(summary: currentData.summary)

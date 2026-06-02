@@ -9,16 +9,21 @@
 import SwiftUI
 
 struct SmartMoneyFlowLegend: View {
+    // Defaults match the dollar-denominated tabs (Insider/Congress). The
+    // hedge-fund tab is in shares, so it passes "Shares Bought/Sold".
+    var buyLabel: String = "Buy Volume"
+    var sellLabel: String = "Sell Volume"
+
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
             SmartMoneyFlowLegendItem(
                 color: HoldersColors.buyVolume,
-                label: "Buy Volume"
+                label: buyLabel
             )
 
             SmartMoneyFlowLegendItem(
                 color: HoldersColors.sellVolume,
-                label: "Sell Volume"
+                label: sellLabel
             )
         }
         .frame(maxWidth: .infinity)

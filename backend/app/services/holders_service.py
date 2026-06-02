@@ -105,6 +105,12 @@ _classify_insider_transaction = classify_insider_transaction
 
 _SUPABASE_CACHE_TTL_HOURS = 24
 
+# The most recent N quarters are NOT settled: 13F filings arrive over the ~45
+# days after quarter-end and keep getting amended for months. A row cached
+# early (few filers reported) can be wildly wrong, so we never trust the
+# hedge_fund_quarters cache for these — always recompute + re-upsert them.
+_REFRESH_RECENT_QUARTERS = 2
+
 
 # ── Service class ─────────────────────────────────────────────────
 
@@ -1225,6 +1231,81 @@ class HoldersService:
 
         return round(buy_vol, 2), round(sell_vol, 2)
 
+    @staticmethod
+    def _nearest_quarter_price(
+        qtr_prices: Dict[Tuple[int, int], float],
+        key: Tuple[int, int],
+    ) -> float:
+        """Closest available quarter-end price to ``key`` by quarter distance.
+
+        Used as a safe fallback when a specific quarter's close is missing
+        from the price history — far better than ``totalInvested / shares``,
+        which explodes when 13F filings for the quarter are still incomplete.
+        """
+        if not qtr_prices:
+            return 0.0
+        y0, q0 = key
+        ref = y0 * 4 + q0
+        nearest = min(
+            qtr_prices.keys(), key=lambda k: abs((k[0] * 4 + k[1]) - ref)
+        )
+        return float(qtr_prices.get(nearest, 0.0) or 0.0)
+
+    @staticmethod
+    def _resolve_quarter_price(
+        data: Dict[str, Any],
+        qtr_prices: Dict[Tuple[int, int], float],
+        y: int,
+        q: int,
+    ) -> float:
+        """Quarter-end share price used to value net 13F share changes.
+
+        Priority: (1) the quarter's own close, (2) the nearest known
+        quarter-end close, (3) ``totalInvested / numberOf13Fshares`` as a last
+        resort. Step 2 exists because step 3 yields a wildly inflated price
+        when filings are incomplete (tiny share count) — which previously froze
+        a bogus, axis-dominating quarter into the cache.
+        """
+        price = float(qtr_prices.get((y, q), 0.0) or 0.0)
+        if price > 0:
+            return price
+        nearest = HoldersService._nearest_quarter_price(qtr_prices, (y, q))
+        if nearest > 0:
+            return nearest
+        total_inv = float(data.get("totalInvested") or 0)
+        total_shares = float(data.get("numberOf13Fshares") or 1)
+        return total_inv / total_shares if total_shares > 0 else 0.0
+
+    @staticmethod
+    def _compute_quarter_flow(
+        data: Dict[str, Any],
+        qtr_prices: Dict[Tuple[int, int], float],
+        y: int,
+        q: int,
+    ) -> Tuple[float, float, float, int, int]:
+        """Pure per-quarter flow math.
+
+        Returns ``(buy_vol, sell_vol, net_millions, buyers, sellers)``. The net
+        is ``numberOf13FsharesChange × quarter-end price`` — the real dollar
+        value of institutional trading, free of price drift; gross buy/sell are
+        estimated from net + buyer/seller counts via ``_estimate_buy_sell``.
+        """
+        buyers = (
+            int(data.get("newPositions") or 0)
+            + int(data.get("increasedPositions") or 0)
+        )
+        sellers = (
+            int(data.get("closedPositions") or 0)
+            + int(data.get("reducedPositions") or 0)
+        )
+        shares_change = float(data.get("numberOf13FsharesChange") or 0)
+        price = HoldersService._resolve_quarter_price(data, qtr_prices, y, q)
+        net_millions = (shares_change * price) / 1_000_000
+        buy_vol, sell_vol = HoldersService._estimate_buy_sell(
+            net_millions, buyers, sellers
+        )
+        return buy_vol, sell_vol, round(net_millions, 2), buyers, sellers
+
     # ── DB helpers for hedge_fund_quarters ──────────────────────
 
     def _load_existing_quarters(
@@ -1325,9 +1406,19 @@ class HoldersService:
         existing = await asyncio.to_thread(
             self._load_existing_quarters, ticker, target_pairs
         )
+
+        # Drop the most recent (unsettled) quarters from the cache-hit set so
+        # they are always recomputed from FMP and re-upserted. Without this, a
+        # quarter cached early — when 13F filings were incomplete — stays frozen
+        # at a bad value (e.g. an inflated price fallback) that dominates the
+        # chart's shared y-axis and flattens every other quarter to ~0.
+        volatile = set(target_pairs[-_REFRESH_RECENT_QUARTERS:])
+        existing = {k: v for k, v in existing.items() if k not in volatile}
+
         logger.info(
             f"Hedge fund quarters for {ticker}: "
-            f"{len(existing)}/{len(target_pairs)} in DB"
+            f"{len(existing)}/{len(target_pairs)} in DB "
+            f"(forcing refresh of {sorted(volatile)})"
         )
 
         # 2. Identify missing quarters
@@ -1348,30 +1439,8 @@ class HoldersService:
                 if data is None:
                     continue
 
-                buyers = (
-                    int(data.get("newPositions") or 0)
-                    + int(data.get("increasedPositions") or 0)
-                )
-                sellers = (
-                    int(data.get("closedPositions") or 0)
-                    + int(data.get("reducedPositions") or 0)
-                )
-
-                # ── Compute REAL net buy/sell ────────────────────────
-                # numberOf13FsharesChange = net shares added/removed
-                # Multiply by quarter-end price → dollar value of
-                # actual institutional trading, free of price drift.
-                shares_change = float(data.get("numberOf13FsharesChange") or 0)
-                price = qtr_prices.get((y, q), 0.0)
-                if price <= 0:
-                    # Fallback: use totalInvested / shares for avg price
-                    total_inv = float(data.get("totalInvested") or 0)
-                    total_shares = float(data.get("numberOf13Fshares") or 1)
-                    price = total_inv / total_shares if total_shares > 0 else 0
-
-                net_millions = (shares_change * price) / 1_000_000
-                buy_vol, sell_vol = self._estimate_buy_sell(
-                    net_millions, buyers, sellers
+                buy_vol, sell_vol, net_millions, buyers, sellers = (
+                    self._compute_quarter_flow(data, qtr_prices, y, q)
                 )
                 row = {
                     "ticker": ticker,
@@ -1380,7 +1449,7 @@ class HoldersService:
                     "quarter_date": (data.get("date") or "")[:10],
                     "buy_volume": buy_vol,
                     "sell_volume": sell_vol,
-                    "net_flow": round(net_millions, 2),
+                    "net_flow": net_millions,
                     "buyers_count": buyers,
                     "sellers_count": sellers,
                 }

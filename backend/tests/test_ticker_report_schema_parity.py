@@ -695,3 +695,78 @@ def test_wall_street_consensus_smart_money_none_without_holders():
     assert consensus["hedge_fund_smart_money"] is None
     consensus["hedge_fund_note"] = None
     WallStreetConsensusResponse.model_validate(consensus)
+
+
+# ── Wall Street Consensus: honest empty state for analyst targets ─────
+
+
+def _analyst_with_targets(
+    *, low: float = 200.0, avg: float = 260.0, high: float = 320.0,
+    current: float = 215.0,
+):
+    """Minimal real AnalystAnalysisResponse carrying a price-target range."""
+    from app.schemas.analyst import (
+        AnalystActionsSummary,
+        AnalystAnalysisResponse,
+        AnalystConsensus,
+        AnalystPriceTarget,
+    )
+
+    return AnalystAnalysisResponse(
+        symbol="AAPL",
+        total_analysts=30,
+        updated_date="2026-01-01",
+        consensus=AnalystConsensus.BUY,
+        target_price=avg,
+        target_upside=round((avg - current) / current * 100, 1),
+        distributions=[],
+        price_target=AnalystPriceTarget(
+            low_price=low, average_price=avg, high_price=high, current_price=current,
+        ),
+        momentum_data=[],
+        net_positive=20,
+        net_negative=2,
+        actions_summary=AnalystActionsSummary(upgrades=5, maintains=10, downgrades=1),
+        actions=[],
+    )
+
+
+def test_wall_street_consensus_emits_real_analyst_targets():
+    """With real FMP coverage, the consensus block carries the exact
+    analyst Low / Avg / High — no rounding-away, no substitution."""
+    from app.schemas.ticker_report import WallStreetConsensusResponse
+    from app.services.agents.ticker_report_data_collector import (
+        _build_wall_street_sections,
+    )
+
+    _, consensus = _build_wall_street_sections(
+        analyst=_analyst_with_targets(low=200.0, avg=260.0, high=320.0),
+        holders=None, current_price=215.0, fair_value=None,
+        monthly_prices=_monthly_prices_12(),
+    )
+    assert consensus["target_price"] == 260.0
+    assert consensus["low_target"] == 200.0
+    assert consensus["high_target"] == 320.0
+    consensus["hedge_fund_note"] = None
+    WallStreetConsensusResponse.model_validate(consensus)
+
+
+def test_wall_street_consensus_targets_null_without_analyst_coverage():
+    """Honest empty state: with no analyst coverage the three targets are
+    null — NOT fabricated from current price or DCF fair value. The block
+    must still validate (iOS renders a 'no analyst targets' state). A
+    fair_value is supplied to prove we no longer fall back to it here."""
+    from app.schemas.ticker_report import WallStreetConsensusResponse
+    from app.services.agents.ticker_report_data_collector import (
+        _build_wall_street_sections,
+    )
+
+    _, consensus = _build_wall_street_sections(
+        analyst=None, holders=None, current_price=215.0,
+        fair_value=300.0, monthly_prices=_monthly_prices_12(),
+    )
+    assert consensus["target_price"] is None
+    assert consensus["low_target"] is None
+    assert consensus["high_target"] is None
+    consensus["hedge_fund_note"] = None
+    WallStreetConsensusResponse.model_validate(consensus)

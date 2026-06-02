@@ -653,9 +653,11 @@ struct SmartMoneyFlowPointDTO: Codable {
 struct WallStreetConsensusDTO: Codable {
     let rating: String
     let currentPrice: Double
-    let targetPrice: Double
-    let lowTarget: Double
-    let highTarget: Double
+    // Null when the backend has no real analyst coverage — decoded via
+    // decodeIfPresent so missing/null becomes nil (honest "no targets" state).
+    let targetPrice: Double?
+    let lowTarget: Double?
+    let highTarget: Double?
     let valuationStatus: String
     let discountPercent: Double
     let hedgeFundNote: String?

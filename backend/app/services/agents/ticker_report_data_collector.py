@@ -2154,12 +2154,23 @@ def _build_wall_street_sections(
                 ((fair_value - current_price) / max(fair_value, 1e-6)) * 100, 1
             )
 
+    # Honest empty state: only emit analyst targets when FMP actually
+    # returned a real consensus range. We previously fabricated Min/Avg/Max
+    # as current × 0.85 / 1.0 / 1.3 (or fair_value) when analyst coverage was
+    # missing, which surfaced invented numbers as if they were real Wall
+    # Street targets. When absent, send null and let iOS render a "no analyst
+    # coverage" state — mirroring `_hedge_fund_flow_from_holders`, which
+    # returns honest zeros rather than synthetic noise.
+    has_analyst_targets = (
+        target_price > 0 and low_target > 0 and high_target > 0
+    )
+
     consensus_partial = {
         "rating": consensus_rating,
         "current_price": round(current_price, 2),
-        "target_price": round(target_price if target_price > 0 else (fair_value or current_price), 2),
-        "low_target": round(low_target if low_target > 0 else current_price * 0.85, 2),
-        "high_target": round(high_target if high_target > 0 else (fair_value or current_price) * 1.3, 2),
+        "target_price": round(target_price, 2) if has_analyst_targets else None,
+        "low_target": round(low_target, 2) if has_analyst_targets else None,
+        "high_target": round(high_target, 2) if has_analyst_targets else None,
         "valuation_status": val_status,
         "discount_percent": max(0.0, discount_pct),
         "hedge_fund_note": None,  # filled by AI in assemble_report
@@ -2326,9 +2337,9 @@ async def refresh_wall_street_consensus_block(
 
         # Analyst data is what feeds the Low/High/Target fields the
         # user wants to match Analysis tab. If AnalystService failed,
-        # the builder would fall back to current_price * 0.85 / 1.3
-        # sentinels — strictly worse than the persisted real numbers.
-        # Skip the refresh in that case.
+        # the builder now emits null targets (no synthetic fallback) —
+        # merging those would WIPE the persisted real numbers. Skip the
+        # refresh in that case and keep the persisted block intact.
         analyst_obj = analyst if not isinstance(analyst, Exception) else None
         if analyst_obj is None:
             return persisted_block
@@ -2346,9 +2357,9 @@ async def refresh_wall_street_consensus_block(
         monthly_prices = _monthly_closes(historical_list, count=12)
 
         # `_build_wall_street_sections` returns (vital, consensus_partial).
-        # fair_value=None is fine: with analyst_obj populated, the
-        # builder's fallback at line ~2160 never triggers for the
-        # analyst-derived fields. valuation_status / discount_percent
+        # fair_value=None is fine: with analyst_obj populated and real
+        # targets present, the builder emits the live analyst numbers for
+        # the analyst-derived fields. valuation_status / discount_percent
         # come out as sentinels from None, but we discard those and
         # keep the persisted block's values below.
         _, fresh_block = _build_wall_street_sections(
@@ -2376,22 +2387,22 @@ async def refresh_wall_street_consensus_block(
 async def patch_wall_street_consensus_live(
     payload: Dict[str, Any], ticker: str,
 ) -> Dict[str, Any]:
-    """Top-level wrapper used by the saved-report read endpoints to
-    splice a live `wall_street_consensus` block into the persisted
-    `ticker_report_data` payload. Mutates and returns the payload.
+    """Return the saved report's payload UNCHANGED — saved/cached reports
+    are frozen snapshots.
 
-    Paired with `patch_legacy_price_action` in the same call sites so
-    the saved-report read path stays a single readable transform
-    pipeline (load → live-overlay WS → patch legacy price action →
-    return).
+    Previously this live-overlaid the `wall_street_consensus` block with
+    current analyst targets / price / momentum / hedge-fund flow on every
+    read. That made an "old" report silently show today's numbers — and,
+    when the live analyst fetch returned no targets, it replaced the
+    report's REAL saved targets with ±15%/+30% estimates off the current
+    price (the synthetic fallback in `_build_wall_street_sections`).
+
+    Per product decision, a report must reflect the data from WHEN IT WAS
+    GENERATED, so we no longer overlay live data. The implementation is
+    retained in `refresh_wall_street_consensus_block` below in case we
+    later want an opt-in "refresh, but never fall back to estimates" mode;
+    it is simply no longer wired into the read paths.
     """
-    if not isinstance(payload, dict):
-        return payload
-    persisted_block = payload.get("wall_street_consensus")
-    if not isinstance(persisted_block, dict):
-        return payload
-    refreshed = await refresh_wall_street_consensus_block(ticker, persisted_block)
-    payload["wall_street_consensus"] = refreshed
     return payload
 
 

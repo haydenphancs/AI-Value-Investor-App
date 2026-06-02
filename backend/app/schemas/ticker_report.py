@@ -371,9 +371,12 @@ class SmartMoneyFlowPointResponse(BaseModel):
 class WallStreetConsensusResponse(BaseModel):
     rating: str  # "strong_buy" | "buy" | "hold" | "sell" | "strong_sell"
     current_price: float
-    target_price: float
-    low_target: float
-    high_target: float
+    # Analyst price targets are null when FMP has no real consensus coverage.
+    # We do NOT fabricate them (previously current × 0.85 / 1.0 / 1.3); iOS
+    # renders an honest "no analyst targets" state instead of fake numbers.
+    target_price: Optional[float] = None
+    low_target: Optional[float] = None
+    high_target: Optional[float] = None
     valuation_status: str
     discount_percent: float
     hedge_fund_note: Optional[str] = None

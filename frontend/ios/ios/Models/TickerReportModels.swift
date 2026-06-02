@@ -660,9 +660,11 @@ enum ConsensusRating: String {
 struct ReportWallStreetConsensus {
     let rating: ConsensusRating
     let currentPrice: Double
-    let targetPrice: Double
-    let lowTarget: Double
-    let highTarget: Double
+    // nil when there's no real analyst coverage. The view renders an honest
+    // "no analyst price targets" state instead of fabricated numbers.
+    let targetPrice: Double?
+    let lowTarget: Double?
+    let highTarget: Double?
     let valuationStatus: ValuationStatus
     let discountPercent: Double         // "Trading 33.4% below fair value estimate"
     let hedgeFundNote: String?          // "Net inflow of $430M from institutional..."
@@ -675,33 +677,45 @@ struct ReportWallStreetConsensus {
     let momentumUpgrades: Int
     let momentumDowngrades: Int
 
+    /// True only when the backend returned a real analyst consensus range.
+    /// The pole, target badges, and forecast copy are gated on this.
+    var hasAnalystTargets: Bool {
+        targetPrice != nil && lowTarget != nil && highTarget != nil
+    }
+
     var formattedCurrentPrice: String {
         String(format: "$%.0f", currentPrice)
     }
 
     var formattedTargetPrice: String {
-        String(format: "$%.0f", targetPrice)
+        guard let targetPrice else { return "—" }
+        return String(format: "$%.0f", targetPrice)
     }
 
     var formattedHighTarget: String {
-        String(format: "$%.0f", highTarget)
+        guard let highTarget else { return "—" }
+        return String(format: "$%.0f", highTarget)
     }
 
     var formattedLowTarget: String {
-        String(format: "$%.0f", lowTarget)
+        guard let lowTarget else { return "—" }
+        return String(format: "$%.0f", lowTarget)
     }
 
     var formattedHighTargetPercent: String {
+        guard let highTarget else { return "—" }
         let percent = ((highTarget - currentPrice) / currentPrice) * 100
         return String(format: "%+.1f%%", percent)
     }
 
     var formattedAvgTargetPercent: String {
+        guard let targetPrice else { return "—" }
         let percent = ((targetPrice - currentPrice) / currentPrice) * 100
         return String(format: "%+.1f%%", percent)
     }
 
     var formattedLowTargetPercent: String {
+        guard let lowTarget else { return "—" }
         let percent = ((lowTarget - currentPrice) / currentPrice) * 100
         return String(format: "%+.1f%%", percent)
     }

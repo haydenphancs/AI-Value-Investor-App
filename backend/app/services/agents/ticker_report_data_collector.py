@@ -2310,11 +2310,14 @@ def _build_wall_street_sections(
         "high_target": round(high_target, 2) if has_analyst_targets else None,
         "valuation_status": val_status,
         "discount_percent": max(0.0, discount_pct),
+        # NAMING: these `hedge_fund_*` keys = FMP 13F institutional-ownership data;
+        # the iOS UI labels it "Institutions" (SmartMoneyTab.hedgeFunds =
+        # "Institutions"), not "Hedge Funds".
         "hedge_fund_note": None,  # filled by AI in assemble_report
         "hedge_fund_price_data": hf_price_data,
         "hedge_fund_flow_data": hf_flow_data,
         # Pass the Holders quarterly smart-money payload through verbatim so
-        # the report's Hedge Funds chart + net-flow badge mirror the Holders
+        # the report's Institutions chart + net-flow badge mirror the Holders
         # tab. Stored as a plain dict (the partial is persisted as JSON and
         # re-validated by TickerReportResponse.model_validate).
         "hedge_fund_smart_money": (

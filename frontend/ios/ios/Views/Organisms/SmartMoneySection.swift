@@ -3,7 +3,9 @@
 //  ios
 //
 //  Organism: Complete Smart Money section card
-//  Displays insider/hedge fund/congress trading activity with flow chart
+//  Displays insider / institutions / congress trading activity with flow chart.
+//  NOTE: the "institutions" tab is SmartMoneyTab.hedgeFunds (FMP 13F data) — the
+//  code says "hedge fund", the UI label is "Institutions".
 //
 
 import SwiftUI
@@ -31,7 +33,7 @@ struct SmartMoneySection: View {
             // Header with title and info icon
             headerSection
 
-            // Tab selector (Insider / Hedge Funds / Congress)
+            // Tab selector (Insider / Institutions / Congress) — "Institutions" = SmartMoneyTab.hedgeFunds
             SmartMoneyTabSelector(selectedTab: $selectedTab)
 
             // Period label

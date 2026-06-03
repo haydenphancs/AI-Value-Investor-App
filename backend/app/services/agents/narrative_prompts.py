@@ -809,6 +809,9 @@ EVIDENCE:
 Be concrete about *what* the risk is — not just that it exists."""
 
 
+# NAMING: `hedge_fund_note` populates the report's "Institutions" section
+# (SmartMoneyTab.hedgeFunds = "Institutions"). "hedge fund" here = FMP 13F
+# institutional data; the prompt prose below speaks of "institutional positioning".
 def _hedge_fund_note_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:

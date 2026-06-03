@@ -204,6 +204,8 @@ class OwnershipSnapshotService:
 
         # Extract smart money flow summaries
         insider_summary = holders.insider_data.summary
+        # `hedge_funds_data` = FMP 13F institutional ownership (UI label
+        # "Institutions"); hence the `inst_summary` name here.
         inst_summary = holders.hedge_funds_data.summary
 
         insider_flow = insider_summary.total_net_flow

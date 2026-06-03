@@ -39,6 +39,7 @@ TABLE_NAME = "ticker_report_cache"
 # 2026-05-02 — Deep Dive Modules backend hydration:
 #   * `revenue_forecast.projections[*].is_forecast` now always True
 #   * `wall_street_consensus.hedge_fund_price_data[-1].price` pinned to current_price
+#     (`hedge_fund_*` = FMP 13F institutional data; UI label "Institutions")
 #   * `current_price` / target prices retain cents (was rounded to whole dollars)
 #   * `insider_data` filtered to Informative trades only (parity with Holders tab)
 #   * `price_action.prices` no longer falls back to a synthetic flat line

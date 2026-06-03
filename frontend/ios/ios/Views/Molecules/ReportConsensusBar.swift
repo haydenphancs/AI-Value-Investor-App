@@ -109,9 +109,9 @@ struct ReportConsensusBar: View {
     /// imply a forecast the data doesn't support.
     private var analystPriceTargetSummary: String {
         guard consensus.hasAnalystTargets else {
-            return "No analyst price targets are available for this company yet. Current price: \(consensus.formattedCurrentPrice)."
+            return "No analyst price targets are available for this company yet."
         }
-        return "One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus. Target \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget)). Current price: \(consensus.formattedCurrentPrice)."
+        return "One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus.\nTarget \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget))."
     }
 
     // MARK: - Analyst Price Chart
@@ -365,6 +365,9 @@ struct ReportConsensusBar: View {
     }
 
     // MARK: - Institutions Section
+    // NAMING: "hedge fund" / `hedgeFund*` below is FMP 13F institutional data; this
+    // section is labeled "Institutions" in the UI (SmartMoneyTab.hedgeFunds =
+    // "Institutions"). The Holders tab renders the same data under that same label.
 
     private var hedgeFundsSection: some View {
         Group {
@@ -395,8 +398,11 @@ struct ReportConsensusBar: View {
         if let smartMoney = consensus.hedgeFundSmartMoney,
            smartMoney.flowData.contains(where: { $0.hasActivity }) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Per-quarter real summary (latest, or the tapped bar).
-                flowQuarterSummary(smartMoney.flowData)
+                // Tap-to-inspect popup for the selected quarter (hidden until a
+                // bar is tapped). Sits in the slot the always-on summary used
+                // to occupy, above the bars it describes.
+                flowQuarterPopup(smartMoney.flowData)
+                    .transition(.scale.combined(with: .opacity))
 
                 // Net-flow bars drawn in the analyst chart's exact coordinate
                 // system, so the y-axis lands in the same gutter as the
@@ -410,11 +416,13 @@ struct ReportConsensusBar: View {
                 SmartMoneyNetFlowBadge(summary: smartMoney.summary)
                     .padding(.top, AppSpacing.sm)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedFlowIndex)
         } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {
             // Legacy monthly fallback (pre-`hedge_fund_smart_money` reports).
             // Net derives from buy−sell here (no counts), so the bar still works.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                flowQuarterSummary(consensus.hedgeFundFlowData)
+                flowQuarterPopup(consensus.hedgeFundFlowData)
+                    .transition(.scale.combined(with: .opacity))
 
                 volumeBarsChart(consensus.hedgeFundFlowData)
                     .padding(.top, AppSpacing.xs)
@@ -422,19 +430,18 @@ struct ReportConsensusBar: View {
                 SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
                     .padding(.top, AppSpacing.xs)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedFlowIndex)
         }
     }
 
-    /// One-line REAL summary for the selected quarter (or the latest with
-    /// activity): net share change + how many institutions added vs trimmed.
-    /// Counts render only when present (hedge-fund data); legacy/other tabs show
-    /// net alone.
+    /// Tap-to-inspect popup for the selected quarter: net share change as a
+    /// header, plus how many institutions added vs trimmed when counts exist
+    /// (hedge-fund data). Legacy data has no counts → header (net) only.
+    /// Renders only while a bar is selected — tapping a bar toggles
+    /// `selectedFlowIndex`; nil collapses this to nothing.
     @ViewBuilder
-    private func flowQuarterSummary(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
-        let activeIndex = selectedFlowIndex
-            ?? bars.lastIndex(where: { $0.hasActivity })
-            ?? (bars.isEmpty ? nil : bars.count - 1)
-        if let idx = activeIndex, bars.indices.contains(idx) {
+    private func flowQuarterPopup(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
+        if let idx = selectedFlowIndex, bars.indices.contains(idx) {
             let bar = bars[idx]
             let net = bar.netFlow
             let isBuy = net >= 0
@@ -442,22 +449,33 @@ struct ReportConsensusBar: View {
             let netStr = mag >= 1000
                 ? String(format: "%@%.2fB shares", isBuy ? "+" : "−", mag / 1000)
                 : String(format: "%@%.0fM shares", isBuy ? "+" : "−", mag)
-            HStack(spacing: 6) {
-                Text(formatMonthLabel(bar.month).replacingOccurrences(of: "\n", with: " "))
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-                Text("·").foregroundColor(AppColors.textMuted)
-                Text(netStr)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(isBuy ? HoldersColors.buyVolume : HoldersColors.sellVolume)
-                if let buyers = bar.buyersCount, let sellers = bar.sellersCount {
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                HStack(spacing: 6) {
+                    Text(formatMonthLabel(bar.month).replacingOccurrences(of: "\n", with: " "))
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
                     Text("·").foregroundColor(AppColors.textMuted)
+                    Text(netStr)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(isBuy ? HoldersColors.buyVolume : HoldersColors.sellVolume)
+                }
+                if let buyers = bar.buyersCount, let sellers = bar.sellersCount {
                     Text("\(buyers.formatted()) added / \(sellers.formatted()) trimmed")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }
-                Spacer(minLength: 0)
             }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackground)
+                    .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .strokeBorder(AppColors.cardBackgroundLight, lineWidth: 1)
+            )
         }
     }
 

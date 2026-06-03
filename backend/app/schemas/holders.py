@@ -93,7 +93,11 @@ class SmartMoneyFlowSummarySchema(BaseModel):
 
 
 class SmartMoneyDataSchema(BaseModel):
-    """Complete smart money data for one tab (Insider/Hedge Funds/Congress)."""
+    """Complete smart money data for one tab (Insider / Institutions / Congress).
+
+    NAMING: the "Institutions" tab carries FMP 13F "hedge fund" data — the code
+    says "hedge fund", the iOS label is "Institutions" (SmartMoneyTab.hedgeFunds).
+    """
     tab: str
     price_data: List[StockPriceDataPointSchema] = []
     daily_prices: List[DailyPricePointSchema] = []

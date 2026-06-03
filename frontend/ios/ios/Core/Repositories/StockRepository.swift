@@ -1902,6 +1902,8 @@ struct HoldersResponseDTO: Codable {
     let symbol: String
     let shareholderBreakdown: ShareholderBreakdownDTO
     let insiderData: SmartMoneyDataDTO
+    // NAMING: `hedgeFundsData` (FMP 13F institutional ownership) is shown in the UI
+    // as the "Institutions" tab — SmartMoneyTab.hedgeFunds = "Institutions".
     let hedgeFundsData: SmartMoneyDataDTO
     let congressData: SmartMoneyDataDTO
     let recentActivities: RecentActivitiesDTO

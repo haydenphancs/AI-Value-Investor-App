@@ -7,6 +7,10 @@ Bulk pre-computes the quarterly 13F net-share flow into the existing
 the holders / Smart-Money "Institutions" chart serves instantly without each
 report paying the cold-build FMP cost.
 
+NAMING: "hedge fund" / ``hedge_fund_quarters`` = FMP 13F institutional-ownership
+data; the UI labels it "Institutions" (iOS SmartMoneyTab.hedgeFunds =
+"Institutions"), not "Hedge Funds".
+
 FMP-only feature — no Gemini / AI cost.
 
 Correctness equals the live reader because this script REUSES

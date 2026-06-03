@@ -1559,6 +1559,7 @@ class TickerDetailViewModel: ObservableObject {
         let insiderFlow = data.insiderData.summary
         parts.append("Insider 12M Net Flow: \(insiderFlow.formattedNetFlow) (\(insiderFlow.isPositive ? "Bullish" : "Bearish"))")
 
+        // `hedgeFundsData` = FMP 13F institutional ownership; UI label "Institutions".
         let hfFlow = data.hedgeFundsData.summary
         parts.append("Institutional 12M Net Flow: \(hfFlow.formattedNetFlow) (\(hfFlow.isPositive ? "Bullish" : "Bearish"))")
 

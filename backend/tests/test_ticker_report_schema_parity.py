@@ -624,6 +624,8 @@ def test_overall_assessment_averages_card_ratings():
 
 
 # ── Wall Street Consensus: hedge-fund smart-money passthrough ─────────
+# NAMING: "hedge fund" / `hedge_fund_*` = FMP 13F institutional data; the iOS UI
+# labels it "Institutions" (SmartMoneyTab.hedgeFunds = "Institutions").
 
 
 def _monthly_prices_12() -> list[dict]:
@@ -632,7 +634,7 @@ def _monthly_prices_12() -> list[dict]:
 
 def test_wall_street_consensus_carries_hedge_fund_smart_money():
     """The report's WS Consensus must pass the Holders quarterly smart-money
-    payload through verbatim (snake_case) so the iOS Hedge Funds chart +
+    payload through verbatim (snake_case) so the iOS Institutions chart +
     net-flow badge mirror the Holders tab. Guards the nested shape iOS
     decodes via SmartMoneyDataDTO."""
     from app.schemas.holders import (

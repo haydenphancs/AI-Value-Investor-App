@@ -687,6 +687,83 @@ def test_60day_window_now_selectable():
     assert len(result["prices"]) >= 60                       # full 2-month span shown
 
 
+# ── Price Movement: intraday (hourly) chart for short windows ─────────
+
+
+def test_intraday_closes_reverses_to_chronological():
+    from app.services.agents.ticker_report_data_collector import _intraday_closes
+    # FMP returns newest-first; a None close is skipped.
+    rows = [{"close": 3.0}, {"close": 2.0}, {"close": None}, {"close": 1.0}]
+    assert _intraday_closes(rows) == [1.0, 2.0, 3.0]
+
+
+class _FakeIntradayFMP:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = 0
+
+    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+        self.calls += 1
+        return self.rows
+
+
+def _collector_with(rows):
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
+    return TickerReportDataCollector(fmp=_FakeIntradayFMP(rows))
+
+
+def _pa_out(tier, change_days, prices, event=None):
+    from app.services.agents.ticker_report_data_collector import CollectedTickerData
+    out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
+    out.price_action_partial = {
+        "tier": tier, "_change_days": change_days, "prices": prices, "event": event,
+    }
+    return out
+
+
+@pytest.mark.asyncio
+async def test_intraday_chart_swaps_short_window():
+    """A short-window big move swaps the daily sparkline for HOURLY closes
+    (intraday texture) and drops the daily-indexed event marker."""
+    rows = [{"date": f"2026-06-{d:02d} {h}:00:00", "close": float(100 + d + h)}
+            for d in range(1, 5) for h in (10, 11, 12, 13, 14)]  # 20 hourly bars
+    collector = _collector_with(rows)
+    out = _pa_out("Unusual", 5, [10.0, 11.0, 12.0],
+                  event={"tag": "x", "date": "Jun 1", "index": 2})
+    await collector._apply_intraday_chart(out)
+    assert collector.fmp.calls == 1
+    assert len(out.price_action_partial["prices"]) == len(rows)  # now hourly
+    assert out.price_action_partial["event"] is None             # marker dropped
+
+
+@pytest.mark.asyncio
+async def test_intraday_chart_keeps_daily_when_sparse():
+    """Too few hourly bars (e.g. FMP intraday history too short) → keep daily."""
+    collector = _collector_with([{"close": 100.0}, {"close": 101.0}])  # < min points
+    out = _pa_out("Unusual", 5, [10.0, 11.0, 12.0])
+    await collector._apply_intraday_chart(out)
+    assert out.price_action_partial["prices"] == [10.0, 11.0, 12.0]   # unchanged
+
+
+@pytest.mark.asyncio
+async def test_intraday_chart_skipped_for_long_window():
+    """Long windows (>15d) stay daily — no intraday fetch at all."""
+    collector = _collector_with([{"close": 1.0}] * 40)
+    out = _pa_out("Unusual", 30, [10.0, 11.0])
+    await collector._apply_intraday_chart(out)
+    assert collector.fmp.calls == 0
+    assert out.price_action_partial["prices"] == [10.0, 11.0]
+
+
+@pytest.mark.asyncio
+async def test_intraday_chart_skipped_for_typical_move():
+    """Quiet (Typical) moves never fetch intraday."""
+    collector = _collector_with([{"close": 1.0}] * 40)
+    out = _pa_out("Typical", 5, [10.0, 11.0])
+    await collector._apply_intraday_chart(out)
+    assert collector.fmp.calls == 0
+
+
 # ── Macro snapshot: shared cross-ticker cache ─────────────────────────
 
 

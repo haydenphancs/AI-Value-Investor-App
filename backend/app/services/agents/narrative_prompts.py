@@ -380,6 +380,16 @@ def _price_action_narrative_prompt(
     else:
         headlines_block = "\nRECENT MATCHED HEADLINES: none in window\n"
 
+    # Web-grounded reason (primary evidence when present): a current web search
+    # found WHY the stock moved (price_catalyst_service, big moves only). When
+    # set, the narrative should LEAD with this over the FMP headlines.
+    grounded_reason = pa.get("_grounded_reason")
+    grounded_block = (
+        f"\nWEB-GROUNDED REASON (PRIMARY — current web search; lead with this):\n"
+        f"  {grounded_reason}\n"
+        if grounded_reason else ""
+    )
+
     # Macro context — VIX regime, fed stance, sector rotation, geopolitics.
     # Already computed for the report's own macro_data section; reuse it
     # here so the AI can attribute moves like "sector rotation" or "war"
@@ -515,7 +525,7 @@ the chart sub-label. Focus on the WHY (catalyst) and the WHAT-KIND-OF-SIGNAL
 
 GROUND TRUTH: {ground_truth}
 CATALYST EVENT IN WINDOW: {event_str}
-{headlines_block}{macro_block}
+{grounded_block}{headlines_block}{macro_block}
 POSTURE: {posture}
 
 EVIDENCE:

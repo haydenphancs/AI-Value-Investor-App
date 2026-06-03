@@ -39,6 +39,7 @@ import bisect
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -119,6 +120,18 @@ _MACRO_SYMBOLS: Tuple[str, ...] = (
     "EURUSD", "USDJPY", "USDCNY",  # Major FX
 )
 
+# ── Shared market-wide macro snapshot cache ───────────────────────────
+# These symbols are identical for EVERY ticker, so without a shared cache
+# each report re-fetches ~2 FMP rows × N symbols. We cache the assembled
+# snapshot at module scope (1h TTL) and dedup concurrent fetches via
+# `_inflight`, so a burst of reports triggers ONE FMP fetch instead of one
+# per ticker. FRED has its own 6h cache (fred.py); this gives the FMP side
+# the same cross-ticker reuse. No dollar cost either way (FMP is flat-rate)
+# — this saves rate-limit budget + report latency, not grounding $.
+_MACRO_SNAPSHOT_TTL_SECONDS: int = 3600  # 1h — fresh enough for a backdrop
+_macro_snapshot_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_macro_snapshot_inflight: Dict[str, Any] = {}
+
 
 # ── News catalyst classification ──────────────────────────────────────
 #
@@ -156,9 +169,18 @@ NEWS_CATALYST_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
         "lowers guidance", "cuts outlook",
         "lowers forecast", "warns of",
     )),
-    ("Lawsuit", (
-        "lawsuit", "class action", "files suit",
-        "sec investigation", "doj probe",
+    # Material legal/regulatory ONLY. Routine plaintiff-firm litigation PR
+    # ("lawsuit", "class action", "files suit") is deliberately EXCLUDED: it
+    # floods the wire for nearly every public company and is a LAGGING symptom
+    # — securities suits are filed days/weeks AFTER a drop and cite it as the
+    # basis, so blaming a price move on "a lawsuit" reverses causality. Keep
+    # only enforcement actions and court rulings, which are genuine catalysts.
+    ("Legal/Regulatory", (
+        "sec investigation", "sec charges", "wells notice",
+        "doj probe", "doj investigation", "antitrust",
+        "indictment", "indicted", "criminal charges",
+        "fraud charges", "charged with fraud",
+        "jury verdict", "found liable", "subpoena", "injunction",
     )),
     ("Buyback", (
         "share buyback", "stock repurchase",
@@ -301,6 +323,7 @@ class CollectedTickerData:
     insider_data_partial: Dict[str, Any] = field(default_factory=dict)
     key_management_partial: Dict[str, Any] = field(default_factory=dict)
     price_action_partial: Dict[str, Any] = field(default_factory=dict)
+    price_catalyst_grounded: Optional[Dict[str, Any]] = None
     revenue_engine_partial: Dict[str, Any] = field(default_factory=dict)
     wall_street_consensus_partial: Dict[str, Any] = field(default_factory=dict)
     fundamental_metrics_partial: List[Dict[str, Any]] = field(default_factory=list)
@@ -334,7 +357,55 @@ class TickerReportDataCollector:
 
         self._compute_metrics(out)
         self._build_sections(out)
+        await self._precompute_price_catalyst(out)
         return out
+
+    async def _precompute_price_catalyst(self, out: "CollectedTickerData") -> None:
+        """For a BIG move only (the section's z>=1 gate, already decided in
+        `_build_price_action` → tier != "Typical"), fetch the real reason via
+        Gemini web-search and fold it into `price_action_partial`: override the
+        badge `tag` and add `_grounded_reason` for the Stage B narrative.
+        Source citations are persisted to `price_catalyst_audit` (not shown in
+        the report). Any failure is a graceful no-op — the deterministic FMP
+        catalyst already in `price_action_partial` stays as the fallback.
+        """
+        pa = out.price_action_partial or {}
+        tier = pa.get("tier")
+        if not pa or not tier or tier == "Typical":
+            return  # not a big move (or σ unavailable) → no paid web search
+        try:
+            from app.services.price_catalyst_service import (
+                get_price_catalyst_service,
+            )
+            grounded = await get_price_catalyst_service().get_catalyst(
+                out.ticker,
+                float(pa.get("change_pct") or 0.0),
+                pa.get("window_label") or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "price_catalyst precompute failed for %s: %s", out.ticker, exc,
+            )
+            return
+        if grounded is None:
+            return  # hard failure → keep the FMP catalyst fallback
+
+        out.price_catalyst_grounded = grounded
+        pa["_grounded_reason"] = grounded.get("reason") or ""
+        tag = grounded.get("tag")
+        if tag:
+            pa["tag"] = tag
+            if isinstance(pa.get("event"), dict):
+                pa["event"]["tag"] = tag
+        else:
+            # Web search found no clear company catalyst → show the tier, not a
+            # (likely-wrong) FMP keyword badge, and drop the FMP event marker.
+            pa["tag"] = tier
+            pa["event"] = None
+        logger.info(
+            "price_catalyst for %s: tag=%s tier=%s (%.1f%%)",
+            out.ticker, pa.get("tag"), tier, pa.get("change_pct") or 0.0,
+        )
 
     # ── Phase 1: parallel fetch ───────────────────────────────────────
 
@@ -521,6 +592,35 @@ class TickerReportDataCollector:
         return out
 
     async def _fetch_macro_indicators(self) -> List[Dict[str, Any]]:
+        """Market-wide macro snapshot, shared across all tickers.
+
+        The snapshot depends only on `_MACRO_SYMBOLS` (identical for every
+        ticker), so it's cached at module scope (1h TTL) with `_inflight`
+        dedup — a burst of concurrent reports triggers ONE FMP fetch, not
+        one per ticker. The cache-miss work lives in the `_uncached` variant.
+        """
+        key = ",".join(_MACRO_SYMBOLS)
+        cached = _macro_snapshot_cache.get(key)
+        if cached is not None and (
+            time.time() - cached[0]
+        ) < _MACRO_SNAPSHOT_TTL_SECONDS:
+            return cached[1]
+
+        inflight = _macro_snapshot_inflight.get(key)
+        if inflight is not None:
+            return await inflight
+
+        task = asyncio.ensure_future(self._fetch_macro_indicators_uncached())
+        _macro_snapshot_inflight[key] = task
+        try:
+            snapshot = await task
+            # Cache-write only on success; never cache an exception.
+            _macro_snapshot_cache[key] = (time.time(), snapshot)
+            return snapshot
+        finally:
+            _macro_snapshot_inflight.pop(key, None)
+
+    async def _fetch_macro_indicators_uncached(self) -> List[Dict[str, Any]]:
         """Fetch the latest level + multi-period changes per macro symbol.
 
         Two parallel FMP calls per symbol:
@@ -3141,9 +3241,21 @@ def _detect_news_catalysts(
     return candidates
 
 
-_EVAL_WINDOWS: Tuple[int, ...] = (7, 15, 30, 45)
+_EVAL_WINDOWS: Tuple[int, ...] = (7, 15, 30, 45, 60)  # incl. 60d (2mo) so a slow build is detectable
 _BASELINE_DAYS: int = 180
 _DEFAULT_WINDOW: int = 30
+
+# Minimum sparkline span (calendar days). The chart always shows AT LEAST this
+# much history so a short-window move isn't a flat line — purely a visual-context
+# floor; change_pct/window_label/σ/tier still reflect the actual detection window.
+_MIN_CHART_DAYS: int = 30
+
+# |z| threshold that defines a "BIG move" worth explaining. The price-action
+# section decides significance FIRST and only hunts for a catalyst/reason when
+# the move clears this bar — never the other way round. 1.0σ = Notable+ (the
+# same Typical→Notable line _compute_price_volatility uses). Raise to 2.0
+# (Unusual) or 3.0 (Extreme) to only explain larger moves.
+_BIG_MOVE_Z: float = 1.0
 
 
 def _daily_returns(prices: List[float]) -> List[float]:
@@ -3329,21 +3441,22 @@ def _build_price_action(
 ) -> Dict[str, Any]:
     """Volatility-aware price-movement section with dynamic window selection.
 
-    Pipeline:
-      1. Compute σ_daily over the 180-day baseline, then per-window z-scores
-         for the evaluation windows (7, 15, 30, 45 calendar days). Windows
-         are calendar-day when `recent_price_dates` is provided (production)
-         and trading-day otherwise (legacy test path).
-      2. If a catalyst event (earnings or news headline) fires within the
-         last 45 days, the chart anchors to the event date and the tier is
-         computed for the exact since-event span. Otherwise, the chart
-         shows the argmax|z| window (or 30 days when nothing is unusual).
-      3. Trim the sparkline to the chosen window's length so iOS renders
-         the right span without needing the full baseline.
+    Pipeline — significance is decided BEFORE any reason is sought:
+      1. Compute σ_daily over the 180-day baseline and the most-unusual
+         evaluation window (7/15/30/45 days; calendar-day in production,
+         trading-day in the legacy test path).
+      2. BIG-MOVE GATE — score the displayed move (current price vs the
+         window's opening close) against σ. Only |z| ≥ _BIG_MOVE_Z is
+         "big" enough to explain; for a move within range we SKIP the
+         catalyst scan entirely and show "Last N Days" + the tier badge.
+      3. Only for a big move: scan earnings + FMP news, and anchor the
+         chart to a catalyst ("Since <date>") when its OWN since-event move
+         also clears _BIG_MOVE_Z — otherwise keep the window. Trim the
+         sparkline to the chosen span.
 
-    Also emits `_news_headlines` (top 20 most-recent matched headlines)
-    so the Stage B narrative prompt can name a real catalyst instead of
-    speculating. The underscore prefix flags it as Pydantic-ignored.
+    `_news_headlines` (matched headlines for the Stage B narrative) is
+    populated ONLY when the gate opens — a normal move surfaces no reason.
+    The underscore prefix flags it as Pydantic-ignored.
     """
     if not recent_prices:
         return _empty_price_action(current_price)
@@ -3356,93 +3469,116 @@ def _build_price_action(
     chosen_window = vol["chosen_window"]
     chosen_ref_idx = vol["chosen_ref_idx"]
 
-    # ── Scan for catalysts within the larger of (45 days, chosen window)
-    # so we don't miss an old-but-significant event.
-    max_scan = max(45, chosen_window)
-    scan_start = today - timedelta(days=max_scan)
-
-    earnings_candidate: Optional[Dict[str, Any]] = None
-    if earnings_dates:
-        for ed in earnings_dates:
-            try:
-                d = datetime.strptime(ed[:10], "%Y-%m-%d").date()
-            except (TypeError, ValueError):
-                continue
-            if not (scan_start <= d <= today):
-                continue
-            idx = _index_for_date(d, today, recent_prices)
-            change = _price_change_at_index(recent_prices, idx)
-            if change > 3:
-                tag = "Earnings Beat"
-            elif change < -3:
-                tag = "Earnings Miss"
-            else:
-                tag = "Earnings Reaction"
-            earnings_candidate = {
-                "tag": tag,
-                "date": d,
-                "index": idx,
-                "abs_move_pct": abs(change),
-                "_source": "earnings",
-            }
-            break
-
-    news_candidates = _detect_news_catalysts(
-        news or [], recent_prices, today, scan_start,
-    )
-
-    # Priority: largest absolute move wins. Ties → earnings (higher
-    # confidence). Catalyst-only ties → most recent date.
-    best_news: Optional[Dict[str, Any]] = None
-    if news_candidates:
-        news_candidates.sort(
-            key=lambda c: (c["abs_move_pct"], c["date"]),
-            reverse=True,
-        )
-        best_news = news_candidates[0]
-
-    chosen_event: Optional[Dict[str, Any]] = None
-    if earnings_candidate and best_news:
-        chosen_event = (
-            best_news
-            if best_news["abs_move_pct"] > earnings_candidate["abs_move_pct"]
-            else earnings_candidate
-        )
-    elif earnings_candidate:
-        chosen_event = earnings_candidate
-    elif best_news:
-        chosen_event = best_news
-
-    # ── Window choice: event date overrides volatility window ─────────
-    if chosen_event:
-        event_date = chosen_event["date"]
-        event_days_ago = max(1, (today - event_date).days)
-        # Pad the chart with a tiny lead-in so the user can see context
-        # before the event marker.
-        window_days = max(event_days_ago, 7)
-    else:
-        window_days = chosen_window
-
-    # ── Ground truth: change_pct + reference price ────────────────────
-    if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
-        ref_price = recent_prices[chosen_event["index"]]
-        change_days = max(1, (today - chosen_event["date"]).days)
-    elif chosen_ref_idx is not None:
-        # Pin to the exact close the volatility function selected. In
-        # calendar-day mode this is the close on/before today−N days; in
-        # trading-day mode it's the Nth from end. Either way, change_pct
-        # and the σ band agree because they both anchor here.
+    # ── STEP 1 · IS IT A BIG MOVE?  (significance is decided FIRST) ────
+    # Score the move the user will actually see — current price vs the close
+    # that opens the most-unusual volatility window — against the stock's own
+    # daily σ. This runs BEFORE any news is scanned: we never hunt for (or pay
+    # to find) a "reason" for ordinary noise. Only a move that clears
+    # _BIG_MOVE_Z earns the reason-finding step below.
+    if chosen_ref_idx is not None:
         ref_price = recent_prices[chosen_ref_idx]
         change_days = max(1, len(recent_prices) - 1 - chosen_ref_idx)
     else:
-        ref_idx = max(0, len(recent_prices) - (window_days + 1))
+        ref_idx = max(0, len(recent_prices) - (chosen_window + 1))
         ref_price = recent_prices[ref_idx]
-        change_days = window_days
+        change_days = chosen_window
+    window_days = chosen_window
+    change_pct = round(
+        (current_price - ref_price) / ref_price * 100, 1,
+    ) if ref_price else 0.0
+    z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
+    tier = _tier_for_z(z_score)
 
-    change_pct = 0.0
-    if ref_price:
-        change_pct = (current_price - ref_price) / ref_price * 100
-    change_pct = round(change_pct, 1)
+    big_move = z_score is not None and z_score >= _BIG_MOVE_Z
+    # σ unavailable (<30 closes) → we can't judge "big", so fall back to
+    # scanning (keeps low-history tickers + legacy tests working); the σ
+    # sub-label is hidden in that case anyway.
+    hunt_for_reason = big_move or sigma_daily is None
+
+    # ── STEP 2 · ONLY NOW, AND ONLY FOR A BIG MOVE, FIND THE REASON ───
+    earnings_candidate: Optional[Dict[str, Any]] = None
+    news_candidates: List[Dict[str, Any]] = []
+    chosen_event: Optional[Dict[str, Any]] = None
+    if hunt_for_reason:
+        # Scan within the larger of (45 days, chosen window) so we don't
+        # miss an old-but-significant event.
+        max_scan = max(45, chosen_window)
+        scan_start = today - timedelta(days=max_scan)
+
+        if earnings_dates:
+            for ed in earnings_dates:
+                try:
+                    d = datetime.strptime(ed[:10], "%Y-%m-%d").date()
+                except (TypeError, ValueError):
+                    continue
+                if not (scan_start <= d <= today):
+                    continue
+                idx = _index_for_date(d, today, recent_prices)
+                change = _price_change_at_index(recent_prices, idx)
+                if change > 3:
+                    tag_e = "Earnings Beat"
+                elif change < -3:
+                    tag_e = "Earnings Miss"
+                else:
+                    tag_e = "Earnings Reaction"
+                earnings_candidate = {
+                    "tag": tag_e,
+                    "date": d,
+                    "index": idx,
+                    "abs_move_pct": abs(change),
+                    "_source": "earnings",
+                }
+                break
+
+        news_candidates = _detect_news_catalysts(
+            news or [], recent_prices, today, scan_start,
+        )
+
+        # Priority: largest absolute move wins. Ties → earnings (higher
+        # confidence). Catalyst-only ties → most recent date.
+        best_news: Optional[Dict[str, Any]] = None
+        if news_candidates:
+            news_candidates.sort(
+                key=lambda c: (c["abs_move_pct"], c["date"]),
+                reverse=True,
+            )
+            best_news = news_candidates[0]
+
+        if earnings_candidate and best_news:
+            chosen_event = (
+                best_news
+                if best_news["abs_move_pct"] > earnings_candidate["abs_move_pct"]
+                else earnings_candidate
+            )
+        elif earnings_candidate:
+            chosen_event = earnings_candidate
+        elif best_news:
+            chosen_event = best_news
+
+        # Per-catalyst check: even inside a big-move window, only ANCHOR on a
+        # catalyst whose OWN since-event move itself clears _BIG_MOVE_Z. If it
+        # doesn't, the headline didn't drive the move — demote it to
+        # context-only and let the chart show the volatility window instead.
+        if chosen_event:
+            ev_idx = chosen_event.get("index", -1)
+            ev_ref = recent_prices[ev_idx] if 0 <= ev_idx < len(recent_prices) else None
+            ev_days = max(1, (today - chosen_event["date"]).days)
+            ev_change = ((current_price - ev_ref) / ev_ref * 100) if ev_ref else 0.0
+            ev_z = _z_score_for_window(ev_change, sigma_daily, ev_days)
+            if ev_z is not None and ev_z < _BIG_MOVE_Z:
+                chosen_event = None
+
+    # ── A surviving catalyst RE-ANCHORS the move to the event date ────
+    # (otherwise the STEP-1 volatility-window values computed above stand.)
+    if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
+        ref_price = recent_prices[chosen_event["index"]]
+        change_days = max(1, (today - chosen_event["date"]).days)
+        window_days = max(change_days, 7)  # tiny lead-in before the marker
+        change_pct = round(
+            (current_price - ref_price) / ref_price * 100, 1,
+        ) if ref_price else 0.0
+        z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
+        tier = _tier_for_z(z_score)
 
     if abs(change_pct) < 1.0:
         direction = "flat"
@@ -3450,10 +3586,6 @@ def _build_price_action(
         direction = "up"
     else:
         direction = "down"
-
-    # ── Tier: based on the actual span the user sees ──────────────────
-    z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
-    tier = _tier_for_z(z_score)
 
     # ── Tag + window label ────────────────────────────────────────────
     if chosen_event:
@@ -3464,21 +3596,25 @@ def _build_price_action(
         window_label = f"Last {window_days} Days"
         tag = tier  # Typical / Notable / Unusual / Extreme
 
-    # ── Trim sparkline to the chosen window so iOS doesn't ship 200
-    # closes when the chart only renders ~30. For the no-event path with
-    # calendar-day windows we anchor to chosen_ref_idx so the chart shows
-    # exactly the closes that fell inside the labelled window.
-    if not chosen_event and chosen_ref_idx is not None:
-        sparkline = recent_prices[chosen_ref_idx:]
-        offset = chosen_ref_idx
+    # ── Chart span: AT LEAST _MIN_CHART_DAYS of history so a short-window
+    # move isn't a flat line. Only the sparkline widens for visual context —
+    # the DETECTION window (change_pct/window_label/σ/tier above) is unchanged.
+    # Using min(detect_idx, min_chart_idx) takes the EARLIER index, so the
+    # chart naturally uses the longer span when the move itself is > 1 month.
+    if recent_price_dates and len(recent_price_dates) == len(recent_prices):
+        target = today - timedelta(days=_MIN_CHART_DAYS)
+        min_chart_idx = max(0, bisect.bisect_right(recent_price_dates, target) - 1)
     else:
-        sparkline_len = window_days + 1
-        if len(recent_prices) >= sparkline_len:
-            sparkline = recent_prices[-sparkline_len:]
-            offset = len(recent_prices) - sparkline_len
-        else:
-            sparkline = list(recent_prices)
-            offset = 0
+        min_chart_idx = max(0, len(recent_prices) - (_MIN_CHART_DAYS + 1))
+
+    if not chosen_event and chosen_ref_idx is not None:
+        detect_idx = chosen_ref_idx
+    else:
+        detect_idx = max(0, len(recent_prices) - (window_days + 1))
+
+    chart_start = min(detect_idx, min_chart_idx)
+    sparkline = recent_prices[chart_start:]
+    offset = chart_start
 
     # Re-index the event marker against the trimmed sparkline.
     event_out: Optional[Dict[str, Any]] = None

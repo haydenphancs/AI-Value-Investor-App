@@ -479,9 +479,9 @@ Sentence 2 (OPTIONAL) — If a strong headline is in the window, mention it
   as CONTEXT only ("came alongside X" / "X was in the news"), NOT as the
   driver of the move. SKIP this sentence entirely if no notable headline.
 
-Final sentence — Use Frame B: classify this as routine trading inside the
-  stock's normal range, not a fundamental shift. You may name a macro or
-  sector backdrop if relevant.
+Final sentence — Classify this as routine trading inside the stock's normal
+  range, not a real change in the business. You may name a macro or sector
+  backdrop if relevant.
 
 NEVER contradict GROUND TRUTH direction. DO NOT quote σ, z-score, or any
 volatility math — that lives in the chart sub-label. DO NOT write phrases
@@ -498,28 +498,22 @@ Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
   - otherwise say plainly that no single catalyst explains it — broader market drift
   Cite a specific source from the headlines or macro block when you can.
 
-Final sentence — Classify the signal. Use one of these two frames explicitly:
-  A) "This reflects a FUNDAMENTAL change in the business" — a structural shift
-     in the company's own economics, in EITHER direction:
-       POSITIVE examples: new contract or major customer win, secular-tailwind
-         capture (AI-infrastructure build-out, EV transition, GLP-1 wave),
-         accelerating revenue, raised guidance, durable moat strengthening,
-         expanded TAM, breakthrough product launch.
-       NEGATIVE examples: declining revenue, leadership change, structural
-         cost issue, lost contract, credible guidance reset, deteriorating
-         moat, regulatory blow.
-     Be specific about WHAT changed. Default to Frame A when a strong
-     company-specific catalyst (positive or negative) sits in the headlines.
-  B) "This is short-term market NOISE" — when the cause is macro fears (rates,
-     war, oil), sector rotation, broad risk-off, or no clear cause at all.
+Final sentence — Judge what KIND of move this is, decided from the evidence
+(do NOT default to one verdict): either a genuine, durable shift in the
+company's own business/economics (e.g. a major contract or customer win, a
+secular tailwind it is capturing, accelerating revenue, raised guidance, a
+strengthening moat — or the negative mirror of any of these), OR a temporary,
+market-driven move (macro fears, sector rotation, broad risk-off, sentiment,
+or no clear cause). Be specific about WHAT changed, in plain language.
 
 NEVER contradict GROUND TRUTH direction. If headlines suggest the opposite of
-the chart, treat the move as macro-driven (market repricing through this name).
+the chart, treat the move as market-driven (a repricing through this name).
 If everything is FLAT, write one sentence saying so and skip the catalyst hunt.
 
-DO NOT quote σ, z-score, or any volatility math in the prose — that lives in
-the chart sub-label. Focus on the WHY (catalyst) and the WHAT-KIND-OF-SIGNAL
-(fundamental vs. noise)."""
+DO NOT quote σ, z-score, or any volatility math (it lives in the chart
+sub-label), and DO NOT shout ALL-CAPS labels like "FUNDAMENTAL"/"NOISE" — write
+natural prose. Focus on the WHY and whether it's a real business shift or a
+temporary market move."""
 
     return f"""Explain WHY the stock moved and what kind of signal this is.
 
@@ -915,8 +909,11 @@ def build_narrative_jobs(
     if isinstance(pa, dict):
         jobs.append(NarrativeJob(
             label="price_action_narrative",
+            # Headroom over the prompt's "under 60 words / 3 sentences" so a
+            # full 3-sentence Insight is never chopped mid-thought with "…".
+            # The cap is a runaway safety net, not the target length.
+            word_cap=90,
             prompt=_price_action_narrative_prompt(persona, evidence, shell),
-            word_cap=50,
             apply=_setter_for_dict_key(pa, "narrative"),
             fallback_value=FALLBACK["price_action_narrative"],
         ))

@@ -358,6 +358,7 @@ class TickerReportDataCollector:
         self._compute_metrics(out)
         self._build_sections(out)
         await self._precompute_price_catalyst(out)
+        await self._apply_intraday_chart(out)
         return out
 
     async def _precompute_price_catalyst(self, out: "CollectedTickerData") -> None:
@@ -405,6 +406,42 @@ class TickerReportDataCollector:
         logger.info(
             "price_catalyst for %s: tag=%s tier=%s (%.1f%%)",
             out.ticker, pa.get("tag"), tier, pa.get("change_pct") or 0.0,
+        )
+
+    async def _apply_intraday_chart(self, out: "CollectedTickerData") -> None:
+        """For a short-window BIG move, swap the daily sparkline for HOURLY
+        closes so the chart shows intraday texture instead of a smooth daily
+        line. Detection (%, label, σ, tier) is unchanged — only the rendered
+        `prices` array changes. Graceful daily fallback on failure or when
+        hourly history is too sparse.
+        """
+        pa = out.price_action_partial or {}
+        tier = pa.get("tier")
+        change_days = pa.get("_change_days")
+        if (not pa or not tier or tier == "Typical"
+                or not change_days or change_days > _INTRADAY_MAX_DAYS):
+            return  # not a big move, or the window is long enough for daily
+        today = datetime.now(timezone.utc).date()
+        win_start = (today - timedelta(days=int(change_days) + 5)).isoformat()
+        try:
+            rows = await self.fmp.get_intraday_prices(
+                out.ticker, interval="1hour",
+                from_date=win_start, to_date=today.isoformat(),
+            )
+        except Exception as exc:
+            logger.warning("intraday chart fetch failed for %s: %s", out.ticker, exc)
+            return  # fallback: keep the daily sparkline
+        closes = _intraday_closes(rows)
+        if len(closes) < _INTRADAY_MIN_POINTS:
+            return  # too sparse to be worth it → keep the daily line
+        pa["prices"] = [round(c, 2) for c in closes]
+        # The event dot indexes into the DAILY array; re-mapping it to hourly
+        # by date is noisy, so drop the marker for the hourly view — the
+        # catalyst is still named in the badge + Insight.
+        pa["event"] = None
+        logger.info(
+            "intraday chart for %s: %d hourly points (~%d-day window)",
+            out.ticker, len(closes), int(change_days),
         )
 
     # ── Phase 1: parallel fetch ───────────────────────────────────────
@@ -3257,6 +3294,31 @@ _MIN_CHART_DAYS: int = 30
 # (Unusual) or 3.0 (Extreme) to only explain larger moves.
 _BIG_MOVE_Z: float = 1.0
 
+# Short-window moves (detection span ≤ this many trading days) render the chart
+# from HOURLY closes for intraday texture instead of a smooth daily line; longer
+# windows stay daily. Detection (σ / z / label / %) is always daily regardless.
+_INTRADAY_MAX_DAYS: int = 15
+_INTRADAY_MIN_POINTS: int = 12  # fewer hourly bars than this → keep the daily line
+
+
+def _intraday_closes(rows: List[Dict[str, Any]]) -> List[float]:
+    """Chronological close prices from FMP intraday rows.
+
+    FMP `historical-chart/{interval}` returns newest-first rows with a
+    `close` field; we reverse to oldest→newest for the sparkline.
+    """
+    out: List[float] = []
+    for r in rows or []:
+        c = r.get("close")
+        if c is None:
+            continue
+        try:
+            out.append(float(c))
+        except (TypeError, ValueError):
+            continue
+    out.reverse()
+    return out
+
 
 def _daily_returns(prices: List[float]) -> List[float]:
     """Daily simple returns from a price array (oldest→newest).
@@ -3662,6 +3724,7 @@ def _build_price_action(
         "sigma_daily_pct": sigma_daily_pct,
         "expected_band_pct": expected_band_pct,
         "_news_headlines": evidence_payload,  # Pydantic-ignored
+        "_change_days": change_days,  # detection-window span (Pydantic-ignored)
     }
 
 

@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     GEMINI_TEMPERATURE: float = 0.7
     GEMINI_CACHE_TTL: int = 3600  # seconds to cache API responses (saves quota)
 
+    # Price-catalyst grounding (Gemini web-search "why did it move" for big moves)
+    PRICE_CATALYST_AI_ENABLED: bool = True       # kill switch; false → FMP fallback
+    PRICE_CATALYST_CACHE_TTL_HOURS: int = 24     # a move's reason is fresh daily
+
     # Financial Modeling Prep
     FMP_API_KEY: str
     FMP_BASE_URL: str = "https://financialmodelingprep.com/stable"

@@ -1,0 +1,1607 @@
+[
+  {
+    "ticker": "UPS",
+    "change_pct": 13.2,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Unusual",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "UPS shares fall after Q1 profit drops; company signals growth rebound ahead"
+    ],
+    "oracle": {
+      "text": "The stock performance of UPS (+13.2% over the last 15 days) appears to be driven by a combination of factors, with the most significant catalyst being the company's first-quarter 2024 earnings report, which exceeded analyst expectations for earnings per share (EPS) despite a revenue miss.\n\nSpecifically, UPS reported an adjusted diluted EPS of $1.43, surpassing the analyst consensus of $1.31. While consolidated revenues decreased by 5.3% year-over-year to $21.7 billion, the company's ability to beat EPS estimates demonstrated cost management and profitability resilience. Additionally, UPS reaffirmed its full-year 2024 financial guidance, signaling confidence in its future performance.\n\nWhile the Q1 2024 earnings report is the primary driver, other factors may have contributed to the positive stock movement. The company's CEO, Carol Tom\u00e9, noted an improvement in average daily volume in the U.S. during the quarter, suggesting a positive trend in domestic operations. Furthermore, UPS has emphasized its strategic shift towards a more profitable mix of business, focusing on small and medium-sized businesses (SMB), business-to-business (B2B), and healthcare, while reducing lower-yielding e-commerce volume. This strategic pivot, coupled with ongoing cost-reduction efforts, likely contributes to investor confidence.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHNl46JRhZd2OkvtcPTsv4Q1SkqVHUlwO0_OjduHBO4kSFn7Fcke5v98zpQbuOiupZzEwmbAcPqnhpGJkNKF1gSMozNDQVyPXg9f2ggHLc6hsJTdDp7p6-zeuk6tOkGo1lwwnaBJY_As32lvHh-bkLPaWqp6lAyXIZ1AMIjVWecWuYuC4uQXYq5ETyxh1yQEQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH1vIzON9z28BNUcoxJsGa6sJXQXln1_wjK3tMX8VhW0Su6D0Ft2f6RKCI_7STgJpH3aqOOydGgJo35eA7C1l-LxLmtfBdE7NdyAMuxz51GjAd9ETdsvJ9HF5_euulNoEvGC8nuJexVZvS6WawG11a-lGrIZp8q4ILgAez01r7sWgcudsF8qM71Yb7R2giOhEKxsKoUW5j8bC6stfUO",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFIZ_acTnQ5xt2XmCuNMZvpHt3NAkjvKFntldmYWqmMew5VjNTN1u2FOwwQmAFgJO2RadH6SOoOmHN9FQpm1wJsWdvUTIG6mSI4SyM1wImxsxx8jpq-679aZBfKinA_hX9UiVwGmYQSKqSKhwLoT-piIFw9ZOLI_YifrKm6r8-yJstFDhf614OJYfyXMFQh5r70c8SXUJQn4UtFuxOwsbTfClAYknkUlUUOhlhlX7v4Dw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGK5XuOEh94ecTA_4wghxu9NpHtMNGKsguFhXmabpYqha7zq7BcJyAsdSZXYLM9tMCCnbNC_15dwvqXuI5_qM6Uv0bHZHtBzUYqOAf-9nkVlW8eim3H5Ptd2vxzAUVNHs6wqn9kouL5uJPSHINa0NHOR1XpFmWr7TOfgpk5DhSoWC4bnra8FRyEROD3DJjN5Dmy9Y6LOgk0o2E=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHYci_JL8648izmGB9hn0_GItDLzJ4H_tmZFL_gAGJWDGJp_bb0whm3f9Yz4MqWo3Vor3kBBPprAt66_0cJtCB7GaFAYU4EuCbh1hUasv1u4rP7tsmxGYuD9BNPUGPAADDb5UrFNB_2MtpAyAdCHdporYFR1bLZC6NzWl8="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system's matched headline indicates a price drop, contradicting the stock's actual positive movement."
+    }
+  },
+  {
+    "ticker": "MSCI",
+    "change_pct": 15.6,
+    "window_label": "Since Apr 21",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [
+      "These 4 Dividend Growers Have Already Declared 10% Dividend Increases"
+    ],
+    "oracle": {
+      "text": "The +15.6% stock movement for MSCI since April 21st was primarily driven by a strong first-quarter earnings report released on April 21, 2026. The company exceeded Wall Street expectations for both revenue and adjusted earnings per share.\n\nSpecifically, MSCI reported revenue of $850.8 million, a 14.1% increase year-over-year, and adjusted earnings per share of $4.55, surpassing analyst forecasts. A key metric highlighted was the record asset-based fee run rate of $872 million, a 25% year-over-year increase, reflecting the growth in passive investing and assets benchmarked against MSCI's indexes. The company also saw significant organic revenue growth of over 13% and a 52% increase in net new recurring subscription sales.\n\nFollowing these positive results, several analysts raised their price targets for MSCI, with some reiterating \"outperform\" or \"buy\" ratings. This strong financial performance and positive analyst outlook appear to be the most significant catalysts for the stock's upward movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHXKdcKQv8SY-ozKViijLJQMTdgwMoCpu5cZlsCT_SeVuyg0wqiYzTmg4fXUAlhNUmrv0Zk5NEcMVVkF9rKPb5xzMjaCGbeHOc18SKEJAhg0cFXcz6XQOcxr2sNljrx32a9Hc49fLOTcIuAqa-Swe6K1AfMfJj_9d5UTvNn3XFjv0nYzPuZZjsJ7NsUNxtB36ZTYpzf7Ho08Eq5GRokoWiiTEgK0kWKRMA1HVlf5bkpj4t3mAap_lGg4OJroGpQcZ4xZM-ecgoregm59i1yslPiTgHGuEnUSWo3JTsqY7Y=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG4Qu0CgWaDtuMbp6g_15AfW2ukCX6izsWKPSsIEJH4Ob8fNyw-3oG88mFZgeOyyl9MfWp8yAcOZEY6GWE0csm61F7Z4dEKlzIP7YMx9gepY-1haol9gxx3FPsqm-6-SEIahCD0czj3OyrD6Na7MvT5Cq4NtHRxkJZDO8XzsXMNeWkOr6bHptmxE5z3biZvA-qOyvT-78lCqfXPCvt28fdV6HlGlIBbhFS8uVZLxRDHn-94XrpbJDM=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFWNKg0YWGWAFduxmAjHe69_uAIVajmd25QEFP0S_kZgDKUvNvkPLHJWqqkRz8EmnyIxoTsa0suThjJfM1Sja-iANw5gUcRMa0Yp6g38oDZZmPemeBqQ6f0LQI2tPxuxZSqOuCCukYLZ9OSGGTfNbXBZC0yuXNCYsg=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG3C-9Qbk4kEwEHZy0PZVybNQcqPOaUlVmenC5-meDn3oyrs9XVbaAcwnLCRThx9MidCE6_DphkEyIOsEt-89XO5YMSIF5XOuZOnNeUBnzh7jlstZnsLhaoPEQN3kq4s6cceVirJ6PzhwANLMdVdgxcpKuzeA-_uqvgPiHja9LlA48tHb6FIpcy2OWAVKvQcvBGUTowc5lRgA=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' but the reference provided specific details about a strong earnings report and exceeding expectations."
+    }
+  },
+  {
+    "ticker": "ASML",
+    "change_pct": 30.9,
+    "window_label": "Since Apr 20",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Buyback",
+    "top_headlines": [
+      "ASML reports transactions under its current share buyback program",
+      "ASML reports transactions under its current share buyback program",
+      "ASML reports transactions under its current share buyback program",
+      "ASML Shares Trending Overnight As AGM Approves Dividend, Buyback Plan: What You Should Know",
+      "ASML reports transactions under its current share buyback program"
+    ],
+    "oracle": {
+      "text": "The most significant catalyst for ASML's stock movement of +30.9% since April 20, 2024, appears to be the company's first-quarter 2024 earnings report, released on April 17, 2024. While the report showed mixed results with revenue missing analyst estimates, it also revealed an earnings per share (EPS) beat. More importantly, ASML maintained its full-year 2024 outlook, expecting the second half of the year to be stronger than the first, signaling a continued recovery in the semiconductor industry. This positive forward-looking statement, coupled with the company's ongoing investments in capacity and technology, likely reassured investors about ASML's long-term prospects and its crucial role in the industry's cyclical upturn. Additionally, ASML's strong performance in 2023, with significant net income and sales, and a proposed increase in its 2023 dividend, further contributed to investor confidence. The company's EUV systems continue to be a central driver of demand, especially with the increasing complexity and performance requirements of modern electronics and the growing influence of AI.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF2TbpDG7c7Q9T5zhDgDmEdpdUZWssHRDY6lx9Uv8qmt1fiNLrU5c8db0dwzIPFvAFO5OQBOZip5FFhLtCwJ9ZSoMPFWKj93Tv8iFuwo4M6lO4KGoyu36jnDc4NUbow4abLWcC9oFSONAE9pCEG9MZLK3kMEjotPUPSCvj4PekH8ilF21mdNlZj3UEEr4FACvGtK2bLQhIWUvY5P9kzaCM0bPtpOv4MVJlP5LuV4GJTayU_",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE5hYFTfsEAA-F3cAJAVUYCWpqNpurJFe2-1izQu7qqoccGCDqs0tBgAg6z_8PWQK9oz9rgGYk5daNz-TaB_uqDXb3jWpmalp9BxM6tuMUTxUnIF6Dz14CnqFD9O4b8zt4MLxgN_XxAkcyPhvtBjue35gT16dWwDXmCXRUM9RyeChGIi4Wu",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE2RcYPXzlfcb4uBtre8xA5fmzw9gjvt2HVo3QNrQ8ckxOzjujXGl8EAe3e6LffqNG-A3BmYnsYa8X2yyCjcCIIAA8v7Qa_m8ZZnUxTuMbxOw44S3JuvaswpV9I5AuNfyC-Un8T2y_nRIQJBruhHIGt5VGOScTPdulKKH7xJXDq0ydlh0g0en3chq2j6IhFQ6Mxwnt8K2vbCCCdAUKc",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEF3F_vPHlnaiKuoXSaHSHd4iWJL9sInXlZtb9_X1xMEDMFg6LQsXYRI-sSf4hFi8QRFF6tgWfA0v9LYaM9sJzuIt5IeF0nQzd7C1rmll4ZwPeevmzIP3c6pgWxukgJPKn3z1wOa4aw8-KORxN0_f14s6VMXrM1",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEHgXdXvjq8PtWrT0jhovnpEbQTgNTfZOEblwfx7nwKsQpAHUbNfKy5A-c308rsBFxRaKSXz6v_bz244rHVT6oNawFWzQUtJP0GAL-v_FMCqJ2h2Uvx4G8JixN8shOGbfMgf-4ttzj2jOpK8Ei-87Wr71A="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified share buybacks as the catalyst, while the reference points to the Q1 earnings report and positive future outlook."
+    }
+  },
+  {
+    "ticker": "GFI",
+    "change_pct": -23.3,
+    "window_label": "Last 45 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Beauce Gold Fields Acquires the France Phosphate Property Expanding its Lac-Saint-Jean Anorthosite Land Package"
+    ],
+    "oracle": {
+      "text": "The stock GFI has experienced a significant decline of -23.3% over the last 45 days. The primary catalyst for this downturn appears to be a combination of broader market and sector-specific pressures, rather than a single company-specific event.\n\nSpecifically, a retreat in gold prices, driven by rising bond yields and investor rotation into other asset classes, has negatively impacted Gold Fields. This broader market trend, affecting the entire precious metals sector, is the most significant driver of GFI's recent stock performance.\n\nWhile there have been some positive company-specific developments, such as analyst upgrades and strategic investments, these have been overshadowed by the macroeconomic headwinds and sector-wide weakness. Additionally, there are ongoing concerns regarding regulatory uncertainty surrounding Gold Fields' key Tarkwa mine in Ghana, where lease renewal is facing stricter scrutiny. This adds another layer of risk that is contributing to the stock's decline.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEda0S712aZip_ITd2sxy1C7kgfaMGaG6mkMe9Emw3aedZ3HH1b2Rpyfx7UUd9o6ns4qA-qsQoUS1QHRQof-bDVHG1XxXl3mJYgzaNKg044BHl_CaTdBkzPGVhX",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG-DXTmj1lO13O6AJk4Zj3-W6-fJOYAdoiBJDQLiVmpJznJzK7ngC4vJkZGBdVqQ0nMv9NEOoKMYwTZaYEvh8hYycK9RcU2urWegdz_b7Q1uy5YPUxTtLJcMkGI-1XUHtM="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified an acquisition as a catalyst, but the reference indicates broader market and sector pressures, not company-specific events, drove the stock's decline."
+    }
+  },
+  {
+    "ticker": "PUK",
+    "change_pct": -8.3,
+    "window_label": "Since May 17",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "M&A",
+    "top_headlines": [
+      "Prudential plans to acquire 75% stake in Bharti Life Insurance"
+    ],
+    "oracle": {
+      "text": "There was no single, clear company-specific catalyst reported for Prudential plc's (PUK) stock movement of -8.3% since May 17, 2026.\n\nHowever, Prudential plc did announce a series of share repurchases between May 18 and May 22, 2026, as part of an ongoing buy-back program. The company intended to cancel these repurchased shares, which reduces the number of outstanding shares. Additionally, on May 29, 2026, Prudential plc provided an update on its total voting rights and share capital, stating it consisted of 2,520,488,997 ordinary shares.\n\nIt's important to note that Prudential plc is distinct from Prudential Financial, Inc. of the United States.\n\nWhile these buy-back activities were reported, the provided search results do not indicate a direct link between these actions and an -8.3% stock price drop during that specific period. It is possible that broader market or sector trends influenced the stock's performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEKpy0dcMTGIAWkGYffe26R-vHWWmjrGVBXmqhJVb3Tsx2WLvNWNbsbPHSHN-p89Ffat39Di7BpoNdpYMwRQJOK34foXvN6FfpE1HF0aLkJLDVkDhnHMGdOTV-7hXM4LL3LwACc50y3ftN_h2dhVeezkD2N7mcuA3p3fH3haOpho4GIrsxjwEK5-iKp4jh_02UBe-gvtxL3lB-pnbLNHIoq17vBuka0oxY=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF7gGbWMKdN2YMLyvP28Lbd6xusqZBHEt9QvEH3ESi1Gv-aKLY3QS_DuFkbZBwGAo7DKyQvWTlRTZTOao--AUCTDuQ8ZNyQ7qnkofld7oMsgYNgPn1Ru5cljTnOCczpA0I6HMy85DYVYmBHXEx5G_W9vbAaoE9hg9SeX3Gwxqxkr2NxMfN13smJbzi4NDdRa_8PqVbAyHGzyUy3KVrG6TZ06Sv3RCOK4fQ=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHcrXBAD2MdVFHAr6jGb2NNEuWuPpV4e1v0fjoEMce-yuS26H5Rwrde4ZyeAdafZwXa7-el-uW3drnU7US4b_G7UXfIFiPSAdxptYp-BsDsgTVfibZd61jj5yOWH3vz1bz5vGjGq_lhG7B6qrQAblL9SjSQ5hH7uysHCn079DbJJO2THimu1-ec2mcfTIzHzck9R3RtoFkuFERGdeNbgNJwPiL5Hwcn6A6ogqB-gXeDa1w=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGPcou9pDjtQRn4za-WdqXmljL0C17ZQVrgJr0xlfsSag_MM_AvK4pZ8J36LDHTxPhjIi4p1-QTrvGqm3LiYqV7uMYfs6qx_tspCXEcwnO7mG9bu8SVzZWpImrjX_HLCaVUHxh6waz6l2hKG680lyfoe1DSC6035FVftBJku8Ii1hLmAa082QILce58a-wQ2tC7uZicxU_huYN8-FgjuZAxinj_lcLmRP6D2IetabMcOxXWxbvsEA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFw9U4isvJuwbOwaWTzW5MC3lA4dN-cy6ET4W7cGBXBq4KQDGUAqcw4H9plj55VjqEOelUx4sC1wACetIaIfhKImlCMU3Hfbx1ALZj8Cg7EQE8cE2_WNqkzwJpUHOF8733Ov0Y-4-5iL-4napGjwcaOw-PaowD0wsvBNWQ24riMUBmDmZEV2UEahQqPTHsG-urXn0Qwa1NaEcKzN_BA0WFzYkN9NSmtBxa-ixhLx3xBwKpDhVi1McBp8qVfPhUOM2jY7Y6p2Fdv_qWlCdgRvu2b4zMqI7dnUH_oRSNYen4sKBSewP01-JZtfHSa3OHBWeUeaeGzULdm5ZoSREP8O4qkbaRwiu6uhhPxaXFRyK6H-_AIuMFYVmnDbCR7whjPEPcUsazY"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified M&A as a catalyst, but the reference found no clear catalyst and mentioned share repurchases instead."
+    }
+  },
+  {
+    "ticker": "BBDO",
+    "change_pct": -12.6,
+    "window_label": "Since May 6",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [
+      "Banco Bradesco (NYSE:BBDO) Sets New 52-Week High  \u2013 What\u2019s Next?"
+    ],
+    "oracle": {
+      "text": "The stock BBDO experienced a market cap decrease of 12.14% over the 30 days leading up to May 22, 2026. This aligns with a reported -12.6% stock movement since May 6th. While specific company-specific catalysts for this decline are not explicitly detailed in the provided search results, several factors and technical indicators suggest a potential downward trend or market sentiment shift around this period.\n\nOne significant indicator is that BBDO moved below its 50-day moving average on May 7, 2026, signaling a potential shift from an upward trend to a downward trend. Additionally, the Momentum Indicator moved below the 0 level on April 23, 2026, and the Moving Average Convergence Divergence (MACD) histogram turned negative on April 24, 2026, both of which are bearish signals suggesting a potential for further stock price decline in the subsequent weeks.\n\nFurthermore, the RSI Oscillator for BBDO moved out of overbought territory on April 22, 2026, which can also indicate a shift towards a downward trend. While some analyses suggest a \"Buy\" consensus from Wall Street analysts, other technical indicators point towards a weaker short-term performance.\n\nIt is important to note that the provided information focuses on technical indicators and market sentiment rather than specific news events or company announcements that might have directly driven the stock's movement. Therefore, the most significant driver appears to be a combination of bearish technical signals and a general shift in market sentiment, rather than a single, clear company-specific catalyst.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEHG68mdwFCrKsh17otNaxqkoLjgNet19B6gZof1d3BqArv92W4CLIwJo7pT_0o9K5IhcfNCOsOnyPo2Jkz9L6ShruQ1xKlQHFiL2A7IfsFjuJb5traV5vuuJqqP7ovZUu8mFS-_rG5XDwTRYTSj1Hu4QKOna6V",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG7NMRj9Z_dtiA1pIOSy077RLeV1kMrYPLCo-7NjWzqSKOxiAoICZbgrMENdetNJi7doQHhdyzlyrZcIY4dEME8SiGJRTDBxDO3VcaeU1_aaSZZ_KHyQZu3W_J65IHvFaizkkJqy-2t3FtPtlgg4650bQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEIuM9PGmTDxP5AnlJ9JutGvytbol5xCIDI6sP4jeF3y3kuCcUXzxLbrYqy_ltx6Y8kDjInWXHxgqymE5if40tIEC0BqmTKJ_UQgY2_r98XDWfYepngpJVyJIIdiSDEWuoMSxbrXKcAC7THMajkd0Y=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFl5KWajYuQTDz7gxzMwLFJ9sDs3ZB1R9wW0qpoR0SH2qsDcgw-j64NPAgfGMzIJRUu-9LkNf4q8O4whWjQ0iVf6VyYtK0slacgALoJQ12KX0yUE2VMYxFoDrbL"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system incorrectly identified earnings as a catalyst, while the reference points to technical indicators."
+    }
+  },
+  {
+    "ticker": "ALAB",
+    "change_pct": 83.8,
+    "window_label": "Since May 5",
+    "direction": "up",
+    "tier": "Unusual",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary catalyst for Astera Labs' (ALAB) significant stock movement since May 5th has been its robust first-quarter 2026 financial results, which exceeded analyst expectations, coupled with optimistic second-quarter guidance.\n\nSpecifically, the company reported earnings per share (EPS) of $0.61, surpassing the consensus estimate of $0.54, and revenue of $308.36 million, exceeding the expected $292.19 million. This strong performance was further bolstered by a year-over-year revenue growth of 93.5%.\n\nAstera Labs also provided a positive outlook for the second quarter of 2026, forecasting EPS between $0.68-$0.70 (against a consensus of $0.50) and revenue between $355.0 million and $365.0 million (compared to a consensus of $310.0 million). This optimistic guidance, driven by strong demand for its AI fabric and signal conditioning portfolios, has significantly boosted investor confidence. The company's focus on purpose-built semiconductors for rack-scale AI and its role in next-generation AI clusters have also contributed to positive sentiment.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH-971I9EX_EZGK4bNoYXcVNF1wvK4i1OJTUwObUrpvriLjH62vlZofshVqVimWzMGS3e320STVaTFWWlGGvaVSFTqnUXAo1yXljHw6WhJRjqV-r8HnWSYIXjxR2orkm8IQHNZHVZGSKMeHiAxyXtyFsUBaalRcmXBsXVPE9BBvDxrfnUzbgAec66XGJxfc",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH52rbiWDP1P3t8USEIl6xPdDlHRSbpC6H57o10N15veNRVUBdu4l8QGoa82xwGqxG-acEV3cmffcDfAy7lviQUXFawY9SjaZW_krqr66RZEwBJkw3TqviP4k0qPramiV6pAO2lRMXCTdZ7PO-P18CYJkXaWkfvyy-0Yfuslw7S_dSb-zP0FiigvMILnJVWdQjjBuzkiSZMdXP4lnx_tR1_T2GgEfdrwYRd3pOa6edS",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEDMSq0W9us-2GLxjkuTtAHaxyanUuXWjQbaLwzXF0cYgJv0RTXV9TCQFYh2QgmTtOfIsccGrg1PrekCVeY8PabKU2wQbBypZjSAc2lXAL75mfep7gV57hbhCZud_XNSTYM0rDuWue6G-OxeP9jAuzZjpGsYmxB3CjvrnsTGhOSTliEeRpNXkkJDzJtKrXplbVy56zEGHu2ALHx7QCz0m_Rkg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEDOnHfQpX-sof57jZShx37-um9ewv8W-ZUoxu32L7nb91wLqY0bpYBTLHxytXfdgBkBlgtgTww6Bc3BX36cL7DW_MYuo0aV5a5GyTELQDSxcp1T-cLOA8h4uRBxg=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' as the catalyst, but the reference details specific financial results and guidance, not a general reaction."
+    }
+  },
+  {
+    "ticker": "SHOP",
+    "change_pct": 12.9,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Chiron Real Estate Inc. Completes Acquisition of Inaugural SHOP Communities"
+    ],
+    "oracle": {
+      "text": "The +12.9% stock movement for Shopify (SHOP) over the last 15 days appears to be primarily driven by positive sentiment surrounding its Q1 2026 earnings report and the company's strategic integration and growth in the AI space.\n\nThe single most important driver was Shopify's Q1 2026 earnings report, released on May 5, 2026. The company reported revenue growth of 34% year-over-year to $3.17 billion, exceeding analyst expectations. Gross Merchandise Volume (GMV) also saw a significant increase of 35% to $100.7 billion. This strong performance, coupled with a 15% free cash flow margin, indicated robust business momentum.\n\nFurthermore, Shopify's strategic positioning and advancements in Artificial Intelligence (AI) have been a significant catalyst. The company is actively leveraging AI, with AI-driven traffic to Shopify stores jumping 8x year-over-year and orders from AI-powered searches increasing nearly 13 times in the first quarter. Shopify's management has highlighted its \"AI era\" advantage, emphasizing strong growth and commerce intelligence. The company's AI tools, such as Sidekick, are contributing to growth, although they also increase operating expenses. The positive read-through from other tech companies' earnings, particularly Snowflake's strong AI-related performance, also boosted sentiment for Shopify and other software-as-a-service (SaaS) platforms.\n\nWhile the Q1 earnings report provided the most direct company-specific catalyst, broader market sentiment and analyst outlooks also played a role. Analysts have maintained a generally positive consensus rating, with a median price target around $164.0 in early May 2026. The company's share repurchase authorization also provided underlying support for investor sentiment.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFkZV4o7go-ic4muY-LQGGs22EZN0LNv5L1joAV-Muhv3CjHkzTLcrnz-5IfZoPAr3qx9WrEH_DdnIHz6UgmWtBxLVXWbN0eoBgzhUr1fDIZwQUSQkSbjcW-iAPMklILeDWrD2y_uf5-dCujg2y0QctaIAF_0kJodPAPJ6h9aBHCjP4wt38TeVLJl2DYyqtRb6Y-GfQmzOXu0bR-h-NewuE7x4vmw_1cG6a0a7vJjvd",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEEynLO_JaFRYbWOTzDnEu0z4Ad2goeEu__kMhI9Cid_75VuDEXeDDxI2Imq_4kGC48irYDI0grvvEbptkPaEIv_yTwnz_UUXQy_c8XG9-zWBhLk50Msx6n23TCwQTEE2zPsQ8r9gIpVdabqs2mWouq6uxgVCVf8oZ9KFrh5V0AdAFRq8KUoNxJAfzgtnBdmXNPJ0tobY2vwfky5mvaL4eeCXupzIwcongBHjk7FoopcuzQo1ECeN_9rU1UMxKiNreNrA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGAhTxTxkvQ-h5STZdtjoRq94TdLXXLIrCZQnGYKlM_2mKHVTMWqz4gXtqD36P0zcwnirFg8C2ctaJXpkYKg62rp8H-38Y4aNGU1OvY2_yGWhY0J4qhb1B1Y4jMEBDwI_VJBQFiFJ1Tg1QEm7XRlhYoplZ-CYWgNrY=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEhOBUCbCba344HkJqGg6n978rPKBFsuF3XteK3VkZqQVlYcZ6xyh9q0He4enLjLfdLN6Nb8fnXNtMHVdDSpP_83_6W6LRoGhVK3tnHWXw8OR-xPt6xnlZxq9ZG4-7z3d5AzwQJtllrzI4-Wj6m7Lt9g7-Gzre5wlubVnutFCPk7amyzeZeDOqG216m",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEpmtBcvSh0eqsJzVspTNTYLsHObozj6KV2wf9QCSMqqkWNmvCR6vfx9oWFs3K45xx6sAOcTYY8T_kmn3mRdWIC2_cosqo60kF742wUaupmj6s5-D5siHh2nHAEDrk4CvYDuldSXK8Q5WvfafJwSnj1Q1MGoVnMa8lMtLn9NTK2yoIEvj9dfs43aLJ94o4HsnsBzSCfM_ukylbgM0y2RL-9"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified an unrelated M&A headline while the reference pointed to strong Q1 earnings and AI advancements as the primary drivers."
+    }
+  },
+  {
+    "ticker": "HSY",
+    "change_pct": -5.4,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "These 3 Dividend Stocks Have Made Investors Rich. They Can Do It Again."
+    ],
+    "oracle": {
+      "text": "There was no single, clear company-specific catalyst for The Hershey Company's (HSY) stock decline of approximately 5.4% over the last seven days. However, recent news indicates that the stock has experienced \"choppy\" trading and has been underperforming the broader consumer staples sector.\n\nFactors contributing to this mixed performance and recent downward pressure include:\n\n*   **Broader Consumer Staples Weakness:** The consumer staples sector has seen some weakness, with investors rotating away from it.\n*   **Commodity Cost Pressures:** Concerns about input costs, particularly cocoa prices, and potential margin compression have been noted.\n*   **Analyst Sentiment:** While some analysts have upgraded HSY, others have maintained neutral ratings or lowered price targets, contributing to uncertainty.\n*   **Valuation Concerns:** Some analyses suggest that while one valuation model indicates Hershey might be undervalued, its P/E ratio is significantly higher than the industry average, suggesting the market may be paying a premium.\n\nDespite these pressures, Hershey reported strong first-quarter 2026 results with increased net sales and net income, and reaffirmed its full-year guidance. The company also continues to engage in marketing initiatives, such as its collaboration with Pok\u00e9mon.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGOQtmiXpSjTWjD3LXAvCWZEWXQTayPY4SmwfU7G9cEOcUd6ak-YMasyEiZivsabLK_4DP43rlnFaHc9ymtpd4o8gi13gisaoUcQsNl6Lt8IsyEh0FPvW2eWQmrx4Pujkcf19m1afKcodZAaO9hJZgp6AFCBWUT6DHKzQ6XSBJrF5HcJkxD7GDfUXOlkhE0ZQxjxSOs8MOQBz5BPg0a_75hy8feo_eAYuBWKLEDRmjPhgR4GmXH5QCxKb2v2YWQUjDc7_dj",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHLqFydO4NE8d99_GLPwD-iECbGFnGf5Kiixek6aSoWVKs114VaYZMQG5YHjK1qG6UK--vMTLnXCzUOyENYRq9EudvwPyQbgRZuoWkMl2rtUUrbzaKEx1GbB3Jb",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHD2R1-DB2ccHpHIANgNvX-4vdv-wE_aiAmQ8mPRmLvs3WQC604tV2OnMV2hdAAXdLGC-WkShTjtaJayEu7m43Se7iiXj-bv_wIgf_OHBfL5jpDFkGwgdKuwcGB8wMYi8c_vvgCZaAQ7jxHoPRHP65rNVPWlVd5eQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHF1_kOCQz3Y_dG5HtLdt0RaOInGVObieXR6Fsc47UTLdBULRZ_K3rHqO3IQPZqyOsrltVgN1brsTVLc8Z_1DJaKSLEuCRcTCudXFU7a88TWj1R4R1BNcYC2SXVMv-p2IWqig==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG_-IMOW-suZVRSnsZcJa__OLVF34ZERK7fjLgrdt4jlnqh3RLYG3O6smRHeFFjR4owRbKviOWEE6iA-Bb7L2VWgEpmCIAd9xx5snBsTuJWYZU7_gaA7FF4kGvJx1_7Lw=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified a generic article about dividend stocks as a catalyst, while the reference cited broader sector weakness and commodity costs as drivers."
+    }
+  },
+  {
+    "ticker": "VB",
+    "change_pct": 5.5,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The Vanguard Small-Cap ETF (VB) has experienced a positive price movement of +5.5% over the last 15 days. This upward trend appears to be driven by a combination of technical indicators and broader market sentiment favoring small-cap stocks, rather than a single, specific company catalyst.\n\nSeveral technical indicators suggest a bullish outlook for VB:\n*   The Moving Average Convergence Divergence (MACD) for VB recently turned positive, which has historically preceded stock price increases in 44 out of 52 cases.\n*   The Momentum Indicator moved above the 0 level, a signal that has preceded further stock climbs in 82 out of 95 past instances.\n*   VB's price broke its lower Bollinger Band on May 19, 2026, a pattern that has led to further price rises in 33 out of 38 similar occurrences.\n*   The Aroon Indicator has entered an uptrend.\n\nAdditionally, there's evidence of a broader market trend supporting small-cap equities. For instance, the Russell 2000 (a small-cap index) has seen a significant rally year-to-date, outperforming the S&P 500. This suggests that the positive performance of VB is part of a larger sector trend, potentially influenced by factors like AI-driven momentum and optimism surrounding potential peace deals in geopolitical hotspots. Some analysts also see small-cap stocks as undervalued, presenting a long-term investment opportunity.\n\nWhile specific company-level news for VB is not highlighted as the primary driver, the ETF's performance is influenced by its underlying holdings. For example, strong individual gains in companies like Flex Ltd., Comfort Systems USA, and Lumentum Holdings Inc., driven by AI infrastructure demand, have contributed to VB's outperformance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF443hLMEaO_pv5AklFNLtIaj3GSloMIGEGCHnJMfbFljwZD4IZlMnIXb6RAtcfuleQ4puBhOewWAeH0lquAwP977NHtj9VuTvseFVTDQ6N1134i4PwUoUA-VEMSXh1Y8rv2poYIhpwmg7B9nyg2U1_lW-zlwwsL0DxCJVxddYvh0uz62aCkW3931bi73_QuanVapSLyXh-ddQLL9kYbdE_KyfVgbmlzwPSOUmLsXdGFNWHa1RW1hm7nqJZ3grJqOmw",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEDkKE3oEdUy-WfOohfGZZtxguyaHL6UIZNSaE3mbVo-ert_BEybeq-Qej55q3E-aABNZIloot6M64ZGa2f0TsFuaVfJcgOI4pRSes2K5YqTdDrt7X9OqJ5GQ1AWGVEqTlIvPXU0c7t",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFPVFo_nJvklBlvBBK1soSRvkWF7svT0cDFxBlxywAU_r_QgOAUAXv0ZmMHR0ZNuWtiETEPBCLLsPcI2mRpjjLkhCAG3u6wc6k7D2jlYII6bbaLTK7RvDFcKjOZUQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed the technical and market-sentiment drivers identified by the reference."
+    }
+  },
+  {
+    "ticker": "BSBR",
+    "change_pct": -17.3,
+    "window_label": "Since Apr 29",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "On April 29, 2026, Banco Santander Brasil (BSBR) reported its Q1 2026 results, which showed a year-over-year increase of 0.8% in revenue to R$21.2 billion, but a decrease of 1.9% in net profit to R$3.8 billion. The company cited a challenging economic environment in Brazil, with pressures from elevated household debt levels and high interest rates.\n\nDespite these challenges, the bank saw strong momentum in certain business lines, such as card fees (up 9.8%) and insurance fees (up 12.2%), partly due to the launch of the Santander Reward program. The company's Q1 2026 earnings call also highlighted that earnings before tax grew 5.4% sequentially and over 20% year-on-year, despite a drop in net income.\n\nThe stock's performance around this period may have been influenced by a combination of factors:\n\n*   **Q1 2026 Earnings Report:** The mixed results, with revenue growth but declining net profit, alongside the challenging economic outlook, could have contributed to investor sentiment.\n*   **Routine SEC Filing:** On the same day, April 29, 2026, the company also furnished a Form 6-K to the U.S. Securities and Exchange Commission, which is a routine filing confirming its status as a foreign private issuer. While this filing itself did not contain operational or financial updates, it is part of the ongoing regulatory transparency for investors.\n*   **Analyst Ratings:** The average analyst rating for BSBR stock around this time was \"Hold,\" with a price target of $7.06, indicating a potential upside but also suggesting a lack of strong buy conviction.\n\nWhile the Q1 2026 earnings report and the associated economic pressures in Brazil appear to be the most significant company-specific drivers for the stock's movement around April 29, 2026, it's important to note that broader market or sector trends can also influence stock prices. However, based on the available information, the mixed financial results and the challenging economic environment in Brazil are the primary catalysts.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFF2p0Z-AVw4n4HHqfaXQZAda9nYhC8fyZjOtWz_1TDXhEh92tB53gN28-2kKBPdYx4CBX7ibq07MIV4oAhc6l6AYavsNySCH8GYyrD-311oK8aTlQMQM6RKvs6UVIfFeV6nwPrkp8OHFvex86SBd_x-8JUIMQZn6zwcv1uvVG7MEbPbljMiX1gpNYoWLJ78o4-iNsNO11I9nmQ6vQW5qKIQ_Lx65wNrA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQExOqoA5l2ahpwXdxh3YB8-3czqiU7T8dKSZmZUYH7cYL_4PmKefvQNF8kC-7jJAwitAKvwfLuwQ1ysg7M5yPF0wsdUknoaCX36DpX5qgmVxSC_B3HkosH99aXf1DL2JfFu",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEhT72lYXvaVzBhW4DKDOvVdFCDRfmHKplNXyarNbjbXFVmg6YA3tV3y0DgczUnt2m6VVfMah-dr0B8DWn2qKxQQ5SlzBfM3ZtOVrKu_avGi0xkLeBDzObur8mjG23lzncWDfqyPVgxAmOEwe9tItw8EOlBI2iKsG8cBcNakf1nvRSY-TiU2lBqvbVuylrtOjO1mdfeW48qQrdn69ynVK4KSLpyjQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG8vznTBNmMj31rIJLcdILpsDeEhb0eS8l35-ajJvp_c3Orp8bJfMYE0VR6cKATvjD4-TtoYOni1HQGAH4n0wL4sn5y5BbsMTG-_vdfP3q3yn2IJOTACe3VCNoGmsrsHwKlkLt_zmk8Y1rs5k3iIM-vrkMCYXibGd_SY1vKEpNu3TE7EoZ74zejySqlxenY6aPPt6GtsyTo8keehDbND6T4BX11m5eQrWHjQauOuDxrkVJYZFk="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system correctly identified earnings reaction but lacked specific details from the reference about mixed results and economic factors."
+    }
+  },
+  {
+    "ticker": "GOOGL",
+    "change_pct": -6.5,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Google Cloud Strikes Major AI Deal With European Buyout Giant EQT",
+      "EU plans to fine\u00a0Google\u00a0high triple-digit million euro sum as part of antitrust investigation: report",
+      "EU plans to fine Google high triple-digit million euro sum, Handelsblatt reports",
+      "Google Appeals Landmark Ruling Declaring It a Monopolist in Search",
+      "A top Google executive says Silicon Valley is overstating the AI jobs apocalypse"
+    ],
+    "oracle": {
+      "text": "The primary catalyst for GOOGL's stock decline of approximately 6.5% over the last seven days was Alphabet's announcement of plans to raise $80 billion through stock sales to fund its artificial intelligence (AI) infrastructure. This move represents a significant shift in strategy, as the company has historically relied on share buybacks and debt markets to fund its growth.\n\nAnalysts have expressed concerns about this substantial equity raise, questioning the sustainability of financing AI initiatives through external funding and viewing the move as potentially dilutive to existing shareholders. The significant capital expenditure required for AI development, including data centers, custom chips, and global compute buildouts, is driving this need for funding.\n\nWhile Berkshire Hathaway's $10 billion investment in the offering was noted, it did not fully offset the dilution concerns among investors. Additionally, there has been notable insider selling of Alphabet stock in the past three months, which some interpret as a lack of confidence from insiders regarding the stock's current valuation.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG2wRgzpImQMhmC_xYzG8KmBS6flnHlWOjaTYpcnKp-YpBHQTNBS-dkBqByWnLXvWIESkma9KPdoyjiEZTtC96DGsxqBxauL1-Hmpte7XzUMIn4eDi7ZIP8Jw5H2N19sYFaSLqVVUquVeNCt1QYJOfM8DS3ufu6BP4YHfhAf0ZHzkFj0gGqylmyQ6PGBocfWQI1DUvuxwqn4_lteZpzvTF83YZtYw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEvoh_IlYx7VPhJIeRCgtwn31K3DOogKdkpXBH5OhK4bmB7xAYPHUy-6ybdMaAhYepnqf0-MJV1HaHrOasfc7-JkCWpfMWAa6FjCe6EYNzm8-jLT9cuiM5vZnIZSBhk3VD6itOGUvS1yCk-3iKrQX3EHrJ0P3Bo9Dpz0GoKWNXU5rBynq9jj4pYvH72aUrCDjcppA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHtmgvfoCsvUhop9neMX2EEPADElSKWgTXrBU-pJZPZg9uCukHylxZML2uobR_FCYLv9kvISVP-sr7CPS5bmyIcE9c8bQbPukVj3YBA4bJdRD7cmdYN6jwLcM53hDXVCvxVLbfKsO76HCXmlRn_20-wb8X-tN0rsS8JAmSX8Wzw1GZbSts6emJkGeiLXBKolE33pBD9-9U_t0uBQgUceNca0tzvxbWycHk=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGhqo_VNQCPhswLiAJ2QHLB6IZDtgQoLH6YwnGCoGMmElnQYILyTZxp2fMiewXsOfa8tf1GCI0xb3y8d5z6x33ChZJ_n81SXnIwMlAYnK7DitUIUh_iYycqT3LaEJRwnoDPzOzmaVKXgjVZ_gor8-ciaiVnlH9IHiT2zSRGFXeePhw5cVHElLUmOlSCskV90iBD8_lm9IqKOpi5g0YGs9QTEZiXhKMK-M6qVIlI6tNJBARdQBmKqHIKUsorkPnkSvjKgz-gr1d6iYJNno4b6KjQ5R4Jhe8KqUgNoJn0PhK7qQkr48e97TqMp4nwyEwAyUHZ6C5Nfc1SsxFZVPaNeIr7nSYF28r4WJC0gWoz7h-9DG8=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFHXM99kGhmtBaVM1PH1mBp6fzCeq1iE-Tbi44LuqWuLBU-9RpTfurPue58um8yFTyr7Flsjfshb7NddbEoQX-V8FC_Ref0Zw7lvlAg0Ctmcd80N-_1uaOImMx_r2Rj_ebDK-589drbJGet0uo6-lej2NvXmnOYfLjJZt7CjUmW9H_Yw1xQX7L2159-ZkljnkImN2Tie5cMaRFvuZhTrYic52EYjBaGD95gHHk="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the primary catalyst related to the stock offering for AI infrastructure, instead listing unrelated headlines."
+    }
+  },
+  {
+    "ticker": "ADBE",
+    "change_pct": 6.7,
+    "window_label": "Last 7 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Adobe Completes Semrush Acquisition, Strengthening CX Enterprise with Enhanced Brand Visibility Capabilities",
+      "Adobe gains 3% as $25B buyback offsets AI concerns, stock slump",
+      "This Michael Burry stock just approved $25 billion share buyback",
+      "Adobe Announces New $25 Billion Stock Repurchase Program"
+    ],
+    "oracle": {
+      "text": "The stock ADBE has moved +6.7% over the last 7 days. The primary catalyst for this movement appears to be the anticipation of Adobe's upcoming second-quarter fiscal year 2026 earnings report, scheduled for June 11, 2026.\n\nWhile there was a notable dip on June 2nd due to lowered analyst earnings expectations and a shift to more cautious sentiment, the overall positive movement over the past week suggests that broader market sentiment and positive news regarding AI's impact on software companies may be outweighing these concerns. Specifically, comments from Nvidia's CEO about AI being the future of marketing and the \"agentic AI era\" have positively impacted software stocks, including Adobe. Additionally, Adobe's recent announcements of a new $25 billion stock repurchase program and new AI-powered productivity agents have also provided support.\n\nIt's important to note that concerns about AI competition and its potential impact on Adobe's growth and margins persist, as highlighted by a recent downgrade from \"Buy\" to \"Hold\" by Mizuho. However, the upcoming earnings report is seen as the next key catalyst to gauge the company's performance in light of these AI-related developments.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFBE0gQxZdgJlW-_Y2vCVcm8Qg2mU9VMVRzA1I0z1pgcG1HnxUZTw8gMc3ej7Kj5u167NegyedEWLst0rjuaIsZVW222jSzdMBv9fjcGQxxm6q6WKHZyp2yiITJWAgpfqjAZG7-7IaycnrVvDAOCOGyZCRRuKR7USY_hmd_Iw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEOOJcRgzBiokok3VIQ_RQN1vzhUi3vinZy3feGQf4Fi9z0Bpc_T5Kqp9dcY253hf0jBaMqAyKeOnHVzVjLTHoJXPaktXRJn6bTe67vaQhbxQigxkcEsV-Si7wTjGGgAijsG0UqK-QGfL1gld-lNDRvzz09UI4vcRij_d3FWiXcCT9mqBn5ATTwUHS5upiP4CNsiA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEzpZv6o5XHZU5b4kujuqtEF4EVaquNqGg7VI0n1xvrU2LLW86N5HY2MN_ScFnHzyz-HNY5QOsJt5PwAwhG_fp4FXDpXDL4Gos5xGmK8sTUj8kJZ-wL97c103xrwwhRSTG__mVCZzVyyjXZVVp_0usnudk=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHkYV1UP6q_xpMtxh5p1DROkIwwT8drwzg_FzdXMJygcOMjCcq4QZLsE2SpU0oR5kyQf5jhqddNkMH2729Oh9Xc6I9jjscATN2bNvFnM_WBZWN7kQaRPszwLxmdf3-7v-3-Yzv9z9YY30NhYYDTEoZUU6EoXm-a13tKCcv9Mfq5y8nf19GLxY0C4eQrkKBTX0afwRpsQfJIjQfwsjw3AqYFaJqa1AbHxX1L",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFVXmn4ev8gsgLJQHZnyMf3Y9PEvmgAcHtyrlUy-5fWrjucJ4D3LAZqAtcwNP6gz6o8i29pbpbFKmbphDQnL3NR6C56_sREbx2vR9mH8xzy6CNm6WNt3LaWv6l26AQ_wGqtg7TNlc6RBn-9SJI7-2To6_B0f8qi"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified relevant headlines about share buybacks and an acquisition, but missed the primary catalyst of upcoming earnings and positive AI sentiment."
+    }
+  },
+  {
+    "ticker": "VST",
+    "change_pct": 17.0,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The +17.0% stock movement for VST over the last 15 days appears to be primarily driven by positive sentiment surrounding the company's strong first-quarter 2026 earnings report and its strategic positioning for future growth, particularly in relation to AI and data center demand.\n\nKey factors contributing to this positive performance include:\n\n*   **Strong Q1 2026 Earnings Beat:** Vistra Energy (VST) reported first-quarter 2026 earnings per share (EPS) of $2.89, significantly exceeding analysts' expectations of $1.94 by 48.97%. This robust financial performance likely boosted investor confidence.\n*   **Positive Outlook and Guidance:** The company reaffirmed its 2026 guidance for Adjusted EBITDA and Adjusted Free Cash Flow, indicating continued confidence in its operational and financial trajectory.\n*   **Strategic Positioning for AI and Data Centers:** Vistra is actively involved in projects to meet the growing electricity demand from AI and data centers. This forward-looking strategy aligns with a major growth trend, attracting investor interest.\n*   **Investment-Grade Credit Ratings:** Fitch upgraded Vistra to investment grade, a significant positive development that enhances the company's financial standing and attractiveness to investors.\n*   **Robust Hedging:** Vistra has a high percentage of its 2026 volumes hedged, providing a degree of certainty and stability in its financial performance amidst market volatility.\n\nWhile there are broader market trends like the \"AI boom\" influencing the energy sector, Vistra's specific actions, such as its strong earnings and strategic investments, appear to be the most significant company-specific catalysts for its recent stock performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGYG8-a8MvjbpVIQEqFEuHmMp_9lYVwvmGwRb_xIcCbyN1q5qEOFZ9IT1KCQb8W213SqRzTtdlThFEKaGYCFKFHIfhZMhxK9e98DYg6z3iHeWN2IEt9ZFGpLeFXxJ1mlW4B",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFIDQuZF3GNFIsiG6Auf5PX6AYkuSiEppUtbPC3hxm7TDnbDC5rjC8EDOVNI7EkL6n_nyw8zQJCxHnRoNeEnLGpYq1lWJ4LTHnUbTLOHOt3hXAB0k37KBkITjwYkuq22Q==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGC2CrcDGCaF5mJC6j93d3hBsGPr6LeS_MUkc5lIh2YXFji1M6nlTKWCqIRXi9ZxBe8SIKwghlu_FvR9-6L0XJtedu323uygs0kSfg7heC2GhMTlblKKY5BXiozl9AJyYLqWgyXTW8l1Uf_1yhFpOPxxuQ_6bEc5eW-w1GvGXgS3jENz-QUMJ5SROINmSi2LqD4j3U-0XFlTRBrD7YYyRljlsXUIPn8driu8rQde7o5Rrn8IFRu"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed a clear catalyst identified in the reference, which was driven by strong earnings and strategic positioning."
+    }
+  },
+  {
+    "ticker": "ABEV",
+    "change_pct": 10.2,
+    "window_label": "Last 30 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock ABEV experienced a significant upward movement of +10.2% over the last 30 days. The primary catalyst for this surge was the release of Ambev's first-quarter 2026 financial results.\n\nThese results showcased strong organic net revenue growth and a notable increase in organic normalized EBITDA, indicating improved operational efficiency and profitability. A key factor driving investor optimism was the substantial surge in operating cash flow, which marked its strongest first-quarter performance in a decade. The company also reinforced shareholder returns through capital payments and an existing share buyback program.\n\nSpecifically, Ambev reported 8.1% organic net revenue growth and 10.1% organic EBITDA growth with margins of 33.6% in Q1 2026. This performance, coupled with strategic pricing and a favorable product mix, particularly from its Brazil Beer segment and operations in Central America and the Caribbean, contributed to the positive stock movement. The growth in premium and no-alcohol beer categories also demonstrated solid performance.\n\nAdditionally, the upcoming 2026 FIFA World Cup is seen as a potential catalyst, expected to drive significant beer demand across Latin America.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHioPIu08eqRSdyqlNROD6VE6kCjkEXNOpvmIq_YwC04chFkcX8RdWR7Ddfqa9G4rfov6SuIr-d3vob5-NudzaPExJNtGBhIC0ZHKUlmgp09WPqjQXL0GRwNtBqZLbqg2VKFenrlFTp9U3lRwoxSUMSGGerhQU3xK3WZeQl35gSPdTG5kuWHHwPLkZFca4=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEwHjbp835TwSOxpHzibucKcnR3Irh6GiwMNpGVSGlMoCPty30C-Y-zKVQ_ddP8JgmLkrAtA_2F6LF6pcFmB1XL4-IvpF8h3BI9kgSG05JRpY9PrxuIn84d0S2Crwip2V8="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the Q1 2026 financial results as the primary catalyst, which was clearly stated in the reference."
+    }
+  },
+  {
+    "ticker": "ACGL",
+    "change_pct": -9.5,
+    "window_label": "Since Apr 28",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock ACGL experienced a decline of approximately 9.5% since April 28, 2026. The primary driver for this movement appears to be the company's announcement on June 2, 2026, of a $2 billion public offering of senior notes. This offering includes $600 million in notes maturing in 2036 and $1.4 billion in notes due in 2056. The proceeds are intended to refinance existing debt, including $500 million in notes maturing in 2026, and to fund tender offers for other outstanding notes.\n\nWhile the company reported strong first-quarter earnings that beat estimates, with improved net investment income and underwriting performance, these positives were partially offset by declining premium volumes and weakness in the mortgage segment. Additionally, Arch Capital Group's first-quarter revenue missed analyst expectations.\n\nThe stock's price has also been influenced by broader market sentiment and analyst ratings. While some analysts maintain \"Buy\" or \"Overweight\" ratings with price targets suggesting potential upside, others have a more cautious \"Hold\" or \"Neutral\" stance. Concerns about potential catastrophe losses and pressure on specialty premiums are also noted as risks.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFDhJbzT6LoVieWFc_KcL_kVib9TY_x3nPqQiVvvuYiR3_ntQi8N01VEJIF9KqHxQHWyXClOafdDknCY0nNhm9HwYWYnhdTh-YQlAIcj9tle1HnUik_vVnkpBZUvRNGNaj9fSWV95I9qckPOnooExxmx7tj1Wad0K3Cv9Plhxlf1_ITtC9I_udqN-bMWfAkbhJOWYiAek2zMfNoew==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEwB-0XDnVD9Hdz2-a1heCgR2CU_rGQdE9MMnKvUuA82Ms_wnmmXGXD5ITTMAD8lurgI_ZuiIqGXeC-cpC0RwtB9wAmdSe0tuzRVYqfkSPcnn_5M6dgIpPoLz2QdKbcVhbV3et4jhCCco_55jR_sxD1VZuKx2fhMZvj2xMZonnGzDnSxkMe2w9pvNEWBGQq2-uc-fYJl4FMY5Ish_ZBzIsBA183rVIR5Q==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQETfZK3DYrcCcT534PG--jYn7MVwRLG6sC0RLOQlzQQzBVKMZ-29PX1inF5XzWVfoIuuhghm3TvsMEdKzF-Fk19HSsO7zYm-VqiRecYVPl8gIdIrpqONIDIo0aWnRMZ858cZYB4XSALFe8q8vQv_v7VDNXHLgyCbehxNmHEeWiMqLGNxMCcjpEo_Bqgr9PCxWW19_q8udw_SZybNGkwyHqryggz0fKEiubGofaRlLvbRk36-LBfIjrj_o03DNWa9I09S_eG",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGgz3wOMM_35LC-Oh7J9pLdmLnmq6_eSnX1W-E3vDkkMa_hz36B6PCo7cL_a6lZLN7a8GbWZjMZd-k26AKGZkD_xvbCOk6KirR7VFEPit7Px10_OM5z6lNlvUihgnar_ddXtuUDy3aKN60S8bHaBtUy5OxJ4Xq_hHy3C_5AFZ07D2p9HYUD0uw-VgJ5QVHhjBnb0PaAEDG-CwgcoAPWC8-CB18zPx5SGtm9Eg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEPyaVclXwdsg9D7pWNUJ64AoOp_2NpwfZBQEedVs8BgrvfGKqLJ7ymgIZ9kfXRpK9oRdFd8eAKYznTgP3bA9RnphwEuSdu4PjrTvZyiElFxilJKWJCuz4UIrIgRY0qZPnGPpALPZbsfiN7jQseM8teHmp5PCbQgVDjeOwNKhUa3rB8olIuCjkZpCSIqYgZq8l6g43cFG6h4ZaTVN36dxa7OMjAa-6uGQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the stock offering and debt refinancing as the catalyst, while the reference clearly indicated it."
+    }
+  },
+  {
+    "ticker": "LLY",
+    "change_pct": 18.0,
+    "window_label": "Since Apr 20",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "M&A",
+    "top_headlines": [
+      "Lilly to spotlight growing hematology portfolio at 2026 European Hematology Association (EHA) Annual Meeting",
+      "Eli Lilly to Expand Vaccine Pipeline With Three Biotech Buyouts",
+      "Eli Lilly to acquire Seattle-area biotech in $1.5 billion bet on next-generation shingles vaccine",
+      "Eli Lilly targets vaccines market with $3.8B acquisition of three biotech firms",
+      "Eli Lilly targets vaccines market with $3.8B acquisition of three biotech firms"
+    ],
+    "oracle": {
+      "text": "The single most important driver for Eli Lilly's (LLY) stock increase of +18.0% since April 20th, 2026, was the strong Q1 2026 earnings report and raised 2026 guidance, driven by robust demand for its GLP-1 drugs, Mounjaro and Zepbound.\n\nOn April 30, 2026, Eli Lilly reported first-quarter earnings per share (EPS) of $8.55, significantly beating the Zacks Consensus Estimate of $7.06. Revenue for the quarter reached $19.8 billion, a 56% year-over-year increase, also surpassing the Zacks Consensus Estimate of $17.62 billion. This strong performance was primarily attributed to the high volume growth of their GLP-1 drugs, Mounjaro (for type II diabetes) and Zepbound (for obesity).\n\nIn response to these positive results, Eli Lilly raised its full-year 2026 revenue guidance to a range of $82 billion to $85 billion and its EPS outlook to $35.50-$37.00. This upward revision in financial expectations further bolstered investor confidence and contributed to the stock's positive momentum.\n\nWhile the FDA approval of Foundayo, an oral GLP-1 pill for chronic weight management, on April 1, 2026, was a significant event, the market's reaction to the Q1 earnings report and raised guidance appears to have been the more immediate and impactful catalyst for the stock's recent surge. The Q1 earnings report demonstrated the company's ability to meet and exceed expectations, particularly with its flagship GLP-1 products, and the raised guidance signaled continued strong performance for the remainder of the year.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFV579y_SptnDoawdgjGKQ5srHd63WB9wXs-9iRkT4vlQVsvoSc2fICag6cPOp_kxzzxfmyPpP7s0bp4nMf-F8kLK4iyi6b9flUXTXH_g9P9-ioeEG2gk7ZiJBCF31ERJq-Ub7-0b92QuXrd7po9JfOWYzlJ6yQcutiuf7HzNrtKJqCwppJAPqOOl6uKBcxB17odU5EdW73h4oQHTjE4js=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGllNTbecIZzcSDoSpz_yz2cnXk4t20hshcF2H5ZgJg55eIV-U38flslo8vpylpOAlr0sLqAMcscTQ0HOIDcsJtIiCss-G7CRexLi0QNetVF2aFzZsn3dY35kLumNpL3PHALE6cWDJ4OMcyxbRzwcd1Kmku04Snd3TLk84BwIlm07oig9ZGk4QmEWmqWBvLcC7UMyKEKLees5czj_pk55BtgMQ="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified M&A as the catalyst, but the reference indicates strong earnings and guidance drove the stock price."
+    }
+  },
+  {
+    "ticker": "TEVA",
+    "change_pct": -5.8,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Teva Pharmaceuticals CEO on acquiring Emalex Biosciences, drug portfolio",
+      "Teva Signals Confidence With $700 Million Pipeline Push, Buyback Plan",
+      "Teva to Acquire\u00a0Emalex\u00a0Biosciences, Adding NDA-Ready, First-in-Class Therapy to Neuroscience Pipeline and Accelerating Teva's Pivot to Growth Strategy"
+    ],
+    "oracle": {
+      "text": "There was no single, clear company-specific catalyst driving Teva's (TEVA) stock down 5.8% over the last seven days. However, recent reports indicate that the stock's valuation is considered significantly overvalued by some analysts, which could be contributing to a pullback.\n\nWhile Teva has been undergoing a strategic transformation from a generic drug manufacturer to a developer of higher-margin branded therapies, and has seen positive developments such as a new stake from Norges Bank and strong performance in its innovative neuroscience franchise (AUSTEDO, AJOVY, and Uzedy), concerns about its current stock price relative to its intrinsic value persist. Some analysts have noted that the stock is trading significantly above its estimated fair value, suggesting a potential for a price correction. Additionally, there has been notable insider selling activity in recent months, with executives selling a significant number of shares, which may also be influencing investor sentiment.\n\nDespite these concerns, many analysts maintain a positive outlook on Teva, with a consensus \"Moderate Buy\" rating and an average price target that implies potential upside. The company's pivot to growth, pipeline development, and strategic acquisitions are viewed favorably by many.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE4A3DWJrBtmcCmNTRdIWgZcmbjCi3DkaaKF7iZWpSMh_1NJfP1-Jjf3YZBVtZlCNO9CqVjzy81kVkrfmV7KpGNcTVkLT4MNYZMyKcgeyByyeqztvL9JiCsnH7mVgByeDtvQtyfXm1mzYenYIlUYBucAwB-logGlVTC1-042nPryjW6_qdkT-Gwpv8ly_Soiwxe9SuE6W4oS9zVi2DGbpr8-LPJW5gSRWBYo2KiwFaZtofe_eFTBCjEpRymhw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFY0hLK2HFWSFw1DT69zp6pEuFdb_Tv8xBREgMKPZODMfFk5Q7bKShZPhwzBwSlM1uxlen23FDO7vkyFsrdhYXciKzv0jxv82E9bGojVIQXJQzzjMISjMl4WHM_55kOR1I4HuY5C7rL94XgqnCD250CUJx832FLv8KtXEKQYjf-tPNIUR5eBGnLALAo5bZnuKlb_GmuUZrpzg3Fqeh10JJKIOe-v0lUKxAa5JXiMCDr3Kf1Ku7E_Qu-5JD2vzYtjy8Nzkc=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEJKu215Dwosroubm70PNZbalHzWq16tog9W5Dge3pWTYeXvudRhaOFRDx9ih5nmnJeqY2LYkRmhCnDFJUfL-ihUegYuvDtYb4x6hVcI45xIgEPvSYKVoQeZ7IkGzcwVk4Zvqi9ibCERi6d1XOyh6OICOCHpZPP_-vwlJ570A24gyAx8kt2wOnGh1FhP_i7JSba8Hs1Vbvi2pn5agYngEhLN9X6_V-Z",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFvvSRVsrkLreUnphDYY2wrQC6YWc4h78_uGEe5UzpiJ1HgaJ0xXmBUfS1zmhFJbNG6ZoJ6xiVIia1IwANiDrL14aEwTTlyu5xt_VaIT7GGZ_QjNmeI-7oMyaR96wOnRhZ4iL2KY2CxW-CX_imhcEwuzhQXjZNPa-SyMaLE0Nt1paOUDwmRGgjU1g==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFnK0cLEr4q6tytHBHajNWh6YDEPh0HuHH7f0GbI0UD_I6GJx6Y-bdW-m0FCxs7HD-Gsj6xdyyGHWfRfFzh3q-moffKRB0i04wD_dNAKa0TOlJc0Cj2NwgAGggBt6pLSBGkoer5wNTUcsCzkEizbqz9WfWyzp2ZZ_dxQnFdte79V4a1pQI1chcER0kBZbqqAHKkUjoe-Ld6J7UNaPGe45VP9maIGVd_C4_2az6meKuudKLW6buppFLSYfDOE4nD5uVZaGw_F7JoZ2xhKOm0"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system found no catalyst, while the reference indicated overvaluation and insider selling as potential drivers."
+    }
+  },
+  {
+    "ticker": "EW",
+    "change_pct": 5.8,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "Over the last 15 days, Edwards Lifesciences (EW) stock saw a significant increase of +5.8%. The primary driver for this positive movement appears to be strong first-quarter financial results and an updated positive outlook for 2026.\n\nSpecifically, the company reported earnings that beat expectations and matched revenue estimates, leading to an upward revision of its 2026 outlook. This growth was notably fueled by accelerating performance in the company's Transcatheter Mitral and Tricuspid Therapies (TMTT) segment, alongside strong Transcatheter Aortic Valve Replacement (TAVR) performance. Additionally, the company announced 10-year data from the COMMENCE aortic trial, reinforcing the long-term durability of its RESILIA tissue, which also contributed positively to investor sentiment. Analysts have largely maintained a positive stance, with several reiterating \"Buy\" ratings and some even raising their price targets for the stock.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEsq17NOQgNsnkQQz2wrSJX6SUTwq2prZcBTlHDdoSW3FFhRRZmmNX49hUmrOalc81jbND5Aw4uVNymuB1RgTSMGfY3XMp8BYat5mW2jvzUywy5Z0-tA6ZQp82_r8GNvi5Y3vge2FyrAzo9fSr59y9WSiylfBVJ3xHHw9l3tCde6XWzc1qC",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEq8aqcS5ojBMAXuLy7DCrD-c0wy-4xmvjLIpd_cWSltKtqy_wdhnB52YKDON-OLqqzgZ3Lqa_fgjacf-VpNBcSKec2U3QTYnPwLCyAeI1yvD9ZwjdqTi6_JupL",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHRUw9iPFVGwSUf_VvvDNtc5oSpsDn6oc5gSZ9VlTROOaGrq8eCfE313q3iV5a6U_bMTIQLFCXURgYx04x68cZ1cNTqDz74MUSVcPeieBd2phZmERkxX_L6gyLKKz4v",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF9bary7D2BWtO5u7BLDw2CVLcIJ0A-V5JLEJpqlh9f-t2HUjsaIKhg6LXA3FtaNaAlUxteLvR-psHZSl8mpLDybxxzDhXQIyazsqi_U6GauIIZmwOrswqP_-PoV_YmAg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHHlVrGJmsG1lYdVF0zqWPNhk0IZF6APECTUC5ZDm48cOgzPfzfkFt3AGWXQgTqojYf8kTXeoJEsxCW4o1owG2sp1IfWNSCS2hc5CVRmQ1VdXcTTsjxW9B-EH9hOtsw1jM="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed the catalyst identified in the reference, which was strong financial results and positive outlook."
+    }
+  },
+  {
+    "ticker": "MCK",
+    "change_pct": -11.7,
+    "window_label": "Since May 7",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary driver for McKesson's (MCK) stock movement of -11.7% since May 7, 2026, appears to be a broad sector-wide selloff impacting medical distribution stocks.\n\nSpecifically, on May 6, 2026, McKesson experienced a significant drop, with reports indicating a 7.4% decline due to a sector-wide selloff. This was accompanied by steep losses in its peers, with Cencora (COR) falling 17.2% and Walgreens Boots Alliance (WGRX) down 8.7%. The coordinated move across the sector suggests investors were repositioning away from the medical distribution space rather than reacting to company-specific concerns at McKesson.\n\nWhile McKesson released its fourth-quarter and full-year fiscal 2026 results on May 7, 2026, which included a revenue miss against analyst estimates, the company's management stated that this did not impact profit due to their fixed fee-for-service model. The revenue shortfall was attributed to declines in wholesale acquisition cost (WAC) on branded drugs and a sequential slowdown in GLP-1 distribution volumes.\n\nThe broader market sentiment and sector-wide pressures seem to be the most significant factors influencing MCK's stock performance during this period, rather than a single company-specific catalyst.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE8qYaX6RJPXnLGP24sYySnwe6NCNX0B30axqIimi3qv-2BbjG2tvG0J9_DtipI2nLtfCNXQ5TPqlsJChFwENkeYE5xyOYP-GubIAAXFS9k61BT8ZKNt79TolqnRV_7SK6_wNiUomNTsTUrqXKvmIMsP91rEAIs-6KeGDYk977JbNCOvA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEab16UB7laZsmi1abS8j7HoDVCiTq426WlowqhtoESMfs88vtr5V9IUZnpZUMbTFExO6WdybbEisJgWt-gaL-PvpZLUnJTscS9800Qbq-J0U1H3-guvxjwjC6-hKFbDxDfxeHAbHE54XZu1hxpZzFCVnVBBF1AZTupJAP-m77-QgonpEpSbmm5O_Lga6itPYrsf-IQSrbxtSPJOg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHdk8EKk2VdiY_fOQX56FZtfXNuEKyJ32GUe43AYezRlQhwtByg6e5RewQr82IArHQ0IB3Anld2JWx35-1FTwRj9XB2xdg--z295tyP_eTYbL-R1_5iPgLAoJHLaaGPNeMRC12OZBtY2LCM1RjZ6opiDPZSIek_JxuJe-2EKmunuAfqaDUFaCtPnLBvlC25YA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG1t5GcGLlBLe0AzcaHNcOMd_1gjKOcWzF9m-9U_6u_7oBGjp9kbbePvbtO8eBhkyKUsVpCN2PTGFWkqe1KmBNxRtcEhjrAv5sI2xPTtd9GR3dcCE6uG1dj9NDfiKuAKPoggwDIDwkDq-I06a8r0DM7O728ROO_7tvjfqlRVOAZUBi6MnUpnCMPSWGn2txjrXSR17_npwEPPoLgD0aqq_R2"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system incorrectly identified 'Earnings Reaction' as the catalyst when the reference points to a sector-wide selloff."
+    }
+  },
+  {
+    "ticker": "CM",
+    "change_pct": -6.8,
+    "window_label": "Since May 28",
+    "direction": "down",
+    "tier": "Unusual",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "On May 28, 2026, Canadian Imperial Bank of Commerce (CM) stock experienced a significant decline of approximately 5.1% to $109.50. This drop occurred despite the release of strong second-quarter earnings that beat analyst expectations, with revenue up 14% year-over-year and net income increasing by 23%.\n\nThe primary catalyst for the stock's decline appears to be a combination of factors, including concerns about the bank's financial strength rating and higher provisions for credit losses. While the bank announced positive news such as a new share buyback program and the sale of its Caribbean business, these were seemingly overshadowed by underlying investor concerns. The sale of the Caribbean unit, while intended to refocus capital on North American growth, may have also contributed to a negative sentiment due to associated charges. Additionally, the bank's financial strength rating was noted as a concern, with a rating of 2 out of 10, suggesting potential issues with debt levels.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGekxHRyKh2DApWWvJqqtNsQ5AKSPWjscSzvfblXx_4p5x6q7wdWJhFbyL7wduJ7RSBkHgYqqV-UBerBajLg1G4O3AmG2B8tcnWUEYRtFETXHOxoJonJwdriK1OytKbAM-kOgHmd9rr",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHW-Rxshx4kY97EIJiMenCCXiJ65pIlKN0u7HFhJ8H8VyoxeSwQ4CJsmo6J9HdM_ju2PmUSQtuR5ftyuPiBqzpdn-v8n9ga1QqTpGnOKVggAIR2RTbe70dGgQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGe4R0RgYQ6dpxLNXA7hF46yg_0WKqiAydYnZ2kULxUK6GKXq-yG3l1KrWl8IdspyHKcWn_91SS7Xaw6T2iJTBF9Zzamvlnm__C2ASIbdoHrWg6j6KXoSXAMpuHdaqjm1kcGYlGFFtje2u5MyJqbcsdBDfKIrS9Wh0qtBmxK6IG3xxQ7jNTiHMBqgMJVw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHx9LQNZFkK-IatfQbGjukLl5PyNFfBMdC6ytZtyaFKCeUo5-jjodG2j0cIMRca8h-LxtmFZaFJ4xaZH4oNlNWfr5kbtAx6SRwIbFnJ5nIEW49S2i0jZ577L8zP6gGnysz-N1r9HBdXdd8VHGh8aZek_fugvucama3_NqJsS6gNmIZY43dXRsPhTVhUnD-7agORlF24sitLuwTeVGELsn6VomaSrZs8V4RqlyCAEuElR1jUMLPN95HhaSREWsM=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGmQdzyo010y3La3l2Xn8e5CQapk4ge8rywyNMlHq7I2--bomBOHocx5FEb4vkw3IHXPZsTrqRDaiAT0Cx9l1nPrPehZ7-YsnUvUCNZfW5eqjxQI77c1zlvZMIHK0Lo42OdSkTyl1ApVCH3qJB3KsJIBDehVBkTeDjFMDGsp-OfxYBnNR_WU-MVRWoDqL6Giv9LEIVhSoAepx2B3p5gENvE01cDbOIeJKfcyvGnehtdcvgD7PsvSdqr0lr4YPRR"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify any catalyst, while the reference found multiple negative factors despite positive earnings."
+    }
+  },
+  {
+    "ticker": "ISRG",
+    "change_pct": -13.7,
+    "window_label": "Since Apr 21",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary driver for Intuitive Surgical's (ISRG) stock movement around April 21, 2026, was its **strong first-quarter 2026 earnings report**. The company announced revenue of $2.77 billion, a 23% increase year-over-year, significantly beating analyst expectations. Additionally, its non-GAAP earnings per share (EPS) of $2.50 also surpassed estimates by a considerable margin.\n\nThis positive financial performance was driven by robust growth in procedure volume, with total procedures increasing by 17% and da Vinci procedures up 16%. The company also saw strong system placements, particularly for its newest da Vinci 5 system, which accounted for over half of U.S. placements in the quarter. Management's decision to raise full-year guidance for da Vinci procedure growth and gross margin further boosted investor confidence.\n\nWhile there were some prior concerns, such as an FDA safety alert regarding a stapler recall and a cyber incident, these did not materially affect the Q1 results according to the company. The strong earnings report and raised guidance were the most significant catalysts, leading to a positive reaction in ISRG's stock price.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE8j6rJIP_A783VxAnbeNa5cqqM_VYMvnUA7x55CnY2Mw23HYsU5Mnri7AmvsSUyylWjxEo4mz5Sb0dmTaS0OKw2nn5vTJtIs9WtoRSaZ9u8mbRbSF7WVZZr1qzoKazwxZlf3hoZRb2LESOIUi1x4QU1OUzO_RaDIOmSS3w1gZ1O_hOHl-eZWIeJ-YOfvTYJxPR6OhYzQQ1VtbV6w1n0LEwDEyUspLsXXXZ1-w=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFDzadqL8QRWT7ZqJ20Y8LZXTBGJmliHI5fC23LZF8sYdOnngKTON4YgzMC6CWs33GBIzeAgmLppDE2ok-PV9n2e1UDJC5PkyOOllaHswlZ3foTge90tZ-NVLeBmZ8eyyAgG_gUBViDr6rcQWLCyH_A4xFJfmXlZoonx8dTUjTLL8yEmk9pPdR1BbEwIKiZlKx4k2OO3_OgqA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGEHBGfcZHIMz-c1q8I_8ET8k230VN6jVYQp_CeKbDmFjbu8Uf05V9yhDuD9x6pYi807_-E9ZLfirsccRYEqj-L-pn3elNLLJDt1wCHJ2qdZFetkuFW3_oG4y6tazqaVVaHZgyDlwUqp1q3D-YIKlVG6H-KOiV8j3CheiZvztBXF9lHr8CKrxyjQ0m0i2M48oERckzcpCddnNl4boiPij8koD3-psCrNCNPeRc1xAiNIppQke-LsG_VLRA=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFAOFEEE5LjBZIDR6a22RKagqhnSkqiGDRyal8hU_8Fo7IU8q6wr5wDNfvuTACnf9BtStgV1F97SFPCiTkEeUpKYhji4XIgbpLPSqMfSMWbQvz1vlRXUI6Xkte7f61KVwdaGFfKrHs8juV_hLoET0cvTxeXd6ozJAZN1EMc58Nnn-GxlvKikRVw707ZESltVAfHxK8ixx8=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE5wpZgOwxHOrALtE9c2Ocka2tJ2tXPDH5TpqGWI7UisXb75hzQMXilkX050qhOR4ZhaBiTHC5aYhqm1GzJ9pVg9AocDpskbRIm04n0cJFvy-NqlGpPS3gjlUEm0Wp7IR58LOrKqievD_p_sf-P-Kj1Cjp1y7GU_j_MU1VhSTxMCT0ZFiFB_k39ZzOvXA4Y2PZuHEGY-b6yS5rmzJ0="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the earnings report as the catalyst, while the reference clearly stated it."
+    }
+  },
+  {
+    "ticker": "SPYG",
+    "change_pct": 7.8,
+    "window_label": "Last 30 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The SPDR Portfolio S&P 500 Growth ETF (SPYG) experienced a +7.8% increase over the last 30 days due to a general upward trend in growth stocks, particularly within the technology sector. This movement is not attributed to a single company-specific catalyst but rather a broader market sentiment favoring growth-oriented investments.\n\nThe ETF's performance is closely tied to its holdings, which are primarily large-cap growth stocks selected from the S&P 500 based on factors like sales growth, earnings change to price, and momentum. The technology sector, which constitutes a significant portion of SPYG's holdings (around 48.6%), has seen strong performance, contributing to the ETF's overall gains. For instance, AI enthusiasm and resilient earnings have fueled momentum in growth stocks, leading SPYG to hit a new 52-week high.\n\nWhile specific news driving SPYG's recent surge isn't pinpointed to one event, the ETF's performance reflects the broader market's positive sentiment towards growth stocks and the technology sector's continued strength. The ETF's heavy concentration in technology and communication services, with top holdings including NVIDIA and Microsoft, further explains its sensitivity to sector-wide movements.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGUe_F3CeBzOHghhX1EIa609Jr3l3YdAcYo6KSs-BMQVlwlVJ1abXSyZOPnobjmon-FwzmS60bFV6vZoLG-1F1ESF47a5uOBHbT6I3-TG8kr5eE2sG8Moe3udWDHw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFzeHCGVi7NARW8E0OiR6J8WnYozRX8QJil2dpn1BeCVdLnqEwLLnOtpJKJaPwzt_B2k-jbq-ToIt0F4MtouF98ENkEOxldPkY8GsNZhjFbgPyW3p8wtT8NxPUMhol_-RVDqgAEsaiPGZ375PgPXOfN4ceYr87ArgzXBvEBP00Ai429XCYgy0mNR03Ixoz7YJ-zL_b1n65zynzH",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFjvKtEyo0K0CiH_X5IRn3XPoZRsQvH898nC541MfHMRwO1LT-hwaJ61JdiPYzHOLaRuOPe9whK_8oUeWlbPIgU-tQT1njGqJeJ6HQyAmz3bCCqqVGbUzjt12aS",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF5CMbdGBQLsCZI-tUzSII236SeBReXza8M6QLDh_RY2Dq3g0nDjdwgGoWOIgvDGtamMcWtKX4VaQiXnlHocJdQSHn_DJgeT_cOKaurvqbIRoalC2FA98-j_sZqNogr",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFvCnVEq_LDdnjNvlLWSd2fW_jnAax6pPVsNVfEuqQCPM27t3-BBq5uXoRxSDowu6HNpDEQg_W48quFnMfrbi5JLaw8glYQ7Hn1ob9diw52eVrkuKgq7dqSpN6EcGMZWj1fVL11yhJx7LQKwrJO7ojzl_LyJLOEX0NZ"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the broad market trend favoring growth stocks, especially in technology, as the catalyst."
+    }
+  },
+  {
+    "ticker": "BTI",
+    "change_pct": -7.4,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Unusual",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock BTI experienced a -7.4% decline over the past seven days. While there isn't one single, dominant catalyst, recent analyst actions and mixed regional performance appear to be the primary drivers.\n\nSpecifically, BofA Securities reiterated a \"Buy\" rating on June 2, 2026, but noted that performance in the Asia-Pacific, Middle East, and Africa region was weaker than expected, due to softness in Bangladesh and Heated Tobacco. This was partially offset by strong US vapor performance. Additionally, a recent analyst upgrade by Morgan Stanley to \"Overweight\" on April 24, 2026, had previously driven a stock rebound, suggesting that the market is sensitive to analyst sentiment.\n\nThe company's next earnings release is expected on July 30, 2026.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEcqgkcppWTpoWgaWed4Kb__rIWLGTt2FeHb-cIrmjWSLgfXehivKEcr-eIqcH4De8lXyNlC3UnD_qDXU-aEDh3ipw7peEj6KJkJQxPcii9wHDTo9cfVJnLXfkuwvFxm2qIP6kAH6KULs-y20GZhvCFLrUtiBmJTJr36FR_knKNBK3qlS0evu0fK6S6JmA2nR1tssJQHifpM0hLzUv_rl2--7jdrdAsQjgOazOKqvgI9CehC8Uh_miVX-CegoOgz1SaJL8NfRE=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHnQz6U0Wu5V1Uxz4jlGXzqTZl2LK_v2C8AuLudF888Wks1hIzBcRLUb-dm566IU0na1ogx1cYkN_fcG6GKwbLe6zkcXS-kGlHKUkR2wV0KOqB30dEp3BGzCFGy",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF2HuXGhN1qikSUcscO3BOrx5RPVQKRlS-se8DTHJ8NJriBnXQP9ySxkH18PdFqWeA8fLVC-B1cA7VGZIM3fXvr_ZrG74ntGJ4RJ_maMqAEp3s5DpEMe2yV1kTE0zlA8Cwz8mFkbYWw",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFR7F-xvmzJ9wIPPB_3og8PU9nRDGkCy5fRWCN5YxG5C9vYExcEGILVm_nOxLaXoOlluF0pLLR9RklJ3PlyoOp_C5myvx2ZWsre8ZTLSb-_BUJUh9wBQyw-5RIzcjkpRy6YA0Nk",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGwghH8LMP74yOMkhNygm5jvo533lLDJv2CdMMNNVF2uGkKxqiA8OHJmVM3KZLfCiXn0DXmxVmRdxoSGJmf6Ic8CrZYmM5gtXDudcJo6_MrNvuDkVMWBJFTqsgcQwOZzBlEe2dRveEFUiduXUr0Ro5FalWwvQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system found no catalyst, but the reference identified analyst actions and regional performance as drivers."
+    }
+  },
+  {
+    "ticker": "TD",
+    "change_pct": 5.0,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The most significant driver for TD's stock movement over the last 15 days appears to be the bank's strong second-quarter 2026 financial results, which were released on May 28, 2026.\n\nKey highlights from the earnings report that likely contributed to the positive stock performance include:\n\n*   **Strong Earnings Growth:** Adjusted earnings per share (EPS) were up 15% year-over-year, and on an adjusted basis, EPS was up 21% year-over-year, reaching $2.38.\n*   **Improved Return on Equity (ROE):** The adjusted ROE was 14.4%, exceeding the bank's fiscal 2026 target of 13.0%.\n*   **Positive Operating Leverage:** TD achieved its fourth consecutive quarter of positive operating leverage, driven by structural cost reduction programs and AI investments.\n*   **Momentum in Key Segments:** Canadian Personal and Commercial Banking saw a 15% year-over-year increase in net income, with strong loan and deposit growth. Wholesale Banking was also a standout, with adjusted earnings up 38% year-over-year.\n*   **AI Integration:** The bank highlighted its progress in AI, including the launch of an agentic AI model for real estate secured lending, which significantly reduced mortgage pre-adjudication times.\n\nThe company also announced a dividend increase to $1.12 per share, reflecting confidence in future growth. While the stock has shown some volatility around earnings announcements historically, the strong fundamental performance in the recent quarter appears to be the primary catalyst for its positive movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFlSP5srNrx6KFLntmNwRL9G1dVlsOkPYNqJBMIfw4KvlqAMx8-oIXf60XLk9Z8B2zpK1gidvJKZVfBo5m5F3XihzVPTHCA1mEZxr_lMOt6LYpzHQPDjIh65vJf1Yc6D6Dsx31Tz1n6h5dsayuD-gOOYyKt2-UyZ8ldqHi9g-XKj9uXREXvx4wVEwJrS1WX1gM56zleg8tLEis=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEoexsOJUnCKEgaUnb1rqWK3Bbl-kzQtDyev6sIgq-g7czfSTW9GopegKTRlHVUt3Pi8kS9uJcWtznGzjqRKAPrGFU4AwO6SIQFqbnBfSAnQqsJSCmfoQx9CilC8uZnE7R7Juqb4RczdQhywsvnVweezsOu8u9OMfwnOIuqbHJPNRQYXEF-e-ZQIwvq0rlKPIOzGPXujwZ2bfJgI8o=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHlUSA_cDEpcWZumZfI7P-freCfJ4CYfVcCvwhYKgHPN_VzXuY_4LSWyTZx0QC-kLrci4HnweHK24uTl2sAxoEITqAeACmcn4dmjiDBipUmm0gcmFZIPrOCtDjWzR_kAE3HCRqgrhBSSsOMmPZzyC5xzo_Ng5qylfZvitqoSMX7Fo3UUv8ytwh8fKJuyqfuE2_GHMWSYd1KA0XXyFtjNxqmHrKg9u7XrpWwvsZ6OXUeONeXRa_k61QH0Q==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHr6-nvC04rbJDlDzESRzXI5kL4ZPBMfNSYAuFVUsNH4V77rOsCqtko1wjmpOIQsHLF2T68CW0BWWdVpOC8NcSyuo_R986nwUc4VdPL6qQ2ufwp61-imS7PXSiEhJWTu9Svqp7hl7MaT2LJaMPvEuO-BzLSBXIykyKGDhPRUMHJHST-u6j4Xh9PNn2ghFcdKzyZ17ZlLFv05_oH_Lz6xc2hZCFa90oTuMlz",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEFXZdNnHemnL2HoqEESIkGMGY4DDUXo0KA_2GL--PMVYAtD5E4pWLTtkPK1nOwKiWaUOY0mo82gWVQDcWK8aL9bjJcZ1b960Wc3GKO13TPOGhHE248HxXMoJZ_vcdlvSyBB4v66Gg_KUXAp5qhvSYmJeUZs5Z92JP5JOYJz5_KRIyLfqFq9hIQI8GZO1_xug=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed the strong earnings results and AI integration which were the primary drivers of the stock's positive movement."
+    }
+  },
+  {
+    "ticker": "AMD",
+    "change_pct": 76.3,
+    "window_label": "Since May 5",
+    "direction": "up",
+    "tier": "Extreme",
+    "found": true,
+    "fmp_tag": "Earnings Beat",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary catalyst for AMD's significant stock movement of +76.3% since May 5th is the sustained and robust demand for its data center chips, particularly those used in artificial intelligence (AI) infrastructure. This demand is driven by cloud computing companies accelerating their spending on AI.\n\nAMD is recognized as a key challenger to NVIDIA's dominance in the AI chip market. The company's data center segment, which includes its EPYC processors and Instinct accelerators, has become its main growth engine. This segment saw a substantial surge in sales, demonstrating the rapid investment companies are making in AI systems. Furthermore, AMD has secured significant deals, including an agreement to sell up to $60 billion worth of AI chips to Meta Platforms over five years, and a prior deal with OpenAI. This strong performance and forward-looking demand in the AI sector are the most important drivers of AMD's stock performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHDtsboDpalwmbFwdR0HZ11prDgsbpNBfeWg9O7lTmXaiQZBncr-idC9A4blw3q16XTeaM5XZDGMsnKh4mR91zL4IAtfa8B39fvw7IuaRbmvkz5HLvbPTL18KWP_WIkHakp-qZQqEgS191I_2LC9AYYexnH6wnGASV68PNhvX9zNudlMjnAbLV8ljeixCLCL10prm-sX3256kyW86jPCtBpNAiWUJZxQZlClKH6vFBp3YLh-VXetUeDE4aOwl1u1YeDW9HCW2nzDxt7cZxCug==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHZljGZd4Ii2mAWLF-3oO5ZBesoa7pvKHRfcZrgnJdQxaea0vCgTRzb96oT6HjSE65H2yncs9LUf-F9CNsSPlEI-t__PA4dCV88i6Ucs1Jum5C9sU9u1sRXCXXyJ2ajF1U7XOFgzMRKsfONH_XKegTUapH5F716PqaYSVSNQ8otH1GD0n2lUbdgKlSuBo4YHQLWZ7R_BA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF8oh661CSJzcKEklqocs4h3n64yNqKaGchUnlRzRfjHmO3CFjy2bVly5UAsThFs5q9lX9MiTBGtn36Mr9cRl0Te1lee99GDx_EcYrILEG6aYc3u-CmI2ne5F-LeVbhppEh2foal1nlKA6fYXF46dEOOyCJYYxrr2xNMZ8c3EofyWDVZOgK_pbjpOc4MR8FpqedRlTfTY-ZqfI7lUyvQdrjeVSnd_AnXSvqochbSVvgwGEAGK3FkAlMsVDhfVdmEg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGBD61GXCRmuc1YzxHzsu251w69Lp4bQI52UJR4HW7rSAJIAkNDTGNu8YG01CTyoEeHX0ONO_RXq00Pjp8hl6CF3FUBkEZO3Mzh_uP1IvkZX0nLNyfxqTIqaIcRXgTBapDZJzs-uNFfpKLE3cQGFNc1l8IM7x8X8emaVT0udCObSWZZCXY9dWJVWs4_XXTLjlnGVTji-uGHrdk="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the primary catalyst, which was strong demand for AI data center chips."
+    }
+  },
+  {
+    "ticker": "CHT",
+    "change_pct": 4.9,
+    "window_label": "Since May 7",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock CHT experienced a significant increase of +4.9% since May 7, 2026. The primary catalyst for this movement was Chunghwa Telecom's strong first-quarter 2026 earnings report, released on May 7, 2026.\n\nKey factors contributing to the positive performance include:\n\n*   **Record Revenue:** The company reported a record first-quarter revenue of NT$59.99 billion, a 7.5% increase year-over-year.\n*   **Exceeding Guidance:** All key financial metrics, including revenue and earnings per share (EPS), exceeded the company's quarterly guidance.\n*   **Strong ICT Business Growth:** The Information and Communications Technology (ICT) business was a major growth driver, with group ICT revenue rising 25% year-over-year. Specific areas like IDC, Cloud, and AIoT also showed significant growth.\n*   **Consumer and Enterprise Business Strength:** The consumer business group saw a 6.2% revenue increase, supported by core telecom services and strong iPhone demand. The enterprise business group also grew by 8.5%, primarily due to the robust ICT business.\n*   **Positive Outlook and Investments:** The company is scaling investments in AI and network infrastructure, including 5G SA and the CHT AI Factory, and expanding submarine cable capacity.\n\nWhile the company did report an EPS miss in a later announcement on May 21, 2026, the initial positive reaction to the Q1 earnings report on May 7th appears to be the driving force behind the stock's upward movement in the period following that date.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHvRwTY--lHXcVBymqfrgUN_B-ET8UvM5qArvOQBwsELz72GtKunmo6mTtrxbdjZ81paP_7gqOmYqOZ9sPWvibPzSPMuIVvxJog4Gucpxix3g2fodZTQwh1CivqZjOtsvXF6aNxk3E663glwcf1UmpSqW1ba0p30G9oFPFThZvJoT8mXpbD50pLNjXQmuTajm3iz5yKtSVsap8ioARszoHHXM2FTxgl23Il0TvL",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEZQJQ5_iJdk6A2G3pPWMNWolZf_PFeX6VPIfUVHQpwRWPegJrzoY1I-0COFD4oalVUfxuancjLp_dK2nPwGeMYWIn4ixvPbH8Xh8NeUjG3Bysd1x31OhxNEJxIeAodeZK01_77qi0ChrQHXjWirlK9g6tiBdjp0C9pgc2t7Cgne-AjYyxTax6shgCTSCYS",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFMs9LrZaeaa8xdTFcI1PKJpaZ5Jt6OdakbfebP-UswMVYjv5NLWMaJkQJ5bOf7W11UeV03sJoUuQ4bjhWsC_q8cRjBlpVZgo6QoJHxafvCTUl9YdUJTdldYb4k4xBxqj2Y21MqrOO4ye4xBlpXa_l9AOUR8aw=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEOcHd1PeVU0eVxJi94I9PXu3kc9wICLk5TDfVlsVCA2u8_BPTGWIkQux7YE8OpoQ8LHA5j9k_b6parQTBkPrJUElhiIEv79qqmhezSGHjXV2FY30VMhQStUUBihXIXXLbQRk0SCEVsGxXzgl_IBJhs3kMqyinvW9zekU38acaBprf5HOeMtyYMMEmiGjIkvoa1TA0eiSzM3xwbqaBJsNt5nRZubmqL5xfph3K3u0Qj2uSgk5Hh-hXFHQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed the earnings catalyst identified by the reference."
+    }
+  },
+  {
+    "ticker": "IBM",
+    "change_pct": 26.9,
+    "window_label": "Since Apr 20",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "M&A",
+    "top_headlines": [
+      "International Business Machines (NYSE:IBM) Stock Price Down 8% Following Analyst Downgrade",
+      "Breakfast News: IBM Hit by Inflation's Long Shadow",
+      "Active Energy inks UAE grid connection deal",
+      "Can Healthy Software Revenue Growth Benefit IBM's Q1 Earnings?"
+    ],
+    "oracle": {
+      "text": "The significant increase in IBM's stock price since April 20th, 2024, appears to be driven by a combination of factors, primarily stemming from its first-quarter 2024 earnings report and strategic announcements, alongside positive analyst sentiment.\n\nThe single most important driver was likely the company's strong performance in its software segment, particularly in hybrid cloud and AI solutions, coupled with a significant strategic acquisition. IBM reported accelerated software revenue growth and announced the acquisition of HashiCorp, which is expected to enhance its hybrid cloud capabilities. The company also reported earnings per share that beat analyst expectations, although revenue slightly missed estimates.\n\nFurther contributing to the positive momentum were analyst upgrades and increased price targets. Barclays initiated coverage with an \"Overweight\" rating and a $350 price target, highlighting IBM's enterprise software portfolio and its \"sticky\" revenue base. Other analysts also expressed optimism, focusing on IBM's investments in AI and quantum computing.\n\nWhile IBM's Q1 earnings report showed mixed results with revenue slightly missing expectations, the strong performance in software, the strategic acquisition of HashiCorp, and the subsequent positive analyst sentiment appear to be the primary catalysts for the stock's upward movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH7aEogfapoRuPWwEWe5pX0PGTIlXVqkS-fb8CpSSfTH9F2OqgkQD8VAVKQCYlu-aieY0xkLTe8CZUyEswm4v7zO_hR6QFLL_ivC9qEuXOoqx08kcqg9NQZlG9EjGN0_CzhwAnD9MzS3l6qEe7dnnsbozd6Z8jhioQ_5PmW98rP7ZxN4AfG6l8M1OwS8pqSA5YRlppkCd2i2Enwr4nMx0Q=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGGyxuSJdb0acmJAcIZytbskk1JGI-wxovye54sn5t-Bm5GM-hFa-Vb3YcBvfoPW2vImOGvbNSwTVfmkmpSdSAYUzBpV2WcY8WuLmhw5tjsQ7o-dkvSvnwSr5XRjFtC2uPIIhzCA8pTEjh48GmtzCQlr3n3pxZyoUjKUFjVSlmlSg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFSl0JMx9UPbkTa35Ws5GjXLB1TlOkpzIh7hEhNyiwVt8JbqYkcUoSz1q3xQonZ3ZvhM7UvMNZjLbhoPRmvcVnQH7x7OZEVDZomREvpifeWYW_7VJRxMN8KlMMnr4XucikHTaz036IfCxHYFq1uF_Rt3oEyk7GKhE15mX-YjvzHug7PS_x1AEHyw1_t0ALJAqHqag==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHrPVYnb_oUQXIw4NSqSjnr8wzuXM9P7zNXMyQ-gLXjDDhEEUWXRe8MHL5QzKoOgS0JePG1Ox2vIplDlh-BoLyOw5vP6bnicwyagjkrW0Oa-PuxngkV_Ze5tdfIvyGH1hMmX07VvIr-lkeN7RJUhJGpfPoYPJgVb3fbn5w8VnAhn6CAtmeAzG0tm_Cburr1HLAwfrBRmCJDgg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH_AUKmH2vgNwEqFyEDK1roVnOVo1rkDrQLBJ8qCoeXkHF3C2cgCccjMzFRR7QPGP-b-hPTa5JReVP79ZXJFrq7IEuaQYWKIG8h4I_rfTWew0ZxQ4BWPRNROPV3DNDnuaPntNS_7EzUGXsJb9H-"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified M&A as a catalyst, which is partially correct, but missed the primary drivers like earnings and analyst sentiment."
+    }
+  },
+  {
+    "ticker": "KMI",
+    "change_pct": -7.7,
+    "window_label": "Last 15 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock KMI experienced a decline of approximately 7.7% over the last 15 days. The primary catalyst for this movement appears to be a combination of profit-taking after a period of strong gains and a general market sentiment that views the stock as fully priced, potentially limiting near-term upside.\n\nWhile Kinder Morgan reported strong first-quarter 2026 earnings, with revenue up 13.8% year-over-year and adjusted EPS beating analyst estimates, some analysts suggest that the stock's valuation is already high. This has led to a \"Hold\" rating from some analysts, who believe that while the company remains fundamentally robust, its current valuation may constrain further significant price appreciation in the immediate future.\n\nAdditionally, there have been some insider sales reported, which can sometimes contribute to negative sentiment. However, it's important to note that the company also announced a dividend increase, which is generally a positive signal for investors.\n\nIn summary, the recent stock movement is not attributed to a single negative company-specific event, but rather a confluence of factors including profit-taking, a fully-priced valuation, and broader market sentiment, despite positive underlying business performance and dividend increases.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEWom_NZXhWWodCqM0hJoCnJz-8XpVS3hFnZ08Udh26qLTPkfc0pbGZ3SQD53GTsotlrc4B1wloNSaRGO365maFISkpzDwyellND7oCoJ1KzNVmI_jU8kst1QCtty3Zp9yLvFPtio9K4jFkJoTqZo9RwWq1pagf5ChwoI6cqmJGYOXxr4Y7acEziXNJs19OtEKC57AsJ-XqCane-HeJ5oVRTnr-DdMQaHg=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEuecKRlBr9bA3OVxZLMObryOFBBvFh2NkWQSOocf8u59JplDwYL6jZC8P-e9ovU49sw6iCGUk8Eho84uaT9ylRek3Ag7pcjxUyR9ZZUkKN7Eefauh55_5i67-d_RebJXbMIo9iAYjlWRuIRgty1QavtxdROs8vyEMzos0JewxYQeZJ18ZbR2zwt3OcsIbwPdRTjn_m8FIqj1iRP1lKVNZJEI4xaIGyzN5zoj3QQXZSxmkl5f9xmxD2heI=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEy8kOf-75g9mayBUr-aAAj41UXIabskLJHmvU35Y4g5jta0J2KmiYnLCQAJR5m6clpQyGamXaXjToMjo4rP_JrwyPf7S5dgHV2gyCtOPsderRDzFKWUNKWqQ6IX8JZU1haViC1ZlTKz_cRDOTyXAsw1zzvjpEupr7QsKvU7WvS2e5wNUl44N2sjzOtqha2jFs8mDtIu7c8fjirJbTmTqTTC9s85JYH7kiQJhJJD-lGVRE_dxqSwdSm3Z8c03oLYVc5wYVce1M=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGfVONPDIRzfwYg1qYYaG0bd64Zy34GqfBUmJoJ4Pz6pd3TEW2z_CN_y5PV3knUE-sixObc9Gx6_w_w3ReT2iqR4ltAAvXwx_A107cp2detadeSRrDNs0stMcIM",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGy-4wB9pqrgljh4wRCn-PjEWdx4M0ZwbQBUEgHejfO4mnEnDTyJrUwicd9sX8Pd5g9VaqN251SPqEvKSE6SObQxHxuvliVxmqgEHOYDy2BoJAskI7k5YEKd1nWxoSv4wajojkNyQdYzXzx9-fiZlg1miTRzHtVqQICubWtm20gKWlUAMKSKC1-HWXyUQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify any catalysts, while the reference provided several contributing factors for the stock's decline."
+    }
+  },
+  {
+    "ticker": "SCHW",
+    "change_pct": -6.6,
+    "window_label": "Last 15 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock SCHW has experienced a decline of -6.6% over the last 15 days. The primary driver for this movement appears to be a combination of factors, including recent debt issuance, insider selling, and broader market sentiment regarding interest rate sensitivity and funding costs for financial institutions.\n\nSpecifically, Charles Schwab recently completed a significant debt offering, issuing $1.0 billion of fixed-to-floating senior notes due 2030 and $1.25 billion of fixed-to-floating senior notes due 2037, totaling approximately $2.236 billion in net proceeds. This issuance, coupled with visible insider selling by co-chairman Charles R. Schwab, who indirectly sold 27,500 shares, has contributed to investor sentiment.\n\nInvestors may also be reacting to the general sensitivity of brokerage and bank hybrid companies to funding costs and balance sheet narratives. Furthermore, the company's exposure to shifts in interest rates and client cash behavior remains a central risk. While Schwab has also introduced new trading features and expanded its wealth advisory network, these positive developments have been overshadowed by concerns related to debt and insider activity in the short term.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFinHk9Rvpli5rHLEbgis1JbuvUPJKb_-iLtkHHmaXZ1VjkS-pZzrJkwFary0gWVbRpO1U4gDUJviRUsYE66phoHq6jd3dZBpxEamWvm8pseoPDB8V4hjyHdyv2p-9cHvnJm7lxec7KuMrn3Vdlsg8bsgJ-fcKAiIG8OZZbzySEZ-YDSgaosDmvpio0v9GjpUKVgt8yT1Zg8YTuIUO6P2F2ufbfr3YcfW-k9bWno18Sx0OvBA8C0lM=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEgferklxiixYrI1-GCsug2m5BFTDCfFE7tjhi_Yfa0DrTwi-pPLhX4rWrYjygsgNX9BUG5iw5pD_KTdlvAoWgtGVWmVefBhNUQ0mo7HRAkJSylhYOJ4TUFdL536tPnKUO331fTVQubndMrX27a0FKLpQIxA5sZrBUot-B72NEqHefzj7Fpbhww4wChRUYh3SUtqqx9Hz8McPxn74Z-zNTRGHh0WpJsKbcc-ZHiJhcz2MCR8PhmroBuSrTWtF-A5_Em9kXhT42PXW-DcIQ=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF8ABAUnbEx7MGqtgr-YIvGu6YrN2sbuiii3BtlO-BAajAJUzeZ-V1aos06z9EfWLcmAZ_cjbcsUv27otevpw0BUtLOYt5fdowjTSokAom9r18o4f3pWqU6wfbnRAh4sYtY9PgM3tIA2ODvw64ORgu_rJ0fYeIudAIac4MW24v9OjFamZrK9-tyHqIIP5G6txWY6dhT0JxO1cx6G6yL9DBRjrQoci8="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system found no catalyst, but the reference identified several significant factors including debt issuance and insider selling."
+    }
+  },
+  {
+    "ticker": "PWR",
+    "change_pct": 20.6,
+    "window_label": "Last 45 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Why These Three Big Buybacks Are Sending Very Different Signals to Investors",
+      "Quanta Services Announces Quarterly Cash Dividend and New $1 Billion Stock Repurchase Program"
+    ],
+    "oracle": {
+      "text": "Based on the available information, there is no single, specific company-driven catalyst that clearly explains the +20.6% stock movement for Quanta Services (PWR) over the last 45 days.\n\nHowever, recent news indicates that Quanta Services has been involved in projects related to the growing demand for electrical power driven by artificial intelligence. The company also announced a new $1 billion stock repurchase program and a quarterly cash dividend, which could positively influence investor sentiment. Additionally, Quanta Services reported strong first-quarter 2026 results with significant revenue growth and an increase in backlog, leading to a positive reaction in the stock price.\n\nIt's also worth noting that the stock has outperformed the broader market (SPY ETF) over the last three months, gaining 22.1% compared to the SPY's 10.8%. This suggests a strong performance driven by a combination of company-specific factors and potentially favorable sector trends.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFCjL_i6UQZnUa1yepmobtWGeZGL1-LqFczv684i11YwxpnPk1nQcCLfy5K7QvsZ3liMYtWTt8keLVLJu9eLGkLw0CVn2KRlpRqOh7DgHa_Rh1prquxE6MVTMWDpp2XUuXjzCnOpwEoj9hlfDk=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGazb4g-kwf5WySM3XFkg_msga6LQKZVqIPYdtOGfoVw6h1ih6WEkp_T9dTXLXr1kPQuveNeyuVuZ3yen3xQoVbgC-9L-M5__G6vEIewYh5pnqS3GHyYfuqXODaA961u0Nd_HtfIYdF",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE0qIYtYEstd2AUMt0Rx95JUrVlYxcLTjisk5mLoDtN82dBwqb9kfwJc4qfOyDbRlcNA15bPhdyZoLDLNXH1RiWz2XG2OcYCCOVuSBf2wel7sRZ8Udl5Jk4MhYUmfVH5gOjt5DrdM0b3mPx5Q==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHc2gPr-wgpT9p8U8BD0ZuSKzDzSNOsgKimsQoDW5LLPe9j4XujsZw-x_MNwy9uFl_HDSwoTiKhFXuoC59jtMu0hBfRKgVUfrKF9Sy4um2QswcbTD9Pc41iBSHxSeTjlctL9Y6CeR70uqfzWQ=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified buybacks as a catalyst, which is mentioned in the reference, but missed the primary drivers like AI demand and strong earnings."
+    }
+  },
+  {
+    "ticker": "IUSB",
+    "change_pct": 0.9,
+    "window_label": "Last 15 Days",
+    "direction": "flat",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The iShares Core Total USD Bond Market ETF (IUSB) has experienced a slight upward movement of approximately +0.9% over the last 15 days. However, there is no single, specific company-driven catalyst identified for this movement. Instead, the ETF's performance is likely influenced by broader market and sector trends within the bond market.\n\nThe IUSB ETF tracks the Bloomberg US Universal Bond Index, which includes a wide range of USD-denominated taxable bonds, such as investment-grade and high-yield corporates, Treasurys, sovereigns, and mortgage-backed securities. Its performance is therefore sensitive to overall economic conditions, interest rate expectations, and general investor sentiment towards fixed-income assets.\n\nWhile specific news or events directly impacting IUSB are not apparent, the ETF's movement can be attributed to the general dynamics of the bond market.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE3mG5yI0-dq2fUTAQiyw8v9k9HXGm7zdQuHTM9Ax7NdeHnUKlH7_GRVSsOzfZ-XJviAa6YQ2BAcI6UnjlNpr_FRVPJiWf2FCgHWU5KNvCUm5YPy293bEVEGjpE-EooTg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG3FBy5YpQ28GjOr7pvrJ-OYp2XuzP1hpjFp9CjqdNdoxwjT4LQcEF6Eootcsm_qeelGEV80G9TbjiKbx5MgejcXfIMCHQ9lozoaT4P_WfalAvncmkWdfq3R2lCmnBHK_YOGTDGezt8TelL4Q=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Correct",
+      "winner": "tie",
+      "note": "Both system and reference agreed there was no specific catalyst, attributing the move to broader market trends."
+    }
+  },
+  {
+    "ticker": "CCL",
+    "change_pct": 15.9,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "Over the last 15 days, Carnival Corporation (CCL) stock has seen a significant increase of +15.9%. While there isn't one single, overwhelmingly dominant catalyst, the positive movement appears to be driven by a combination of strong booking trends, positive analyst sentiment, and the company's financial performance.\n\nSpecifically, strong bookings for 2026, up 10% year-over-year, with a high percentage of the year already booked at historically high prices, have contributed to management raising their full-year EBITDA outlook. This positive outlook is reflected in analyst ratings, with a strong consensus of \"Buy\" and a median price target of $34.00, suggesting significant upside potential.\n\nFurthermore, Carnival has been implementing initiatives like completing the cruise industry's first LNG bunkering in Latin America and the Western Caribbean, which demonstrates a commitment to operational advancements and potentially lower fuel costs. The company also reinstated its dividend and authorized a stock buyback, signaling financial health and a return of capital to shareholders.\n\nWhile there was a report of a data breach in late May 2026, it does not appear to have significantly derailed the stock's upward momentum in the immediate 15-day period. Additionally, concerns about fuel costs due to Middle East conflicts have been noted as a headwind, but the overall positive sentiment seems to be outweighing these concerns for now.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG4UPadP5XGI6MwROevsHPYaq6V6M0H5WReAN0c8kkzuVLpfH3jKlLV826ULZZixcsRWMAWIY17-ZOXAoqvq3BbhjcQnEH4AWPaDvZq8vOpQJByozyWrTR39FkX94nO_yVttn-hDkIz0vYOpDpXLbIecCW--yIGDvLc5imKhEKr6xR-1iXD_soVJRewEyjHRc_8Csv7az3pOkcl9A==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH5j74UcqicnFNtCwHbvsf0O6szhL3oREOfsT5c_9byGVFggtMiPg9ttLhEjDYmkvuxA0LPZ7fAcGnW0-_uA3hmbZZdLPTelhdb9vK_7e5omZEMwg4ltSM50vq4ZlzwEF89r8PixQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG6_aCcGOYKBQXFwlOWtXcBDgcXFG34PuQ6aXJlmoHN2-PKL-EUX0RnDeBOJZ-RXEn_zoq-YGZ2h_jpGrWGH7fyZ8U0S5JQCopcl45jYF2xTZutfVncIwNBBhaO_ogSQsUACqQ0NR4=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGJJDEFIpp342IU3x4yWVp8Q0kPYtisFqUMM5yZHUBdIrAzek4JyemBusVsWkjJ45OqVqKEV9o54ySCdcJtlx55THYy3ht0Z23JyTDHh52OjZ2OLIg6JbqX9iR-R9JnZI31",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEwZ0qPonRgguEFsDRa9Hg75Hu2zKE4tB3R02yHJp7bsdluPP1sQ9Oy5gqH1eg4pvyyTG7FsTCJD8Ub5FyzTHiTEinQBnxlZHP_puUnU7escgwNukcdat-teyq-fVbs-9Q3Gw=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system failed to identify any catalysts, while the reference noted multiple contributing factors including booking trends and analyst sentiment."
+    }
+  },
+  {
+    "ticker": "NOC",
+    "change_pct": -23.6,
+    "window_label": "Since Apr 21",
+    "direction": "down",
+    "tier": "Unusual",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [
+      "5 Dividend Increases Expected In May 2026",
+      "Tractor Supply, Lululemon, and Northrop Grumman Are Among Top 10 Large-Cap Losers Last Week (April 20-April 24): Are The Others In Your Portfolio?"
+    ],
+    "oracle": {
+      "text": "The primary catalyst for Northrop Grumman's (NOC) stock decline of approximately 23.6% since April 21, 2026, was the market's reaction to its Q1 2026 earnings report released on April 21, 2026.\n\nSpecifically, investors focused on concerns regarding higher-than-expected cash burn and increased capital expenditures, despite the company beating revenue and earnings per share estimates for the quarter. The company also reported a significant use of operating cash flow and free cash flow, which raised liquidity and working capital concerns among investors. Additionally, a charge within the Space Systems segment related to the GEM 63XL program due to a launch anomaly contributed to the negative sentiment.\n\nWhile the company reaffirmed its full-year guidance, this did not appease investors who may have been anticipating an upward revision. The increased capital expenditures are partly due to efforts to expand production capacity for the B-21 Raider, which, while strategic for long-term growth, has led to short-term cash flow considerations. This situation highlights a broader tension in defense sector investing, where investors are weighing the value of long-cycle programs against immediate free cash flow visibility.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFQVxicNE4lfyg7KeqsMFGMsq8uNU3bVCNZID0CFeHaoW5YCp5_pVxOZlD7TqligM2_JAroxqNbO-_AFsZaYNw-R2nD7Epgne2_r6QfJh0fP6-_mdoLYarxQd06zla902gl8uJ9jd2lM7kSC3_Cpcz-QVP0zozPyGBKgozAlSm_Vqc_2d1Lc-1mqUhUeifJzkOFDIRPsZqdoaqkbcyPDIs7gPKKljAiMOynlQs=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH81Ha2rGYy_UMG3QjISg5ktAOfIBx_3_MYFHBsAVtoAoFF87EvrjPcgSF37HI-jQOwzifZtaRYojsaPb1b5FdssX0Hx1XuzZhRAxiFee5Jl7jVvO4OZKSEm0oj9hxkDUFD6nfmkUxyF90xNVczAKoEjRg-utKeEnUogFZD6SCTY7VzPi_FfOd7UaurOA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHpKOsglpdhyTzaFaHF0uHlV1Z0z7MfQro4LWurmSK0QBFpQTlrvhf0fGkurCOv7fWJPQb84H_zZ2pV__anJb2T5ZKNOydsXSqss5p04nA-M_h9YE_cGeEOjOQs7pkyshZblrFCDuVzeR3-d0tpRpYH_vMcqlVvaePkggYpZczd20mmujcOsx9GMp5BBFnituaIrwrr2C19PBsJLAPTY3wI"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified earnings reaction but missed the specific details of cash burn and capital expenditures."
+    }
+  },
+  {
+    "ticker": "ITUB",
+    "change_pct": -15.0,
+    "window_label": "Since May 5",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Miss",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock ITUB experienced a significant decline of -15.0% since May 5th. The primary catalyst for this movement appears to be the Brazilian Central Bank's decision to halt its interest rate cut cycle.\n\nOn May 10, 2024, the Monetary Policy Committee (COPOM) of the Central Bank of Brazil reduced the Selic rate by 25 basis points to 10.50% per year. However, the decision was not unanimous, with some members advocating for a larger cut. Subsequently, on June 21, 2024, the Central Bank decided to maintain the Selic rate at 10.50%, halting the cycle of interest rate cuts due to slower-than-expected disinflation, a challenging global scenario, and dampened inflation expectations. This shift in monetary policy, signaling a more cautious approach, likely contributed to the negative sentiment surrounding financial stocks like Itau Unibanco.\n\nWhile Itau Unibanco reported strong first-quarter earnings for 2024, beating analyst estimates for both EPS and revenue on May 6th, the broader macroeconomic concerns, particularly regarding interest rates and inflation in Brazil, seem to have overshadowed the company-specific positive news. The Central Bank's decision to pause rate cuts suggests a more uncertain economic outlook, which can negatively impact banking sector performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGAgzUtMxpwc-aKGVwYkmw8LReLLiv-j2R1wXfRlZGJ2T6nFycDdM1AJztCXySgEVo4zWZypZkhUgiTAMJT_27qbAEhPb1mNqNW5BP2_DrS9ICRRQxRdPzBWv2bVgB_nsvwPGaHDKmuQmaAU-NPtg2sLJp-wTgn8bwkGZOfisrFji8aMSY=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHmM-dXHa_Khr0zM_B1AlK_9gMS6B_fRRmBbp_hxxlPKMvpMFXh2OPb86DWdSJ7wUIGLYHOZWVJ54sGhHN7DW8xnf5UQiMp4yMXrzmas9NAAN6ETaZF3ir-7IREq1OmAnb9MRU8ezd9pKDvmYaIphCS0P61Bl5D4mvm-QnRdj67TzQhyVumIuzFuDS1nYtuR38-rfwK8g-rBWBlWnEsa09o287luODA",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFAeyr-BufsFQjGhi1jH_qmX8cOy5tYhlhf2QJuGdYofcK3D-1jVGbaucvYbLWbM-90OmhoAAd4edXC0WCCClriKNZ_03OKjFAYEUoALihVTsqQPnwA4syXJRCVHN5b47RaW7sHCTsf1EHHWv6-F9kiHh6lghmA7vW0Dbo5ZyTGoze_58XflzeHnnApiSX071gmjlq3Q9dHIP4Yn2INcPWMiu8pSTvv",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGLFExXBB0rty48dTpNWz7bx1rTHKPkENmZGjdr5KmOFRQBidfgv-Ax05nDZE92Sbce_O4dNP-g1x9nv1lvprvhpS4lWGe3xBDo6h-RqhmvpNYg4YU96ofzw8iHGxnwb0gniplOneyaj52QElVIauDYfozUdZQrYvlNoVuQmz3eD2_4hye4D_UGWzvJbG_QkuebxjC_q4uH6RwiGhJEb1GLXVYl-dzM5m3hxw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEX52t2KrPeGYR7ZJyyh_y_-QR5J6YSGKpKDHyhYkAmwIKJxRNSGGDD_QAC_AadbDSXZ2AeCo_nEKnRO-8WuxPcGJHZkYxmd4mlCnb9-6-T8pV6-5CosGYoHcf19-y8-MemPFNy5IP8k1zW34fDXiUIW7nbR_GBEoBWsgBRUzjjrNSjjelW5JMSdfciOWy_0iA_ZOR8e2v5ZZms"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the correct catalyst, which was the Central Bank's halt of interest rate cuts, not an earnings miss."
+    }
+  },
+  {
+    "ticker": "VCSH",
+    "change_pct": -0.4,
+    "window_label": "Last 7 Days",
+    "direction": "flat",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The Vanguard Short-Term Corporate Bond ETF (VCSH) experienced a -0.4% movement over the last seven days. While specific daily catalysts are not readily apparent in recent news, the ETF's performance is primarily influenced by broader market factors such as interest rate changes, credit spreads, and overall market sentiment towards corporate bonds.\n\nVCSH's performance is closely tied to the term structure of interest rates and market-based credit spreads, rather than company-specific news. The ETF's short duration (approximately 2.7 years) helps to mitigate sensitivity to interest rate volatility, making it less susceptible to sharp movements driven by monetary policy shifts. However, significant shifts in the broader bond market, such as changes in the 10-year Treasury yield or inflation expectations, can still impact its value.\n\nGiven the lack of specific company-related news driving the recent movement, it is likely that VCSH's performance over the past week is a reflection of broader market drift within the short-term corporate bond sector.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGhdlU4V5tXpNxyFmPcYzQaNZT4nk1GoaVlM6BQiXlbIrUS4GSi3HoYFjOfR4SBoKHdLQiyETOref3lLFK8AAYZdc8307CrIrm9qYQ5WyEtn7ixoYEOUOFiufcSpUUZnaPPT0YmSNME7FIKjwaKWkARdiYcBzqYWUdOFn15DxZiYsM_j_W0GF3R_9zymVRWGLHUPEM3lRs-I_HRtZ2CBUY90CJrljFzwLc=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG3oGaeJUuE4-pdxuQOJospyM-vT5YLj6Q9on2Or_5kjNZHOB3VzQrvFgCYiYE1CWkmd6sJKdmmvDosXRILxZggwqEJWS_1G9uTf1ZaIhGJLJrI4LxWHHE_U6tihm59C0mO"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system correctly identified no specific catalyst but missed the broader market factors cited by the reference."
+    }
+  },
+  {
+    "ticker": "MAR",
+    "change_pct": 8.3,
+    "window_label": "Last 30 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Sculptor Real Estate and Trinity Investments Acquire JW Marriott Marco Island Beach Resort from MassMutual"
+    ],
+    "oracle": {
+      "text": "The stock MAR (Marriott International) has seen a significant increase of approximately 8.3% over the last 30 days. The primary catalyst for this upward movement appears to be the company's strong first-quarter 2026 earnings report, released on May 6, 2026.\n\nMarriott International exceeded analyst expectations for both earnings per share (EPS) and revenue in Q1 2026. The company reported an adjusted diluted EPS of $2.72, surpassing the consensus estimate of $2.56, and revenue of $6.65 billion, which was higher than the anticipated $6.59 billion. This strong financial performance, coupled with a 15% increase in Adjusted EBITDA and a 4.2% rise in worldwide RevPAR (revenue per available room), signaled robust demand and operational efficiency.\n\nIn addition to the positive earnings, Marriott also announced an increase in its quarterly cash dividend to $0.73 per share from $0.67, reflecting its strong cash generation and earnings growth. This dividend hike, along with raised full-year 2026 EPS guidance, further boosted investor confidence. Several analysts also raised their price targets for Marriott stock following these announcements, contributing to the positive sentiment.\n\nWhile there are some headwinds mentioned, such as potential travel disruptions from the Middle East conflict, the overall market reaction and analyst sentiment have been predominantly positive, driven by the company's solid financial results and shareholder-friendly actions.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEISJsR-u3YMasq5kltO7pvfjgRR4AoJajHzqf_c-R-Bw0ij9eyPRkC5fWaUyfaQhFPC7g5jdbwW_xyG3p0d8jGqHEwquG1wp1ssuUILj2Kz-BPeB8z0gzKH6wmQ2NCQb1h8RUiHT6690Qlwr55QDMf6T0CiBBMANvO3lRgtKrGVgMuSQXxvMdEIrFrWZ-UmwUB1eDPzkUy3rIqejpYVxO-na-D8vgfPkBO4fODAtZ2rGJNgIvNVnYMiQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFDOKyBpqxyAQNJEQgSaH28C4tbpbAlhNNRGqCaj0zmv6cf0Dv-X0fbAC8eWPUTRx5H65y-6ETR8lGmH2eMXwgAfIwQBs_SzZxYeLMQBgXvHIrcn4weowMq6Yk1ga1evXr44d8m1KcZeDl3zm3368OXlenNqdiuZyefANdIz3FX8tQ3S-0QFuUe7kmHTD26Rr8AXxWc_rDH0MWRCG4uubA=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFnwESlA4zPV44NUnZGh5q7niRS_ZiDdKOP2uO4OZy2_MxB1HoX3efeZFF0DGzkmu9SPmYGE7J6WkC3bLYmbpW8h9Omi8xoxQmHyw9aZ7EY6I202UciaeNPLZ4TqIum3VD1L2tQJAGszBIzYF7rubV1Guj35lzLNzcBbWQ8W9UFN9BxIK0q7BT-d5lefyAZY9PKjDJoXq_XkfDcz3GJHYbShuA=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGzYEEORzfGRF44TjseigTAU4Vp-dj8QF60XxzqSfkxqVNYZ3xs29oLIxeW7__pqFQuPZgZiyS0i3lEWH19rkSx0s_rbFw-BDUiyH_ggpabXw8OhqGiiA6cdUb4mXeQkMiP_M2Tu2lOam6ssXgwkTDT2JgyOageWoTIjfJLw-wPXy2etvA1oCeNOSLxwnFJWGHvW1SqGgh_vtMaiQ5l9bd2947Bf5uJUocJptXyr4uHxr3YX1ofSi5jocluHg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQESRt3icCJmk0gpgva2z6lS6srTXP7xbqcsIEeIm2Mk3qB4a8M_wD0ozYPzcqWTHg7U-Ddo_LZubG2mChLjVm_kDlDjvVdwIZDK3osx0gsCtFT-u--8T68xuyfjAEalaoTadnJw8wqx1qj2GRj1ArAfqcyf-HvkrDNUjo6i2JleBi_5F65cfXdA1c7M29kqsP3evZKzuEoa_DcMO9f_lPOb"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the earnings report as the primary catalyst, instead pointing to an unrelated real estate transaction."
+    }
+  },
+  {
+    "ticker": "T",
+    "change_pct": -4.6,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "AT&T: Cash Flow Weakness Looks Temporary, Valuation Still Compelling"
+    ],
+    "oracle": {
+      "text": "The stock T experienced a -4.6% decline over the last seven days. The primary catalyst for this movement appears to be a downgrade in its stock rating by Oppenheimer, citing concerns about increasing competition from satellite providers in the broadband and mobile services sectors.\n\nOppenheimer downgraded AT&T (T) to \"Perform\" from \"Outperform\" on Tuesday, June 3, 2026. The firm expressed worries that satellite low Earth orbit constellations pose a risk to AT&T's longer-term broadband subscriber growth and mobile services. Oppenheimer specifically noted that AT&T has the most broadband exposure relative to its telecom peers. The firm also suggested that AT&T might not achieve its projected penetration rates, estimating they could stop at 50 million homes. This concern stems from a perceived underestimation of threats from fixed wireless access and now satellite providers, similar to how the industry previously underestimated fixed wireless access.\n\nWhile AT&T has announced other developments, such as streamlining its fiber internet offerings and launching a new customizable wireless plan, these were overshadowed by the negative rating action from Oppenheimer.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF8_GXcr9p3ui-ByjuxwBte6zoohIPCRk1q4WjgcSY_g-1e_4CotK8ey8mCGfdlK6ZooyNKlrmDR1QrSwNt1A8jWogHqt7Zh2W6cPQv74s8iNMt-3GfzCTY10MeCfEafX6FP6V8kyFfVcykhRWHFhWidwPzGjWh_vy697ifUvXKevjoJx29qC-j_hJZySvvjZmWgwygSbvzJLqKFfwI9amElBhbrC3fzjYkCoHfS-T2PcEn"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified a headline about valuation but missed the Oppenheimer downgrade which was the actual catalyst."
+    }
+  },
+  {
+    "ticker": "O",
+    "change_pct": -2.9,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Realty Income: Growth, Diversification, 5% Yield"
+    ],
+    "oracle": {
+      "text": "Based on the available information, there is no single, clear company-specific catalyst that directly explains a -2.9% stock movement for \"O\" over the last seven days. The news surrounding Realty Income (O) in the past week has been largely positive, including strong Q1 2026 operating results, raised guidance for 2026 investments, and the declaration of consecutive monthly dividends.\n\nThe stock's movement may be influenced by broader market or sector trends, or a combination of factors not immediately apparent from recent news. For instance, discussions about interest rate environments or broader real estate investment trust (REIT) sector performance could be at play, though specific details are not provided in the search results.\n\nIt's also worth noting that some articles discuss \"O\" in comparison to other REITs like PLD, or analyze its long-term potential, which might contribute to investor sentiment but not a specific short-term catalyst for a 2.9% drop.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEoe1wlxCtnZomdnwniC60TvjK8T8jUN09AucukuwAdmKVS34desFN5skCx_vz8Oz5VSrkZbXpgDoqC38bN9AweDSQzylB_dciepRMVALs1YfbNcBfw5rYgLVbxVqutyw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFPT5Ci4iGbw6OBYZBtVh7Fvfc5po-R_3K_Q6uKVT16VTWshpgf3TIKpahhj2jpca9tR9Xb5XXLwxHZohB45DZcBgJhEhus1o7GGHj-A3sZznLrpdvnovWmj4hBzDU=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG848VrOcKtvdumi4iUKSKScaKR1Eu2JJPklrhKfD-Dmyp8m7E4yqEr5EWH3yZOQQbYztdUma4wgmUlb7n40t99bE9ygZ8obL74sxRp9gmkAtnYZWtl1U_SqcnftkBy1L-qgER2pdUulyVqFur8_NxVSpzN_OkQq3ml",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFHuOubVpMxVUMZmAS05Hgq_RQKDh-45hNuUBXXjx5O9dFbGN568fl-XA-DjOAxFKkCm_3190OSAqkmX--fyV2u8Qq2_vQlOIsSF42HBln0G-KZwLqRRapc19R55rOba5I3bA=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Correct",
+      "winner": "tie",
+      "note": "Both the system and reference agree that there was no clear, single catalyst for the stock's movement."
+    }
+  },
+  {
+    "ticker": "BSV",
+    "change_pct": -1.1,
+    "window_label": "Last 45 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The Vanguard Short-Term Bond ETF (BSV) has experienced a -1.1% movement over the last 45 days. Based on the available information, there is no single, specific company-driven catalyst identified for this movement. Instead, the performance of BSV is largely influenced by broader market and sector trends affecting short-term bonds.\n\nBSV tracks a market-weighted index of U.S. government bonds, investment-grade corporate bonds, and investment-grade international dollar-denominated bonds with maturities of 1-5 years. Its performance is therefore tied to the overall health and interest rate sensitivity of this segment of the bond market. Recent analyses suggest a neutral sentiment across various time horizons for BSV, indicating a wait-and-see approach in the market rather than a reaction to a specific event.\n\nWhile there are many articles comparing BSV to other ETFs or discussing its expense ratio and dividend yield, none point to a singular, company-specific event as the driver for its recent performance. The ETF's nature as a broad market fund means its fluctuations are more likely to be a reflection of macroeconomic factors and general bond market sentiment.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHzN_T6yajJnzQj1HIryVA3gYDMWLouEgq5odTVCGXXLpWdMpncrtPkEfhOi1N7zBqcOmVuB9BDYbvskMaD2cG2Jur3-kOeRds2bSi_JycYsccxppVCPMPNHttvkqQSNtZSVDZMpKZPf9UKaC-CeIU3OpaTQqOyhzS-bLRKl9VFENa8OXiGel1VTnjVWNcd5Nm4PAGreqk5hWspbFQyoEzfrVduGR5Ih4AqEdli1gWFGbA7mPB7QMr3AwWpvA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHDtfN4kdAkPSz_2jOHPB8Ek2t_swLuQGCTWak0brAACKVHrUj23HnumG3WoLuKkSmtvfIA6IJMZOmR2AGZ3ntbR5O6fN3ALiAvNVjDnFmeVEyP2REx",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHAk8KWnsCsoODCPufOk3Zs3gJrLQKWfHoaIdia5axdPW4srK1KkH7X_7Kp5N1vYacy7Dj-t-SPxEmvrUndjbm9SvYEplQl_BC6z-Uas3sbcZSYaMeCR3c4",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHmENicKT0tqVRNZEG0O0N9oP54DdK72TzoH1j-SMzhX0ZKN_mTAsk2v19JEUV0sn_F9I-R9IDhd1fx42s4canGmjwxEUaIirezRtCdkjt6gb1w5F0SUmC_rDvTQiY=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFD-fTu_MLF3HJuuTOC3FuM3N6zU_qZcWx3wrYwvvnkdzReSyTLdaEK1AKDVcnPOmEX8k7CgSpg6bsHdcRImcFYu4h2ae0mlOSZ1TOsvhYENlt9NN179lAVp1Rbb7IEcwPaZSBXJA6sqtE="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Correct",
+      "winner": "tie",
+      "note": "Both the system and reference correctly identified no specific catalyst, attributing the movement to broader market factors."
+    }
+  },
+  {
+    "ticker": "LRCX",
+    "change_pct": 57.0,
+    "window_label": "Since Apr 22",
+    "direction": "up",
+    "tier": "Unusual",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary catalyst for Lam Research's (LRCX) stock surge of +57.0% since April 22, 2026, was its strong Q3 2026 earnings report released on April 22, 2026. The company reported earnings per share (EPS) of $1.47, which surpassed analysts' expectations of $1.36 by $0.11. Additionally, quarterly revenue rose 23.8% year-over-year to $5.84 billion, exceeding the consensus estimate of $5.70 billion.\n\nThe positive earnings report, coupled with an optimistic outlook for the semiconductor equipment market driven by AI demand, fueled investor confidence and contributed to the stock's significant rise. Management also raised its 2026 wafer fabrication equipment spending forecast and highlighted strong performance in its Customer Support Business Group and advanced packaging segments.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEekuyAGMAqCARoEHKegM8E457F2f5vtHb2Hi0MpnNG7wTaY7JPruFvBf_tKjaP3VXPOa8oXVsV2h6xfPcOmy6nAT-tEbvpAQMU0CX66hSytV_xR2VAzuvsR5ul0winGAULdoglfs_DD6_oDwk3IfFR0nA=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHwbhtcwzylkG04H9a_3Fl3zfP_VEGivl7nvH3gGqFCrIfEHE2vRzgAZmwFE-ATLzLPaHp8qBfaKGw3BZ2m5NPSoS-V-401kGqrSwb9z7pKFkgIL2h9eMrIj0w24AFf2iUy6Q==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGrSEbz-i7oSn_I4xojhLdAWYEoMeGkOJ18vR2cPbsZFKkYYkAXa5rqepi6am3vYTaAD_D-JEpe204gMJnPOOh6QMXjpCixFnxHW4fsgQvuoapJ0hHzndBB2-LVYn5Zog==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG9bFBhPZRxCzH0l7sEv0GZySpHmIaWpzxgvO30gwSMjGeBa1P8abNFXoTOrDID0Ta_2T-w2OCmq4E1ZEiMBrj0vCd4kWFauna-ecC0Ht2M3VE6PGFu_3bj4jSf63xYtNGTsV7SAnthkNEWh96vNS-x14JyrFdWRuWM9zGiPmx8Cz8L0AhlLMz5K6KBsFSbUVNNj2r8PMlFGi6Szj2Xo4of",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEe2JvcAzhnOWoFskmkMMnqgpAQIPh-3ZwBK_r4tpwoX71R_hJu4k9gm8v-POX_5p1nmiIR1BKkpBoeQIXcMuxkG-TKUo2PYuXl4N3DJ0WZ2eR9eAauayPlbHp5j8iUtWHFC2kl6ph7jZuwyz7Z-BrD8Bbot93Rj3m67kUoVAoR995zllpDUYo19_Y5Bpa1yNNCMn_JhBsnDGoH2_bEB0VlcXKyapo4JrHpG5hFWxqTt6GBeRucVEDEyNd1Ig5qrPYSXzJ4tA=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' which is correct, but the reference provided specific details about the earnings report and market outlook."
+    }
+  },
+  {
+    "ticker": "ASTS",
+    "change_pct": 50.2,
+    "window_label": "Since May 11",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The +50.2% stock movement for ASTS since May 11, 2026, was primarily driven by a combination of factors related to its Q1 2026 earnings report and positive developments in the broader space and telecommunications sectors.\n\nThe single most important driver appears to be the company's Q1 2026 earnings report released on May 11, 2026. While the company missed revenue expectations, it reaffirmed its full-year 2026 revenue guidance of $150 million to $200 million. This guidance was supported by a strong commercial pipeline exceeding $1.2 billion and recent U.S. government contract wins. Additionally, the company reported a substantial cash position of $3.5 billion, bolstered by a recent convertible debt raise, indicating financial stability for its ambitious satellite deployment plans.\n\nOther significant catalysts contributing to the stock's upward momentum include:\n\n*   **Direct-to-Device Technology and Partnerships:** AST SpaceMobile's unique ability to deliver high-speed internet directly to standard mobile devices without an antenna, positioning it as a competitor to Starlink, has garnered significant investor interest. The company also publicly supported a proposed joint venture by major U.S. mobile network operators (AT&T, T-Mobile, and Verizon) for direct-to-device connectivity, which was seen as a validation of ASTS's core technology and a potential strategic win.\n*   **SpaceX IPO Hype:** The anticipation surrounding SpaceX's upcoming IPO created a positive sentiment across the space economy, lifting stocks like ASTS.\n*   **Regulatory Progress:** The FCC granted AST SpaceMobile commercial authority to deliver direct-to-device cellular broadband from space in the United States, a crucial regulatory step.\n*   **Satellite Deployment Progress:** The company is targeting approximately 45 BlueBird satellites in orbit by year-end, with manufacturing and launch preparations advancing.\n\nWhile the Q1 earnings report itself had mixed results (missing revenue and EPS estimates), the reaffirmation of guidance, strong cash position, and positive industry developments created a favorable environment for the stock's significant rise.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEoi_B--6TcQeDznL04rXRkEfycxLOBHKVaB8EdtwsqG04cMg03crYWjvVvNZt68niyBcs91zUyR8y2xg2CurzTBcuLJSHtDD56uHX-2oCu4C9jEWwdLEHXfnKnHoCTYsCLcRhJbRTXjPMoTEx1itqth_PVt3VLTwSvm6bARFULeT01Aq81fFhED2WaTtjuLgkBLYsrt0IHq0nUfWir9Rh9x2eqxQDP",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQExD4ko3WLKA5XDU9rVWSagb4fmEOASbQN7PhBF2aVYf-94HKFW3WqOzQIHr-WvB-GAWqYfm26EbDgD6xbrho2WwHg8E3zbYhJa-bs5wIfUhzX5m-w6nSsF35cEJefmcoOLlsYxb7ekQRVkBhEtfrNeDuJkcPpxjQmxxEO2KbMSKF3oJEdkQIsABDbgvIjFZI8ebELV4t3ZqDFossBrOVjSRNGSZ1sJGgg=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGzwuIAJELs56MhFhLqtIhFcgMnWH3QDNOsqI-4GTP0_1vlWPoCYpc43eQLu1PEwK_oBMLgMT1jWNdL5mxSFOkixOAozYUPOh1iM_EE6McXoaq-lP95rHwOdqteeNmqeuk3kZd39BtLwiVLCSCyI-8FoEhzxtCwCQIQV1A2lWk1OAKwFBi_3HhJml-lzeEm1_qpbVBDzJaD1A==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHMxQ9bPQN_jjLVvNPHl8VMC43Aqx9qb0p2wNFPErVe2wVAzmWQUrQWqLusk-Pvyr7Uczu3na49Kv0432GBQFqh4L2Ix4IV5Y4nC13QKJIcOmXKIgJzjlljIQR3WGQBvulup-yGYp7WaTDhh79vP7XpsA42HlBUvvliZJCaVUdVp9cdpg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHTUPNuVlvG1TYVerEQBT2r88n0Yzk567TcSRVPHGMqi_3iH6S8hBw8tYNmfT_j2APF7v07_k7qlHCGaW3u07psFi33q4wNRdGkIRg6vQ-qWYwdnfph9p-q7Q_Gp5OdtzEr"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' but the reference provided a more detailed explanation including earnings, partnerships, and market sentiment."
+    }
+  },
+  {
+    "ticker": "VMC",
+    "change_pct": 9.7,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The most significant catalyst for Vulcan Materials Company's (VMC) stock increase of approximately 9.7% over the last 15 days appears to be the company's strong first-quarter 2026 earnings report, released on April 29, 2026.\n\nSpecifically, VMC reported earnings per share (EPS) of $1.35, which significantly beat analyst expectations of $1.11 by 21.62%. Quarterly revenue also rose 7.4% year-over-year to $1.76 billion, surpassing analyst estimates of $1.64 billion. This positive earnings surprise, coupled with the reaffirmation of the full-year outlook, likely drove investor confidence and contributed to the stock's recent performance.\n\nAdditionally, the company's announcement that the Department of Justice cleared its $712 million California asset sale to CalPortland with only minimal divestitures was a key positive development. This sale is expected to add approximately $2 billion in market capitalization. The company also reported strong adjusted EBITDA growth of 9% year-over-year in the first quarter and highlighted an increase in aggregate shipments and pricing momentum.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF4iaztvdjG8gQxNVLn5GS62aXCfgfjvvRFJmi27AhA6PyxpCuid6K4x5VV73Tmwbr873C7Zo3jv1RyVHifuFajsaOeHW2rYcFrIlY9tXnGmTEnSlVCME8PMTBNJFRsG7xOXmkc7Q5WJtpRn8dvug8=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHdMgUuNjopIwwYdcuRMN5Lirszrmst7UQxjejS6sUPCopT0p8WfKQn_NZPYbrfFrLwYFB-wfZOdqEfyKVzXgUGlgdz1rju1QQDlTWv8KDC3GdJxOomx3oGRQCZ_JDGCjkx",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGGWkG6JuEMWWeizwvefdBPoEitA2oYdU84dmcpYcjqBnzjR_c9w1sZ6SUbNEzX74yd18sbybbZiXEq3Wl5_VYW7GCkQpY-rdKqvSl8bWtmwQB73NMGwSD3viGrWlW9JyYKwWim",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF3aR1ctUgxLjfk9MZwghWPx3gPJVJU-lu4U9UTsvjFp1cC6Pt6ItU0XxZlscRLlx8w0i8Tka113D495MOj2-chetZcpsh8FrhqEhWpJ3TQFgkvEkqiZ3BOwxwFjzE9d9jJYVUNNw4v9h_koa_TZtQpQ5jKeco=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHLV-ldgQTeoTD1CjbmEtEnFHu0tVY0OUnYtoV7MzMOyNCCjYS8304Qr4N_wQJJGHrTz18qdW86orSqZFx1IvYVoxWKkuQABpxFjNNl9AQoQHTovrocsZGib9Ip_nQAt3k="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the strong earnings report and DOJ approval, which were the key drivers for VMC's stock increase."
+    }
+  },
+  {
+    "ticker": "MFG",
+    "change_pct": 9.1,
+    "window_label": "Last 15 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock MFG experienced a significant increase of +9.1% over the last 15 days. The primary catalyst for this movement appears to be Mizuho Financial Group's strong financial performance and positive outlook, particularly its record profits and an upgrade to a \"Buy\" rating from Zacks Investment Research.\n\nSpecifically, Mizuho Financial Group reported a substantial jump in quarterly profit, with net income reaching a record 1.25 trillion yen for the fiscal year 2026. This performance was driven by an improved net interest margin, lower expenses, and a doubling in share sale gains. The company also forecasts continued growth, guiding for a 4% increase in net income for fiscal year 2026.\n\nFurthermore, an upgrade to a Zacks Rank #2 (Buy) rating has contributed to investor optimism. This upgrade suggests growing optimism about the company's earnings prospects and a clear path for re-rating due to mid-term reforms and potential policy normalization. Additionally, Mizuho's first share buyback in 16 years and a 24% dividend hike signal strong shareholder returns and boost investor confidence. The company's strategic moves, such as acquiring a majority stake in India's Avendus Capital, also point towards future growth.\n\nWhile the stock has shown resilience amid broader market fluctuations, these company-specific positive financial results and analyst upgrades are the most significant drivers of its recent stock performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEk78-GB7NtXzfsxu17n_NoMboKwZ6SfcpLnueIZ-9xMg3gMxeVyTA8doeiJwgMm4lRXeVas6WO975eXisOvbywQN7qU0saE62rwCVG4KEXq2ohaJWoKjYDAOYw4YGTP1QENenmdqBB",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEteCagHtcl0oOy25Xfri5x9qV5MYVRx8VhqRlWAsOfzgKfUG_yBniIceoVeOe-d18XkfPEBZretJn_yDgeQODhvyLt7jCogW6cFpdHUqlY08t7tYcZlPAHAcUYbNRTvA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF55u3CyT0IAehfBiIyY9MzYtTDFSR7cs-Y-Ff5Lp_EiQOoKWcT5iYCl_DztSiR7JFBGE3UUFnXiVIb6nKZ5h2Hj92N-nM6Y--hEZquMskQIixUG-RSU1sOrxXv9TtXeXyaPBk-ygAfmugLjw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGC83HUPfrngoS-Uqg1AGgv8Ugvhib8UcYOokKg4LzhWMz2FP4yEAUpgHlCNNrz_f9F2h338ouW4NMovNDAlzBd8SppxtvjFMtHquT5M69THmgM4mw52_mCys-iBg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH8FDeKYWnLtG7adqWq4B60hmZdB0dtaFGUlGw-PEPN-j4IX96WhYz2qUWSsA4EHL5R_PV23-E7t2QeEmvdc8xw-QSJuomykziccyDvx6614iRJZk-LjbWtb20="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed a clear catalyst identified in the reference, which included strong financial performance and analyst upgrades."
+    }
+  },
+  {
+    "ticker": "GILD",
+    "change_pct": -4.0,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "GILD Scores FDA Win for HDV Drug, CHMP Backs Trodelvy",
+      "Gilead Sciences Completes Acquisition of Tubulis Further Strengthening Oncology Portfolio",
+      "Gilead Sciences Completes Acquisition of Arcellx Ahead of Potential Commercial Launch of Anito-cel",
+      "Breakfast News: IBM Hit by Inflation's Long Shadow"
+    ],
+    "oracle": {
+      "text": "While the stock GILD experienced a slight dip of -0.05% over the last 7 days according to one source, there isn't a single, clear company-specific catalyst driving this movement. However, recent news indicates positive developments for Gilead Sciences. The company reported statistically significant Phase 3 IDEAL trial results for its drug Livdelzi (seladelpar) in treating primary biliary cholangitis. Additionally, Gilead received a positive opinion from the European Medicines Agency's Committee for Medicinal Products for Human Use (CHMP) for Trodelvy in first-line metastatic triple-negative breast cancer. These developments suggest a positive outlook for the company's pipeline and diversification beyond its core HIV business.\n\nIt's also worth noting that on June 2, 2026, Gilead Sciences CEO Daniel Patrick O'day sold 15,000 shares of the company's stock, though this was executed under a pre-arranged trading plan. This type of insider selling, while notable, does not necessarily indicate a negative outlook for the company.\n\nThe slight negative movement over the past week could be attributed to broader market or sector fluctuations, as no specific negative company news has been identified as the primary driver.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG5eyoPnwlExjHfY2QIB62BnSY2dxyzjjDeb72-iF8i1WrgTVBVTllxCJF48uSKtHBcGy4tw-3gPxnDqckh_Oan4DdZwVP-slLeUtoqXktippkSBUtVcVgr0SjNNWdZwB4=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGKf540wASqxpTNPUJJI6xNH_5eXNiPGyeygbQXKrHA-1_NmBLOvZmiSt8x1SeaXcuXx-DFjaM5INp7gwBFqtu8Pm40UwZcYrCox-shPjo-j80TdjQ91iqlRyp1qoci2g==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH4y6H72E6gcLu415YBSQQIqfo-TGckiVxG3eLigA8BUo2ymVNfPgSEqQyfTHpoc0yC6DHfNZAht9iLbbqcWeTeWUh6qsn_NOyb5TY2EzvdHB7-W4JJAzmXJK0RpupilLlvVOnNNE9l8RxYc7c=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHFesOfoZaAg8TgEk14kCDrohCvBYj8xvv9VVHNS_25mOLK_gWphfXEZs_9lszKnknWrWeYl9UYFrY-Tewf_2Q9smVLzlUJziQbP8ADEWXn1ysPmDwVVxxDqglqvRNHk87PrsZM7d0Wvq81qi6CAPFyPVTa31MnVJnlQpkj4BbML3G915Sus47ka1faQRpE5FFjR8ngOz15tgUz_oI7r5h7CRG5U_O0OkFpLuBeX9Qosahp3adnQvpIAJ70i2AzFkfzTz_Omgouuc2WO0hfxMQU",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHe9we39caCzOQhKB9v75o-sajQWz1Gp3cIbc3O5kAHk4ddYxZr4k7Nk19EXQt9IghnCApGubX34DMUN4yOAvNWaYqz_-tpM3sXcinaczDbQtdNk7uqrQCNERw_iJaOqdZAN7yfNrb0ATh4UShVWVnVoIbA6L-00UJrcas="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified headlines related to FDA wins and acquisitions, but missed the specific positive trial results and CHMP backing mentioned in the reference as more direct catalysts for the stock's movement."
+    }
+  },
+  {
+    "ticker": "VTR",
+    "change_pct": -6.5,
+    "window_label": "Since May 16",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "M&A",
+    "top_headlines": [
+      "The REIT Repricing Cycle Is Nearing A Turning Point"
+    ],
+    "oracle": {
+      "text": "The stock VTR experienced a decline of approximately 6.5% between May 16, 2026, and June 3, 2026. While there isn't a single, overwhelmingly dominant catalyst for this specific drop, several factors likely contributed to the downward movement.\n\nOne significant development was Ventas's announcement on May 18, 2026, that it had expanded its at-the-market equity program to allow for up to $3.00 billion in common stock issuances. While this provides increased funding flexibility, the potential for dilution can sometimes be viewed negatively by investors.\n\nAdditionally, on May 29, 2026, Ventas updated its full-year 2026 guidance for attributable net income per share to a range of $0.56 to $0.63, with a midpoint of $0.60, compared to the prior midpoint of $0.57. While this was an improvement, the company also noted that the revised outlook was partly offset by market expectations for higher interest rates. Rising interest rates can negatively impact real estate investment trusts (REITs) by increasing borrowing costs and making dividend yields less attractive compared to other fixed-income investments.\n\nFurthermore, a technical analysis from May 29, 2026, indicated that Ventas Inc. stock held sell signals from both short-term and long-term moving averages, suggesting a negative short-term outlook. This technical weakness, combined with the broader market sentiment and the company-specific news, likely contributed to the stock's decline.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHiI3ARD7uo7_s6E-J3ot4I_Ptv5-_xYEMAAO2CHm0CbZWXHz81iaipUiCcnhVhepR9KAwqYIr1hncJgfsxCn9stv_euqBCpHfDrfPLJczu2yvVjXofw7I2uo7FweZ-oQ9NNGeZpelf2TeJfmQHkmeVeys3k8KJWJT6bEa5xG-dqnHFAqYZYwDm25zIjX_2JZ1hTJ18YmhVO3m7WPKHANkwuwLh50-hu8ppFppbz6MmIYAa9uoHiIVb",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEJ7IlSafe_oIi5RJJcpOEL3ElnIZm9KLkUS0cmllhz6llT7Gw9OObLLcYqf7W-WITd-skWJRckvoYwb2N_vFmupGipHJwMFzIG28lGIBkT5BsSQXjANf2kEVUYPy8NorlZ9O3Kgczf2kv-k_7L15KuaPoVRiqnuiZEMrTJssvxK4GILw4fQRV4u8EPTPVSEha55x6U-UPkxvxhvnmbALiFe9weq9aPRFTJpbZLaz_IONnSWoi8szM47Uer9w-fz2ynWXDSF4jOterBKCPu-aRtiGuBwvokcML9skAZZmtMxyNQgSngXPHxcdwEYMsnkZfCOs1Nf678Z_DEO7DTXw2CD4Jx6X9QktgoU6h8UQKsmFwjqOvvh6KCa4XN_m5lGcG07UmWuhmo9ncLJ37N",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHSzDf8k2Zzo2wEnrwDVwvuKnE7YeSX3TPjmy6qjEi3ldI_Aea7wJzf9cHl-xKyPUMjP-zfwq_6KYkaP52vVZCE1QRusy7h2V_32XmEMkEDGLeCcDSMf2kwI3_G"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified M&A as the catalyst, but the reference points to equity issuance, guidance changes, and technical indicators."
+    }
+  },
+  {
+    "ticker": "PDD",
+    "change_pct": -9.3,
+    "window_label": "Since May 27",
+    "direction": "down",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock PDD moved -9.3% since May 27, 2026, primarily due to a disappointing first-quarter earnings report. The company missed analyst expectations for both revenue and, more significantly, non-GAAP earnings per share (EPS).\n\nThe single most important driver for this stock movement was the substantial miss on non-GAAP adjusted EPS, which was 42% below analyst expectations. While revenue also missed estimates, the earnings miss was considerably larger and a key factor in the negative market reaction.\n\nSeveral factors contributed to this earnings miss:\n*   **Increased Investment:** PDD Holdings is undergoing a business transformation, shifting from a low-cost goods retailer to one focused on quality, self-branded products. This strategy requires increased investment, impacting profitability.\n*   **Higher Tariff Costs:** The expiration of the de minimis tax exemption in the U.S. has led to increased tariff costs for the company.\n*   **Business Revitalization Efforts:** Investments in revitalizing the business and international trade relations also played a role.\n\nAdditionally, there were concerns about Temu's U.S. revenue trajectory under revised tariff regimes and the transition to a local-warehouse fulfillment model. Morgan Stanley specifically noted that while operating profit showed growth, the weak growth in Pinduoduo's OMS and the significant miss in net profit were concerning. The company's deep business transformation and new investment cycle in the supply chain and 1P brand business are expected to hamper financials in the coming quarters.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHJK_2FGid59aFK3l3sDWkDkGPdQ5IjWmq9uMTkQmKiKRYRMya-ME0aZWHTQ8Z0iYaxA9vx8zM3ODw_MzqUiqI88Qqypwfn0opm8FzCmwv9Rlen2-ioEDe2vTThqFXvDlv4tbTez1DUxt44-7Ktb0tUIT8-j_J3RxQ-3TycR_GULHBP2211ybUnnvIKKbFM",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF555CjqftXOlEmcZiRFWLPekrYXJrZbEApQwVBz-XJhyVeZhma1MLLwCg7KLRC6lFl9O8sef5cXO_3bF7QUEfRpjh6aty6cEaU3RuESlBBncApP8FyASIO-gjjexuLBKG1eTepv92zhcwMHgAzWfBBZLyM--hCpvTVx99RVIdZHOKVK-zm8I2HIOrsinOy91oFs1e-BWZiINuuZRB46UlLdSjZfWIPPovzuO6f-Y0=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHe8m-LdIL2Fn-3xajPOwDI_BJIfDW-DYXXsC2JTydrTDuQpDQS_YmFBPehxAqUFoZtopvTkfpy2bpaXkUphD35sTicdbhcqhuYu4x9Ii3T_WyFSWSOFzWDy-hwSJQyUPUtLZalHUCTrnWBtCW4V1zxzL8ZVhredwqeyi1TmQjNcUDTM-r5b-zqkPAU8l00eTsh0ZXgL_k_YuXPSSh5",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF1O2mMYnkIh06qbnDa3ChBrc92cwf7cQLgNu2dT1A-eZcXmaIrT36D9GuhCyIxJeHADS_IALV-vHNnVRqvD3g94fbe7rM8TDuekwVLypd8qeJqvqXbjzslEDvtxH27KsTJ1mjrovMP1z3_idOx1E7HlNGMETUI9oQ6G4Znxp0BdxpJhhSgTxI=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEG8H3jeagouMEjkvBREOV8OpklO5P-KunL4gNoFKrVGKFtFed99P7YZ-Aq-Odl8HyhputIo4sPzOXGf0hLl4BC4SFH0dtbkcDhALsPMg-LuTkHQL5lPmw3qojgLmG7lxc-35Un6cJ_DIfWfTfF9nvKMnHhoHtzd8TjJuNJ_hM4jHGeYJxenSJwGMrZoygHbbxqsaV-oIM1bR5-Mr_AUiPQm8_3oj3UF4ZIazuCLmLq8A=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' but found no matching headlines, while the reference clearly points to a disappointing earnings report as the primary driver."
+    }
+  },
+  {
+    "ticker": "VIK",
+    "change_pct": 13.4,
+    "window_label": "Last 30 Days",
+    "direction": "up",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The primary catalyst for Viking Holdings (VIK) stock's recent positive performance appears to be a combination of strong financial results, fleet expansion, and positive analyst sentiment.\n\nSpecifically, the company reported robust first-quarter 2026 financial results, with revenue rising 17.5% year-over-year to $1,053.7 million and Adjusted EBITDA growing 43.9% to $104.8 million. This strong performance was accompanied by positive booking data, with 92% of 2026 capacity and 38% of 2027 capacity already sold.\n\nFurthermore, Viking Holdings has been actively expanding its fleet, taking delivery of its newest ocean ship, the Viking Mira, and announcing plans for further new river and ocean vessels. This expansion, coupled with the opening of bookings for future expedition voyages, signals continued growth and future revenue potential.\n\nAnalyst sentiment has also been a significant driver, with multiple firms upgrading the stock and setting positive price targets. For instance, Loop Capital upgraded VIK to \"Buy\" with a $108 price target, and UBS reiterated a \"Buy\" rating with a $100 target. This analyst support, combined with the company's operational successes and growth strategies, has contributed to the stock's upward momentum.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFKJ-2He4fE7BkswouHKgx8G-OYrj58Q_2okklTD6FhHBy9PCoLwaaX6sNsZCzDrTrXf3w_q_xx8owcTtwybgaK3VXNKGLAcYRCYm4CTGrnOGmFCiNmszG7g8Ju-fJS",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFUiYTNBH-dK8thBVLypRwwdtTxBtCz184UarwgS_w6p6CJxcZC55OzN88AkSZn6WozUHm_dq1juN0B3PArSwBx2d-BU9ofSmbHcbZOHNh9vkk1vrcMujdgOMY=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH7ScgUB4SePwLw3K3ndwd3PXcC-HQcRkDxYchzs3m7ucUJC4Hj9IiKbGKgIIN60YCSL-fx8OUXpCYdB77xJxn80So2Ha55AGb6dJ7U79Wc-xPXwrOrAcVwfUqC0Na58e34Zao=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH2A6bkzxByJb0588Q0_CtjMpWw46XD7h44vl0u8QAQD-5tUCXNpiWbGc-lo9ffu0KPbSp5x0wY4cvQ4CV0BZXgknsw4GbJ2LyEtItR3wg95sPgJsH7g-NcXyJNY5mnJg=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify any catalysts, while the reference cited strong financial results, fleet expansion, and positive analyst sentiment."
+    }
+  },
+  {
+    "ticker": "SBUX",
+    "change_pct": -8.2,
+    "window_label": "Last 15 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Starbucks layoffs impact 252 jobs at Seattle support center, including VPs and other senior roles",
+      "Starbucks is Set to Lay Off 300 Corporate Employees as Part of Its Turnaround Strategy",
+      "Starbucks layoffs today: Coffee giant builds on \u2018strong business momentum' by slashing more corporate jobs",
+      "Starbucks Stock Holds Steady As Investors Digest Extensive Corporate Restructuring Plan",
+      "Starbucks announces new round of corporate layoffs following cuts in Seattle tech roles"
+    ],
+    "oracle": {
+      "text": "The stock SBUX has experienced a decline of -8.2% over the last 15 days. This decline appears to be primarily driven by a combination of factors related to the company's financial performance and strategic outlook, rather than a single, isolated catalyst.\n\nSpecifically, recent earnings reports have indicated a slowdown in growth. For instance, in Q2 Fiscal Year 2024, global comparable store sales declined by 4%, with a notable 6% decrease in comparable transactions. This trend continued into Q3 Fiscal Year 2024, with global comparable store sales declining by 3% and a 5% drop in comparable transactions. Furthermore, the company's Q4 and full fiscal year 2024 results showed a 7% decline in global comparable store sales, driven by an 8% decrease in comparable transactions.\n\nThese declining sales figures, particularly in transactions, suggest a potential weakening of consumer demand or increased competition impacting Starbucks' core business. The company has also faced challenges with its customer experience, as noted in their preliminary Q4 and full fiscal year 2024 results, which mentioned a \"challenged customer experience.\"\n\nAdditionally, Starbucks suspended guidance for the full fiscal year 2025, citing a need to assess the business and solidify strategies. This uncertainty about future performance and the acknowledgment of strategic shifts can also contribute to investor caution and stock price declines.\n\nWhile there isn't one single event, the consistent trend of declining comparable store sales and transactions, coupled with a challenged customer experience and suspended future guidance, are the most significant drivers behind the recent stock performance.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFHN4M4UJDArfmlselFdfTnAFlbG_UETEaUD3bShxSefZeMDssSYUjO7t_pC_U3rxxl9W1sZrlwtuFLR4vSN0_tdvn2BCo6Ju-JjIxO1Mc94CdtcY42jkKXDaokfcJtHj7yF-hxleITABASt_Le8JpdmjWn31OMBok4J0coRaDsHkjqZxqe12S4772LE9iaJC4S0wFQhLow-WUmedALH-mEzOkGrExtDZ5CVj8Vv-JLxSnoiDLKsVBf5g==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG8k1ws1ZL-0_LRlwLl1HrrmYQLkhkILxwAFL-yyn1xqNm0GPoCUtwHqhvz2geJZbeEX6hvUzT8x_foZcnBRPFd6k-ufoA0hTRHLRy6_5dDSxcfT7cpfjl_c-rhrXmiAIfivo0UOfF0_Jyco5zAfDTBAhXelzrGxm_o7X_8Rwtct2UTOnAbV0vbBqCRJf6CtVWR6jjK_H6uxn5DjkZAiJwt-YFHBkjjVmMqbhJ_JJ0jqGkbTvMr5sQzaw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFjZGWDt3Xz2brQ3PHl9euMoG3LqbozZ-kauCOPjeg_JIjJGdEnsXQXEghs9o6qVb9NW_JSy91awvq2Q1aADMT37XWC9QSEjeLriKsDjnwhtZ95wyw6KXz_ON7IYUdIGI_hiLMJw8vkNm4Eg4O04XnFStIQPpvKV1slrz0EpfoP8gpnhxCW44PeQRHZZjWfyOUA3wWWJRGcG-aeU7v375LC7H1toOVwjpWHHwSiAFRgnte_51oIsdJn7KsGpHmrbkjvg79sAODqBA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGEputAKV1n7r3uKFxoBS4YYDR1qeXEKuIX3LRR3FgqqfdevxHSWiC4PW9w1xFhjj0WJh_7luPpKfOLKHfa1hMOVFxSy29pXW6BxT_ihKSlRbR9kJwzPc0upUxP-la6VaAbL__dyP1wlf0oVxSYAo0xZdrnAVoq9bIPH_cxtYgOJ0LzIQSHX-ErN3utE8VDzBYNR8Ip9ZlpXfFzYqFqp-3BF21MTgnETB4JsmMtZg=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified layoffs as a catalyst, while the reference correctly pointed to declining sales and strategic uncertainty as the primary drivers."
+    }
+  },
+  {
+    "ticker": "NEE",
+    "change_pct": -10.3,
+    "window_label": "Last 30 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "NextEra Energy vs. Dominion Energy: Which Offers Better Upside?",
+      "Dominion Energy to Merge With NextEra, Form Utility Behemoth",
+      "AI Data Centers Are About to Break the Grid. One Company Just Spent $67 Billion to Fix It",
+      "One Thing Investors Should Know About NextEra's Acquisition of Dominion",
+      "$HAREHOLDER ALERT: The M&A Class Action Firm Announces An Investigation of NextEra Energy, Inc. (NYSE: NEE)"
+    ],
+    "oracle": {
+      "text": "The stock of NextEra Energy (NEE) experienced a decline of approximately 10.3% over the last 30 days. The primary driver for this movement appears to be investor concerns surrounding the company's proposed $67 billion acquisition of Dominion Energy.\n\nSpecifically, the market is weighing the potential risks associated with this large-scale merger, including regulatory hurdles, the impact on NextEra's balance sheet, and the complexity of integrating the two companies. While the acquisition is expected to provide NextEra with greater exposure to the data center power market in Virginia and accelerate its data center ambitions, investors are focusing on whether NextEra can successfully manage such a significant transaction without negatively affecting its financial health or growth trajectory.\n\nAlthough NextEra reported strong first-quarter 2026 earnings that beat analyst expectations, with adjusted EPS of $1.09, the revenue figure slightly missed estimates. Additionally, there has been notable insider selling of shares in recent months, which some interpret as a lack of confidence in the company's near-term performance.\n\nDespite these concerns, many analysts maintain a constructive outlook on NextEra's long-term prospects, citing its strong renewables backlog, growth in its regulated utility business, and the increasing demand for power from data centers. The company has also reaffirmed its full-year earnings guidance and long-term growth targets.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGdNYWFkWm-QSR7QIqNIQN9pReGzE-lXGkX1lFr-p0XHCKL87Ai9W2C_5afeMj_z5F_S7Ocref8ojI-0mC7HTWZZnDZMgKceIEoHoO6OXR3_Lx3_P0RYwHNVeD6J0zyF5bc8FogKqcLFsAOR8eQtSlQEWZsT8mOosYBu15VBTusRunOhKmGij7j1RpupTGKhnxiN3TDsTxZKbNXn01Uolc=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF96U1-4_uulUKxBiP0dFHNqAGg3oUrnj9ARwZydPHUm5xZOQlU7izZo3eu1UdXq1LH0Vt6sHmhGLKZtj1vTSzAWqMY1U-epG1lrG428hiBc49C6MRm9_jm4k2KhT80wh90ciDi-mSS38VPXQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFUhEtbdXjdEhVCOcEKldFSQ6LY_aUuoMVD3F8xscx4OYtFhi-tqqp78bLLve4nMNZ1xWpDTqp7dzIaisCrDf6H5nWpTfDwXMfMp3F1Joau7F_r-4KnyEUwJhesnEyyrP7k5VRtwMa-2XQMW08sw6OwH0cipsebs1QTAr7T-NYSKNNlC7STB4iJd1Hd_Zn78EE=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH01exl3DJf0fDOJDysFRxjsGLaugl71x-3ZxAJN10kVZ1Rqre1jHS_GsjO57CQ3lz9rzrJ1Wlz9zFr6ysSCcOyvroLwI_vjTuCnj3DCk32lCKFNJ7PufWh7V8=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQESkGsJjZ6eiT40c5fuZE3NX3mgMu-2vs8HjJMgfGSXmQIawo5CSzQvzZ70-OJoeFYw0gFlKgqbt7uJI8oAr5Jb1ze2K6Zva9SRoJGvJYeMrOaqIiTV8uQbTQHm7Nbsf5_1yklLvwR8GxOz5bEv5ZqC54o0g3QupS5PunHSizamHGeYuaUGpfO3UAvF2iX2YUMmI-CeHNDBDzSCuctyasvwf7FJpdEZ6Gks4hBt-nHYDUpMqKDn"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified headlines related to the acquisition but failed to extract the core concern of investor uncertainty about the merger's execution and financial impact."
+    }
+  },
+  {
+    "ticker": "CARR",
+    "change_pct": 17.3,
+    "window_label": "Since Apr 30",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Miss",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The most significant catalyst for Carrier Global's (CARR) stock surge of +17.3% since April 30, 2026, appears to be the company's strong first-quarter 2026 earnings report released on April 30, 2026.\n\nSpecifically, the company reported earnings per share (EPS) of $0.57, which beat analyst estimates of $0.51 by $0.06. Revenue also exceeded expectations, coming in at $5.34 billion against an estimate of $5.11 billion.\n\nA key driver within the earnings report was the exceptional performance in global data center orders, which surged by over 500%. This strong demand in the data center segment, coupled with a backlog that fully covers the company's $1.5 billion data center sales target for the year, provided a significant boost to investor confidence. Additionally, commercial HVAC global orders increased by 35%, further contributing to the positive sentiment.\n\nWhile there were some headwinds mentioned, such as a year-over-year decline in adjusted operating profit and adjusted EPS due to lower sales in the CSA Residential business and continued weakness in China, the overwhelming positive performance in the data center and commercial HVAC sectors overshadowed these concerns. The company also reaffirmed its full-year sales outlook and projected adjusted EPS of approximately $2.80, signaling continued confidence in its financial trajectory.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG-eoF_VaNlruhJQummW-wV5NW71xIEsb6-tjnlQ41cMcG_q_7p4bpD9qLV_4hB7WBPd7gVcKiRXvq77tso5OcEgBqruXbPuioJoJV9SO5bZA0lYmMtipYP2LR2BonDT2qTfgyQ03h5_kpIuKtTKWnDmSkhBccqK1R4rxaGV0tDeXBQepX2ETboHQ6q-B3XIoQkUQ-TyA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHaOAE4xUcrB6_-U8JvYr9IV3zC1KOZE-qdLWmfIHk6xRYRHm5zLxb5krY_F3BfHogm3gJiePAZ9EyzFDvzf5g51W7Cd4doKc-TTL6Fkc1gSaOa_KLWB8ko8JHkxo0a_7ebGeWYP0DgX3-pYb_Z1WmbwOMPYf2ntdE5Ty8b5EIE_JqABKgf9INFW1ef4cga6w0cxP4EIbVQw5iNXZAvRWb_tJIuTuHYKad_ubOnQXfiUlhC75t79Z6bU0fzXNMs",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHSYnnAaq_0-e8kodEzYXeleUdofLeGMeStO7xCYCTourh081e4tpr8UB-uOaiRbxPIyLryISXPdfzToTt-mQlYknd19TX7TwxAoa15KFQJ-hbxADJFg8e95LCeCYYFCeeY-bTgFERs_VJiOf9KeP988LzrYY66txIgT8bwku2jjujXRQqOChkOCduFuA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEzlWNcT8VTe4xBXdYSnI64IxzyI1MRTixTip22zjJKPkYVXxOzPeWj0QX5BQONRtaiGVPfKLyETFObQTxfERg4-Vzv81kyRxjDXBlHeSXfAe95_6soUtzNjJ5nZfuCEjvvBNRyZjM2b88jaYrh2KgS",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF0n6ieq1Zpbcye9wZWQxNFh2GNJXsmJCatyYsHlgfLh-y2G0jTJO2QwK8SRKWXlWuAerPAj9_qFp8qbNl0FQJcIf-szlkF7p-1jXy-aKL8_ysCT7yVN2qEmnklXokPUhpLt-dX7Ddgp1jYxJjsOEo9qVkrYlmt0yjA2BZKKh1JQu8pBt8PfUI_uee33p_J2UPSwPKbDks19oCxIRbCjDP6fdYJ"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system incorrectly identified an earnings miss as the catalyst, while the reference clearly indicates a strong earnings beat drove the stock price increase."
+    }
+  },
+  {
+    "ticker": "WELL",
+    "change_pct": -6.7,
+    "window_label": "Last 7 Days",
+    "direction": "down",
+    "tier": "Unusual",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "The REIT Repricing Cycle Is Nearing A Turning Point"
+    ],
+    "oracle": {
+      "text": "There was no single, clear company-specific catalyst that caused WELL stock to move -6.7% over the last 7 days. The stock's movement appears to be part of a broader market or sector trend, as recent news for WELL Health Technologies Corp. has been largely positive, including improved guidance and record financial results.\n\nHowever, it's important to note that the search results show two different tickers: \"WELL\" for WELL Health Technologies Corp. and \"WELL\" for Welltower Inc.. The provided information indicates that WELL Health Technologies Corp. has had positive news, while Welltower Inc. has seen some mixed financial performance and analyst sentiment.\n\nFor Welltower Inc., recent news includes a 15% increase in its quarterly dividend to $0.85 per share, effective Q2 2026. However, its P/E ratio is noted as being more expensive than the finance sector average, and its short interest has increased, suggesting a potential decrease in investor sentiment. Additionally, Welltower's revenue increased significantly in 2025, but its earnings decreased slightly.\n\nWithout further clarification on which \"WELL\" ticker the user is referring to, it is difficult to pinpoint a single definitive catalyst. However, the general market conditions and sector performance are likely contributing factors to the stock's recent movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEda-Bf6_Y7gzzZ02uR2owit1okdWHA0YM3cJOTBnFWHbV8fnx83De8RMHNSb9LcxMBB7Oi7JI0WasMenerTrdnNKgGm5OGwO3qDzoqdEAENyT8wB003fBGCUrGrJwxTDGL7MV0MyP2beI0iJZn7QQ=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFOuswaO0l4ku72cNrr4HaCmcwTZ4SQnmGHEgcOZ7sub7r0M0ZqKGbbsYWB0-XCt0sIAUTWMDEjlK2lMaId6Ecra0MJL6He4klUCfTPtRw5YynfmHBaUDEKewyRIJn26IiskmV6F3mU4K-WBCZnT2DZsRJi6Or3",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEoVfeXcp4OonBhDuOIS4q0I61aqDpDWkdWLlfMMmwrGbPQAjATwdVxjm7CXdJQdIDHoewt0ewKJw0GLBAEE5bpt4lqnNaazHN6IcBArZd-VX50FYIIYD0i9Fc0yvync3cIa9Q=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE4piG5_J-AUQwmTAieb2JMpq7TyeyQ8o1vY5G9NCeAokP0F5Ug0AeBArb0LgPnB38rp-oCtb644gYggZxaDSPZ4d_aANpp-t-S_oladDQF4qoT53WnVsyXeeu5OscOerS_j6wIO2pmadThCEhD2PQ1ZQISZyCk7TgpfCrQZAUjZK8ONJxUBtoBQRJCtlGLJc3SpJKbHegX148I7tsrbqGrrwvuA_Z7F_nD0VQa6Ts2ETByieo9-TVCDPQw54fWxPpMJR9cQIuarUh8UnqMyfZtqhjtganeeUo-gQO43VJ-UhQ=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHPDpuiBjO9kP_9PFGJrve-Wi7cn-nLYDHMUUKRCndtSNZrrzkp4IyEnyj_3LWga4R_rQJUwvGGnFVnHIOCrhfDILjp55tETpyx7WRq3HXA8rZ0Yw2FBQ69PJ1klHhUKf1WJIS1Fu7AceM="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified no catalyst, but the reference indicated the move was likely due to broader sector trends and mixed performance of Welltower Inc., rather than a specific company catalyst."
+    }
+  },
+  {
+    "ticker": "COF",
+    "change_pct": -13.0,
+    "window_label": "Last 45 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [
+      "Diamond Hill Select Fund Q1 2026 Portfolio Update"
+    ],
+    "oracle": {
+      "text": "The primary catalyst for Capital One Financial's (COF) stock decline over the past 45 days appears to be a combination of a Q1 2026 earnings miss and ongoing concerns about the integration of its Discover acquisition, alongside elevated credit costs.\n\nSpecifically, Capital One reported Q1 2026 adjusted earnings per share (EPS) of $4.42, which fell short of Wall Street expectations of $5.08. Revenue also missed expectations, although it showed a significant year-over-year increase of 52.3% to $15.23 billion, largely due to the Discover acquisition.\n\nThe company's provision for credit losses was higher than anticipated, reaching $4.1 billion, and net charge-offs were $3.8 billion. These elevated credit costs are a significant drag on the company's performance and have contributed to investor caution.\n\nFurthermore, while the integration of Discover is progressing, with the company migrating Discover credit card operations to its internal systems starting in July 2026, the full realization of synergies is still projected for mid-2027. The market appears to be weighing the pace of this integration and the associated costs against the potential future benefits. The recent acquisition of Brex in April 2026 also adds to the integration efforts and associated expenses.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH_6DQFmIT5s3c-Q725VEndjj-KSkWhl2oplusB22OmtlR2BE5tg8EUdpmWgBQ8TB0X8gk-fyD0hqkVqJjfJvWUqEFUUeGfZZbTYOndaFItA6HOyQKBiwWEVc2utC-ZTgiIqFzbGtYKXSq28TRl1dAsLF_K9IA1jII2Psnrnh63cKwDJ8JSTOJpFr9XZcR4LYjn9jZbNdTMDEE=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGu9FWv769zmXdvWVFnlHVut_P-IPZC4SpDIo-N7z_hPVVD9SYa7kS2X53lTYj6jEa7rdW7ugiOfBw1_OflPIBIj6RXb9gOYheDcuVIENe0DfXZ8_pM0oOD89-brhvVots=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEsOsV9fvaQ4xcUWtBmyB29M7glrZu2zR4KKuCJor6DE9thWeDUoXMPpR4XXWQN6enUQc23H8DkqzEy9S1mHjZOKz0sLhTYQXQQss0JWkOX4VZU3Anb7mi60lmruIyhNfj3ljp6CL79-zCDx7E7hapOhkNQ0LNACBo3_qnJ1cDEdUwNkIJUXMbeGJ_E5MQs53yLrb2bBpaw-uk4ARozOx0rjKwSPTZx9tPu6pzLxp4Ijw==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF4kjI9C-fTIkP_z8Y_fbfR7ATMkhb8zTEUCaTDcMBWjMQOcuZdMoLUcsomOMQ-8Owhd2Lcz6OK6qq1TEu2zx40mobZsvw0FekGD6WgWbXNbKGHiW_E69pRd6x13_wzmooZiLT0W6PmTBgJVdlaf67DPdRK_Pu4Akx9uRGS6Cw7AY8MpyBAEq3xl9UtFqVPK2U="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify any catalyst, while the reference clearly outlines an earnings miss, integration concerns, and elevated credit costs as key drivers."
+    }
+  },
+  {
+    "ticker": "TJX",
+    "change_pct": 6.6,
+    "window_label": "Since May 20",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [
+      "TJX Companies Fires on All Cylinders With 9% Revenue Growth",
+      "TJX beats Q1 estimates, raises full-year outlook as shoppers flock to off-price stores",
+      "TJX Reports Q1 FY27 Results; Comp Sales up 6%, Pretax Profit Margin of 12.0%, and Diluted EPS of $1.19, up 29% Vs. Last Year, All Well Above Plan; Increases Full Year FY27 Comp Sales Growth, Pretax Profit Margin, EPS, and Share Buyback Guidance",
+      "Top Wall Street Forecasters Revamp TJX Expectations Ahead Of Q1 Earnings"
+    ],
+    "oracle": {
+      "text": "The primary catalyst for TJX's stock movement of +6.6% since May 20th was its strong first-quarter earnings report released on May 20, 2026.\n\nThe company reported earnings per share (EPS) of $1.19, which exceeded analysts' consensus estimates of $1.02 by $0.17. Additionally, TJX's quarterly revenue rose by 9.2% year-over-year to $14.32 billion, surpassing the consensus estimate of $14.02 billion. This strong financial performance, with comparable sales growth across all four of its main divisions, led to a significant increase in its stock price. The company also raised its full-year guidance, further boosting investor confidence.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFwx7rizrvRmDo1TXzCmIjhKJ-4Twp6GcCTEryY0hT-oAl_YkWh7401tV7vHZihq3JIoN4m_2ARlDqzjD4m9glPmz_d8R_jkJLNj64bU13jsLvaIZMMBE04vVnyT6ZJYsn4kjZACF0O-PLQa5qjtLvUsZf_tdWuAg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGtDXtOvJrshx8pzYe8-dSGIdrOxHG8PggUWrCrk5BPykOdiV3n964fZBhjoRLbAHPDoP2AusTBNcysnv2btlJsomiAiLhoKU-DLJqkH9xpjlupm5MhpUH8YDahASBD6ngicGKzVPIWknXyCA5QQA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGg3lDfyLli8HGT2064ALTG0y9KlRttlY_hg7vhfdZTi0WNz_ut2aaaOgCuwFWvd6AmZsQxYeJLh3zqFV7rWZ1n0p-lxtvPrNm4MQ-gG5DNRAq036PPyZKiDQ79Dmf2D07BKcoouExMSZRGxb7rWqJmw1MbbU4l10iL2Cm5C_ZEqXqOpsrQiF5NaN58IcTPFd87sJ7GIatIhl3r9v1Vlg7Z8KzEi0-71U6zcnXtrPP0mMP_m1mtl8qdqRLFu0fpOzxC7AyTbrE=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQErUmkMP5nmw8NoEVIAZfKnu4ceX3-sFRZJk1ck-jyqSNBYvNtJ3YIJ9S_Pmr2BsiH4YYykV9cYpt2oA_HrZu7eLreR_6HsJEtnAxCJk4_-qhuXyoReNsPSmo686NuntwVf67gr9E7VL5g0ochmke_11vo9mV4sIhhMQcnGIq1ZWQSkNXcfZKIVUHmlxBDMgvhrJ6ZWxCr9",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGjjYkZpSBHz-Exv7h19-fV6R3jbdxeX8xZ4aKLxl8wgExAv7EeBfcFrXQHqkjMhaFFODMS8TeJ8oqLzcGLAThEMhqEs3vSFJ_TXTnkjSOhvvNMi6VcGpvP2zMpybuR5awOPb5GyZurYuQta9n-E233pVaortxR5p9qcaX3gJKDvY1owG74RyPxeHHOyqVaIedMVuEpXNEEN94PJ-g2WYlYXwgdZd9XLQp7URmF8niRI8DKThgA1XxlM09umfQHnjXugzdxikXtnMqI"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Correct",
+      "winner": "tie",
+      "note": "Both the system and reference correctly identified strong first-quarter earnings as the primary catalyst for TJX's stock movement."
+    }
+  },
+  {
+    "ticker": "URI",
+    "change_pct": 40.0,
+    "window_label": "Since Apr 22",
+    "direction": "up",
+    "tier": "Unusual",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [
+      "United Rentals Announces Strong First Quarter Results and Raises Full-Year 2026 Guidance"
+    ],
+    "oracle": {
+      "text": "The single most important driver for United Rentals' (URI) stock price increase of over 40% since April 22, 2026, was its strong first-quarter 2026 earnings report.\n\nThe company announced its Q1 2026 results on April 22, 2026, which significantly beat analyst expectations. Specifically, United Rentals reported adjusted earnings per share (EPS) of $9.71, surpassing the consensus estimate of $9.01. Revenue also exceeded expectations, coming in at $3.98 billion against a forecast of $3.87 billion.\n\nIn addition to the strong quarterly performance, United Rentals raised its full-year 2026 guidance for both revenue and adjusted EBITDA, signaling confidence in continued growth. This positive outlook, coupled with record rental revenues driven by strong demand in large projects, infrastructure, and specialty rentals, fueled investor enthusiasm. The company also highlighted robust free cash flow generation and a disciplined capital allocation strategy, including share buybacks and a dividend increase, further bolstering investor confidence.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGTpYKFGVNqEkM-WGBc0EeP6Ij60hUxJ7R2pvve4ZP6JmjUhJVBsk_oTvfw-pkEcsX2Xt8mdKUWeyBV0e4l__O47EtHTcKi_qt17dMDtswqP1PGRT7rNjZloz_NHcFQsCxjXmqN9U7T7YeJBq27URTEtNbhlX0kedzbjW-Oj9LYSA==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGGicLP-9ZaALGBJtl5tdR7B1OCkCthym3-7LCSgmKNIdxJLvXQ4neeWJaMkeiyx9SWWfuPzA3oI2D3dGo15JMlJYmc8B43Gjp3NJnYykH2oGcYvKfnUbEzPJFa3xMIFbuEYLJPJiXnJJxHTgPSUIDPozxezXSleI2bjT4UjM7nZvvn_m2jgdrc06-k6LXA8wd7OqG50EQQRXTr",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHPQwBLBUzt3mJDvgJJa09YELqz36_evKdIVG3-0A4sXjx-RANzeV-rz3qNq-gI7GzFEz-1hANyKgZwNt1m7shUdiRkEltmGWj7m9SEcPaWxXPVEkRj3xOpMrcKUsgdqgCoit6yb0-nf0F5YAotInYGa0-e-3Z63Tk0ZaFM7LOXMByO",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGPV0knfXSFjV9eJVWDRT5KrC1fgDHeNXp6B737g-EFhnam6PTNcH-QK1Cjr0umF6bKYlKCvGoDh6wykZo6LXT-UqsabOFYpIXDwFpiltNO63nauGCVz4gJnHMOhGCTPRBXHDV5y0dsUhjhac5x4yIfGF9c9G4Cu5pgOCpFJv90x5Jm5R-nIuGgOieAlIdmSz2R38ZDkGzaWOwbYiam2tw=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH3kCocyE_A_3Z3lKPp7UbFyd-qnYUKObPzhPImCmuB5fMP68zJWVDUxsqxw2KFKY-SXjvEYoIuVxNaO3Te_qZ_39GttB5FLOS3IyNfSiBn4wcVsYl_Yu9tHsw="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Correct",
+      "winner": "tie",
+      "note": "Both the system and reference correctly identified the earnings reaction as the primary driver for the stock's movement."
+    }
+  },
+  {
+    "ticker": "IBKR",
+    "change_pct": 29.3,
+    "window_label": "Since Apr 21",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock IBKR moved +29.3% since April 21, 2026. The primary catalyst for this movement was the company's strong first-quarter 2026 earnings report, released on April 21, 2026.\n\nThe earnings report revealed several positive factors:\n\n*   **Earnings Per Share (EPS) Beat:** Interactive Brokers reported diluted earnings per share of $0.59 for the quarter, with an adjusted EPS of $0.60, which exceeded analyst consensus estimates of $0.57.\n*   **Revenue Growth:** The company reported net revenues of $1.67 billion, with an adjusted figure of $1.68 billion, showing a year-over-year increase of 17.0%.\n*   **Customer Account Growth:** Customer accounts increased by 31% year-over-year, reaching 4.75 million.\n*   **Increased Customer Equity and Balances:** Customer equity rose by 38% to $789.4 billion, and uninvested cash hit a record $169 billion, a 35% year-over-year increase.\n*   **Dividend Increase:** The Board of Directors declared an increase in the quarterly cash dividend from $0.08 to $0.0875 per share.\n*   **Sustained Profitability:** The company maintained a strong pretax profit margin of 77%.\n\nIn addition to the strong earnings, the broader market rebound in April 2026 also contributed to the stock's positive performance. The S&P 500 reached all-time highs during April, which typically benefits brokerage firms as trading volumes increase.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQH-W2OdaaZzVfPF_sUa6Q8ZiFrHONzrCyaSSgX-b-LTUYIcew9lohjrirrxbLjXSBNozR_NerlHxzBFZWGotHhmwkMRZ-mkloXAqbAt5qonUbb6gPCcemZIcYStHHkVdVVOBzC0EhMQ15lPkzD5PePa5mJl3LJnQO9gDyKoPae9Kg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEgWHlVwbmEJpN1dE-aEuwqTLORJYHVtBPed7LsM4e8YsT7unXRgY6MtfyFXyDiI7Z82v99I4qtlbHVO7HrD2xjMKGQ1DL3-1X2GvG4zqnZB_uj0PscbZ_kT2bvQrEu5p18gQAPub7J3NDUratPu42EKBlrf4-V6pcfaJnGP4SCniSC4Xnz-5RX2hFdJZ05tSIGpdq_7O2n3TuWFPu64roazkL0UhU=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEFj2BRfTs8osaWCAuxSeoiU9Nv2MdELu6Da5nj9EWpZSEqujCLJ5QrOhBBIMpHmnFg4nPjOlEj82Xq62xYmILSQWhcYfs9FfmbTOFd8Q9kp3vpXO7mGj--4rNIvXHAo9fx9QHlS7sTQJDWVA_MjgDIrk8mg7gq3oMfpRFPVDSg15fvzP740s3krfBHlUUgOtReAswm",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEyLW1ML2nHAAR6v2ApS3B2zr-Z3MNPjyCL2_N3toUI0041P5eYfqYJPImdzsVeJcvnMhOAStBdztQ67OIVOEbKVeCFQldyD4rux36c8ePplVT8sFI6mXlwbPqZ4rR-Nwa6jMSwdpiLs3SA0UBJsoPc-s8iBhhRso6iRztxti9iuCDG9N7EAi09vkUDRXC9Hc7C8Uw-AFspLwj9f-0V57n_pb_aFnnYDJe9XFLPKRziktcg-T_vSpPZCnX6K6KCCEjFGDAoTk0q90NEbeOMwb_ofQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFGjri7skv0ZbE_YDgH4ENkxXHM3J6qEQPCyZnQ1Rf1td5CeO92VIdAsXprjTYfI6baIKouMYYLKPmiZdtx-HIgIBjqc32sWG3yYzHXJS6hl4zIFCnwch5X7S553btqpPwolEhqxermB6MbF9Ul7lSwZGX7Q8BQmtgQg6vA0hYJF3UP3gZqV6msR2MWFjB3_Z4O-UO001A="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system identified 'Earnings Reaction' as the catalyst, which is correct in principle, but the reference provided specific details about the earnings report that drove the stock movement."
+    }
+  },
+  {
+    "ticker": "MU",
+    "change_pct": 135.6,
+    "window_label": "Last 45 Days",
+    "direction": "up",
+    "tier": "Extreme",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The significant +135.6% increase in Micron Technology (MU) stock over the last 45 days appears to be driven by a combination of strong earnings performance, positive analyst sentiment, and the broader AI boom.\n\nSpecifically, Micron's recent earnings report for Q2 2026 showed earnings per share (EPS) of $12.20, significantly beating analyst expectations of $8.60 by 41.86%. This strong financial performance has contributed to a generally positive outlook from analysts, with a consensus rating of \"Buy\". Many analysts have also raised their price targets for MU, with some citing expectations of strong growth in high-bandwidth memory (HBM) demand, which is crucial for AI applications.\n\nFurthermore, Micron's memory products are integrated into NVIDIA's AI platforms, highlighting the company's role in addressing AI memory bottlenecks and supporting high-performance workloads. This connection to the booming AI sector is a major catalyst for the stock's recent surge. Analysts expect the HBM market to expand significantly, reaching approximately $100 billion by 2028.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEaFFs3hqeujrP2l2n_efPpQwgK5GGa2II4gKisGgFq1j3c2bwu7nDdoQ_eIQejsGzo6gSnukCGxtFm815elb3IlKg9Go9JBAnig-snqMTpKdr3hUgnr-PXuZvh9qDxsQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGYK-37KhEUh4p8pddOy7aIlYitiMymUIFjTuRAr3NcYlWCZlvlpbpa7vAszdq6e6_Nriuu6x_7kz04h6L4gBRi1XcDGbqsGa6xm6jkFdvI908vxi1AFgyxA9IJOONQrQUs91DQAcwecBuRw8Q=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHPL4baaaNkIr2tU3Hh4kf0HGtyDCwuHuwZFZvIpZ3Q6IMV3x8jMzSlJYXuEArWzYaQiz6VqLbOrQtGghlLuk2Myhq0vEFRD35xS-wR9mppH-U5dEORTsv7AoQIvSCeaJTus7lbrfI=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF_BHusDXgO-MDd-smeBEC_7YFRJNNEW0Xmo7nK-vWUMiQCLpI3gC70zpCiUBcv9aUsi8LTYKD94SaI5eIbyWYnLC2-aAOsjB_teNXfcr7d_wdfXQN1RPpZw_t2OECV_cm7jLM8V-qym3xpd4zkp0EHQDlY",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGVHwhCmfJaSGjq5powEQ_ymF7jeyRuj20SHBeoL_36ewVo_tg6WNILyHC0i6rcVEYPyrbsO2ne1cL0RH6q0rDk3WMEW1WKTJzhex3qc4WVLSHeMT0lkWkHhLwgECjtYsQzcWirQXwJuS5ruITCthGFFy2XqEMtS5YNwndz"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system missed the multiple catalysts identified by the reference, including strong earnings, analyst sentiment, and the AI boom."
+    }
+  },
+  {
+    "ticker": "ALL",
+    "change_pct": -5.9,
+    "window_label": "Last 15 Days",
+    "direction": "down",
+    "tier": "Notable",
+    "found": false,
+    "fmp_tag": null,
+    "top_headlines": [],
+    "oracle": {
+      "text": "The stock ALL (Allianz SE) has experienced a -5.9% movement over the last 15 days. While there isn't a single, overwhelmingly dominant catalyst for this specific decline, several factors have likely contributed to the stock's performance.\n\nOne significant factor is the broader market sentiment and sector performance. In late April and early May 2026, European equity markets experienced mixed conditions, influenced by factors such as oil prices and geopolitical tensions. While Allianz reported strong Q1 2026 earnings, with a record operating profit of \u20ac4.52 billion, this was met with a cautiously steady market reaction, as there were no clear upside surprises.\n\nAdditionally, while Allianz's full-year 2026 guidance of \u20ac17.4 billion was on track, it fell slightly below prior analyst consensus expectations of \u20ac18.1 billion. This slight miss, even with strong quarterly results, could have tempered investor enthusiasm.\n\nThe company's ongoing share buyback program, which aims to repurchase up to \u20ac2.5 billion in shares, has provided some support for the stock. Allianz also announced a dividend of \u20ac17.10 per share, which was paid in May 2026. These actions are generally positive for shareholders, but they may not have been enough to offset broader market pressures or the slight guidance miss in the short term.\n\nTherefore, the -5.9% movement in ALL over the last 15 days appears to be a result of a combination of factors, including general market conditions, a slight underperformance relative to analyst expectations for the full-year guidance, and the ongoing positive effects of share buybacks and dividends. There is no single, clear company-specific catalyst that explains the entire movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEMijsDhD6aIAQLUyKzgq3peR0pq_E5RJQsc2zdX6Q1FCJJ51Z33TV9u5G-aZ2no_LFmCPavHaPIBZnYAr2q0YGN0KdZ5f5VsulJeehjjjbnuWN923_vz4BqhAONwk4bKV3_mWDNliL-zAdyZVRQytaAjRdIYnoAb3CFPA3ZNhIS0X26rqQvQ==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGTouDNrRuGCA-0_1X3yGbCEuUgsp2KGEMdX2LOzlLlbNmfTjXA9GI1bn0H2ilrAN9rpcoTv8WRGdF_cl0X-nG0P8TKL6MMsJwY2qOt4oDD1hAzvwDc8S-lv_-2BuAWx-4j-U4qKqOSJb4mT9Xuqbu4",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFNcZBfj68ldMXkHZC6gqkRzgNwd0YD3o3X4Ghew_F_T5231MRub9732TjKRqEyERpgTOHWA915q472-Kv2jBTepIqrR1eqaEvC8p7NMiUTQ129RLL7mZZKsPaOSKBjx5Un9FP5CH5lDoU9AU2FWM-8ukD35QCel5MOfxH0_ciD5s1BAzsRpg==",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEFiiotBkPpRm1A_yCg8vffEJCDT6Zdr2yhCLqDUbVS7ZRDlgA7jU0Cw7oroXg4BJSHBvjGZe-Sr7mzJmWEqWhsurjRLWGd-KkOAXF5rebfRoXAmCyR__wShk88kcUplDOs7ZRpbbRXaA6vs03ZFMPPd9sKH5Jw_9H38m_u68zCs128",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFLVmBFSi19818w_JVqjtUyE7lDqGileXxSosaqePitILM9K4Uh7mHXRZSkYs5zLDlh2XdXtsUxtDLbwjeOwMTjKhfMagXqoPtIBI2BLx51C0k48phw2RUY2cYH3aCoMEqrrd8iU0q9SoOjVq-F2Z-dGfpA2qJY1G17vWIf1nPRkGqF9KnK6vXuMgtUqOB0OU_h"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": true,
+      "verdict": "Partial",
+      "winner": "reference",
+      "note": "The system missed several contributing factors that the reference identified."
+    }
+  },
+  {
+    "ticker": "STLD",
+    "change_pct": 53.4,
+    "window_label": "Since Apr 20",
+    "direction": "up",
+    "tier": "Extreme",
+    "found": true,
+    "fmp_tag": "Dividend",
+    "top_headlines": [
+      "Steel Dynamics Reports First Quarter 2026 Results"
+    ],
+    "oracle": {
+      "text": "The primary catalyst for Steel Dynamics Inc. (STLD) stock's significant rise since April 20th, 2024, appears to be the company's strong first-quarter 2024 earnings report, released on April 23rd, 2024.\n\nSpecifically, the company exceeded analyst expectations for earnings per share (EPS), reporting $3.67 per diluted share, which was higher than the estimated $3.51. While revenue was slightly below estimates, the strong EPS performance, coupled with positive commentary from management, likely drove investor confidence.\n\nKey highlights from the Q1 2024 report that contributed to the positive sentiment include:\n*   **Solid Operational Performance:** Steel shipments reached near-record levels of 3.3 million tons.\n*   **Improved Profitability:** Operating income was $751 million, and adjusted EBITDA was $879 million, showing sequential improvement from the previous quarter.\n*   **Strong Demand in Key Sectors:** The automotive, non-residential construction, energy, and industrial sectors were identified as leading demand drivers.\n*   **Rebounding Steel Prices:** Flat-rolled steel pricing showed signs of recovery, and steel producer lead times extended.\n*   **Financial Strength:** The company reported strong liquidity of $3.1 billion and continued share repurchases.\n\nThe company's CEO, Mark D. Millett, noted that customer orders rebounded strongly in March, supporting increased pricing and solid order backlogs, particularly for value-added coated flat-rolled steel products. This positive outlook for future orders and pricing, combined with the strong Q1 results, appears to be the most significant driver of the stock's upward movement.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGZgpQBMkFSBGkeu9KxN3fccBPt6cI_jksTv3h4GmAG26Yy75_mePh2vBiVmFxz9Iu6eZykS-xG7z3df0HWgh1EVjefkoUaC49L0pFsQiIcLnwy80geiDXZ_vW3vOT5gL47KVgeovWX8OcRDeb0IET5VWMT6Ye2U3S4a7ZRwXDhbrJiqO39UUzy81s=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG86EDg36Jh1__GH9yZdX4CgO7P8SYeRB1imrPXY-rH_HdxcOvi-F_LGi2yoNJZji5mtI4Gsa1njw08OCOPHToN10zCMUbSaC6EmkVW5BcaQgmhwv_gjaGF7qjLkTr6UF0N9EbMgHFRVAbt3Np_3OO7xVf3ZI_qisa0UuOjnNvoQY2IXym6zi32FsKDiHJduhn5zpeD_-1xsAYZtF5f1nI=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFWjFI2Ji8neIBVRa6mxATw2SEdNfyHgPCsA1WVtWO66b9ZsesqGQBAZXbgiDmkK9BHxUq0HcJsAC0y9rWMjbhNXfGkhn0gHqS8E5xXajp-bi3YnaUEYs8C4ctZ-0V6st4SMN-VEiSKIiObfl_OdAJd_NXkVtUSp-VRcmu12nR12xFnOmfcdmzEgKg8dR3Gn8jpJJ3btPRQPn-5yxx2GMNsXhb7Uw=="
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Wrong",
+      "winner": "reference",
+      "note": "The system identified a dividend as the catalyst, but the reference clearly states strong earnings and positive operational performance were the drivers."
+    }
+  },
+  {
+    "ticker": "CVE",
+    "change_pct": 12.9,
+    "window_label": "Since May 6",
+    "direction": "up",
+    "tier": "Notable",
+    "found": true,
+    "fmp_tag": "Earnings Reaction",
+    "top_headlines": [],
+    "oracle": {
+      "text": "On May 6, 2026, Cenovus Energy Inc. (CVE) announced its first-quarter 2026 financial and operating results, which included a 10% increase in its quarterly base dividend to $0.22 per share. The company reported strong upstream production and downstream throughput, with adjusted funds flow of approximately $3.4 billion and free funds flow of $2.2 billion. This positive financial performance, driven by higher benchmark oil prices and increased production, is the most significant driver for the stock's upward movement around that time. The company also announced record quarterly upstream production, an increase of 19% from the first quarter of 2025.",
+      "sources": [
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHqax1sUKR7dMtlkSKsaAVXww2o8aeWxc5ONtCXf_RuBS6rGs1-e7QkTNLSvZ5V2f_g80w_9RamGD2Vv9nw4gpYGX9aDk6zYC0qqBtKFQHBkmSDvELrv9witWxc1oluKqmVq7dfXEm_eO3U1225uOtWOjluvOYLqTwwxaQUsZc=",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEY03mV5RHGr6K8if3MRfkdkaIbMFzYvGxJ6GxIuKLiosmF5kcCnN0ujYl0HCe1c4_4aHFuCnR2Zn5ZEw3HeC_4hbaFgQ7Jc-znRndMvfHBl_PbHVEuYhWEJ0SDin--yReFc7KFVytHdPB0IbaO1UC8kqLlcAKE0mmsmxD7tk0stix2qKQK0HTudYeTx_OH9DlNAlJKi8sYTXlNu6ccI0j0hmfxPs0YHAhfkLC5WIxilrB97zWmK9nY",
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQFtAdZSkNMKXqhkwjQ9kc0fRN5C37gBHKvlLXAoVVgqW0zY3PWPvFI3xAUuVyt3hMRcant4ddll-xmqVSF2TEzFD-qKwlQ2_M3zSxDJRyYxV_lNxrFa4eDVdqAUojujZDw4r_2WUQCPIQ7D6SzaUydHTwHScC2Y-KGUM-DmIzITU__tyenujknExJthRTGOGTy5y9W6uVT0VuJdJ552qFaz0bhe0-sd2XFUqb3D"
+      ]
+    },
+    "judge": {
+      "oracle_has_catalyst": false,
+      "verdict": "Missed",
+      "winner": "reference",
+      "note": "The system failed to identify the earnings report and dividend increase as the catalyst, while the reference clearly stated it."
+    }
+  }
+]

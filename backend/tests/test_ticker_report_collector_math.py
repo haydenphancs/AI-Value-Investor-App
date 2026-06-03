@@ -12,6 +12,8 @@ isolation.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from datetime import datetime, timedelta, timezone
@@ -409,7 +411,9 @@ def test_insider_window_excludes_old_trades():
     ("Goldman cuts price target citing slowing growth", "Analyst Downgrade"),
     ("Q3 results: company raises full-year guidance", "Guidance Raised"),
     ("Management lowers forecast as China demand slows", "Guidance Cut"),
-    ("Class action lawsuit filed over alleged disclosure failures", "Lawsuit"),
+    ("Company discloses SEC investigation into its accounting", "Legal/Regulatory"),
+    # Routine plaintiff-firm litigation PR is noise (and lagging) — NOT tagged.
+    ("Class action lawsuit filed over alleged disclosure failures", None),
     ("Board authorizes $10B share buyback program", "Buyback"),
     ("Special dividend of $2/share declared", "Dividend"),
     ("Tech giant announces 15,000 layoffs", "Layoffs"),
@@ -582,6 +586,189 @@ def test_news_headlines_pydantic_silently_dropped():
     # is the v2 default).
     validated = PriceActionResponse(**partial).model_dump()
     assert "_news_headlines" not in validated
+
+
+# ── Price Movement: catalyst significance gate (≥1σ to anchor) ────────
+
+
+def test_normal_move_skips_reason_hunt_even_with_catalyst():
+    """Significance is decided FIRST: when the move is within ±1σ
+    ("Typical"), the section must NOT hunt for a reason at all — even with a
+    real catalyst headline sitting in the window. event=None, NO headlines
+    are surfaced (the scan never ran), and the chart shows the adaptive
+    window + tier badge. Encodes the rule "detect a big move first, only
+    THEN find the reason — not the opposite".
+
+    60-day flat zig-zag → daily σ ≈ 1% (>=30 closes, so σ is computed).
+    Current price is only +0.5% over the 30-day window → z ≈ 0.1 → not a
+    big move → reason hunt skipped, even though an SEC-probe headline is
+    present in the window."""
+    prices = [100.0 if i % 2 == 0 else 101.0 for i in range(60)]
+    news = [{
+        "title": "Company discloses SEC investigation into its accounting",
+        "text": "",
+        "publishedDate": _days_ago(2),
+        "site": "Reuters",
+        "url": "http://x",
+    }]
+    result = _build_price_action(prices, 101.5, [], news)
+
+    assert result["event"] is None
+    assert result["window_label"].startswith("Last")
+    assert result["tag"] == result["tier"]          # window path: tag = tier
+    # The catalyst was never even scanned — the significance gate stayed shut.
+    assert result["_news_headlines"] == []
+
+
+def test_routine_lawsuit_pr_is_not_a_catalyst():
+    """Plaintiff-firm litigation PR ("class action filed") is noise and a
+    lagging symptom — it must NOT classify as a catalyst even when a real
+    move coincides, so the section never blames a routine suit for a drop.
+    Material legal events (SEC/DOJ/indictment/verdict) still do — see the
+    classifier parametrize test."""
+    prices = [100.0 if i % 2 == 0 else 101.0 for i in range(60)]
+    news = [{
+        "title": "Rosen Law Firm announces class action lawsuit against ACME",
+        "text": "Investors who lost money may be entitled to compensation.",
+        "publishedDate": _days_ago(1),
+    }]
+    # Even with a clear -8% move, no catalyst is attributed to the suit.
+    result = _build_price_action(prices, 92.0, [], news)
+    assert result["event"] is None
+    assert result["_news_headlines"] == []
+
+
+def test_significant_catalyst_keeps_badge():
+    """A catalyst whose since-event move clears ±1σ keeps its badge and the
+    "Since <date>" anchor — the section is in explain mode. Same flat σ ≈ 1%
+    baseline, but the stock is +8% since the FDA-approval day (z ≈ 8)."""
+    prices = [100.0 if i % 2 == 0 else 101.0 for i in range(60)]
+    news = [{
+        "title": "Company receives FDA approval for lead drug",
+        "text": "",
+        "publishedDate": _days_ago(1),
+        "site": "Reuters",
+        "url": "http://x",
+    }]
+    # idx for "1 day ago" = 58 (even → 100.0); current price 108 = +8%.
+    result = _build_price_action(prices, 108.0, [], news)
+
+    assert result["event"] is not None
+    assert result["window_label"].startswith("Since")
+    assert result["event"]["tag"] == "FDA Approval"
+    assert result["tag"] == result["event"]["tag"]
+
+
+# ── Price Movement: chart minimum span (no flat line) ─────────────────
+
+
+def test_chart_widens_short_move_to_min_span():
+    """A big move over a SHORT window must still render ~1 month of closes
+    (not a flat ~5-point line), while the %/label keep reflecting the short
+    detection window. Guards the chart-span ↔ detection-window decoupling."""
+    # 87 flat days (tiny noise so σ > 0) + a sharp +10% jump over the last 3.
+    prices = [100.0 + (0.1 if i % 2 else -0.1) for i in range(87)]
+    prices += [108.0, 109.0, 110.0]
+    result = _build_price_action(prices, 110.0, [], [])
+
+    assert len(result["prices"]) >= 25                       # chart widened to ~1 month
+    assert result["window_label"] in ("Last 7 Days", "Last 15 Days")  # short detection
+    assert result["change_pct"] > 5                          # the real short-window move
+
+
+def test_60day_window_now_selectable():
+    """A move that's been building over ~2 months is now detectable as a
+    60-day window (eval set extended 45 → 60) and charted at that span."""
+    prices = [100.0] * 30
+    prices += [100.0 + (i + 1) * (20.0 / 60.0) for i in range(60)]  # steady +20% over 60d
+    result = _build_price_action(prices, prices[-1], [], [])
+
+    assert result["window_label"] == "Last 60 Days"
+    assert len(result["prices"]) >= 60                       # full 2-month span shown
+
+
+# ── Macro snapshot: shared cross-ticker cache ─────────────────────────
+
+
+class _FakeMacroFMP:
+    """Minimal FMP stand-in that counts calls, so we can prove the macro
+    snapshot is fetched once and reused — never per-ticker. (Testing rules:
+    no live FMP — inject inline.)"""
+
+    def __init__(self) -> None:
+        self.change_calls = 0
+        self.quote_calls = 0
+
+    async def get_stock_price_change(self, sym: str) -> dict:
+        self.change_calls += 1
+        return {"5D": 1.0, "1M": 2.0, "3M": 3.0, "1Y": 4.0}
+
+    async def get_stock_price_quote(self, sym: str) -> dict:
+        self.quote_calls += 1
+        return {"price": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_macro_snapshot_shared_across_tickers():
+    """The market-wide macro snapshot is fetched ONCE and reused — a second
+    ticker's report hits the shared cache with zero new FMP calls. Guards
+    the cross-ticker efficiency optimization (FMP calls + latency)."""
+    from app.services.agents.ticker_report_data_collector import (
+        TickerReportDataCollector,
+        _MACRO_SYMBOLS,
+        _macro_snapshot_cache,
+        _macro_snapshot_inflight,
+    )
+    _macro_snapshot_cache.clear()
+    _macro_snapshot_inflight.clear()
+
+    fake = _FakeMacroFMP()
+    collector = TickerReportDataCollector(fmp=fake)
+
+    first = await collector._fetch_macro_indicators()
+    assert len(first) == len(_MACRO_SYMBOLS)
+    cold_calls = fake.change_calls
+    assert cold_calls == len(_MACRO_SYMBOLS)          # one cold fetch
+
+    # A different ticker's report — must reuse the snapshot, not re-fetch.
+    second = await collector._fetch_macro_indicators()
+    assert second == first
+    assert fake.change_calls == cold_calls            # zero extra FMP calls
+
+    _macro_snapshot_cache.clear()
+    _macro_snapshot_inflight.clear()
+
+
+@pytest.mark.asyncio
+async def test_macro_snapshot_dedups_concurrent_fetches():
+    """A burst of concurrent reports must trigger ONE underlying fetch via
+    the `_inflight` dedup, not one per caller (thundering-herd guard)."""
+    from app.services.agents.ticker_report_data_collector import (
+        TickerReportDataCollector,
+        _MACRO_SYMBOLS,
+        _macro_snapshot_cache,
+        _macro_snapshot_inflight,
+    )
+    _macro_snapshot_cache.clear()
+    _macro_snapshot_inflight.clear()
+
+    class _SlowFakeFMP(_FakeMacroFMP):
+        async def get_stock_price_change(self, sym: str) -> dict:
+            await asyncio.sleep(0)  # yield so callers overlap before caching
+            return await super().get_stock_price_change(sym)
+
+    fake = _SlowFakeFMP()
+    collector = TickerReportDataCollector(fmp=fake)
+
+    results = await asyncio.gather(
+        *[collector._fetch_macro_indicators() for _ in range(5)]
+    )
+    # Five concurrent callers → exactly one full fetch, not five.
+    assert fake.change_calls == len(_MACRO_SYMBOLS)
+    assert all(r == results[0] for r in results)
+
+    _macro_snapshot_cache.clear()
+    _macro_snapshot_inflight.clear()
 
 
 # ── Sector aggregates: HHI math ───────────────────────────────────────

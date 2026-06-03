@@ -64,7 +64,7 @@ FALLBACK = {
     ),
     "fundamental_quality_label": "—",
     "critical_factor_description": "Detail unavailable for this risk factor.",
-    "hedge_fund_note": None,
+    "wall_street_insight": None,
 }
 
 
@@ -136,7 +136,7 @@ class NarrativeJob:
     word_cap: int
     apply: Callable[[Any], None]
     fallback_value: Any
-    # Some fields (guidance_quote, hedge_fund_note, ownership_note) are
+    # Some fields (guidance_quote, wall_street_insight, ownership_note) are
     # legitimately optional. When True, an empty/whitespace response
     # becomes None instead of the fallback string.
     nullable: bool = False
@@ -809,19 +809,33 @@ EVIDENCE:
 Be concrete about *what* the risk is — not just that it exists."""
 
 
-# NAMING: `hedge_fund_note` populates the report's "Institutions" section
-# (SmartMoneyTab.hedgeFunds = "Institutions"). "hedge fund" here = FMP 13F
-# institutional data; the prompt prose below speaks of "institutional positioning".
-def _hedge_fund_note_prompt(
+# The Wall Street Consensus "Insight" — a big-picture synthesis across all three
+# sub-sections the user sees in that card: Analyst Price Target, Institutions
+# (FMP 13F flow), and Momentum (12-month analyst upgrades/maintains/downgrades).
+def _wall_street_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    return f"""Write a one-line read on institutional positioning (hedge funds, big asset managers).
+    ws = shell.get("wall_street_consensus") or {}
+    up, maint, down = (
+        ws.get("momentum_upgrades"),
+        ws.get("momentum_maintains"),
+        ws.get("momentum_downgrades"),
+    )
+    momentum_str = (
+        f"{up} upgrades / {maint} maintains / {down} downgrades (last 12mo)"
+        if up is not None else "no recent rating changes"
+    )
+    return f"""Write the Wall Street Consensus insight — the big-picture read that ties together analyst price targets, institutional (13F) positioning, and analyst rating momentum.
 
 EVIDENCE:
 {evidence}
 
+ANALYST MOMENTUM (last 12 months): {momentum_str}
+
 {_style_block(persona)}
-{_length_brief(1, 25)}
+{_length_brief(2, 45)}
+
+Synthesize all THREE signals: where do the price target, the institutions, and the rating trend AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number (a target, an upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Do NOT just list the three — give the verdict that ties them together.
 
 If the data doesn't show a clear pattern, write the literal word: NULL"""
 
@@ -995,15 +1009,15 @@ def build_narrative_jobs(
             fallback_value=factor.get("description") or FALLBACK["critical_factor_description"],
         ))
 
-    # ── wall_street_consensus.hedge_fund_note ────────────────────────
+    # ── wall_street_consensus.wall_street_insight ────────────────────
     ws = shell.get("wall_street_consensus")
     if isinstance(ws, dict):
         jobs.append(NarrativeJob(
-            label="hedge_fund_note",
-            prompt=_hedge_fund_note_prompt(persona, evidence, shell),
-            word_cap=28,
-            apply=_setter_with_null(ws, "hedge_fund_note"),
-            fallback_value=FALLBACK["hedge_fund_note"],
+            label="wall_street_insight",
+            prompt=_wall_street_insight_prompt(persona, evidence, shell),
+            word_cap=45,
+            apply=_setter_with_null(ws, "wall_street_insight"),
+            fallback_value=FALLBACK["wall_street_insight"],
             nullable=True,
         ))
 
@@ -1132,7 +1146,7 @@ Return ONLY valid JSON (no markdown fences):
     "intelligence_brief": ""
   }},
   "wall_street": {{
-    "hedge_fund_note": null
+    "wall_street_insight": null
   }},
   "critical_factors": [
     {{"title": "Factor Title", "severity": "high|medium|low", "description": ""}}
@@ -1149,7 +1163,7 @@ RULES:
 - 2-4 critical_factors
 - 3-5 competitors, ranked by relevance
 - DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
-- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "hedge_fund_note" field as the placeholder shown above. Those will be written by a separate prose pass.
+- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
 - moat_competition.market_dynamics.concentration AND moat_competition.competitors are RECOMPUTED downstream from real FMP peer + sector data — your values for those fields are discarded. You may still fill them as best-guess for sanity, but accuracy doesn't matter there.
 - moat_competition.market_dynamics.current_tam / future_tam: STRICT EXTRACTION ONLY. Set to a USD-denominated number (e.g. 150000000000 for $150B) **only when the EARNINGS-CALL TRANSCRIPT EXCERPT or the company description above contains an explicit, quoted TAM/addressable-market figure**. Set both to 0 when no figure is disclosed. Do NOT estimate from sector context, competitor data, or your training-data knowledge of the industry. Forced fabrication here is the highest-cost failure mode for this product.
 - moat_competition.market_dynamics.tam_source_quote: when current_tam > 0, paste the verbatim sentence from the transcript / description that contains the figure (≤ 200 chars). When current_tam = 0, return "".
@@ -1239,6 +1253,6 @@ def stage_a_fallback() -> Dict[str, Any]:
             "risk_factors": [],
             "intelligence_brief": "",
         },
-        "wall_street": {"hedge_fund_note": None},
+        "wall_street": {"wall_street_insight": None},
         "critical_factors": [],
     }

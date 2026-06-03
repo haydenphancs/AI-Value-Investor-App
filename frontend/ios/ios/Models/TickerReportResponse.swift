@@ -660,10 +660,13 @@ struct WallStreetConsensusDTO: Codable {
     let highTarget: Double?
     let valuationStatus: String
     let discountPercent: Double
+    // AI "Insight": big-picture synthesis across the whole WS Consensus card
+    // (price targets + institutions + momentum). Optional: legacy persisted
+    // reports stored it under the old `hedge_fund_note` key → nil until regenerated.
+    let wallStreetInsight: String?
     // NAMING: these `hedgeFund*` fields are FMP 13F institutional-ownership data,
     // surfaced in the report's "Institutions" section (SmartMoneyTab.hedgeFunds =
     // "Institutions"), not a "Hedge Funds" label.
-    let hedgeFundNote: String?
     let hedgeFundPriceData: [StockPricePointDTO]
     let hedgeFundFlowData: [SmartMoneyFlowPointDTO]
     /// Quarterly institutional 13F flow, identical to the Holders tab's
@@ -672,6 +675,8 @@ struct WallStreetConsensusDTO: Codable {
     let hedgeFundSmartMoney: SmartMoneyDataDTO?
     let momentumUpgrades: Int
     let momentumDowngrades: Int
+    // Optional: legacy persisted reports predate `momentum_maintains`.
+    let momentumMaintains: Int?
 
     enum CodingKeys: String, CodingKey {
         case rating
@@ -681,12 +686,13 @@ struct WallStreetConsensusDTO: Codable {
         case highTarget = "high_target"
         case valuationStatus = "valuation_status"
         case discountPercent = "discount_percent"
-        case hedgeFundNote = "hedge_fund_note"
+        case wallStreetInsight = "wall_street_insight"
         case hedgeFundPriceData = "hedge_fund_price_data"
         case hedgeFundFlowData = "hedge_fund_flow_data"
         case hedgeFundSmartMoney = "hedge_fund_smart_money"
         case momentumUpgrades = "momentum_upgrades"
         case momentumDowngrades = "momentum_downgrades"
+        case momentumMaintains = "momentum_maintains"
     }
 }
 
@@ -1052,7 +1058,7 @@ extension TickerReportAPIResponse {
             highTarget: wallStreetConsensus.highTarget,
             valuationStatus: Self.mapValuationStatus(wallStreetConsensus.valuationStatus),
             discountPercent: wallStreetConsensus.discountPercent,
-            hedgeFundNote: wallStreetConsensus.hedgeFundNote,
+            wallStreetInsight: wallStreetConsensus.wallStreetInsight,
             hedgeFundPriceData: wallStreetConsensus.hedgeFundPriceData.map { p in
                 StockPriceDataPoint(month: p.month, price: p.price)
             },
@@ -1061,7 +1067,8 @@ extension TickerReportAPIResponse {
             },
             hedgeFundSmartMoney: wallStreetConsensus.hedgeFundSmartMoney?.toDisplayModel(),
             momentumUpgrades: wallStreetConsensus.momentumUpgrades,
-            momentumDowngrades: wallStreetConsensus.momentumDowngrades
+            momentumDowngrades: wallStreetConsensus.momentumDowngrades,
+            momentumMaintains: wallStreetConsensus.momentumMaintains ?? 0
         )
 
         // Critical Factors

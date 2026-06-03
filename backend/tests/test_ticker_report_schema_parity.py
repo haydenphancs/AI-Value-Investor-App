@@ -678,7 +678,7 @@ def test_wall_street_consensus_carries_hedge_fund_smart_money():
     assert sm["flow_data"][0]["has_activity"] is True
 
     # The whole consensus block must still validate (note filled by AI later).
-    consensus["hedge_fund_note"] = "test note"
+    consensus["wall_street_insight"] = "test note"
     WallStreetConsensusResponse.model_validate(consensus)
 
 
@@ -695,7 +695,9 @@ def test_wall_street_consensus_smart_money_none_without_holders():
         fair_value=None, monthly_prices=_monthly_prices_12(),
     )
     assert consensus["hedge_fund_smart_money"] is None
-    consensus["hedge_fund_note"] = None
+    # momentum_maintains is forwarded (0 in the analyst-less path) and validates.
+    assert consensus["momentum_maintains"] == 0
+    consensus["wall_street_insight"] = None
     WallStreetConsensusResponse.model_validate(consensus)
 
 
@@ -749,7 +751,7 @@ def test_wall_street_consensus_emits_real_analyst_targets():
     assert consensus["target_price"] == 260.0
     assert consensus["low_target"] == 200.0
     assert consensus["high_target"] == 320.0
-    consensus["hedge_fund_note"] = None
+    consensus["wall_street_insight"] = None
     WallStreetConsensusResponse.model_validate(consensus)
 
 
@@ -770,5 +772,5 @@ def test_wall_street_consensus_targets_null_without_analyst_coverage():
     assert consensus["target_price"] is None
     assert consensus["low_target"] is None
     assert consensus["high_target"] is None
-    consensus["hedge_fund_note"] = None
+    consensus["wall_street_insight"] = None
     WallStreetConsensusResponse.model_validate(consensus)

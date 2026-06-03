@@ -379,10 +379,15 @@ class WallStreetConsensusResponse(BaseModel):
     high_target: Optional[float] = None
     valuation_status: str
     discount_percent: float
+    # AI "Insight" — a big-picture synthesis across the whole Wall Street Consensus
+    # card: analyst price targets + institutions (13F) + momentum. Written by the
+    # Stage-B narrative pass. Optional/defaulted so legacy persisted reports (which
+    # stored it under the old `hedge_fund_note` key) re-validate as None until
+    # regenerated.
+    wall_street_insight: Optional[str] = None
     # NAMING: these `hedge_fund_*` fields = FMP 13F institutional-ownership data;
     # iOS renders them in the report's "Institutions" section
     # (SmartMoneyTab.hedgeFunds = "Institutions"), not a "Hedge Funds" label.
-    hedge_fund_note: Optional[str] = None
     hedge_fund_price_data: List[StockPricePointResponse]
     hedge_fund_flow_data: List[SmartMoneyFlowPointResponse]
     # Quarterly institutional 13F flow, mirrored verbatim from the Holders
@@ -392,6 +397,10 @@ class WallStreetConsensusResponse(BaseModel):
     hedge_fund_smart_money: Optional[SmartMoneyDataSchema] = None
     momentum_upgrades: int
     momentum_downgrades: int
+    # Analyst "maintain"/reiterate count over the SAME trailing-12-month window
+    # as upgrades/downgrades (see analyst_service._compute_actions_summary).
+    # Defaulted so legacy persisted reports (pre-`momentum_maintains`) re-validate.
+    momentum_maintains: int = 0
 
 
 # ── Critical Factors ──────────────────────────────────────────────────────────

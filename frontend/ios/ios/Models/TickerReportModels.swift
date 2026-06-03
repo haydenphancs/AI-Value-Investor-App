@@ -667,9 +667,10 @@ struct ReportWallStreetConsensus {
     let highTarget: Double?
     let valuationStatus: ValuationStatus
     let discountPercent: Double         // "Trading 33.4% below fair value estimate"
+    // AI "Insight": synthesis across price targets, institutions, and momentum.
+    let wallStreetInsight: String?
     // NAMING: `hedgeFund*` = FMP 13F institutional-ownership data, rendered in the
     // report's "Institutions" section (SmartMoneyTab.hedgeFunds = "Institutions").
-    let hedgeFundNote: String?          // "Net inflow of $430M from institutional..."
     let hedgeFundPriceData: [StockPriceDataPoint]   // Price data for hedge fund chart
     let hedgeFundFlowData: [SmartMoneyFlowDataPoint] // Buy/sell volume data (legacy monthly fallback)
     // Quarterly institutional flow mirrored from the Holders tab. When
@@ -678,6 +679,7 @@ struct ReportWallStreetConsensus {
     let hedgeFundSmartMoney: SmartMoneyData?
     let momentumUpgrades: Int
     let momentumDowngrades: Int
+    let momentumMaintains: Int  // analyst "maintain"/reiterate count (trailing 12mo)
 
     /// True only when the backend returned a real analyst consensus range.
     /// The pole, target badges, and forecast copy are gated on this.
@@ -1587,7 +1589,7 @@ extension TickerReportData {
             highTarget: 250,
             valuationStatus: .deepUndervalued,
             discountPercent: 33.4,
-            hedgeFundNote: "Net inflow of $430M from institutional investors last quarter.",
+            wallStreetInsight: "Buy-rated with a $190 target (~14% upside), institutions added $430M last quarter, and upgrades lead downgrades 8-to-3 — analysts, funds, and the rating trend all lean bullish.",
             hedgeFundPriceData: [
                 StockPriceDataPoint(month: "02/2025", price: 163.20),
                 StockPriceDataPoint(month: "03/2025", price: 162.80),
@@ -1618,7 +1620,8 @@ extension TickerReportData {
             ],
             hedgeFundSmartMoney: SmartMoneyData.hedgeFundsSampleData,
             momentumUpgrades: 8,
-            momentumDowngrades: 3
+            momentumDowngrades: 3,
+            momentumMaintains: 12
         ),
         criticalFactors: [
             CriticalFactor(

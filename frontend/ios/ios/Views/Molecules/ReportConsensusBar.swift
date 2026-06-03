@@ -72,10 +72,18 @@ struct ReportConsensusBar: View {
             // lives in the analyst chart above)
             hedgeFundsSection
 
-            // Momentum — now the last element
+            // Momentum
             momentumSection
                 .padding(.top, AppSpacing.sm)
+
+            // Wall Street insight — AI synthesis of price targets, institutions,
+            // and momentum, rendered as its own labeled section at the bottom.
+            insightSection
+                .padding(.top, AppSpacing.md)
         }
+        // Tapping anywhere outside a chart column dismisses the quarter popup.
+        .contentShape(Rectangle())
+        .onTapGesture { selectedFlowIndex = nil }
     }
 
     /// Period label for the merged view (e.g. "2-Year Flow"), shown once at
@@ -332,11 +340,19 @@ struct ReportConsensusBar: View {
 
     private var momentumSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Momentum")
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textSecondary)
+            // Period label disambiguates from the chart's "2-Year Flow": these
+            // analyst actions are counted over the trailing 12 months
+            // (analyst_service._compute_actions_summary, 365-day cutoff).
+            HStack(spacing: AppSpacing.xs) {
+                Text("Momentum")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
+                Text("· Past 12 Months")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
 
-            HStack(spacing: AppSpacing.lg) {
+            HStack(spacing: AppSpacing.md) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.up")
                         .font(AppTypography.iconTiny).fontWeight(.bold)
@@ -345,6 +361,20 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Upgrades")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+
+                // Maintains — gray "equal" icon, mirroring the Analysis tab's
+                // AnalystActionBadge treatment (AppColors.textSecondary).
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "equal")
+                        .font(AppTypography.iconTiny).fontWeight(.bold)
+                        .foregroundColor(AppColors.textSecondary)
+                    Text("\(consensus.momentumMaintains)")
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Maintains")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }
@@ -364,25 +394,60 @@ struct ReportConsensusBar: View {
         }
     }
 
+    // MARK: - Wall Street Insight (AI synthesis across all three sub-sections)
+
+    @ViewBuilder
+    private var insightSection: some View {
+        if let insight = consensus.wallStreetInsight, !insight.isEmpty {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "sparkles.2")
+                        .foregroundStyle(LinearGradient(
+                            colors: [.indigo],
+                            startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
+                    Text("Insight")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundStyle(LinearGradient(
+                            colors: [.indigo, .cyan],
+                            startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
+                Text(insight)
+                    .font(AppTypography.label)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: - Institutions Section
     // NAMING: "hedge fund" / `hedgeFund*` below is FMP 13F institutional data; this
     // section is labeled "Institutions" in the UI (SmartMoneyTab.hedgeFunds =
     // "Institutions"). The Holders tab renders the same data under that same label.
 
+    /// True when there's real institutional (13F) data to chart — gates the
+    /// Institutions section independently of the AI insight.
+    private var hasInstitutionalData: Bool {
+        if let sm = consensus.hedgeFundSmartMoney,
+           sm.flowData.contains(where: { $0.hasActivity }) {
+            return true
+        }
+        return !consensus.hedgeFundPriceData.isEmpty
+            && !consensus.hedgeFundFlowData.isEmpty
+    }
+
     private var hedgeFundsSection: some View {
         Group {
-            if let hedgeFundNote = consensus.hedgeFundNote {
+            // Gated on real institutional data (decoupled from the insight, which
+            // now spans the whole card and lives at the bottom).
+            if hasInstitutionalData {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text("Institutions")
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
 
                     hedgeFundFlowContent
-
-                    Text(hedgeFundNote)
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textSecondary)
-                        .padding(.top, AppSpacing.sm)
                 }
             }
         }
@@ -605,12 +670,13 @@ struct ReportConsensusBar: View {
         highTarget: nil,
         valuationStatus: base.valuationStatus,
         discountPercent: base.discountPercent,
-        hedgeFundNote: base.hedgeFundNote,
+        wallStreetInsight: base.wallStreetInsight,
         hedgeFundPriceData: base.hedgeFundPriceData,
         hedgeFundFlowData: base.hedgeFundFlowData,
         hedgeFundSmartMoney: base.hedgeFundSmartMoney,
         momentumUpgrades: base.momentumUpgrades,
-        momentumDowngrades: base.momentumDowngrades
+        momentumDowngrades: base.momentumDowngrades,
+        momentumMaintains: base.momentumMaintains
     ))
     .padding()
     .background(AppColors.cardBackground)

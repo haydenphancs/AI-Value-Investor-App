@@ -1388,10 +1388,10 @@ class TickerReportDataCollector:
         ai_rf = ai.get("revenue_forecast") or {}
         _overlay_ai_guidance(revenue_forecast, ai_rf)
 
-        # ── Wall Street consensus: AI fills only hedge_fund_note ─────
+        # ── Wall Street consensus: AI fills only wall_street_insight ─────
         wall_street_consensus = dict(out.wall_street_consensus_partial)
         ai_ws = ai.get("wall_street") or {}
-        wall_street_consensus["hedge_fund_note"] = ai_ws.get("hedge_fund_note")
+        wall_street_consensus["wall_street_insight"] = ai_ws.get("wall_street_insight")
 
         # ── Moat: dimensions, durability_note, competitive_insight come ─
         # from Stage A AI (qualitative). market_dynamics + competitors
@@ -2209,7 +2209,7 @@ def _build_wall_street_sections(
     """Real wall-street sections from AnalystService + HoldersService.
 
     Returns (wall_street_vital, wall_street_consensus_partial). The
-    consensus partial is missing only `hedge_fund_note` (AI-written).
+    consensus partial is missing only `wall_street_insight` (AI-written).
     """
     # ── Defaults if AnalystService is missing ─────────────────────────
     if analyst is None:
@@ -2219,6 +2219,7 @@ def _build_wall_street_sections(
         high_target = 0.0
         upgrades = 0
         downgrades = 0
+        maintains = 0
     else:
         consensus_rating = _consensus_to_key(analyst.consensus)
         target_price = float(analyst.target_price or 0.0)
@@ -2226,6 +2227,7 @@ def _build_wall_street_sections(
         high_target = float(analyst.price_target.high_price or 0.0)
         upgrades = int(analyst.actions_summary.upgrades or 0)
         downgrades = int(analyst.actions_summary.downgrades or 0)
+        maintains = int(analyst.actions_summary.maintains or 0)
 
     # ── Vital status ──────────────────────────────────────────────────
     target_or_fair = target_price if target_price > 0 else (fair_value or 0.0)
@@ -2310,10 +2312,12 @@ def _build_wall_street_sections(
         "high_target": round(high_target, 2) if has_analyst_targets else None,
         "valuation_status": val_status,
         "discount_percent": max(0.0, discount_pct),
+        # AI "Insight" — big-picture synthesis across price targets, institutions,
+        # and momentum. Filled by the Stage-B narrative pass in assemble_report.
+        "wall_street_insight": None,
         # NAMING: these `hedge_fund_*` keys = FMP 13F institutional-ownership data;
         # the iOS UI labels it "Institutions" (SmartMoneyTab.hedgeFunds =
         # "Institutions"), not "Hedge Funds".
-        "hedge_fund_note": None,  # filled by AI in assemble_report
         "hedge_fund_price_data": hf_price_data,
         "hedge_fund_flow_data": hf_flow_data,
         # Pass the Holders quarterly smart-money payload through verbatim so
@@ -2327,6 +2331,7 @@ def _build_wall_street_sections(
         ),
         "momentum_upgrades": upgrades,
         "momentum_downgrades": downgrades,
+        "momentum_maintains": maintains,
     }
 
     return wall_street_vital, consensus_partial
@@ -2425,7 +2430,7 @@ async def refresh_wall_street_consensus_block(
     `/stocks/{ticker}/holders` are currently showing. This helper
     refreshes the live-derivable fields while preserving
     DCF-dependent fields (`valuation_status`, `discount_percent`) and
-    the AI-written `hedge_fund_note` from the persisted snapshot.
+    the AI-written `wall_street_insight` from the persisted snapshot.
 
     Best-effort: on ANY failure (FMP outage, service down, missing
     quote, analyst service empty) we return the persisted block
@@ -2434,14 +2439,14 @@ async def refresh_wall_street_consensus_block(
     Live-overwritten fields:
       * rating, current_price, target_price, low_target, high_target
       * hedge_fund_price_data, hedge_fund_flow_data, hedge_fund_smart_money
-      * momentum_upgrades, momentum_downgrades
+      * momentum_upgrades, momentum_downgrades, momentum_maintains
 
     Preserved-from-snapshot fields:
       * valuation_status, discount_percent (depend on the original
         report's DCF model — re-deriving without that fair_value
         would either need to re-run the DCF or fall back to a
         degraded sentinel)
-      * hedge_fund_note (AI-written prose from the original generation)
+      * wall_street_insight (AI-written prose from the original generation)
     """
     if not isinstance(persisted_block, dict):
         return persisted_block
@@ -2511,7 +2516,7 @@ async def refresh_wall_street_consensus_block(
             "rating", "current_price", "target_price", "low_target",
             "high_target", "hedge_fund_price_data", "hedge_fund_flow_data",
             "hedge_fund_smart_money",
-            "momentum_upgrades", "momentum_downgrades",
+            "momentum_upgrades", "momentum_downgrades", "momentum_maintains",
         ):
             if k in fresh_block:
                 merged[k] = fresh_block[k]
@@ -5843,6 +5848,28 @@ def build_financial_context(out: CollectedTickerData) -> str:
             f"{a.actions_summary.maintains} maintains, "
             f"{a.actions_summary.downgrades} downgrades"
         )
+
+    # Institutions (13F) — the third leg of the Wall Street Consensus insight,
+    # so the AI can synthesize price targets + institutions + momentum together.
+    if out.holders_response and out.holders_response.hedge_funds_data:
+        hf = out.holders_response.hedge_funds_data
+        summ = hf.summary
+        direction = "net buying" if summ.is_positive else "net selling"
+        parts.append(
+            f"\nInstitutions (13F, {summ.period_description}): {direction}, "
+            f"{summ.total_net_flow:+.1f}M shares net informative flow"
+        )
+        latest = next(
+            (p for p in reversed(hf.flow_data)
+             if p.buyers_count is not None and p.sellers_count is not None),
+            None,
+        )
+        if latest is not None:
+            qtr = latest.month.replace("\n", " ")
+            parts.append(
+                f"  Latest quarter ({qtr}): "
+                f"{latest.buyers_count} added / {latest.sellers_count} trimmed"
+            )
 
     if out.insider_data_partial:
         i = out.insider_data_partial

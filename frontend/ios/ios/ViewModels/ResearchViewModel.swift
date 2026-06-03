@@ -61,6 +61,10 @@ class ResearchViewModel: ObservableObject {
     private var isAuthenticated: () -> Bool = { false }
     private var searchTask: Task<Void, Never>?
     private var reportsPollTask: Task<Void, Never>?
+    /// Backend id of the report currently being generated, so the live
+    /// progress stream can mirror its % + step onto the matching list row
+    /// (the GET /reports list query lags the per-report /status poll).
+    private var generatingReportId: String?
     private var cancellables = Set<AnyCancellable>()
 
     /// Backend report IDs the client has locally given up on because they've
@@ -198,6 +202,7 @@ class ResearchViewModel: ObservableObject {
                 .map { AnalysisReport.from($0) }
             applyClientSideTimeoutPass()
             sortReports()
+            applyLiveProgress()   // keep the in-flight row at the live stream %
         } catch {
             print("⚠️ ResearchVM: Failed to load reports — \(error). Using mock data.")
             if reports.isEmpty {
@@ -260,6 +265,21 @@ class ResearchViewModel: ObservableObject {
     func stopReportsPolling() {
         reportsPollTask?.cancel()
         reportsPollTask = nil
+    }
+
+    /// Mirror the live generation stream onto the in-flight report row so the
+    /// processing card animates in real time. The GET /reports list query's
+    /// stored progress can lag the per-report /status poll the stream uses, so
+    /// without this the card freezes at the last list-refreshed value (e.g. 5%
+    /// while the stream is already at 20%). No-op once the row goes ready/failed.
+    private func applyLiveProgress() {
+        guard let rid = generatingReportId, generationProgress > 0,
+              let idx = reports.firstIndex(where: { $0.backendId == rid }),
+              reports[idx].status == .processing else { return }
+        reports[idx].progress = Double(generationProgress) / 100.0
+        if !generationStep.isEmpty {
+            reports[idx].currentStep = generationStep
+        }
     }
 
     // MARK: - Auth Configuration
@@ -405,6 +425,7 @@ class ResearchViewModel: ObservableObject {
                     switch progress {
                     case .started(let taskId):
                         print("🔬 ResearchVM: Research started — report ID: \(taskId)")
+                        self.generatingReportId = taskId
                         self.generationStep = "Research initiated..."
                         // Surface the new pending row in the Reports list
                         // immediately so the Tesla-style processing card
@@ -415,6 +436,7 @@ class ResearchViewModel: ObservableObject {
                         print("🔬 ResearchVM: Progress \(percent)% — \(step)")
                         self.generationProgress = percent
                         self.generationStep = step
+                        self.applyLiveProgress()   // update the processing card now
                         // Refresh the list at 25% boundaries so the card
                         // animates without spamming Supabase. The poller
                         // in startReportsPolling() is the steady-state
@@ -430,6 +452,7 @@ class ResearchViewModel: ObservableObject {
                         self.isGeneratingAnalysis = false
                         self.generationProgress = 100
                         self.generationStep = "Complete!"
+                        self.generatingReportId = nil
                         // Reload reports and credits from backend to get fresh data
                         await self.loadReports()
                         await self.loadCredits()
@@ -437,6 +460,7 @@ class ResearchViewModel: ObservableObject {
                     case .failed(let appError):
                         print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
                         self.isGeneratingAnalysis = false
+                        self.generatingReportId = nil
                         self.error = appError.message
                         // Refresh so the failed card appears in the list
                         await self.loadReports()

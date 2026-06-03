@@ -369,11 +369,12 @@ struct AnalysisReport: Identifiable, Hashable {
     let industry: String
     let persona: AnalysisPersona
     let status: ReportStatus
-    let progress: Double? // 0.0 to 1.0, only for processing
+    var progress: Double? // 0.0 to 1.0, only for processing
     /// Live progress text from `research_reports.current_step` (e.g.
     /// "Analyzing fundamentals..."). Rendered under the progress bar
-    /// while a report is in-flight.
-    let currentStep: String?
+    /// while a report is in-flight. `var` so the live generation stream
+    /// can mirror its real-time progress onto this row (the list query lags).
+    var currentStep: String?
     let rating: Double?   // 0-100, only for ready
     let ratingLabel: String? // e.g. "Strong Quality Business", only for ready
     let date: Date

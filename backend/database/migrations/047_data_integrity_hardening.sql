@@ -282,6 +282,7 @@ BEGIN
 END $$;
 
 -- hedge_fund_quarters: volumes / counts non-negative, quarter in [1,4]
+-- (hedge_fund_quarters = FMP 13F institutional data; UI label "Institutions")
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hedge_fund_quarters_buy_volume_nonneg') THEN

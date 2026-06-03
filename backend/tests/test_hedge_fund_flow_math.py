@@ -2,6 +2,9 @@
 Math/regression tests for the Hedge Funds quarterly flow pipeline
 (`HoldersService` static helpers).
 
+NAMING: "hedge fund" / the `hedge_fund_quarters` table = FMP 13F institutional-
+ownership data; the UI labels it "Institutions" (SmartMoneyTab.hedgeFunds).
+
 The flow is stored in MILLIONS OF SHARES (not dollars): the net is the real
 ``numberOf13FsharesChange`` from the positions-summary — comparable across
 quarters, and the one institutional-flow figure FMP reports completely. The

@@ -1445,6 +1445,10 @@ class HoldersService:
     ) -> SmartMoneyDataSchema:
         """Build hedge fund smart money with incremental quarterly DB store.
 
+        NAMING: "hedge fund" / ``hedge_fund_*`` / the ``hedge_fund_quarters`` table
+        here = FMP 13F institutional-ownership data. The UI labels it "Institutions"
+        (iOS SmartMoneyTab.hedgeFunds = "Institutions"), not "Hedge Funds".
+
         Flow is expressed in MILLIONS OF SHARES (not dollars): the net is
         ``numberOf13FsharesChange`` straight from the positions-summary — the
         real net 13F share change, comparable across quarters (dollar values

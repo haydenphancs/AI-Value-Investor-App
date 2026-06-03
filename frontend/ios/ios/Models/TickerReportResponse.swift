@@ -660,6 +660,9 @@ struct WallStreetConsensusDTO: Codable {
     let highTarget: Double?
     let valuationStatus: String
     let discountPercent: Double
+    // NAMING: these `hedgeFund*` fields are FMP 13F institutional-ownership data,
+    // surfaced in the report's "Institutions" section (SmartMoneyTab.hedgeFunds =
+    // "Institutions"), not a "Hedge Funds" label.
     let hedgeFundNote: String?
     let hedgeFundPriceData: [StockPricePointDTO]
     let hedgeFundFlowData: [SmartMoneyFlowPointDTO]

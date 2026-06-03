@@ -379,11 +379,14 @@ class WallStreetConsensusResponse(BaseModel):
     high_target: Optional[float] = None
     valuation_status: str
     discount_percent: float
+    # NAMING: these `hedge_fund_*` fields = FMP 13F institutional-ownership data;
+    # iOS renders them in the report's "Institutions" section
+    # (SmartMoneyTab.hedgeFunds = "Institutions"), not a "Hedge Funds" label.
     hedge_fund_note: Optional[str] = None
     hedge_fund_price_data: List[StockPricePointResponse]
     hedge_fund_flow_data: List[SmartMoneyFlowPointResponse]
     # Quarterly institutional 13F flow, mirrored verbatim from the Holders
-    # tab's `hedge_funds_data` so the report's Hedge Funds chart + net-flow
+    # tab's `hedge_funds_data` so the report's Institutions chart + net-flow
     # badge match TickerDetail exactly. Optional: legacy persisted reports
     # predate this field (iOS falls back to the monthly chart above).
     hedge_fund_smart_money: Optional[SmartMoneyDataSchema] = None

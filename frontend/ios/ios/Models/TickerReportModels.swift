@@ -667,6 +667,8 @@ struct ReportWallStreetConsensus {
     let highTarget: Double?
     let valuationStatus: ValuationStatus
     let discountPercent: Double         // "Trading 33.4% below fair value estimate"
+    // NAMING: `hedgeFund*` = FMP 13F institutional-ownership data, rendered in the
+    // report's "Institutions" section (SmartMoneyTab.hedgeFunds = "Institutions").
     let hedgeFundNote: String?          // "Net inflow of $430M from institutional..."
     let hedgeFundPriceData: [StockPriceDataPoint]   // Price data for hedge fund chart
     let hedgeFundFlowData: [SmartMoneyFlowDataPoint] // Buy/sell volume data (legacy monthly fallback)

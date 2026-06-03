@@ -78,9 +78,15 @@ struct InstitutionalHolder: Identifiable {
 
 // MARK: - Smart Money Tab Types
 
+// NAMING (canonical): the `hedgeFunds` case is FMP 13F institutional-ownership
+// data, and its raw value — the user-facing label — is "Institutions", NOT
+// "Hedge Funds". This is the source of the `hedgeFund*` / `hedge_fund_*` naming
+// used app-wide (report DTOs/models, ReportConsensusBar, backend holders_service,
+// the `hedge_fund_quarters` table). Wherever the code says "hedge fund", the
+// screen shows "Institutions".
 enum SmartMoneyTab: String, CaseIterable {
     case insider = "Insider"
-    case hedgeFunds = "Institutions"
+    case hedgeFunds = "Institutions"  // code name `hedgeFunds` → UI label "Institutions"
     case congress = "Congress"
 }
 

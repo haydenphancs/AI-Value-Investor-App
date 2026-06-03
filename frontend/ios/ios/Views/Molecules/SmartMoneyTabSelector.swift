@@ -3,7 +3,8 @@
 //  ios
 //
 //  Molecule: Tab pills selector for Smart Money section
-//  Allows switching between Insider, Hedge Funds, and Congress data
+//  Allows switching between Insider, Institutions, and Congress data
+//  ("Institutions" is SmartMoneyTab.hedgeFunds — code "hedge fund" = UI "Institutions")
 //
 
 import SwiftUI

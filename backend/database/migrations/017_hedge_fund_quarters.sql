@@ -1,4 +1,6 @@
 -- Incremental quarterly store for hedge fund 13F data.
+-- NAMING: "hedge fund" here = FMP 13F institutional-ownership data; the app UI
+-- labels it "Institutions" (iOS SmartMoneyTab.hedgeFunds = "Institutions").
 -- Each row = one ticker + one quarter.  Immutable once filed.
 CREATE TABLE IF NOT EXISTS hedge_fund_quarters (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,

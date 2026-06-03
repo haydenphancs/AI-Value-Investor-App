@@ -270,6 +270,7 @@ def test_wall_street_last_chart_point_equals_current_price():
         monthly_prices=monthly_prices,
     )
 
+    # `hedge_fund_price_data` = FMP 13F institutional data (UI label "Institutions")
     points = consensus["hedge_fund_price_data"]
     assert len(points) == 12
     # Last point's price must equal current_price (rounded to 2dp), not the

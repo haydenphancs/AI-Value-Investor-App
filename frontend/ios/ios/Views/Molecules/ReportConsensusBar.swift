@@ -27,7 +27,7 @@ struct ReportConsensusBar: View {
         let minValue = allPrices.min() ?? consensus.currentPrice
         let maxValue = allPrices.max() ?? consensus.currentPrice
         let range = maxValue - minValue
-        return minValue - (range * 0.3) // Add 30% padding below
+        return minValue - (range * 0.18) // Padding below the lowest point
     }
 
     private var maxPrice: Double {
@@ -155,7 +155,7 @@ struct ReportConsensusBar: View {
                 targetBadges(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
             }
         }
-        .frame(height: 260)
+        .frame(height: 225)
     }
 
     // MARK: - Chart Components
@@ -343,11 +343,11 @@ struct ReportConsensusBar: View {
             // Period label disambiguates from the chart's "2-Year Flow": these
             // analyst actions are counted over the trailing 12 months
             // (analyst_service._compute_actions_summary, 365-day cutoff).
-            HStack(spacing: AppSpacing.xs) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("Momentum")
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textSecondary)
-                Text("· Past 12 Months")
+                Text("Past 12 Months")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
@@ -442,7 +442,7 @@ struct ReportConsensusBar: View {
             // Gated on real institutional data (decoupled from the insight, which
             // now spans the whole card and lives at the bottom).
             if hasInstitutionalData {
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Institutions")
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textSecondary)
@@ -473,7 +473,6 @@ struct ReportConsensusBar: View {
                 // system, so the y-axis lands in the same gutter as the
                 // Min/Avg/Max badges and the bars span under the price line.
                 volumeBarsChart(smartMoney.flowData)
-                    .padding(.top, AppSpacing.xs)
 
                 SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
                     .padding(.top, AppSpacing.xs)

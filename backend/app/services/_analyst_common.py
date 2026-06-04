@@ -20,10 +20,19 @@ The normalized labels:
 from typing import Optional, Tuple
 
 
+# Maps analyst rating labels → a 0-4 rank so a direction can be inferred when FMP
+# omits/mislabels the `action` (e.g. labels a real cut "maintain"). Covers the
+# common regional-broker vocabularies (RBC "Sector Perform/Outperform", JMP
+# "Market Outperform", Oppenheimer "Perform", etc.) — an unranked label silently
+# falls back to "maintain", which would HIDE a genuine downgrade.
 _RATING_RANK = {
     "strong sell": 0, "sell": 1, "underperform": 1, "underweight": 1,
-    "hold": 2, "neutral": 2, "market perform": 2, "equal-weight": 2, "equal weight": 2,
+    "sector underperform": 1, "market underperform": 1, "reduce": 1, "negative": 1,
+    "hold": 2, "neutral": 2, "market perform": 2, "sector perform": 2,
+    "equal-weight": 2, "equal weight": 2, "equalweight": 2, "perform": 2,
+    "in-line": 2, "in line": 2, "peer perform": 2, "sector weight": 2,
     "buy": 3, "overweight": 3, "outperform": 3, "accumulate": 3,
+    "sector outperform": 3, "market outperform": 3, "positive": 3, "add": 3,
     "strong buy": 4, "conviction buy": 4,
 }
 

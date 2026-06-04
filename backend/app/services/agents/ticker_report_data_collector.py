@@ -2220,6 +2220,7 @@ def _build_wall_street_sections(
         upgrades = 0
         downgrades = 0
         maintains = 0
+        strong_buy = buy = hold = sell = strong_sell = 0
     else:
         consensus_rating = _consensus_to_key(analyst.consensus)
         target_price = float(analyst.target_price or 0.0)
@@ -2228,6 +2229,19 @@ def _build_wall_street_sections(
         upgrades = int(analyst.actions_summary.upgrades or 0)
         downgrades = int(analyst.actions_summary.downgrades or 0)
         maintains = int(analyst.actions_summary.maintains or 0)
+        # Analyst rating distribution → Buy/Hold/Sell bar. Same grades source.
+        strong_buy = buy = hold = sell = strong_sell = 0
+        for d in (analyst.distributions or []):
+            if d.label == "Strong Buy":
+                strong_buy = int(d.count or 0)
+            elif d.label == "Buy":
+                buy = int(d.count or 0)
+            elif d.label == "Hold":
+                hold = int(d.count or 0)
+            elif d.label == "Sell":
+                sell = int(d.count or 0)
+            elif d.label == "Strong Sell":
+                strong_sell = int(d.count or 0)
 
     # ── Vital status ──────────────────────────────────────────────────
     target_or_fair = target_price if target_price > 0 else (fair_value or 0.0)
@@ -2332,6 +2346,11 @@ def _build_wall_street_sections(
         "momentum_upgrades": upgrades,
         "momentum_downgrades": downgrades,
         "momentum_maintains": maintains,
+        "analyst_strong_buy": strong_buy,
+        "analyst_buy": buy,
+        "analyst_hold": hold,
+        "analyst_sell": sell,
+        "analyst_strong_sell": strong_sell,
     }
 
     return wall_street_vital, consensus_partial
@@ -2517,6 +2536,8 @@ async def refresh_wall_street_consensus_block(
             "high_target", "hedge_fund_price_data", "hedge_fund_flow_data",
             "hedge_fund_smart_money",
             "momentum_upgrades", "momentum_downgrades", "momentum_maintains",
+            "analyst_strong_buy", "analyst_buy", "analyst_hold",
+            "analyst_sell", "analyst_strong_sell",
         ):
             if k in fresh_block:
                 merged[k] = fresh_block[k]

@@ -680,6 +680,32 @@ struct ReportWallStreetConsensus {
     let momentumUpgrades: Int
     let momentumDowngrades: Int
     let momentumMaintains: Int  // analyst "maintain"/reiterate count (trailing 12mo)
+    // Analyst rating distribution (one grade per firm), aggregated to Buy/Hold/Sell
+    // below for the consensus bar.
+    let analystStrongBuy: Int
+    let analystBuy: Int
+    let analystHold: Int
+    let analystSell: Int
+    let analystStrongSell: Int
+
+    // MARK: Analyst consensus distribution (Buy / Hold / Sell)
+    var analystBuyCount: Int { analystStrongBuy + analystBuy }
+    var analystHoldCount: Int { analystHold }
+    var analystSellCount: Int { analystSell + analystStrongSell }
+    var analystTotalRatings: Int { analystBuyCount + analystHoldCount + analystSellCount }
+    var hasAnalystDistribution: Bool { analystTotalRatings > 0 }
+    var buyPercent: Double {
+        analystTotalRatings > 0 ? Double(analystBuyCount) / Double(analystTotalRatings) * 100 : 0
+    }
+    var holdPercent: Double {
+        analystTotalRatings > 0 ? Double(analystHoldCount) / Double(analystTotalRatings) * 100 : 0
+    }
+    var sellPercent: Double {
+        analystTotalRatings > 0 ? Double(analystSellCount) / Double(analystTotalRatings) * 100 : 0
+    }
+    var formattedBuyPercent: String { String(format: "%.0f%%", buyPercent) }
+    var formattedHoldPercent: String { String(format: "%.0f%%", holdPercent) }
+    var formattedSellPercent: String { String(format: "%.0f%%", sellPercent) }
 
     /// True only when the backend returned a real analyst consensus range.
     /// The pole, target badges, and forecast copy are gated on this.
@@ -1621,7 +1647,12 @@ extension TickerReportData {
             hedgeFundSmartMoney: SmartMoneyData.hedgeFundsSampleData,
             momentumUpgrades: 8,
             momentumDowngrades: 3,
-            momentumMaintains: 12
+            momentumMaintains: 12,
+            analystStrongBuy: 18,
+            analystBuy: 14,
+            analystHold: 6,
+            analystSell: 2,
+            analystStrongSell: 0
         ),
         criticalFactors: [
             CriticalFactor(

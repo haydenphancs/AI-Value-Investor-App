@@ -677,6 +677,13 @@ struct WallStreetConsensusDTO: Codable {
     let momentumDowngrades: Int
     // Optional: legacy persisted reports predate `momentum_maintains`.
     let momentumMaintains: Int?
+    // Analyst rating distribution (one grade per firm). Optional → legacy reports
+    // decode as nil; the UI aggregates these to Buy/Hold/Sell for the consensus bar.
+    let analystStrongBuy: Int?
+    let analystBuy: Int?
+    let analystHold: Int?
+    let analystSell: Int?
+    let analystStrongSell: Int?
 
     enum CodingKeys: String, CodingKey {
         case rating
@@ -693,6 +700,11 @@ struct WallStreetConsensusDTO: Codable {
         case momentumUpgrades = "momentum_upgrades"
         case momentumDowngrades = "momentum_downgrades"
         case momentumMaintains = "momentum_maintains"
+        case analystStrongBuy = "analyst_strong_buy"
+        case analystBuy = "analyst_buy"
+        case analystHold = "analyst_hold"
+        case analystSell = "analyst_sell"
+        case analystStrongSell = "analyst_strong_sell"
     }
 }
 
@@ -1068,7 +1080,12 @@ extension TickerReportAPIResponse {
             hedgeFundSmartMoney: wallStreetConsensus.hedgeFundSmartMoney?.toDisplayModel(),
             momentumUpgrades: wallStreetConsensus.momentumUpgrades,
             momentumDowngrades: wallStreetConsensus.momentumDowngrades,
-            momentumMaintains: wallStreetConsensus.momentumMaintains ?? 0
+            momentumMaintains: wallStreetConsensus.momentumMaintains ?? 0,
+            analystStrongBuy: wallStreetConsensus.analystStrongBuy ?? 0,
+            analystBuy: wallStreetConsensus.analystBuy ?? 0,
+            analystHold: wallStreetConsensus.analystHold ?? 0,
+            analystSell: wallStreetConsensus.analystSell ?? 0,
+            analystStrongSell: wallStreetConsensus.analystStrongSell ?? 0
         )
 
         // Critical Factors

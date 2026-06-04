@@ -695,8 +695,10 @@ def test_wall_street_consensus_smart_money_none_without_holders():
         fair_value=None, monthly_prices=_monthly_prices_12(),
     )
     assert consensus["hedge_fund_smart_money"] is None
-    # momentum_maintains is forwarded (0 in the analyst-less path) and validates.
+    # momentum_maintains + analyst distribution are forwarded (0 in the
+    # analyst-less path) and validate.
     assert consensus["momentum_maintains"] == 0
+    assert consensus["analyst_buy"] == 0 and consensus["analyst_strong_sell"] == 0
     consensus["wall_street_insight"] = None
     WallStreetConsensusResponse.model_validate(consensus)
 

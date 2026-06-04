@@ -57,6 +57,9 @@ struct ReportConsensusBar: View {
             analystPriceTargetHeader
                 .padding(.bottom, AppSpacing.sm)
 
+            // Buy / Hold / Sell analyst consensus distribution (segmented bar + %).
+            consensusDistributionSection
+
             // Period label for the whole view (price chart + volume bars below
             // both span this window). Sits right under the range/current-price
             // description.
@@ -109,6 +112,58 @@ struct ReportConsensusBar: View {
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Analyst Consensus Distribution (Buy / Hold / Sell)
+
+    /// Proportional Buy/Hold/Sell bar + one-row % legend, mirroring the Holders
+    /// tab's Shareholder Breakdown. Hidden when there's no analyst coverage.
+    @ViewBuilder
+    private var consensusDistributionSection: some View {
+        if consensus.hasAnalystDistribution {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        if consensus.buyPercent > 0 {
+                            Rectangle().fill(AppColors.bullish)
+                                .frame(width: geo.size.width * consensus.buyPercent / 100)
+                        }
+                        if consensus.holdPercent > 0 {
+                            Rectangle().fill(AppColors.textMuted)
+                                .frame(width: geo.size.width * consensus.holdPercent / 100)
+                        }
+                        if consensus.sellPercent > 0 {
+                            Rectangle().fill(AppColors.bearish)
+                                .frame(width: geo.size.width * consensus.sellPercent / 100)
+                        }
+                    }
+                    .frame(height: 14)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .frame(height: 14)
+
+                // Single straight row: % Buy (green) · % Hold (gray) · % Sell (red).
+                HStack(spacing: AppSpacing.lg) {
+                    consensusLegendItem(color: AppColors.bullish, label: "Buy", percent: consensus.formattedBuyPercent)
+                    consensusLegendItem(color: AppColors.textMuted, label: "Hold", percent: consensus.formattedHoldPercent)
+                    consensusLegendItem(color: AppColors.bearish, label: "Sell", percent: consensus.formattedSellPercent)
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.bottom, AppSpacing.sm)
+        }
+    }
+
+    private func consensusLegendItem(color: Color, label: String, percent: String) -> some View {
+        HStack(spacing: AppSpacing.xs) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(label)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+            Text(percent)
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(color)
         }
     }
 
@@ -675,7 +730,12 @@ struct ReportConsensusBar: View {
         hedgeFundSmartMoney: base.hedgeFundSmartMoney,
         momentumUpgrades: base.momentumUpgrades,
         momentumDowngrades: base.momentumDowngrades,
-        momentumMaintains: base.momentumMaintains
+        momentumMaintains: base.momentumMaintains,
+        analystStrongBuy: base.analystStrongBuy,
+        analystBuy: base.analystBuy,
+        analystHold: base.analystHold,
+        analystSell: base.analystSell,
+        analystStrongSell: base.analystStrongSell
     ))
     .padding()
     .background(AppColors.cardBackground)

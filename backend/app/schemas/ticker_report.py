@@ -401,6 +401,14 @@ class WallStreetConsensusResponse(BaseModel):
     # as upgrades/downgrades (see analyst_service._compute_actions_summary).
     # Defaulted so legacy persisted reports (pre-`momentum_maintains`) re-validate.
     momentum_maintains: int = 0
+    # Analyst rating distribution (one most-recent grade per firm), from the SAME
+    # `get_grades` source as momentum. iOS aggregates these to Buy/Hold/Sell for the
+    # consensus bar. Defaulted so legacy persisted reports re-validate as 0.
+    analyst_strong_buy: int = 0
+    analyst_buy: int = 0
+    analyst_hold: int = 0
+    analyst_sell: int = 0
+    analyst_strong_sell: int = 0
 
 
 # ── Critical Factors ──────────────────────────────────────────────────────────

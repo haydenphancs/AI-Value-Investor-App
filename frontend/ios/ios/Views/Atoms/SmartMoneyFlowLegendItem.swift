@@ -11,6 +11,8 @@ import SwiftUI
 struct SmartMoneyFlowLegendItem: View {
     let color: Color
     let label: String
+    var font: Font = AppTypography.caption
+    var labelColor: Color = AppColors.textSecondary
 
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
@@ -21,8 +23,8 @@ struct SmartMoneyFlowLegendItem: View {
 
             // Label
             Text(label)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
+                .font(font)
+                .foregroundColor(labelColor)
         }
     }
 }

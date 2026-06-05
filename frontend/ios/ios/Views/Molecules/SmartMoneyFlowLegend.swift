@@ -13,17 +13,23 @@ struct SmartMoneyFlowLegend: View {
     // hedge-fund tab is in shares, so it passes "Shares Bought/Sold".
     var buyLabel: String = "Buy Volume"
     var sellLabel: String = "Sell Volume"
+    var font: Font = AppTypography.caption
+    var labelColor: Color = AppColors.textSecondary
 
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
             SmartMoneyFlowLegendItem(
                 color: HoldersColors.buyVolume,
-                label: buyLabel
+                label: buyLabel,
+                font: font,
+                labelColor: labelColor
             )
 
             SmartMoneyFlowLegendItem(
                 color: HoldersColors.sellVolume,
-                label: sellLabel
+                label: sellLabel,
+                font: font,
+                labelColor: labelColor
             )
         }
         .frame(maxWidth: .infinity)

@@ -638,7 +638,7 @@ struct ReportKeyManagement {
 // MARK: - Wall Street Consensus
 
 enum ConsensusRating: String {
-    case strongBuy = "BUY RATING"
+    case strongBuy = "STRONG BUY"
     case buy = "BUY"
     case hold = "HOLD"
     case sell = "SELL"
@@ -688,24 +688,32 @@ struct ReportWallStreetConsensus {
     let analystSell: Int
     let analystStrongSell: Int
 
-    // MARK: Analyst consensus distribution (Buy / Hold / Sell)
-    var analystBuyCount: Int { analystStrongBuy + analystBuy }
-    var analystHoldCount: Int { analystHold }
-    var analystSellCount: Int { analystSell + analystStrongSell }
-    var analystTotalRatings: Int { analystBuyCount + analystHoldCount + analystSellCount }
+    // MARK: Analyst consensus distribution (5 levels)
+    var analystTotalRatings: Int {
+        analystStrongBuy + analystBuy + analystHold + analystSell + analystStrongSell
+    }
     var hasAnalystDistribution: Bool { analystTotalRatings > 0 }
-    var buyPercent: Double {
-        analystTotalRatings > 0 ? Double(analystBuyCount) / Double(analystTotalRatings) * 100 : 0
+
+    /// The 5 rating levels with the SAME colors as the Analysis tab
+    /// (`StockRepository` distColors). Reuses `AnalystRatingDistribution` so the
+    /// report bar and the Analysis tab share one model + palette and stay in sync.
+    var analystLevels: [AnalystRatingDistribution] {
+        // Ordered most-bearish → most-bullish: Strong Sell on the left, Strong Buy
+        // on the right, Hold in the middle. Colors travel with each level, so this
+        // reorders both the bar and the legend together.
+        [
+            AnalystRatingDistribution(label: "Strong Sell", count: analystStrongSell, color: Color(hex: "B91C1C")),
+            AnalystRatingDistribution(label: "Sell", count: analystSell, color: AppColors.bearish),
+            AnalystRatingDistribution(label: "Hold", count: analystHold, color: AppColors.neutral),
+            AnalystRatingDistribution(label: "Buy", count: analystBuy, color: Color(hex: "4ADE80")),
+            AnalystRatingDistribution(label: "Strong Buy", count: analystStrongBuy, color: AppColors.bullish),
+        ]
     }
-    var holdPercent: Double {
-        analystTotalRatings > 0 ? Double(analystHoldCount) / Double(analystTotalRatings) * 100 : 0
+
+    /// Percentage (0–100) of total ratings for a bucket count.
+    func analystPercent(_ count: Int) -> Double {
+        analystTotalRatings > 0 ? Double(count) / Double(analystTotalRatings) * 100 : 0
     }
-    var sellPercent: Double {
-        analystTotalRatings > 0 ? Double(analystSellCount) / Double(analystTotalRatings) * 100 : 0
-    }
-    var formattedBuyPercent: String { String(format: "%.0f%%", buyPercent) }
-    var formattedHoldPercent: String { String(format: "%.0f%%", holdPercent) }
-    var formattedSellPercent: String { String(format: "%.0f%%", sellPercent) }
 
     /// True only when the backend returned a real analyst consensus range.
     /// The pole, target badges, and forecast copy are gated on this.

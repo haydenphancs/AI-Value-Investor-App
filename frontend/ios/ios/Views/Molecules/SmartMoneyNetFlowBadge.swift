@@ -10,6 +10,9 @@ import SwiftUI
 
 struct SmartMoneyNetFlowBadge: View {
     let summary: SmartMoneyFlowSummary
+    /// When true, the text drops to 13pt (label) to match the report's
+    /// Momentum row. Default keeps the 14pt size used in the Holders tab.
+    var compact: Bool = false
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
@@ -25,7 +28,7 @@ struct SmartMoneyNetFlowBadge: View {
                     )
 
                 Text("Net Informative Flow:")
-                    .font(AppTypography.bodySmall)
+                    .font(compact ? AppTypography.label : AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
 
                 HStack(spacing: AppSpacing.xxs) {
@@ -34,7 +37,7 @@ struct SmartMoneyNetFlowBadge: View {
                         .foregroundColor(summary.flowColor)
 
                     Text(summary.formattedNetFlow)
-                        .font(AppTypography.bodySmallEmphasis)
+                        .font(compact ? AppTypography.labelEmphasis : AppTypography.bodySmallEmphasis)
                         .foregroundColor(summary.flowColor)
                 }
             }

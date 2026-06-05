@@ -27,7 +27,7 @@ struct ReportConsensusBar: View {
         let minValue = allPrices.min() ?? consensus.currentPrice
         let maxValue = allPrices.max() ?? consensus.currentPrice
         let range = maxValue - minValue
-        return minValue - (range * 0.18) // Padding below the lowest point
+        return minValue - (range * 0.1) // Padding below the lowest point
     }
 
     private var maxPrice: Double {
@@ -35,7 +35,7 @@ struct ReportConsensusBar: View {
         let maxValue = allPrices.max() ?? consensus.currentPrice
         let minValue = allPrices.min() ?? consensus.currentPrice
         let range = maxValue - minValue
-        return maxValue + (range * 0.1) // Add 10% padding above
+        return maxValue + (range * 0.07) // Padding above the highest point
     }
 
     /// Format month string from "MM/YYYY" to "MM/YY"
@@ -53,20 +53,21 @@ struct ReportConsensusBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Title and Description
+            // Title + "Based on N analysts" + colored consensus rating.
             analystPriceTargetHeader
                 .padding(.bottom, AppSpacing.sm)
 
             // Buy / Hold / Sell analyst consensus distribution (segmented bar + %).
             consensusDistributionSection
 
-            // Period label for the whole view (price chart + volume bars below
-            // both span this window). Sits right under the range/current-price
-            // description.
+            // Target + range — moved below the distribution bar, above "2-Year Flow".
+            analystTargetLine
+
+            // Period label for the price chart + volume bars below.
             Text(flowPeriodLabel)
                 .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
-                .padding(.bottom, AppSpacing.sm)
+                .padding(.bottom, AppSpacing.xs)
 
             // Price line + Min/Avg/Max pole + dashed current-price line
             analystPriceChart
@@ -77,7 +78,7 @@ struct ReportConsensusBar: View {
 
             // Momentum
             momentumSection
-                .padding(.top, AppSpacing.sm)
+                .padding(.top, AppSpacing.xl)
 
             // Wall Street insight — AI synthesis of price targets, institutions,
             // and momentum, rendered as its own labeled section at the bottom.
@@ -107,12 +108,29 @@ struct ReportConsensusBar: View {
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
-            Text(analystPriceTargetSummary)
-                .font(AppTypography.label)
-                .foregroundColor(AppColors.textSecondary)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
+            if consensus.hasAnalystDistribution || consensus.hasAnalystTargets {
+                // One line: "Based on N analysts, one-year price forecast: BUY" —
+                // the rating colored by sentiment (green BUY / amber HOLD / red SELL).
+                (Text(forecastPrefix).foregroundColor(AppColors.textSecondary)
+                    + Text(consensus.rating.rawValue.uppercased())
+                        .foregroundColor(consensus.rating.color).fontWeight(.bold))
+                    .font(AppTypography.label)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("No analyst price targets are available for this company yet.")
+                    .font(AppTypography.label)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    /// Leading copy before the colored rating word. Includes the analyst count
+    /// when we have a rating distribution; otherwise just the forecast lead-in.
+    private var forecastPrefix: String {
+        consensus.analystTotalRatings > 0
+            ? "Based on \(consensus.analystTotalRatings) analysts, one-year forecast: "
+            : "One-year forecast: "
     }
 
     // MARK: - Analyst Consensus Distribution (Buy / Hold / Sell)
@@ -125,17 +143,11 @@ struct ReportConsensusBar: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 GeometryReader { geo in
                     HStack(spacing: 0) {
-                        if consensus.buyPercent > 0 {
-                            Rectangle().fill(AppColors.bullish)
-                                .frame(width: geo.size.width * consensus.buyPercent / 100)
-                        }
-                        if consensus.holdPercent > 0 {
-                            Rectangle().fill(AppColors.textMuted)
-                                .frame(width: geo.size.width * consensus.holdPercent / 100)
-                        }
-                        if consensus.sellPercent > 0 {
-                            Rectangle().fill(AppColors.bearish)
-                                .frame(width: geo.size.width * consensus.sellPercent / 100)
+                        // 5 levels (Strong Buy → Strong Sell), same colors as the
+                        // Analysis tab. Zero-count levels are omitted.
+                        ForEach(consensus.analystLevels.filter { $0.count > 0 }, id: \.label) { level in
+                            Rectangle().fill(level.color)
+                                .frame(width: geo.size.width * CGFloat(consensus.analystPercent(level.count)) / 100)
                         }
                     }
                     .frame(height: 14)
@@ -143,38 +155,50 @@ struct ReportConsensusBar: View {
                 }
                 .frame(height: 14)
 
-                // Single straight row: % Buy (green) · % Hold (gray) · % Sell (red).
-                HStack(spacing: AppSpacing.lg) {
-                    consensusLegendItem(color: AppColors.bullish, label: "Buy", percent: consensus.formattedBuyPercent)
-                    consensusLegendItem(color: AppColors.textMuted, label: "Hold", percent: consensus.formattedHoldPercent)
-                    consensusLegendItem(color: AppColors.bearish, label: "Sell", percent: consensus.formattedSellPercent)
-                    Spacer(minLength: 0)
+                // All 5 levels stretched edge-to-edge to match the bar width:
+                // "Strong Sell" sits at the left edge, "Strong Buy" at the right,
+                // with flexible gaps between. No dots; each label+% is colored.
+                HStack(spacing: 0) {
+                    ForEach(Array(consensus.analystLevels.enumerated()), id: \.element.label) { index, level in
+                        consensusLegendItem(
+                            color: level.color,
+                            label: level.label,
+                            percent: String(format: "%.0f%%", consensus.analystPercent(level.count))
+                        )
+                        if index < consensus.analystLevels.count - 1 {
+                            Spacer(minLength: AppSpacing.xs)
+                        }
+                    }
                 }
             }
             .padding(.bottom, AppSpacing.sm)
         }
     }
 
+    /// One legend entry — "Buy 65%" with the label + % both in the level's color,
+    /// same regular weight, no dot, so all five fit on a single row.
     private func consensusLegendItem(color: Color, label: String, percent: String) -> some View {
-        HStack(spacing: AppSpacing.xs) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(label)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
-            Text(percent)
-                .font(AppTypography.captionEmphasis)
-                .foregroundColor(color)
-        }
+        Text("\(label) \(percent)")
+            .font(AppTypography.caption)
+            .foregroundColor(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
     }
 
-    /// Forecast copy. With real analyst coverage it states the consensus +
-    /// target range; without it, an honest "no targets" line so we never
-    /// imply a forecast the data doesn't support.
-    private var analystPriceTargetSummary: String {
-        guard consensus.hasAnalystTargets else {
-            return "No analyst price targets are available for this company yet."
+    /// Target + range line, centered below the distribution bar (above "2-Year
+    /// Flow"). Cents-aware via `formatTargetPrice`: shows $248.20 when there are
+    /// cents, whole dollars ($160 / $320) when there aren't — matching the chart
+    /// badges. Only with real analyst price-target coverage.
+    @ViewBuilder
+    private var analystTargetLine: some View {
+        if consensus.hasAnalystTargets {
+            Text("Target \(formatTargetPrice(consensus.targetPrice ?? 0)) (range \(formatTargetPrice(consensus.lowTarget ?? 0)) - \(formatTargetPrice(consensus.highTarget ?? 0)))")
+                .font(AppTypography.label)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.bottom, AppSpacing.sm)
         }
-        return "One-year price forecast: \(consensus.rating.rawValue.uppercased()) consensus.\nTarget \(consensus.formattedTargetPrice) (range \(consensus.formattedLowTarget) - \(consensus.formattedHighTarget))."
     }
 
     // MARK: - Analyst Price Chart
@@ -210,7 +234,7 @@ struct ReportConsensusBar: View {
                 targetBadges(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
             }
         }
-        .frame(height: 225)
+        .frame(height: 200)
     }
 
     // MARK: - Chart Components
@@ -408,6 +432,7 @@ struct ReportConsensusBar: View {
             }
 
             HStack(spacing: AppSpacing.md) {
+                Spacer(minLength: 0)
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "arrow.up")
                         .font(AppTypography.iconTiny).fontWeight(.bold)
@@ -416,8 +441,8 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Upgrades")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary)
                 }
 
                 // Maintains — gray "equal" icon, mirroring the Analysis tab's
@@ -430,8 +455,8 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Maintains")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary)
                 }
 
                 HStack(spacing: AppSpacing.xs) {
@@ -442,9 +467,10 @@ struct ReportConsensusBar: View {
                         .font(AppTypography.label)
                         .foregroundColor(AppColors.textPrimary)
                     Text("Downgrades")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary)
                 }
+                Spacer(minLength: 0)
             }
         }
     }
@@ -529,10 +555,10 @@ struct ReportConsensusBar: View {
                 // Min/Avg/Max badges and the bars span under the price line.
                 volumeBarsChart(smartMoney.flowData)
 
-                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
+                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling", font: AppTypography.label, labelColor: AppColors.textMuted)
                     .padding(.top, AppSpacing.xs)
 
-                SmartMoneyNetFlowBadge(summary: smartMoney.summary)
+                SmartMoneyNetFlowBadge(summary: smartMoney.summary, compact: true)
                     .padding(.top, AppSpacing.sm)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedFlowIndex)
@@ -546,7 +572,7 @@ struct ReportConsensusBar: View {
                 volumeBarsChart(consensus.hedgeFundFlowData)
                     .padding(.top, AppSpacing.xs)
 
-                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling")
+                SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling", font: AppTypography.label, labelColor: AppColors.textMuted)
                     .padding(.top, AppSpacing.xs)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedFlowIndex)
@@ -595,6 +621,9 @@ struct ReportConsensusBar: View {
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                     .strokeBorder(AppColors.cardBackgroundLight, lineWidth: 1)
             )
+            // Pull the bars chart up toward the card — the bars chart has empty
+            // headroom above its centered bars, so this closes the gap below the card.
+            .padding(.bottom, -AppSpacing.md)
         }
     }
 
@@ -680,7 +709,7 @@ struct ReportConsensusBar: View {
                 }
             }
         }
-        .frame(height: 150)
+        .frame(height: 120)
     }
 
     /// Round a positive value up to a "nice" axis maximum (1/2/2.5/5 × 10ⁿ).

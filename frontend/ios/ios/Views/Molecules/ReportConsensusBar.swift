@@ -83,7 +83,7 @@ struct ReportConsensusBar: View {
             // Wall Street insight — AI synthesis of price targets, institutions,
             // and momentum, rendered as its own labeled section at the bottom.
             insightSection
-                .padding(.top, AppSpacing.md)
+                .padding(.top, AppSpacing.xl)
         }
         // Tapping anywhere outside a chart column dismisses the quarter popup.
         .contentShape(Rectangle())

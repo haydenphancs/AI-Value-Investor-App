@@ -502,6 +502,10 @@ struct ReportRevenueForecast {
     // earnings transcript). Both nil when no quote was extracted.
     let guidanceSpeaker: String?       // "CFO" | "CEO" | "IR"
     let guidancePeriod: String?        // "Q4 2025" | "FY 2026"
+    // Stage-B narrative explaining WHY the forward trajectory looks the way
+    // it does. nil on older cached reports / the fallback path — the view
+    // hides the Insight card when nil or empty.
+    let insight: String?
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
@@ -1486,7 +1490,8 @@ extension TickerReportData {
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3",
             guidanceSpeaker: "CFO",
-            guidancePeriod: "Q3 2026"
+            guidancePeriod: "Q3 2026",
+            insight: "Revenue is projected to compound ~15% to $179B by 2029 as cloud demand outruns the maturing license base, with EPS growing faster (+18% CAGR) on operating leverage. Management raising guidance signals real confidence the backlog converts. The steepening 2028 ramp is the swing factor — execution risk concentrates there."
         ),
         insiderData: ReportInsiderData(
             sentiment: .negative,

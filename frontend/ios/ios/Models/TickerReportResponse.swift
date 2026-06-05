@@ -330,6 +330,7 @@ struct RevenueForecastDTO: Codable {
     let guidanceQuote: String?
     let guidanceSpeaker: String?
     let guidancePeriod: String?
+    let insight: String?
 
     enum CodingKeys: String, CodingKey {
         case cagr
@@ -339,6 +340,7 @@ struct RevenueForecastDTO: Codable {
         case guidanceQuote = "guidance_quote"
         case guidanceSpeaker = "guidance_speaker"
         case guidancePeriod = "guidance_period"
+        case insight
     }
 }
 
@@ -950,7 +952,8 @@ extension TickerReportAPIResponse {
             }(),
             guidanceQuote: revenueForecast.guidanceQuote,
             guidanceSpeaker: revenueForecast.guidanceSpeaker,
-            guidancePeriod: revenueForecast.guidancePeriod
+            guidancePeriod: revenueForecast.guidancePeriod,
+            insight: revenueForecast.insight
         )
 
         // Insider Data

@@ -172,6 +172,10 @@ class RevenueForecastResponse(BaseModel):
     # "FY 2026" | null when the speaker didn't tag a period.
     guidance_speaker: Optional[str] = None
     guidance_period: Optional[str] = None
+    # Stage-B narrative: the "why" behind the forward trajectory (what drives
+    # the projected revenue/EPS growth + what the guidance stance signals).
+    # Written by `_revenue_forecast_insight_prompt`; None on the fallback path.
+    insight: Optional[str] = None
 
 
 # ── Deep Dive: Insider & Management ───────────────────────────────────────────

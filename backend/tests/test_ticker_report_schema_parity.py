@@ -35,7 +35,7 @@ from app.api.error_response import (
     error_body_from_exception,
     make_error_response,
 )
-from app.schemas.ticker_report import TickerReportResponse
+from app.schemas.ticker_report import RevenueForecastResponse, TickerReportResponse
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
     stage_a_fallback,
@@ -246,6 +246,33 @@ def test_moat_dimensions_carry_source_tier():
         assert d["source"] in valid_sources, (
             f"pillar {d.get('name')!r} has invalid source {d.get('source')!r}"
         )
+
+
+def test_revenue_forecast_carries_insight_field():
+    """Future Forecast gained a Stage-B `insight` (the "why" narrative).
+    The assembled dict must always carry the key (seeded by the collector
+    partial), the job builder must emit a `revenue_forecast_insight` job
+    targeting it, and a populated insight must validate against
+    RevenueForecastResponse so the iOS RevenueForecastDTO decode can't crash."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    report = coll.assemble_report(out, stage_a_fallback())
+
+    rf = report["revenue_forecast"]
+    assert "insight" in rf, "revenue_forecast must always carry the `insight` key"
+
+    # The Stage-B job that fills it must exist and target revenue_forecast.
+    persona = get_persona_config("warren_buffett")
+    evidence = build_financial_context(out)
+    jobs = build_narrative_jobs(persona, evidence, report)
+    insight_jobs = [j for j in jobs if j.label == "revenue_forecast_insight"]
+    assert len(insight_jobs) == 1, "expected exactly one revenue_forecast_insight job"
+
+    # Stage B mutates the assembled report in place — applying the job's
+    # value must land on this dict, and a populated insight stays valid.
+    insight_jobs[0].apply("Revenue compounds ~15% on cloud demand; EPS faster on leverage.")
+    assert rf["insight"].startswith("Revenue compounds")
+    RevenueForecastResponse.model_validate(rf)
 
 
 def test_narrative_fallbacks_keep_pydantic_valid():

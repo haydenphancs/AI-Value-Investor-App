@@ -48,6 +48,9 @@ FALLBACK = {
     "overall_assessment_text": "Quality scoring updated; narrative unavailable.",
     "guidance_quote": None,
     "revenue_analysis_note": None,
+    "revenue_forecast_insight": (
+        "Forecast reflects analyst estimates; commentary unavailable."
+    ),
     "moat_durability_note": "Data unavailable for this ticker.",
     "moat_competitive_insight": "Data unavailable for this ticker.",
     "macro_headline": "Macro overview unavailable",
@@ -232,7 +235,7 @@ def _overall_assessment_text_prompt(
     avg = shell.get("overall_assessment", {}).get("average_rating", 0.0)
     strong = shell.get("overall_assessment", {}).get("strong_count", 0)
     weak = shell.get("overall_assessment", {}).get("weak_count", 0)
-    return f"""Write the one-line overall quality verdict for the fundamentals section.
+    return f"""Write the overall quality read for the Fundamentals & Growth section — the whole-picture verdict across all four cards.
 
 CONTEXT: Average rating {avg}/5 across four cards ({strong} strong, {weak} weak).
 
@@ -240,9 +243,12 @@ EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-{_length_brief(1, 25)}
+LENGTH: Write 3-4 sentences, total under 70 words.
 
-Capture the gestalt — is this a quality compounder, a fixer-upper, a value trap, or something else? Use one concrete metric to anchor it.
+Cover the whole picture of this section:
+- Open with the gestalt verdict — is this a quality compounder, a fixer-upper, a value trap, or something else? Anchor it to one concrete metric.
+- Then name the standout STRENGTH and the main WEAKNESS across the four cards (Profitability, Growth, Valuation, Financial Health), each tied to a specific card metric.
+- Close with the bottom-line takeaway for an investor weighing this stock.
 
 Grounding rules — STRICT:
 1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block in the evidence. NEVER invent or recompute a different value for a metric listed there.
@@ -280,17 +286,48 @@ def _moat_durability_note_prompt(
             "Phrases like 'exposed', 'no real defense', 'commodity-like' fit."
         )
 
-    return f"""Write a one-line judgment on how durable this company's moat is.
+    # Competitor + relative-moat context so the insight can speak to HOW the
+    # company competes, not just how strong its moat is in isolation. At
+    # Stage B time `shell` is the assembled report, so competitors and the
+    # per-dimension peer_score baselines are already populated.
+    competitors = moat.get("competitors", []) or []
+    comp_str = ", ".join(
+        f"{c.get('name')} ({c.get('ticker')}, threat={c.get('threat_level')})"
+        for c in competitors[:4]
+    ) or "none listed"
+    edges = [
+        d for d in dims
+        if d.get("peer_score") is not None
+        and float(d.get("score") or 0.0) - float(d.get("peer_score") or 0.0) >= 1.0
+    ]
+    gaps = [
+        d for d in dims
+        if d.get("peer_score") is not None
+        and float(d.get("peer_score") or 0.0) - float(d.get("score") or 0.0) >= 1.0
+    ]
+    edge_str = ", ".join(
+        f"{d.get('name')} ({d.get('score')} vs peer {d.get('peer_score')})"
+        for d in edges[:3]
+    ) or "no dimension clearly beats peers"
+    gap_str = ", ".join(
+        f"{d.get('name')} ({d.get('score')} vs peer {d.get('peer_score')})"
+        for d in gaps[:3]
+    ) or "no material gaps"
+
+    return f"""Write the moat & competitive read for this company — how durable its moat is AND how it competes with its rivals.
 
 TOP MOAT SOURCE: {top.get('name', 'unknown')} (score {top.get('score', 0)}/10)
 ALL DIMENSIONS: {", ".join(f"{d.get('name')} {d.get('score')}/10" for d in dims) or "none"}
 MOAT STRENGTH: {strength_hint}
+WHERE IT OUT-DEFENDS PEERS (focal vs peer-avg): {edge_str}
+WHERE IT TRAILS PEERS: {gap_str}
+KEY COMPETITORS: {comp_str}
 
 {_style_block(persona)}
-{_length_brief(1, 20)}
+LENGTH: Write 2-3 sentences, total under 55 words.
 
-Name the specific threat or staying power — don't just restate the score.
-Weave the moat-strength tone naturally into the phrasing."""
+Sentence 1 — judge how durable the moat is (its staying power or the specific threat to it); weave the moat-strength tone naturally, don't just restate the score.
+Sentence 2-3 — how it competes with the named rivals: where its moat out-defends them (use the edge above) and which competitor is the real threat (the highest threat_level). Name actual competitors, not "peers" in the abstract."""
 
 
 def _moat_competitive_insight_prompt(
@@ -636,6 +673,64 @@ LENGTH: 1-2 sentences, total under 30 words.
 If there's no real guidance signal in the data, write the literal word: NULL"""
 
 
+def _revenue_forecast_insight_prompt(
+    persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
+) -> str:
+    """The Future Forecast insight — explains WHY the forward revenue / EPS
+    trajectory looks the way it does, grounded in the projection bars the
+    user sees on the chart plus management's guidance stance."""
+    rf = shell.get("revenue_forecast", {}) or {}
+    cagr = rf.get("cagr")
+    eps_growth = rf.get("eps_growth")
+    guidance = rf.get("management_guidance") or "maintained"
+    guidance_quote = rf.get("guidance_quote")
+    projections = rf.get("projections") or []
+
+    # Compact the chart-visible projections so the model anchors on the same
+    # numbers the user sees on the bars (no re-deriving arithmetic). Defensive
+    # against the fallback-shell path where projections is empty.
+    if projections:
+        proj_str = "; ".join(
+            f"{p.get('period')}: rev {p.get('revenue_label')}"
+            + (
+                f" ({p.get('revenue_yoy_pct'):+.0f}% YoY)"
+                if p.get("revenue_yoy_pct") is not None else ""
+            )
+            + f", EPS {p.get('eps_label')}"
+            + (
+                f" ({p.get('eps_yoy_pct'):+.0f}% YoY)"
+                if p.get("eps_yoy_pct") is not None else ""
+            )
+            for p in projections[:4]
+        )
+    else:
+        proj_str = "no analyst projections available"
+
+    cagr_str = f"{cagr:+.0f}%" if isinstance(cagr, (int, float)) else "n/a"
+    eps_str = f"{eps_growth:+.0f}%" if isinstance(eps_growth, (int, float)) else "n/a"
+    quote_line = (
+        f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"' if guidance_quote else ""
+    )
+
+    return f"""Write the Future Forecast insight — explain WHY the forward revenue and earnings trajectory looks the way it does.
+
+PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
+MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)
+FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
+
+EVIDENCE:
+{evidence}
+
+{_style_block(persona)}
+LENGTH: Write 3-4 sentences, total under 70 words.
+
+Focus on the WHY, not just the numbers:
+- What is driving the projected growth (or the slowdown) — demand, mix shift, margin leverage, pricing, a maturing base, headwinds?
+- Whether growth is accelerating or decelerating across the forward years, and what that implies.
+- What the guidance stance ({guidance}) signals about management's own confidence.
+Cite ONE concrete projected number from the projections above to anchor the read. Do NOT just list the projections back."""
+
+
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -880,7 +975,7 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="overall_assessment_text",
             prompt=_overall_assessment_text_prompt(persona, evidence, shell),
-            word_cap=28,
+            word_cap=90,
             apply=_setter_for_dict_key(oa, "text"),
             fallback_value=FALLBACK["overall_assessment_text"],
         ))
@@ -891,7 +986,7 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="moat_durability_note",
             prompt=_moat_durability_note_prompt(persona, evidence, shell),
-            word_cap=22,
+            word_cap=70,
             apply=_setter_for_dict_key(moat, "durability_note"),
             fallback_value=FALLBACK["moat_durability_note"],
         ))
@@ -945,6 +1040,17 @@ def build_narrative_jobs(
             apply=_setter_for_dict_key(re_section, "analysis_note"),
             fallback_value=FALLBACK["revenue_analysis_note"],
             nullable=True,
+        ))
+
+    # ── revenue_forecast.insight ─────────────────────────────────────
+    rf = shell.get("revenue_forecast")
+    if isinstance(rf, dict):
+        jobs.append(NarrativeJob(
+            label="revenue_forecast_insight",
+            prompt=_revenue_forecast_insight_prompt(persona, evidence, shell),
+            word_cap=90,
+            apply=_setter_for_dict_key(rf, "insight"),
+            fallback_value=FALLBACK["revenue_forecast_insight"],
         ))
 
     # ── revenue_forecast.guidance_quote ──────────────────────────────

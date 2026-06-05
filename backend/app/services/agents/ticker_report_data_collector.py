@@ -2913,6 +2913,7 @@ def _build_revenue_forecast_partial(
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
         "guidance_period": None,        # AI fills via Stage A (PR 6)
+        "insight": None,                # Stage B fills (revenue_forecast_insight)
     }
 
 

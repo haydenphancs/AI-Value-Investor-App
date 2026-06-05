@@ -75,6 +75,7 @@ struct ReportConsensusBar: View {
             // Buy/Sell volume bars (no second price line — the price line
             // lives in the analyst chart above)
             hedgeFundsSection
+                .padding(.top, AppSpacing.md)
 
             // Momentum
             momentumSection
@@ -197,7 +198,12 @@ struct ReportConsensusBar: View {
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.bottom, AppSpacing.sm)
+                .padding(.top, AppSpacing.sm)
+                // 6 (not AppSpacing.sm=8): a text→text gap reads ~2pt taller than
+                // the rectangle→text gap between the distribution bar and the
+                // 5-levels row at the same nominal spacing, so 6pt here makes the
+                // Target→"2-Year Flow" gap visually match that bar→levels `sm` gap.
+                .padding(.bottom, 6)
         }
     }
 
@@ -559,7 +565,7 @@ struct ReportConsensusBar: View {
                     .padding(.top, AppSpacing.xs)
 
                 SmartMoneyNetFlowBadge(summary: smartMoney.summary, compact: true)
-                    .padding(.top, AppSpacing.sm)
+                    .padding(.top, -AppSpacing.xxs)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedFlowIndex)
         } else if !consensus.hedgeFundPriceData.isEmpty && !consensus.hedgeFundFlowData.isEmpty {

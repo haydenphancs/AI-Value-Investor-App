@@ -66,14 +66,22 @@ from app.services.sector_aggregates_service import (
 logger = logging.getLogger(__name__)
 
 
-# Feature flag: the iOS "Key Vitals" strip is hidden (redundant with the Deep
-# Dive modules, which cover the same ground in depth). When False, report runs
-# emit an empty (all-null) `key_vitals` object — the 8-slot shape is preserved
-# so iOS still decodes — so a generated report carries NO Key Vitals content.
-# (The underlying vital derivations are cheap pure functions on already-collected
-# data — no extra FMP/Gemini calls — so they're left running; only the output is
-# dropped.) Flip to True + uncomment ReportKeyVitalsSection on iOS to restore.
-EMIT_KEY_VITALS = False
+# NOTE: the user-facing "Key Vitals" feature has been removed (iOS UI + client
+# DTOs/schema deleted). This internal layer is emitted under the JSONB key
+# `_scoring_inputs` (legacy alias `key_vitals` in reports cached before the
+# rename) and is stripped from every client response —
+# `patch_legacy_price_action` pops it on the raw-return paths, and the schema
+# `model_dump` drops it on the validated path — so it is NOT part of the iOS
+# contract.
+#
+# It is RETAINED as an internal, server-only scoring substrate:
+#   • persona_scoring.compute_quality_score() rolls the 8 vital scores into the
+#     report's quality_score / overall_score (the headline persona rating);
+#   • research_service derives fair_value_estimate, the Buy/Hold/Sell
+#     recommendation, and moat/valuation analysis from it;
+#   • narrative_prompts pulls the insider key-insight from it.
+# These derivations are cheap pure functions over already-collected data (no
+# extra FMP/Gemini calls), so they stay. Do NOT surface it to clients.
 
 
 DISCLAIMER = (
@@ -1214,20 +1222,14 @@ class TickerReportDataCollector:
             "agent": _AGENT_MAP.get(out.persona_key, "buffett"),
         }
 
-        # ── Valuation vital (Key Vitals — gated off via EMIT_KEY_VITALS) ─
-        out.valuation_vital = (
-            _build_valuation_vital(
-                current_price, fair_value, upside, out.snap_valuation
-            )
-            if EMIT_KEY_VITALS else {}
+        # ── Valuation vital ───────────────────────────────────────────
+        out.valuation_vital = _build_valuation_vital(
+            current_price, fair_value, upside, out.snap_valuation
         )
 
-        # ── Financial health vital (Key Vitals — gated off) ───────────
-        out.financial_health_vital = (
-            _build_health_vital(
-                c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative")
-            )
-            if EMIT_KEY_VITALS else {}
+        # ── Financial health vital ────────────────────────────────────
+        out.financial_health_vital = _build_health_vital(
+            c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative")
         )
 
         # ── Revenue vital — top segment hooked from real segments ─────
@@ -1242,22 +1244,16 @@ class TickerReportDataCollector:
             segments_built[0]["name"] if segments_built else "Primary"
         )
         top_segment_growth = _segment_growth_pct(segments_built)
-        # revenue_vital is Key Vitals — gated off. segments_built above is
-        # kept (the revenue-engine section reuses it downstream).
-        out.revenue_vital = (
-            _build_revenue_vital(
-                c.get("total_revenue") or 0.0,
-                c.get("revenue_growth_yoy"),
-                top_segment_name,
-                top_segment_growth,
-            )
-            if EMIT_KEY_VITALS else {}
+        out.revenue_vital = _build_revenue_vital(
+            c.get("total_revenue") or 0.0,
+            c.get("revenue_growth_yoy"),
+            top_segment_name,
+            top_segment_growth,
         )
 
-        # ── Forecast vital (Key Vitals — gated off) ───────────────────
-        out.forecast_vital = (
-            _build_forecast_vital(c.get("revenue_cagr"), c.get("eps_cagr"))
-            if EMIT_KEY_VITALS else {}
+        # ── Forecast vital ────────────────────────────────────────────
+        out.forecast_vital = _build_forecast_vital(
+            c.get("revenue_cagr"), c.get("eps_cagr")
         )
 
         # ── Wall Street vital + consensus from AnalystService ────────
@@ -1640,7 +1636,7 @@ class TickerReportDataCollector:
                 + (coverage_note if (coverage_note and ai_competitive_insight) else "")
             ),
         }
-        moat_vital = _derive_moat_vital(moat_dims) if EMIT_KEY_VITALS else None
+        moat_vital = _derive_moat_vital(moat_dims)
 
         # ── Macro: deterministic numeric factors merge into AI's qualitative
         # ones. Order of priority (real data wins on category collision):
@@ -1706,34 +1702,23 @@ class TickerReportDataCollector:
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
-        macro_vital = (
-            _derive_macro_vital(risk_factors, threat_level, composite)
-            if EMIT_KEY_VITALS else None
-        )
+        macro_vital = _derive_macro_vital(risk_factors, threat_level, composite)
 
         # ── Key vitals (assembled) ────────────────────────────────────
-        # Hidden in the iOS UI (redundant with the Deep Dive modules). When
-        # EMIT_KEY_VITALS is off, emit an all-null object: report runs put no
-        # Key Vitals content in the output, while the 8-slot shape is preserved
-        # so iOS still decodes and the schema-parity test stays green. Flip the
-        # flag (top of this file) + uncomment ReportKeyVitalsSection to restore.
-        _VITAL_SLOTS = (
-            "valuation", "moat", "financial_health", "revenue",
-            "insider", "macro", "forecast", "wall_street",
-        )
-        if EMIT_KEY_VITALS:
-            key_vitals = {
-                "valuation": out.valuation_vital,
-                "moat": moat_vital,
-                "financial_health": out.financial_health_vital,
-                "revenue": out.revenue_vital,
-                "insider": insider_vital,
-                "macro": macro_vital,
-                "forecast": out.forecast_vital,
-                "wall_street": out.wall_street_vital,
-            }
-        else:
-            key_vitals = {slot: None for slot in _VITAL_SLOTS}
+        # INTERNAL scoring substrate only (see the NOTE at the top of this
+        # file): feeds the persona rating (compute_quality_score), fair value,
+        # recommendation, and moat/valuation analysis. Stripped from every
+        # client response; the user-facing Key Vitals UI has been removed.
+        scoring_inputs = {
+            "valuation": out.valuation_vital,
+            "moat": moat_vital,
+            "financial_health": out.financial_health_vital,
+            "revenue": out.revenue_vital,
+            "insider": insider_vital,
+            "macro": macro_vital,
+            "forecast": out.forecast_vital,
+            "wall_street": out.wall_street_vital,
+        }
 
         # ── Top-level assembly ────────────────────────────────────────
         report: Dict[str, Any] = {
@@ -1754,7 +1739,7 @@ class TickerReportDataCollector:
             # Emitted empty to keep the response contract / iOS decode stable.
             "executive_summary_bullets": [],
 
-            "key_vitals": key_vitals,
+            "_scoring_inputs": scoring_inputs,
 
             "core_thesis": _sanitize_thesis(ai.get("core_thesis")),
 
@@ -5726,11 +5711,11 @@ def _derive_macro_vital(
     threat_level: str,
     composite: float,
 ) -> Dict[str, Any]:
-    """Build the Macro tile shown in Key Vitals.
+    """Derive the internal Macro vital (scoring substrate, not surfaced to clients).
 
     `composite` is the 1.0–5.0 score from `_compute_macro_threat`.
-    Mapped to a 0–10 vitality score so the iOS Key-Vitals tile
-    rendering stays on its existing 10-point scale:
+    Mapped to a 0–10 score that feeds the persona rating roll-up in
+    persona_scoring.compute_quality_score, on a 10-point scale:
       composite 1.0 (benign)   → score 8.0
       composite 5.0 (critical) → score 0.0
     """

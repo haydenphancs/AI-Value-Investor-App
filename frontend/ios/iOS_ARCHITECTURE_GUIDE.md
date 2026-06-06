@@ -220,7 +220,6 @@ frontend/ios/
 │   │   ├── HoldersModels.swift
 │   │   ├── ProfitPowerModels.swift
 │   │   ├── RevenueBreakdownModels.swift
-│   │   ├── VitalRulesEngine.swift            # Financial vital signs rules
 │   │   ├── WhaleProfileModels.swift
 │   │   ├── WhaleDTOs.swift
 │   │   ├── PortfolioHoldingModels.swift
@@ -655,7 +654,7 @@ class MyViewModel: BaseViewModel {
 | File | Contents |
 |------|----------|
 | `TickerDetailModels.swift` | Stock detail, key stats, company profile |
-| `TickerReportModels.swift` | Full AI report (executive summary, vitals, fundamentals, revenue, moat, insider activity, forecast, risk, price movement) |
+| `TickerReportModels.swift` | Full AI report (executive summary, fundamentals, revenue, moat, insider activity, forecast, risk, price movement) |
 | `UpdatesModels.swift` | News feed, filters, sentiment analysis |
 | `ResearchModels.swift` | Analysis reports, personas, credits, trending |
 | `TrackingModels.swift` | Watchlist, portfolio, diversification |
@@ -667,7 +666,6 @@ class MyViewModel: BaseViewModel {
 | `HoldersModels.swift` | Institutional/insider holdings |
 | `ProfitPowerModels.swift` | Profitability analysis |
 | `RevenueBreakdownModels.swift` | Revenue segmentation |
-| `VitalRulesEngine.swift` | Financial vital signs rules engine |
 | `WhaleProfileModels.swift` | Institutional investor profiles |
 | `PortfolioHoldingModels.swift` | Portfolio position tracking |
 | `CryptoDetailModels.swift` | Cryptocurrency data |

@@ -21,96 +21,6 @@ class ExecutiveSummaryBulletResponse(BaseModel):
     sentiment: str  # "positive" | "neutral" | "negative"
 
 
-class MoatTagResponse(BaseModel):
-    label: str
-    strength: str  # "wide" | "narrow" | "none"
-
-
-class VitalScoreResponse(BaseModel):
-    value: float
-    status: str  # "critical" | "warning" | "good" | "neutral"
-
-
-# ── Key Vitals ─────────────────────────────────────────────────────────────────
-
-
-class ValuationVitalResponse(BaseModel):
-    status: str  # "overpriced" | "fair_value" | "underpriced" | "deep_undervalued"
-    current_price: float
-    fair_value: float
-    upside_potential: float
-
-
-class MoatVitalResponse(BaseModel):
-    overall_rating: str  # "wide" | "narrow" | "none"
-    primary_source: str
-    tags: List[MoatTagResponse]
-    value_label: str
-    stability_label: str
-
-
-class FinancialHealthVitalResponse(BaseModel):
-    level: str  # "strong" | "moderate" | "weak" | "critical"
-    altman_z_score: float
-    altman_z_label: str
-    additional_metric: str
-    additional_metric_status: str
-    fcf_note: str
-
-
-class RevenueVitalResponse(BaseModel):
-    score: VitalScoreResponse
-    total_revenue: str
-    revenue_growth: float
-    top_segment: str
-    top_segment_growth: float
-
-
-class InsiderVitalResponse(BaseModel):
-    score: VitalScoreResponse
-    sentiment: str  # "positive" | "negative" | "neutral"
-    net_activity: str
-    buy_count: int
-    sell_count: int
-    key_insight: str
-
-
-class MacroVitalResponse(BaseModel):
-    score: VitalScoreResponse
-    threat_level: str  # "low" | "elevated" | "high" | "severe" | "critical"
-    top_risk: str
-    risk_trend: str  # "improving" | "stable" | "worsening"
-    active_risk_count: int
-
-
-class ForecastVitalResponse(BaseModel):
-    score: VitalScoreResponse
-    revenue_cagr: float
-    eps_cagr: float
-    guidance: str  # "raised" | "maintained" | "lowered"
-    outlook: str
-
-
-class WallStreetVitalResponse(BaseModel):
-    score: VitalScoreResponse
-    consensus_rating: str  # "strong_buy" | "buy" | "hold" | "sell" | "strong_sell"
-    price_target: float
-    current_price: float
-    upgrades: int
-    downgrades: int
-
-
-class KeyVitalsResponse(BaseModel):
-    valuation: Optional[ValuationVitalResponse] = None
-    moat: Optional[MoatVitalResponse] = None
-    financial_health: Optional[FinancialHealthVitalResponse] = None
-    revenue: Optional[RevenueVitalResponse] = None
-    insider: Optional[InsiderVitalResponse] = None
-    macro: Optional[MacroVitalResponse] = None
-    forecast: Optional[ForecastVitalResponse] = None
-    wall_street: Optional[WallStreetVitalResponse] = None
-
-
 # ── Core Thesis ────────────────────────────────────────────────────────────────
 
 
@@ -445,9 +355,6 @@ class TickerReportResponse(BaseModel):
     # Executive Summary
     executive_summary_text: str
     executive_summary_bullets: List[ExecutiveSummaryBulletResponse]
-
-    # Key Vitals (all optional — only noteworthy ones populated)
-    key_vitals: KeyVitalsResponse
 
     # Core Thesis
     core_thesis: CoreThesisResponse

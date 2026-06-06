@@ -24,7 +24,6 @@ struct TickerReportAPIResponse: Codable {
     let qualityScore: Double
     let executiveSummaryText: String
     let executiveSummaryBullets: [ESBulletDTO]
-    let keyVitals: KeyVitalsDTO
     let coreThesis: CoreThesisDTO
     let fundamentalMetrics: [FundamentalMetricCardDTO]
     let overallAssessment: OverallAssessmentDTO
@@ -49,7 +48,6 @@ struct TickerReportAPIResponse: Codable {
         case qualityScore = "quality_score"
         case executiveSummaryText = "executive_summary_text"
         case executiveSummaryBullets = "executive_summary_bullets"
-        case keyVitals = "key_vitals"
         case coreThesis = "core_thesis"
         case fundamentalMetrics = "fundamental_metrics"
         case overallAssessment = "overall_assessment"
@@ -75,175 +73,6 @@ struct ESBulletDTO: Codable {
 
     enum CodingKeys: String, CodingKey {
         case category, text, sentiment
-    }
-}
-
-// MARK: - Vital Score
-
-struct VitalScoreDTO: Codable {
-    let value: Double
-    let status: String
-
-    enum CodingKeys: String, CodingKey {
-        case value, status
-    }
-}
-
-// MARK: - Key Vitals
-
-struct KeyVitalsDTO: Codable {
-    let valuation: ValuationVitalDTO?
-    let moat: MoatVitalDTO?
-    let financialHealth: FinancialHealthVitalDTO?
-    let revenue: RevenueVitalDTO?
-    let insider: InsiderVitalDTO?
-    let macro: MacroVitalDTO?
-    let forecast: ForecastVitalDTO?
-    let wallStreet: WallStreetVitalDTO?
-
-    enum CodingKeys: String, CodingKey {
-        case valuation, moat
-        case financialHealth = "financial_health"
-        case revenue, insider, macro, forecast
-        case wallStreet = "wall_street"
-    }
-}
-
-struct ValuationVitalDTO: Codable {
-    let status: String
-    let currentPrice: Double
-    let fairValue: Double
-    let upsidePotential: Double
-
-    enum CodingKeys: String, CodingKey {
-        case status
-        case currentPrice = "current_price"
-        case fairValue = "fair_value"
-        case upsidePotential = "upside_potential"
-    }
-}
-
-struct MoatTagDTO: Codable {
-    let label: String
-    let strength: String
-
-    enum CodingKeys: String, CodingKey {
-        case label, strength
-    }
-}
-
-struct MoatVitalDTO: Codable {
-    let overallRating: String
-    let primarySource: String
-    let tags: [MoatTagDTO]
-    let valueLabel: String
-    let stabilityLabel: String
-
-    enum CodingKeys: String, CodingKey {
-        case overallRating = "overall_rating"
-        case primarySource = "primary_source"
-        case tags
-        case valueLabel = "value_label"
-        case stabilityLabel = "stability_label"
-    }
-}
-
-struct FinancialHealthVitalDTO: Codable {
-    let level: String
-    let altmanZScore: Double
-    let altmanZLabel: String
-    let additionalMetric: String
-    let additionalMetricStatus: String
-    let fcfNote: String
-
-    enum CodingKeys: String, CodingKey {
-        case level
-        case altmanZScore = "altman_z_score"
-        case altmanZLabel = "altman_z_label"
-        case additionalMetric = "additional_metric"
-        case additionalMetricStatus = "additional_metric_status"
-        case fcfNote = "fcf_note"
-    }
-}
-
-struct RevenueVitalDTO: Codable {
-    let score: VitalScoreDTO
-    let totalRevenue: String
-    let revenueGrowth: Double
-    let topSegment: String
-    let topSegmentGrowth: Double
-
-    enum CodingKeys: String, CodingKey {
-        case score
-        case totalRevenue = "total_revenue"
-        case revenueGrowth = "revenue_growth"
-        case topSegment = "top_segment"
-        case topSegmentGrowth = "top_segment_growth"
-    }
-}
-
-struct InsiderVitalDTO: Codable {
-    let score: VitalScoreDTO
-    let sentiment: String
-    let netActivity: String
-    let buyCount: Int
-    let sellCount: Int
-    let keyInsight: String
-
-    enum CodingKeys: String, CodingKey {
-        case score, sentiment
-        case netActivity = "net_activity"
-        case buyCount = "buy_count"
-        case sellCount = "sell_count"
-        case keyInsight = "key_insight"
-    }
-}
-
-struct MacroVitalDTO: Codable {
-    let score: VitalScoreDTO
-    let threatLevel: String
-    let topRisk: String
-    let riskTrend: String
-    let activeRiskCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case score
-        case threatLevel = "threat_level"
-        case topRisk = "top_risk"
-        case riskTrend = "risk_trend"
-        case activeRiskCount = "active_risk_count"
-    }
-}
-
-struct ForecastVitalDTO: Codable {
-    let score: VitalScoreDTO
-    let revenueCAGR: Double
-    let epsCAGR: Double
-    let guidance: String
-    let outlook: String
-
-    enum CodingKeys: String, CodingKey {
-        case score
-        case revenueCAGR = "revenue_cagr"
-        case epsCAGR = "eps_cagr"
-        case guidance, outlook
-    }
-}
-
-struct WallStreetVitalDTO: Codable {
-    let score: VitalScoreDTO
-    let consensusRating: String
-    let priceTarget: Double
-    let currentPrice: Double
-    let upgrades: Int
-    let downgrades: Int
-
-    enum CodingKeys: String, CodingKey {
-        case score
-        case consensusRating = "consensus_rating"
-        case priceTarget = "price_target"
-        case currentPrice = "current_price"
-        case upgrades, downgrades
     }
 }
 
@@ -754,129 +583,6 @@ extension TickerReportAPIResponse {
             return ExecutiveSummaryBullet(category: b.category, text: b.text, sentiment: sent)
         }
 
-        // Key Vitals
-        let valuation: ReportValuationData? = keyVitals.valuation.map { v in
-            let status: ValuationStatus = {
-                switch v.status.lowercased() {
-                case "overpriced": return .overpriced
-                case "underpriced": return .underpriced
-                case "deep_undervalued": return .deepUndervalued
-                default: return .fairValue
-                }
-            }()
-            return ReportValuationData(
-                status: status,
-                currentPrice: v.currentPrice,
-                fairValue: v.fairValue,
-                upsidePotential: v.upsidePotential
-            )
-        }
-
-        let moat: ReportMoatData? = keyVitals.moat.map { m in
-            let rating: MoatTag.MoatStrength = {
-                switch m.overallRating.lowercased() {
-                case "wide": return .wide
-                case "narrow": return .narrow
-                default: return .none
-                }
-            }()
-            let tags = m.tags.map { t in
-                let s: MoatTag.MoatStrength = {
-                    switch t.strength.lowercased() {
-                    case "wide": return .wide
-                    case "narrow": return .narrow
-                    default: return .none
-                    }
-                }()
-                return MoatTag(label: t.label, strength: s)
-            }
-            return ReportMoatData(
-                overallRating: rating,
-                primarySource: m.primarySource,
-                tags: tags,
-                valueLabel: m.valueLabel,
-                stabilityLabel: m.stabilityLabel
-            )
-        }
-
-        let health: ReportFinancialHealthData? = keyVitals.financialHealth.map { h in
-            let level = FinancialHealthLevel.fromZScore(h.altmanZScore)
-            let addStatus = FinancialHealthLevel.fromZScore(h.altmanZScore)
-            return ReportFinancialHealthData(
-                level: level,
-                altmanZScore: h.altmanZScore,
-                altmanZLabel: h.altmanZLabel,
-                additionalMetric: h.additionalMetric,
-                additionalMetricStatus: addStatus,
-                fcfNote: h.fcfNote
-            )
-        }
-
-        let revVital: ReportRevenueVitalData? = keyVitals.revenue.map { r in
-            ReportRevenueVitalData(
-                score: VitalScore(value: r.score.value, status: Self.mapVitalStatus(r.score.status)),
-                totalRevenue: r.totalRevenue,
-                revenueGrowth: r.revenueGrowth,
-                topSegment: r.topSegment,
-                topSegmentGrowth: r.topSegmentGrowth
-            )
-        }
-
-        let insVital: ReportInsiderVitalData? = keyVitals.insider.map { i in
-            let sent: InsiderSentiment = {
-                switch i.sentiment.lowercased() {
-                case "positive": return .positive
-                case "negative": return .negative
-                default: return .neutral
-                }
-            }()
-            return ReportInsiderVitalData(
-                score: VitalScore(value: i.score.value, status: Self.mapVitalStatus(i.score.status)),
-                sentiment: sent,
-                netActivity: i.netActivity,
-                buyCount: i.buyCount,
-                sellCount: i.sellCount,
-                keyInsight: i.keyInsight
-            )
-        }
-
-        let macVital: ReportMacroVitalData? = keyVitals.macro.map { m in
-            ReportMacroVitalData(
-                score: VitalScore(value: m.score.value, status: Self.mapVitalStatus(m.score.status)),
-                threatLevel: Self.mapThreatLevel(m.threatLevel),
-                topRisk: m.topRisk,
-                riskTrend: Self.mapRiskTrend(m.riskTrend),
-                activeRiskCount: m.activeRiskCount
-            )
-        }
-
-        let forVital: ReportForecastVitalData? = keyVitals.forecast.map { f in
-            ReportForecastVitalData(
-                score: VitalScore(value: f.score.value, status: Self.mapVitalStatus(f.score.status)),
-                revenueCAGR: f.revenueCAGR,
-                epsCAGR: f.epsCAGR,
-                guidance: Self.mapGuidance(f.guidance),
-                outlook: f.outlook
-            )
-        }
-
-        let wsVital: ReportWallStreetVitalData? = keyVitals.wallStreet.map { w in
-            ReportWallStreetVitalData(
-                score: VitalScore(value: w.score.value, status: Self.mapVitalStatus(w.score.status)),
-                consensusRating: Self.mapConsensusRating(w.consensusRating),
-                priceTarget: w.priceTarget,
-                currentPrice: w.currentPrice,
-                upgrades: w.upgrades,
-                downgrades: w.downgrades
-            )
-        }
-
-        let vitals = ReportKeyVitals(
-            valuation: valuation, moat: moat, financialHealth: health,
-            revenue: revVital, insider: insVital, macro: macVital,
-            forecast: forVital, wallStreet: wsVital
-        )
-
         // Core Thesis
         let thesis = ReportCoreThesis(
             bullCase: coreThesis.bullCase.map { CoreThesisBullet(text: $0) },
@@ -1114,7 +820,6 @@ extension TickerReportAPIResponse {
             qualityRating: quality,
             executiveSummaryText: executiveSummaryText,
             executiveSummaryBullets: esBullets,
-            keyVitals: vitals,
             coreThesis: thesis,
             fundamentalMetrics: fundMetrics,
             overallAssessment: assessment,
@@ -1132,15 +837,6 @@ extension TickerReportAPIResponse {
     }
 
     // MARK: - Mapping Helpers
-
-    private static func mapVitalStatus(_ s: String) -> VitalStatus {
-        switch s.lowercased() {
-        case "critical": return .critical
-        case "warning": return .warning
-        case "good": return .good
-        default: return .neutral
-        }
-    }
 
     private static func mapThreatLevel(_ s: String) -> ThreatLevel {
         switch s.lowercased() {

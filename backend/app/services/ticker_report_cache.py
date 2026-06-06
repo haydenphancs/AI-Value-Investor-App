@@ -132,6 +132,17 @@ def patch_legacy_price_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     if not isinstance(payload, dict):
         return payload
+
+    # Key Vitals is deleted from the product: strip the internal scoring field
+    # so it never reaches iOS. It's retained in stored JSONB as the persona-
+    # rating input (see compute_quality_score / _scoring_inputs) but is NOT part
+    # of the client contract. This read chokepoint covers the two raw-return
+    # endpoints; the schema-validated return path drops it via model_dump.
+    # Pop both names: new reports use "_scoring_inputs"; older stored reports
+    # still carry the legacy "key_vitals".
+    payload.pop("_scoring_inputs", None)
+    payload.pop("key_vitals", None)
+
     pa = payload.get("price_action")
     if not isinstance(pa, dict):
         return payload

@@ -97,12 +97,6 @@ struct TickerReportView: View {
                         )
                         .padding(.horizontal, AppSpacing.lg)
 
-                        // Key Vitals — HIDDEN (redundant with the Deep Dive
-                        // modules below, which explain the same ground in depth).
-                        // Not deleted: uncomment to restore (and flip the backend
-                        // EMIT_KEY_VITALS flag in ticker_report_data_collector.py).
-                        // ReportKeyVitalsSection(vitals: report.keyVitals)
-
                         // Core Thesis
                         ReportCoreThesisSection(thesis: report.coreThesis)
 

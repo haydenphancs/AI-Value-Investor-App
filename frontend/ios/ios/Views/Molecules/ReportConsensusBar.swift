@@ -112,9 +112,11 @@ struct ReportConsensusBar: View {
             if consensus.hasAnalystDistribution || consensus.hasAnalystTargets {
                 // One line: "Based on N analysts, one-year price forecast: BUY" —
                 // the rating colored by sentiment (green BUY / amber HOLD / red SELL).
-                (Text(forecastPrefix).foregroundColor(AppColors.textSecondary)
-                    + Text(consensus.rating.rawValue.uppercased())
-                        .foregroundColor(consensus.rating.color).fontWeight(.bold))
+                let forecastText = Text(forecastPrefix)
+                    .foregroundColor(AppColors.textSecondary)
+                let ratingText = Text(consensus.rating.rawValue.uppercased())
+                    .foregroundColor(consensus.rating.color).fontWeight(.bold)
+                Text("\(forecastText)\(ratingText)")
                     .font(AppTypography.label)
                     .fixedSize(horizontal: false, vertical: true)
             } else {

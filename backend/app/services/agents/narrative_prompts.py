@@ -1356,3 +1356,366 @@ def stage_a_fallback() -> Dict[str, Any]:
         "wall_street": {"wall_street_insight": None},
         "critical_factors": [],
     }
+
+
+# ── Core-thesis synthesis (post-assembly, cross-module) ───────────────
+# The Bull/Bear case (core_thesis) is generated in Stage A from
+# `build_financial_context`, whose evidence is fundamentals-only — so
+# Stage A bullets can only cite margins / ratios / growth. The synthesis
+# below runs AFTER `assemble_report`, when every Deep Dive module's FINAL
+# verdict exists on `report` (moat dimension scores, recomputed
+# competitors, computed macro threat, price catalyst, Wall Street
+# consensus). It reads those verdicts + the same `evidence`, ranks every
+# candidate signal by decision-impact, and rewrites core_thesis with the
+# 2-4 STRONGEST points per side drawn across ALL modules — not just
+# fundamentals. Stage A's thesis stays as the fallback if this fails.
+
+
+def _f_num(v: Any, fmt: str = "{:.1f}") -> Optional[str]:
+    """Format a numeric value, or None when it's missing / non-numeric."""
+    try:
+        if v is None:
+            return None
+        return fmt.format(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+# Macro only earns a spot in the thesis when it's genuinely material.
+# "low"/"elevated" macro is background noise, not a buy/sell driver — only
+# "high" or worse should surface as a bear point. Ranks mirror the
+# collector's _SEVERITY_INT ladder (low<elevated<high<severe<critical).
+_MATERIAL_MACRO_THREATS = {"high", "severe", "critical"}
+_MACRO_SEVERITY_RANK = {
+    "low": 1, "elevated": 2, "high": 3, "severe": 4, "critical": 5,
+}
+
+
+def build_module_digest(report: Dict[str, Any]) -> str:
+    """Compact, number-rich digest of every FINAL Deep Dive module verdict
+    on the assembled `report`. Feeds `synthesize_core_thesis` so the thesis
+    can rank signals across ALL modules (moat, competition, macro, Wall
+    Street, forecast, price catalyst, insiders, segments) and cite the exact
+    numbers the user sees in each section.
+
+    Defensive by construction: any module that errors or is empty is simply
+    omitted — a partial digest is fine, a crash is not.
+    """
+    lines: List[str] = []
+
+    # 1. Recent Price Movement (+ catalyst)
+    try:
+        pa = report.get("price_action") or {}
+        chg = _f_num(pa.get("change_pct"), "{:+.1f}")
+        if chg is not None:
+            seg = f"PRICE MOVEMENT: {chg}% over {pa.get('window_label', 'recent period')}"
+            tier = pa.get("tier")
+            z = _f_num(pa.get("z_score"), "{:.1f}")
+            if tier:
+                seg += f"; {tier}" + (f" (z={z})" if z is not None else "")
+            ev = pa.get("event") if isinstance(pa.get("event"), dict) else None
+            tag = (ev or {}).get("tag") or pa.get("tag")
+            if tag and str(tag).strip().lower() not in ("typical", "normal", ""):
+                seg += f"; catalyst: {tag}"
+            lines.append(seg)
+    except Exception:
+        pass
+
+    # 2. Revenue Engine (segments)
+    try:
+        reng = report.get("revenue_engine") or {}
+        unit = reng.get("revenue_unit", "")
+        parts: List[str] = []
+        for s in (reng.get("segments") or [])[:3]:
+            if not isinstance(s, dict):
+                continue
+            cur, prev = s.get("current_revenue"), s.get("previous_revenue")
+            yoy = None
+            try:
+                if prev:
+                    yoy = (float(cur) - float(prev)) / abs(float(prev)) * 100.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                yoy = None
+            curs = _f_num(cur, "{:,.0f}")
+            piece = f"{s.get('name', '?')} {curs}{unit}" if curs else f"{s.get('name', '?')}"
+            yoys = _f_num(yoy, "{:+.0f}")
+            if yoys is not None:
+                piece += f" ({yoys}% YoY)"
+            parts.append(piece)
+        if parts:
+            lines.append("REVENUE ENGINE: " + "; ".join(parts))
+    except Exception:
+        pass
+
+    # 3. Fundamentals & Growth (cards + overall) — sector-relative framing
+    #    lives in EVIDENCE; here we give the card values + the headline rollup.
+    try:
+        card_strs: List[str] = []
+        for c in (report.get("fundamental_metrics") or []):
+            if not isinstance(c, dict):
+                continue
+            stars = c.get("star_rating")
+            mstr = ", ".join(
+                f"{m.get('label', '?')} {m.get('value', '?')}"
+                for m in (c.get("metrics") or []) if isinstance(m, dict)
+            )
+            star_s = f" {stars}/5" if isinstance(stars, int) else ""
+            card_strs.append(f"{c.get('title', '?')}{star_s} [{mstr}]")
+        if card_strs:
+            lines.append("FUNDAMENTALS & GROWTH: " + " | ".join(card_strs))
+        oa = report.get("overall_assessment") or {}
+        avg = _f_num(oa.get("average_rating"), "{:.1f}")
+        if avg is not None:
+            lines.append(
+                f"  Overall fundamentals: {avg}/5 avg "
+                f"({oa.get('strong_count', 0)} strong / {oa.get('weak_count', 0)} weak metrics)"
+            )
+    except Exception:
+        pass
+
+    # 4. Future Forecast
+    try:
+        rf = report.get("revenue_forecast") or {}
+        bits: List[str] = []
+        cagr = _f_num(rf.get("cagr"), "{:+.1f}")
+        eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
+        if cagr is not None:
+            bits.append(f"revenue CAGR {cagr}%")
+        if eps is not None:
+            bits.append(f"EPS CAGR {eps}%")
+        if rf.get("management_guidance"):
+            bits.append(f"guidance {rf['management_guidance']}")
+        if bits:
+            lines.append("FUTURE FORECAST: " + ", ".join(bits))
+    except Exception:
+        pass
+
+    # 5. Insider & Management
+    try:
+        idata = report.get("insider_data") or {}
+        sent = idata.get("sentiment")
+        tx_strs = [
+            f"{t.get('type', '?')} {t.get('count', '?')} ({t.get('value', '?')})"
+            for t in (idata.get("transactions") or []) if isinstance(t, dict)
+        ]
+        if sent or tx_strs:
+            seg = f"INSIDER ({idata.get('timeframe', 'recent')}): {sent or 'n/a'}"
+            if tx_strs:
+                seg += " — " + ", ".join(tx_strs)
+            lines.append(seg)
+    except Exception:
+        pass
+
+    # 6. Industry & Competitive Moat
+    try:
+        moat = report.get("moat_competition") or {}
+        dim_strs: List[str] = []
+        for d in (moat.get("dimensions") or []):
+            if not isinstance(d, dict):
+                continue
+            sc = _f_num(d.get("score"), "{:.1f}")
+            if sc is None:
+                continue
+            ps = _f_num(d.get("peer_score"), "{:.1f}")
+            piece = f"{d.get('name', '?')} {sc}"
+            if ps is not None:
+                piece += f" (peer {ps})"
+            dim_strs.append(piece)
+        if dim_strs:
+            lines.append("MOAT (0-10, focal vs peer): " + ", ".join(dim_strs))
+        md = moat.get("market_dynamics") or {}
+        if isinstance(md, dict):
+            mbits: List[str] = []
+            if md.get("concentration"):
+                mbits.append(str(md["concentration"]))
+            if md.get("lifecycle_phase"):
+                mbits.append(str(md["lifecycle_phase"]).replace("_", " "))
+            c5 = _f_num(md.get("cagr_5yr"), "{:+.1f}")
+            if c5 is not None:
+                mbits.append(f"industry CAGR {c5}%")
+            if mbits:
+                lines.append("  Market structure: " + ", ".join(mbits))
+        comp_strs: List[str] = []
+        for cp in (moat.get("competitors") or [])[:3]:
+            if not isinstance(cp, dict):
+                continue
+            piece = cp.get("name") or cp.get("ticker") or "?"
+            cs = _f_num(cp.get("competitive_score"), "{:.1f}")
+            if cs is not None:
+                piece += f" {cs}/10"
+            if cp.get("threat_level"):
+                piece += f" {cp['threat_level']} threat"
+            comp_strs.append(piece)
+        if comp_strs:
+            lines.append("  Competitors: " + ", ".join(comp_strs))
+    except Exception:
+        pass
+
+    # 7. Macro & Geopolitical — only surface when MATERIAL (High or above).
+    #    Low/elevated macro is background noise, never a thesis-driving point.
+    try:
+        macro = report.get("macro_data") or {}
+        threat = str(macro.get("overall_threat_level") or "").strip().lower()
+        if threat in _MATERIAL_MACRO_THREATS:
+            rfs = [r for r in (macro.get("risk_factors") or []) if isinstance(r, dict)]
+            # Rank by severity first (the high+ factors are what matter),
+            # then by impact as a tiebreaker.
+            rfs.sort(
+                key=lambda r: (
+                    _MACRO_SEVERITY_RANK.get(str(r.get("severity") or "").lower(), 0),
+                    r.get("impact") or 0.0,
+                ),
+                reverse=True,
+            )
+            top_rf = rfs[:2]
+            seg = f"MACRO threat: {threat}"
+            if top_rf:
+                seg += " — " + ", ".join(
+                    f"{r.get('title', '?')} ({r.get('severity', '?')})" for r in top_rf
+                )
+            lines.append(seg)
+    except Exception:
+        pass
+
+    # 8. Wall Street Consensus
+    try:
+        ws = report.get("wall_street_consensus") or {}
+        bits = []
+        if ws.get("rating"):
+            bits.append(f"consensus {str(ws['rating']).replace('_', ' ')}")
+        cur, tgt = ws.get("current_price"), ws.get("target_price")
+        upside = None
+        try:
+            if cur and tgt:
+                upside = (float(tgt) - float(cur)) / float(cur) * 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            upside = None
+        ups, tgts = _f_num(upside, "{:+.0f}"), _f_num(tgt, "{:.0f}")
+        if ups is not None and tgts is not None:
+            bits.append(f"target ${tgts} ({ups}% vs current)")
+        if ws.get("valuation_status"):
+            bits.append(str(ws["valuation_status"]))
+        up, down = ws.get("momentum_upgrades"), ws.get("momentum_downgrades")
+        if isinstance(up, int) and isinstance(down, int) and (up or down):
+            bits.append(f"momentum {up} upgrades / {down} downgrades (12mo)")
+        if bits:
+            lines.append("WALL STREET: " + ", ".join(bits))
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def build_thesis_synthesis_prompt(
+    persona: PersonaConfig,
+    company_name: str,
+    ticker: str,
+    evidence: str,
+    digest: str,
+) -> str:
+    """Prompt that selects the few MOST IMPORTANT bull/bear points across
+    every Deep Dive module — ranked by decision-impact, grounded in the
+    data, diversified so the thesis isn't four fundamental ratios."""
+    return f"""You are assembling the INVESTMENT THESIS — the Bull Case and Bear Case — for {company_name} ({ticker}) as {persona.display_name}.
+
+Two blocks of FINAL, verified data are below. EVIDENCE carries the fundamentals and sector context; MODULE DIGEST carries the headline verdict of every other Deep Dive module (price movement & catalyst, revenue segments, forward forecast & guidance, insider activity, competitive moat, competitors, macro threat, Wall Street consensus).
+
+EVIDENCE (fundamentals, sector, analyst, insider, segments — verified):
+{evidence}
+
+MODULE DIGEST (final verdicts the user sees in each Deep Dive section — verified):
+{digest}
+
+PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
+
+YOUR JOB — think hard, then surface ONLY the most important points:
+Pick the 2-4 STRONGEST reasons to OWN this stock (bull_case) and the 2-4 STRONGEST reasons to AVOID/worry about it (bear_case). Imagine a portfolio manager with 30 seconds: what actually moves the buy/hold/sell decision?
+
+SELECTION RULES (strict):
+- Rank EVERY candidate signal across BOTH blocks by decision-impact = magnitude × how far it deviates from sector / peers / its own history × how much it changes the thesis. Keep only the top few. Discard the merely-fine.
+- 2-4 bull + 2-4 bear. Use FEWER when only two points truly matter — do NOT pad to four. Two razor-sharp points beat four mild ones. Bull and bear counts can differ.
+- DIVERSIFY across modules — take at most ~2 points from any single module. A bull_case made of four valuation/margin ratios is a FAILURE: when the real signal is a wide moat, a price catalyst, raised guidance, a critical macro threat, hostile insider selling, or a strong Wall Street target, that is what belongs here. A quiet/neutral module contributes nothing — skip it.
+- Each point ≤22 words, plain English, no hedging, no clichés. Lead with the number/verdict.
+- GROUNDING — STRICT: every number or named verdict you cite MUST appear verbatim in the EVIDENCE or MODULE DIGEST above (e.g. 'Switching Costs moat 8.5 vs peer 7.0', 'analyst target +18%', 'Extreme -12% move on guidance cut', 'Critical macro threat', '70.51% gross margin', '4.21 D/E'). NEVER invent or recompute a number. A generic point with no concrete number/verdict is NOT acceptable.
+- Never name yourself, the underlying model, or any AI provider.
+
+Return ONLY valid JSON (no markdown fences, no commentary):
+
+{{
+  "bull_case": ["<point 1>", "<point 2>"],
+  "bear_case": ["<point 1>", "<point 2>"]
+}}"""
+
+
+def _clean_thesis_points(raw: Any) -> List[str]:
+    """Coerce a model-returned list into clean, capped bullet strings.
+    Caps at 4 (matches `_sanitize_thesis` in the collector)."""
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        cleaned = _post_process(item)  # strips quotes / markdown / stray labels
+        if cleaned:
+            out.append(cleaned)
+    return out[:4]
+
+
+async def synthesize_core_thesis(
+    report: Dict[str, Any],
+    persona: PersonaConfig,
+    gemini: GeminiClient,
+    evidence: str,
+) -> None:
+    """Rewrite `report['core_thesis']` with the 2-4 strongest bull/bear
+    points drawn across ALL Deep Dive modules. Mutates in place.
+
+    Only overwrites when synthesis yields a COMPLETE thesis (both sides
+    non-empty); otherwise the Stage A thesis already on `report` stays as
+    the fallback. Never raises — a failed synthesis just leaves the
+    existing thesis untouched.
+    """
+    ticker = report.get("symbol", "?")
+    try:
+        digest = build_module_digest(report)
+        if not digest.strip():
+            return  # nothing extra to synthesize from; keep Stage A thesis
+
+        company_name = report.get("company_name") or ticker
+        prompt = build_thesis_synthesis_prompt(
+            persona, company_name, ticker, evidence, digest,
+        )
+        result = await gemini.generate_json(
+            prompt=prompt,
+            system_instruction=persona.system_prompt,
+        )
+        parsed = parse_stage_a_response(result.get("text") or "")
+        if not isinstance(parsed, dict):
+            logger.warning(
+                f"Thesis synthesis returned unparseable JSON for {ticker}; "
+                f"keeping Stage A thesis."
+            )
+            return
+
+        bull = _clean_thesis_points(parsed.get("bull_case"))
+        bear = _clean_thesis_points(parsed.get("bear_case"))
+        if not bull or not bear:
+            # An incomplete thesis is worse than the Stage A one — keep it.
+            logger.info(
+                f"Thesis synthesis for {ticker} returned an incomplete thesis "
+                f"({len(bull)} bull / {len(bear)} bear); keeping Stage A thesis."
+            )
+            return
+
+        report["core_thesis"] = {"bull_case": bull, "bear_case": bear}
+        logger.info(
+            f"Core thesis synthesized for {ticker}: "
+            f"{len(bull)} bull / {len(bear)} bear (cross-module)."
+        )
+    except Exception as e:
+        logger.warning(
+            f"Thesis synthesis failed for {ticker}: "
+            f"{type(e).__name__}: {e}"
+        )
+        # keep Stage A thesis

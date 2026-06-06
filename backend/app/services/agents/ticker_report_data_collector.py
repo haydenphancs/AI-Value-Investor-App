@@ -4419,7 +4419,7 @@ def _build_macro_risk_factors_from_indicators(
         change_1m = vix.get("change_1m_pct")
         if sev_int >= 2:
             out.append({
-                "category": "regulation",  # iOS enum slot for "market regime"
+                "category": "volatility",  # market-regime / equity-vol front
                 "title": "Risk-Off Volatility Regime",
                 "impact": round(impact, 2),
                 "trend": (
@@ -4482,6 +4482,8 @@ def _build_macro_risk_factors_from_indicators(
                     "_risk_group": "fx",
                 })
 
+    for f in out:
+        f["_source"] = "deterministic"
     return out
 
 
@@ -4765,6 +4767,8 @@ def _build_macro_risk_factors_from_fred(
                 "_risk_group": "credit",
             })
 
+    for f in out:
+        f["_source"] = "deterministic"
     return out
 
 
@@ -5649,7 +5653,9 @@ def _sanitize_risk_factor(rf: Dict[str, Any]) -> Dict[str, Any]:
         impact = max(0.0, min(1.0, float(impact)))
     except (TypeError, ValueError):
         impact = 0.5
-    category = rf.get("category") or "regulation"
+    # Normalize to the snake_case categories iOS maps (e.g. "Interest Rates"
+    # → "interest_rates"); unknowns fall back to iOS's "regulation" default.
+    category = (rf.get("category") or "regulation").strip().lower().replace(" ", "_")
     title = rf.get("title") or "Unknown Risk"
     risk_group = rf.get("_risk_group") or _infer_risk_group(category, title)
     return {
@@ -5660,6 +5666,9 @@ def _sanitize_risk_factor(rf: Dict[str, Any]) -> Dict[str, Any]:
         "trend": rf.get("trend") or "stable",
         "severity": rf.get("severity") or "elevated",
         "_risk_group": risk_group,
+        # Provenance so _compute_macro_threat caps AI severities and excludes
+        # them from the deterministic breadth gate.
+        "_source": "ai",
     }
 
 
@@ -5673,6 +5682,20 @@ def _compute_macro_threat(
     tail    = max(weighted severities of emitted factors)
     weighted_i = severity_int_i × β(sector, risk_group_i), capped to 5.0
 
+    Two guards keep the top tiers honest, so "severe"/"critical" means a
+    real, sourced, multi-front regime — not one extreme print or an AI hunch:
+
+      1. CAP AI — AI-emitted factors (`_source == "ai"`) are capped at
+         "high" (3) before weighting, so only sourced numeric FRED/FMP
+         data can push the composite into the severe/critical band. (The
+         "tier is computed deterministically, never delegated to Gemini"
+         design promise — now actually enforced.)
+      2. REQUIRE BREADTH — "severe"/"critical" require ≥2 distinct
+         deterministic high-or-worse fronts (distinct `category` among
+         non-AI factors with severity ≥ "high"). A lone extreme indicator
+         (e.g. a deep yield-curve inversion) caps at "high"; correlated
+         rate metrics collapse to one front.
+
     Empty risk-factor set → ("low", 1.0). No fabrication.
 
     Returns (tier_string, composite_score). Tier mapping is in
@@ -5682,21 +5705,39 @@ def _compute_macro_threat(
     if not risk_factors:
         return "low", 1.0
 
+    _HIGH = _SEVERITY_INT["high"]
     weighted: List[float] = []
+    deterministic_high_fronts = set()
     for rf in risk_factors:
         sev_str = (rf.get("severity") or "low").lower()
         sev_int = _SEVERITY_INT.get(sev_str, 1)
+        is_ai = rf.get("_source") == "ai"
+        if is_ai:
+            # Gemini severities can't drive the deterministic tier.
+            sev_int = min(sev_int, _HIGH)
         risk_group = rf.get("_risk_group") or _infer_risk_group(
             rf.get("category") or "", rf.get("title") or "",
         )
         beta = _beta(sector, risk_group)
         w = min(5.0, max(0.5, sev_int * beta))
         weighted.append(w)
+        # A "front" = a distinct macro category flashing high+ from real
+        # (non-AI) data. Multiple rate metrics collapse to one front.
+        if not is_ai and sev_int >= _HIGH:
+            deterministic_high_fronts.add(rf.get("category") or risk_group)
 
     breadth = sum(weighted) / len(weighted)
     tail = max(weighted)
     composite = 0.5 * breadth + 0.5 * tail
-    return _composite_to_tier(composite), round(composite, 3)
+    tier = _composite_to_tier(composite)
+
+    # Breadth gate: severe/critical require ≥2 sourced high fronts. A lone
+    # extreme factor (or an AI-inflated tail) is held at "high".
+    if tier in ("severe", "critical") and len(deterministic_high_fronts) < 2:
+        tier = "high"
+        composite = min(composite, 3.5)
+
+    return tier, round(composite, 3)
 
 
 def _strip_risk_group(rf: Dict[str, Any]) -> Dict[str, Any]:

@@ -47,6 +47,7 @@ from app.services.agents.narrative_prompts import (
     parse_stage_a_response,
     run_narrative_jobs,
     stage_a_fallback,
+    synthesize_core_thesis,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
@@ -153,12 +154,18 @@ class ResearchAgent:
         # ── Phase 4: assemble (real-data + Stage A merge) ────────────
         report = self.collector.assemble_report(out, shell)
 
-        # ── Phase 5: Stage B (parallel narratives, mutates report) ──
+        # ── Phase 5: Stage B narratives + cross-module thesis synthesis ──
+        # Both mutate `report` in place on disjoint keys (Stage B fills
+        # per-field prose; synthesize_core_thesis rewrites core_thesis from
+        # every FINAL module verdict), so they run concurrently.
         if progress_cb:
             await progress_cb(85, "Writing narrative insights...")
 
         jobs = build_narrative_jobs(self.persona, evidence, report)
-        await run_narrative_jobs(jobs, self.gemini, self.persona)
+        await asyncio.gather(
+            run_narrative_jobs(jobs, self.gemini, self.persona),
+            synthesize_core_thesis(report, self.persona, self.gemini, evidence),
+        )
 
         if progress_cb:
             await progress_cb(95, "Validating and finalizing...")

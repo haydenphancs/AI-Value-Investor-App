@@ -275,12 +275,16 @@ def test_sector_beta_makes_a_difference():
 # ── F. Risk-group inference + AI factor merge ────────────────────────
 
 
-def test_ai_factors_route_through_sector_beta_via_inferred_group():
-    """An AI-emitted factor without an explicit `_risk_group` should
-    still get sector-β mediated via the category/title inference
-    helper. A "geopolitical" factor for Tech has β=1.3 — so a HIGH
-    geopolitical signal weighted by Tech β should land above the same
-    signal weighted by Utilities (β default = 1.0).
+def test_ai_factor_alone_caps_at_high_not_severe():
+    """A lone AI-emitted factor can NEVER drive the tier to severe/critical.
+    Gemini severities are capped at "high", and severe/critical require ≥2
+    sourced (non-AI) high fronts — so a single high geopolitical signal lands
+    "high" for BOTH Tech and Utilities. Sector β still nudges the composite
+    (Tech geopolitical β=1.3 > Utilities 1.0), but the breadth gate holds the
+    tier at "high".
+
+    (Before the breadth gate this lone factor read "severe" for Tech — that
+    was the over-eager behavior this calibration deliberately removes.)
     """
     from app.services.agents.ticker_report_data_collector import (
         _sanitize_risk_factor,
@@ -296,11 +300,51 @@ def test_ai_factors_route_through_sector_beta_via_inferred_group():
     rfs = [_sanitize_risk_factor(ai_factor)]
     tech_tier, tech_comp = _compute_macro_threat(rfs, "Technology")
     util_tier, util_comp = _compute_macro_threat(rfs, "Utilities")
-    assert tech_comp > util_comp, (
-        f"Tech ({tech_comp}) should exceed Utilities ({util_comp}) "
-        "because Tech × geopolitical β = 1.3 vs Utilities default 1.0"
+    assert tech_tier == "high", f"lone AI factor must cap at high, got {tech_tier}"
+    assert util_tier == "high", f"lone AI factor must cap at high, got {util_tier}"
+    # β still routes — Tech weights geopolitical higher — even after the cap.
+    assert tech_comp >= util_comp, (
+        f"Tech ({tech_comp}) should be ≥ Utilities ({util_comp}) via β"
     )
-    # Single HIGH (3) signal × 1.0 β → composite = 3.0 → HIGH tier
-    assert util_tier == "high"
-    # Single HIGH × 1.3 β = 3.9 → composite = 3.9 → SEVERE tier
-    assert tech_tier == "severe"
+
+
+def test_lone_extreme_deterministic_factor_caps_at_high():
+    """One sourced indicator in its top band is, by itself, a single front
+    — it caps at "high" no matter how extreme. A second distinct sourced
+    front frees the tier to reach severe/critical. This is the core of the
+    "critical = real multi-front crisis" calibration."""
+    # Lone CRITICAL credit factor (HY OAS 9.5) → one front → capped at high.
+    lone = _build_macro_risk_factors_from_fred([_fred("BAMLH0A0HYM2", latest=9.5)])
+    tier_lone, comp_lone = _compute_macro_threat(lone, "Technology")
+    assert tier_lone == "high", (
+        f"a lone extreme factor must cap at high, got {tier_lone} ({comp_lone})"
+    )
+    # Two distinct sourced fronts (credit + inverted curve) → severe/critical.
+    two_front = _build_macro_risk_factors_from_fred([
+        _fred("BAMLH0A0HYM2", latest=9.5),    # CRIT credit
+        _fred("T10Y2Y", latest=-1.0),          # CRIT inverted curve (reverse band)
+    ])
+    tier_two, comp_two = _compute_macro_threat(two_front, "Technology")
+    assert tier_two in ("severe", "critical"), (
+        f"two sourced fronts should reach severe+, got {tier_two} ({comp_two})"
+    )
+
+
+def test_ai_factor_cannot_supply_a_breadth_front():
+    """AI factors are capped at "high" AND excluded from the breadth count,
+    so an AI "critical" factor paired with ONE sourced high front still only
+    reaches "high" — severe/critical needs two SOURCED fronts."""
+    from app.services.agents.ticker_report_data_collector import (
+        _sanitize_risk_factor,
+    )
+    ai_crit = _sanitize_risk_factor({
+        "category": "geopolitical", "title": "War", "impact": 1.0,
+        "description": "x", "trend": "worsening", "severity": "critical",
+    })
+    one_det_front = _build_macro_risk_factors_from_fred([
+        _fred("BAMLH0A0HYM2", latest=9.5),    # CRIT credit — 1 sourced front
+    ])
+    tier, comp = _compute_macro_threat(one_det_front + [ai_crit], "Technology")
+    assert tier == "high", (
+        f"AI factor must not unlock severe with one sourced front, got {tier} ({comp})"
+    )

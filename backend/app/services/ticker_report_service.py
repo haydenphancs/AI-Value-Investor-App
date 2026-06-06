@@ -41,6 +41,7 @@ from app.services.agents.narrative_prompts import (
     parse_stage_a_response,
     run_narrative_jobs,
     stage_a_fallback,
+    synthesize_core_thesis,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
@@ -160,9 +161,16 @@ LENGTH: 2-4 sentences, total under 90 words."""
         # 4. Merge deterministic real-data with Stage A shell
         report = self.collector.assemble_report(out, shell)
 
-        # 5. Stage B: parallel narrative writing (mutates `report` in place)
+        # 5. Stage B narratives + cross-module thesis synthesis, in parallel.
+        #    Stage B fills per-field prose; synthesize_core_thesis rewrites
+        #    core_thesis from every FINAL module verdict (not just the
+        #    fundamentals Stage A saw). They mutate disjoint keys of
+        #    `report`, so concurrent execution is safe.
         jobs = build_narrative_jobs(persona, evidence, report)
-        await run_narrative_jobs(jobs, self.gemini, persona)
+        await asyncio.gather(
+            run_narrative_jobs(jobs, self.gemini, persona),
+            synthesize_core_thesis(report, persona, self.gemini, evidence),
+        )
 
         # 6. Persist to cache (best-effort; failure logged but doesn't raise)
         await upsert_cached_report(ticker, persona_key, report)

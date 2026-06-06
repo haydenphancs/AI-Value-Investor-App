@@ -928,6 +928,9 @@ extension TickerReportAPIResponse {
         case "supply_chain": return .supplyChain
         case "tariffs": return .tariffs
         case "energy": return .energy
+        case "recession": return .recession
+        case "credit": return .credit
+        case "volatility", "market_regime": return .volatility
         default: return .regulation
         }
     }

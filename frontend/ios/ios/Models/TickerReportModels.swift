@@ -934,6 +934,9 @@ enum MacroRiskCategory: String {
     case supplyChain = "Supply Chain"
     case tariffs = "Trade & Tariffs"
     case energy = "Energy"
+    case recession = "Recession"
+    case credit = "Credit"
+    case volatility = "Market Volatility"
 
     var iconName: String {
         switch self {
@@ -945,6 +948,9 @@ enum MacroRiskCategory: String {
         case .supplyChain: return "shippingbox"
         case .tariffs: return "arrow.left.arrow.right"
         case .energy: return "bolt.fill"
+        case .recession: return "chart.line.downtrend.xyaxis"
+        case .credit: return "creditcard.trianglebadge.exclamationmark"
+        case .volatility: return "waveform.path.ecg"
         }
     }
 }

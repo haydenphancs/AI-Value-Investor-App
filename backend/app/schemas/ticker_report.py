@@ -420,8 +420,11 @@ class WallStreetConsensusResponse(BaseModel):
 
 class CriticalFactorResponse(BaseModel):
     title: str
-    description: str
-    severity: str  # "high" | "medium" | "low"
+    description: str  # short SIGNAL — what's notable + why it matters
+    severity: str  # "high" | "medium" | "low" — priority to watch
+    # Forward-looking WATCH action: what to monitor next (Stage B). None on
+    # the fallback path / older cached reports — iOS hides the Watch line.
+    watch: Optional[str] = None
 
 
 # ── Full Ticker Report ────────────────────────────────────────────────────────

@@ -92,6 +92,33 @@ def _length_brief(sentences: int, word_cap: int) -> str:
     return f"LENGTH: Write {s}, total under {word_cap} words."
 
 
+# ── Cross-section coherence + grounding (shared across insight prompts) ─
+
+# Canonical anti-fabrication rule for any insight that cites values rendered in
+# its own section (overall_assessment, wall_street, …). Keeps the "cite what the
+# user sees, never invent or recompute" discipline worded identically everywhere.
+def _displayed_values_grounding(block_name: str) -> str:
+    return (
+        f"Grounding rule — STRICT: any number you cite MUST come verbatim from the "
+        f"{block_name} below. NEVER invent or recompute a value shown there; if a "
+        f"value reads '—' / 'N/A' / 'no coverage', pick a different anchor rather "
+        f"than fabricating one."
+    )
+
+
+def _related_context_block(topic: str, context: str) -> str:
+    """Wrap a cross-section digest slice in a clearly-labeled, anchored block so
+    the insight can stay consistent with related sections WITHOUT drifting onto
+    them. Returns "" when there's no context (the insight then stays siloed)."""
+    if not context.strip():
+        return ""
+    return (
+        f"\nRELATED CONTEXT (for coherence only — your insight is still about "
+        f"{topic}; use these numbers only to stay consistent with the rest of the "
+        f"report, do NOT pivot to them as your subject):\n{context}\n"
+    )
+
+
 # ── Output post-processing ────────────────────────────────────────────
 
 
@@ -210,10 +237,18 @@ def _overall_assessment_text_prompt(
     avg = shell.get("overall_assessment", {}).get("average_rating", 0.0)
     strong = shell.get("overall_assessment", {}).get("strong_count", 0)
     weak = shell.get("overall_assessment", {}).get("weak_count", 0)
+    # Cross-section coherence: the Fundamentals & Growth verdict should agree with
+    # the forward trajectory (Future Forecast) and the revenue mix (Revenue
+    # Engine) — e.g. don't call a business "stalling" when the forecast shows
+    # strong forward growth. Surgical: only these two related modules.
+    related = _related_context_block(
+        "the Fundamentals & Growth quality verdict",
+        cross_section_context(shell, ["forecast", "revenue_engine"]),
+    )
     return f"""Write the overall quality read for the Fundamentals & Growth section — the whole-picture verdict across all four cards.
 
 CONTEXT: Average rating {avg}/5 across four cards ({strong} strong, {weak} weak).
-
+{related}
 EVIDENCE:
 {evidence}
 
@@ -223,7 +258,7 @@ LENGTH: Write 3-4 sentences, total under 70 words.
 Cover the whole picture of this section:
 - Open with the gestalt verdict — is this a quality compounder, a fixer-upper, a value trap, or something else? Anchor it to one concrete metric.
 - Then name the standout STRENGTH and the main WEAKNESS across the four cards (Profitability, Growth, Valuation, Financial Health), each tied to a specific card metric.
-- Close with the bottom-line takeaway for an investor weighing this stock.
+- Close with the bottom-line takeaway for an investor weighing this stock — and keep it consistent with the forward trajectory and revenue mix in the RELATED CONTEXT (don't call it stalling if the forecast shows strong forward growth, or a runaway compounder if growth is decelerating). Stay anchored to the fundamentals verdict; use the related context only to stay coherent, not as your subject.
 
 Grounding rules — STRICT:
 1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block in the evidence. NEVER invent or recompute a different value for a metric listed there.
@@ -391,27 +426,35 @@ def _price_action_narrative_prompt(
         if grounded_reason else ""
     )
 
-    # Macro context — VIX regime, fed stance, sector rotation, geopolitics.
-    # Already computed for the report's own macro_data section; reuse it
-    # here so the AI can attribute moves like "sector rotation" or "war"
-    # without us paying for a second LLM-grounded search call.
+    # Macro context — fed stance, sector rotation, geopolitics. Reuse the
+    # report's own DETERMINISTIC macro_data (threat level + risk factors, incl.
+    # web-grounded geopolitical events) so the AI can attribute moves like
+    # "sector rotation" or "war" without paying for a second grounded search.
+    # NOTE: we deliberately do NOT read macro_data["intelligence_brief"] — that
+    # is a Stage-B prose field written in PARALLEL with this one, so at build
+    # time it still holds the assemble-time placeholder ("Data unavailable for
+    # this ticker."). Surfacing it injected that junk sentence into this prompt.
+    # The threat level + risk_factors ARE populated at assemble time. Ungated on
+    # threat (unlike the thesis digest): an "elevated" war/tariff/Fed factor is a
+    # legitimate driver for a price move.
     macro = shell.get("macro_data") or {}
-    macro_brief = macro.get("intelligence_brief") or ""
+    threat = str(macro.get("overall_threat_level") or "low")
     risk_factors = macro.get("risk_factors") or []
-    macro_risks_str = ""
+    macro_block = ""
     if risk_factors:
-        top_risks = [
+        top_risks = "\n".join(
             f"  - {r.get('title')} ({r.get('category')}, "
             f"severity={r.get('severity')}, trend={r.get('trend')})"
             for r in risk_factors[:4]
-        ]
-        macro_risks_str = "\n" + "\n".join(top_risks)
-    macro_block = ""
-    if macro_brief or macro_risks_str:
+        )
         macro_block = (
-            f"\nMACRO / GEOPOLITICAL CONTEXT:\n"
-            f"  Brief: {macro_brief or 'n/a'}"
-            f"{macro_risks_str}\n"
+            f"\nMACRO / GEOPOLITICAL CONTEXT (deterministic — current):\n"
+            f"  Overall threat level: {threat}\n{top_risks}\n"
+        )
+    elif threat.lower() not in ("low", ""):
+        macro_block = (
+            f"\nMACRO / GEOPOLITICAL CONTEXT (deterministic — current):\n"
+            f"  Overall threat level: {threat}\n"
         )
 
     # Ground truth — direction / magnitude / window are computed
@@ -673,13 +716,20 @@ def _revenue_forecast_insight_prompt(
     quote_line = (
         f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"' if guidance_quote else ""
     )
+    # Cross-section coherence: the forward trajectory's WHY is sharpest when it
+    # can name the actual revenue driver — so hand it the Revenue Engine's
+    # per-segment YoY mix. Surgical: only this one related module.
+    related = _related_context_block(
+        "the forward revenue/EPS trajectory",
+        cross_section_context(shell, ["revenue_engine"]),
+    )
 
     return f"""Write the Future Forecast insight — explain WHY the forward revenue and earnings trajectory looks the way it does.
 
 PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
 MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)
 FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
-
+{related}
 EVIDENCE:
 {evidence}
 
@@ -687,7 +737,7 @@ EVIDENCE:
 LENGTH: Write 3-4 sentences, total under 70 words.
 
 Focus on the WHY, not just the numbers:
-- What is driving the projected growth (or the slowdown) — demand, mix shift, margin leverage, pricing, a maturing base, headwinds?
+- What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, tie the forward curve to it (e.g. "cloud, already +33% YoY, carries the forward curve"). Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
 - Whether growth is accelerating or decelerating across the forward years, and what that implies.
 - What the guidance stance ({guidance}) signals about management's own confidence.
 Cite ONE concrete projected number from the projections above to anchor the read. Do NOT just list the projections back."""
@@ -897,27 +947,111 @@ If there is genuinely nothing actionable to monitor, write the literal word: NUL
 def _wall_street_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
+    # Surface the EXACT values rendered in the Wall Street Consensus card so the
+    # insight reflects what the user sees — not a re-derivation from the dense
+    # evidence text. Mirrors the "cite displayed values" discipline used by the
+    # Overall Assessment insight. All numbers are computed Python-side (the model
+    # is bad at arithmetic); the prompt only synthesizes.
     ws = shell.get("wall_street_consensus") or {}
+
+    # ── Analyst Price Target (+ Python-computed analyst-target upside) ──
+    cur = ws.get("current_price")
+    tgt = ws.get("target_price")  # None when FMP returned no real consensus
+    if tgt:
+        try:
+            upside = (
+                (float(tgt) - float(cur)) / float(cur) * 100.0 if cur else None
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            upside = None
+        lo, hi = ws.get("low_target"), ws.get("high_target")
+        range_str = (
+            f", range ${float(lo):.0f}–${float(hi):.0f}"
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and lo and hi
+            else ""
+        )
+        upside_str = (
+            f" ({upside:+.0f}% vs ${float(cur):.0f} current)"
+            if upside is not None else ""
+        )
+        target_line = f"Analyst price target: ${float(tgt):.0f}{upside_str}{range_str}"
+    else:
+        target_line = "Analyst price target: no analyst coverage (no published consensus)"
+
+    # ── Consensus rating + Buy/Hold/Sell distribution ──────────────────
+    rating = str(ws.get("rating") or "").replace("_", " ") or "n/a"
+    dist_parts = []
+    for label, key in (
+        ("Strong Buy", "analyst_strong_buy"), ("Buy", "analyst_buy"),
+        ("Hold", "analyst_hold"), ("Sell", "analyst_sell"),
+        ("Strong Sell", "analyst_strong_sell"),
+    ):
+        n = ws.get(key)
+        if isinstance(n, int) and n > 0:
+            dist_parts.append(f"{n} {label}")
+    dist_str = (" — " + ", ".join(dist_parts)) if dist_parts else ""
+    rating_line = f"Consensus rating: {rating}{dist_str}"
+
+    # ── DCF valuation lens — DISTINCT from the analyst-target upside ────
+    val_status = str(ws.get("valuation_status") or "").replace("_", " ")
+    disc = ws.get("discount_percent")
+    if val_status:
+        disc_str = (
+            f", {disc:.0f}% below DCF fair value"
+            if isinstance(disc, (int, float)) and disc else ""
+        )
+        valuation_line = (
+            f"DCF valuation (model-implied, distinct from the analyst target): "
+            f"{val_status}{disc_str}"
+        )
+    else:
+        valuation_line = "DCF valuation: n/a"
+
+    # ── Institutions (13F net informative flow) ────────────────────────
+    smart = ws.get("hedge_fund_smart_money") or {}
+    summ = (smart.get("summary") if isinstance(smart, dict) else None) or {}
+    net = summ.get("total_net_flow")
+    if isinstance(net, (int, float)) and net:
+        direction = "net buying" if summ.get("is_positive") else "net selling"
+        period = summ.get("period_description") or "recent quarters"
+        institutions_line = (
+            f"Institutions (13F, {period}): {direction}, "
+            f"{net:+.1f}M shares net informative flow"
+        )
+    else:
+        institutions_line = "Institutions (13F): no institutional flow data"
+
+    # ── Analyst rating momentum (last 12 months) ───────────────────────
     up, maint, down = (
         ws.get("momentum_upgrades"),
         ws.get("momentum_maintains"),
         ws.get("momentum_downgrades"),
     )
-    momentum_str = (
-        f"{up} upgrades / {maint} maintains / {down} downgrades (last 12mo)"
-        if up is not None else "no recent rating changes"
+    momentum_line = (
+        f"Analyst momentum (12mo): {up} upgrades / {maint} maintains / {down} downgrades"
+        if up is not None else "Analyst momentum: no recent rating changes"
     )
-    return f"""Write the Wall Street Consensus insight — the big-picture read that ties together analyst price targets, institutional (13F) positioning, and analyst rating momentum.
 
-EVIDENCE:
+    return f"""Write the Wall Street Consensus insight — the big-picture read that ties together the analyst price target, institutional (13F) positioning, and analyst rating momentum.
+
+DISPLAYED VALUES (exactly what the user sees in the Wall Street Consensus card):
+- {target_line}
+- {rating_line}
+- {valuation_line}
+- {institutions_line}
+- {momentum_line}
+
+EVIDENCE (for catalyst context only — financings, acquisitions, guidance changes):
 {evidence}
-
-ANALYST MOMENTUM (last 12 months): {momentum_str}
 
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Synthesize all THREE signals: where do the price target, the institutions, and the rating trend AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number (a target, an upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Do NOT just list the three — give the verdict that ties them together.
+Synthesize the THREE signals — price target, institutions (13F), and rating momentum: where do they AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number from the DISPLAYED VALUES (the target, the upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Do NOT just list the three — give the verdict that ties them together.
+
+{_displayed_values_grounding("DISPLAYED VALUES block")}
+The analyst-target upside and the DCF valuation are DIFFERENT lenses — do not merge them; if they disagree, that divergence IS worth calling out.
+If analyst coverage is absent (target shows "no analyst coverage"), do not fabricate a target — pivot the read to institutions + momentum.
 
 If the data doesn't show a clear pattern, write the literal word: NULL"""
 
@@ -1372,218 +1506,279 @@ _MACRO_SEVERITY_RANK = {
 }
 
 
+# Per-module digest formatters. Each returns the same line(s) it used to
+# append inside `build_module_digest`, so the digest is byte-identical. They
+# are also reused individually by `cross_section_context` to hand ONE section's
+# insight a surgical slice of a RELATED module's final verdict — that way the
+# per-section insight and the cross-module thesis cite the exact same numbers.
+# The per-module try/except now lives in the two callers (build_module_digest /
+# cross_section_context), so a single broken module never sinks the rest.
+
+
+def _digest_price_action(report: Dict[str, Any]) -> List[str]:
+    """Recent Price Movement (+ catalyst)."""
+    out: List[str] = []
+    pa = report.get("price_action") or {}
+    chg = _f_num(pa.get("change_pct"), "{:+.1f}")
+    if chg is not None:
+        seg = f"PRICE MOVEMENT: {chg}% over {pa.get('window_label', 'recent period')}"
+        tier = pa.get("tier")
+        z = _f_num(pa.get("z_score"), "{:.1f}")
+        if tier:
+            seg += f"; {tier}" + (f" (z={z})" if z is not None else "")
+        ev = pa.get("event") if isinstance(pa.get("event"), dict) else None
+        tag = (ev or {}).get("tag") or pa.get("tag")
+        if tag and str(tag).strip().lower() not in ("typical", "normal", ""):
+            seg += f"; catalyst: {tag}"
+        out.append(seg)
+    return out
+
+
+def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
+    """Revenue Engine (segments)."""
+    out: List[str] = []
+    reng = report.get("revenue_engine") or {}
+    unit = reng.get("revenue_unit", "")
+    parts: List[str] = []
+    for s in (reng.get("segments") or [])[:3]:
+        if not isinstance(s, dict):
+            continue
+        cur, prev = s.get("current_revenue"), s.get("previous_revenue")
+        yoy = None
+        try:
+            if prev:
+                yoy = (float(cur) - float(prev)) / abs(float(prev)) * 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            yoy = None
+        curs = _f_num(cur, "{:,.0f}")
+        piece = f"{s.get('name', '?')} {curs}{unit}" if curs else f"{s.get('name', '?')}"
+        yoys = _f_num(yoy, "{:+.0f}")
+        if yoys is not None:
+            piece += f" ({yoys}% YoY)"
+        parts.append(piece)
+    if parts:
+        out.append("REVENUE ENGINE: " + "; ".join(parts))
+    return out
+
+
+def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
+    """Fundamentals & Growth (cards + overall) — sector-relative framing lives
+    in EVIDENCE; here we give the card values + the headline rollup."""
+    out: List[str] = []
+    card_strs: List[str] = []
+    for c in (report.get("fundamental_metrics") or []):
+        if not isinstance(c, dict):
+            continue
+        stars = c.get("star_rating")
+        mstr = ", ".join(
+            f"{m.get('label', '?')} {m.get('value', '?')}"
+            for m in (c.get("metrics") or []) if isinstance(m, dict)
+        )
+        star_s = f" {stars}/5" if isinstance(stars, int) else ""
+        card_strs.append(f"{c.get('title', '?')}{star_s} [{mstr}]")
+    if card_strs:
+        out.append("FUNDAMENTALS & GROWTH: " + " | ".join(card_strs))
+    oa = report.get("overall_assessment") or {}
+    avg = _f_num(oa.get("average_rating"), "{:.1f}")
+    if avg is not None:
+        out.append(
+            f"  Overall fundamentals: {avg}/5 avg "
+            f"({oa.get('strong_count', 0)} strong / {oa.get('weak_count', 0)} weak metrics)"
+        )
+    return out
+
+
+def _digest_forecast(report: Dict[str, Any]) -> List[str]:
+    """Future Forecast."""
+    out: List[str] = []
+    rf = report.get("revenue_forecast") or {}
+    bits: List[str] = []
+    cagr = _f_num(rf.get("cagr"), "{:+.1f}")
+    eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
+    if cagr is not None:
+        bits.append(f"revenue CAGR {cagr}%")
+    if eps is not None:
+        bits.append(f"EPS CAGR {eps}%")
+    if rf.get("management_guidance"):
+        bits.append(f"guidance {rf['management_guidance']}")
+    if bits:
+        out.append("FUTURE FORECAST: " + ", ".join(bits))
+    return out
+
+
+def _digest_insider(report: Dict[str, Any]) -> List[str]:
+    """Insider & Management."""
+    out: List[str] = []
+    idata = report.get("insider_data") or {}
+    sent = idata.get("sentiment")
+    tx_strs = [
+        f"{t.get('type', '?')} {t.get('count', '?')} ({t.get('value', '?')})"
+        for t in (idata.get("transactions") or []) if isinstance(t, dict)
+    ]
+    if sent or tx_strs:
+        seg = f"INSIDER ({idata.get('timeframe', 'recent')}): {sent or 'n/a'}"
+        if tx_strs:
+            seg += " — " + ", ".join(tx_strs)
+        out.append(seg)
+    return out
+
+
+def _digest_moat(report: Dict[str, Any]) -> List[str]:
+    """Industry & Competitive Moat."""
+    out: List[str] = []
+    moat = report.get("moat_competition") or {}
+    dim_strs: List[str] = []
+    for d in (moat.get("dimensions") or []):
+        if not isinstance(d, dict):
+            continue
+        sc = _f_num(d.get("score"), "{:.1f}")
+        if sc is None:
+            continue
+        ps = _f_num(d.get("peer_score"), "{:.1f}")
+        piece = f"{d.get('name', '?')} {sc}"
+        if ps is not None:
+            piece += f" (peer {ps})"
+        dim_strs.append(piece)
+    if dim_strs:
+        out.append("MOAT (0-10, focal vs peer): " + ", ".join(dim_strs))
+    md = moat.get("market_dynamics") or {}
+    if isinstance(md, dict):
+        mbits: List[str] = []
+        if md.get("concentration"):
+            mbits.append(str(md["concentration"]))
+        if md.get("lifecycle_phase"):
+            mbits.append(str(md["lifecycle_phase"]).replace("_", " "))
+        c5 = _f_num(md.get("cagr_5yr"), "{:+.1f}")
+        if c5 is not None:
+            mbits.append(f"industry CAGR {c5}%")
+        if mbits:
+            out.append("  Market structure: " + ", ".join(mbits))
+    comp_strs: List[str] = []
+    for cp in (moat.get("competitors") or [])[:3]:
+        if not isinstance(cp, dict):
+            continue
+        piece = cp.get("name") or cp.get("ticker") or "?"
+        cs = _f_num(cp.get("competitive_score"), "{:.1f}")
+        if cs is not None:
+            piece += f" {cs}/10"
+        if cp.get("threat_level"):
+            piece += f" {cp['threat_level']} threat"
+        comp_strs.append(piece)
+    if comp_strs:
+        out.append("  Competitors: " + ", ".join(comp_strs))
+    return out
+
+
+def _digest_macro(report: Dict[str, Any]) -> List[str]:
+    """Macro & Geopolitical — only surface when MATERIAL (High or above).
+    Low/elevated macro is background noise, never a thesis-driving point.
+    (Price Action wants the ungated risk factors, so it reads macro_data
+    directly rather than through this gated formatter.)"""
+    out: List[str] = []
+    macro = report.get("macro_data") or {}
+    threat = str(macro.get("overall_threat_level") or "").strip().lower()
+    if threat in _MATERIAL_MACRO_THREATS:
+        rfs = [r for r in (macro.get("risk_factors") or []) if isinstance(r, dict)]
+        # Rank by severity first (the high+ factors are what matter),
+        # then by impact as a tiebreaker.
+        rfs.sort(
+            key=lambda r: (
+                _MACRO_SEVERITY_RANK.get(str(r.get("severity") or "").lower(), 0),
+                r.get("impact") or 0.0,
+            ),
+            reverse=True,
+        )
+        top_rf = rfs[:2]
+        seg = f"MACRO threat: {threat}"
+        if top_rf:
+            seg += " — " + ", ".join(
+                f"{r.get('title', '?')} ({r.get('severity', '?')})" for r in top_rf
+            )
+        out.append(seg)
+    return out
+
+
+def _digest_wall_street(report: Dict[str, Any]) -> List[str]:
+    """Wall Street Consensus."""
+    out: List[str] = []
+    ws = report.get("wall_street_consensus") or {}
+    bits = []
+    if ws.get("rating"):
+        bits.append(f"consensus {str(ws['rating']).replace('_', ' ')}")
+    cur, tgt = ws.get("current_price"), ws.get("target_price")
+    upside = None
+    try:
+        if cur and tgt:
+            upside = (float(tgt) - float(cur)) / float(cur) * 100.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        upside = None
+    ups, tgts = _f_num(upside, "{:+.0f}"), _f_num(tgt, "{:.0f}")
+    if ups is not None and tgts is not None:
+        bits.append(f"target ${tgts} ({ups}% vs current)")
+    if ws.get("valuation_status"):
+        bits.append(str(ws["valuation_status"]))
+    up, down = ws.get("momentum_upgrades"), ws.get("momentum_downgrades")
+    if isinstance(up, int) and isinstance(down, int) and (up or down):
+        bits.append(f"momentum {up} upgrades / {down} downgrades (12mo)")
+    if bits:
+        out.append("WALL STREET: " + ", ".join(bits))
+    return out
+
+
+# Stable registry — keys are the module names the cross-section wiring uses.
+# `_DIGEST_ORDER` reproduces the original 1→8 top-to-bottom sequence so the
+# concatenated digest is byte-identical to the pre-refactor output.
+_DIGEST_FORMATTERS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
+    "price_action": _digest_price_action,
+    "revenue_engine": _digest_revenue_engine,
+    "fundamentals": _digest_fundamentals,
+    "forecast": _digest_forecast,
+    "insider": _digest_insider,
+    "moat": _digest_moat,
+    "macro": _digest_macro,
+    "wall_street": _digest_wall_street,
+}
+_DIGEST_ORDER: List[str] = list(_DIGEST_FORMATTERS)
+
+
 def build_module_digest(report: Dict[str, Any]) -> str:
     """Compact, number-rich digest of every FINAL Deep Dive module verdict
-    on the assembled `report`. Feeds `synthesize_core_thesis` so the thesis
-    can rank signals across ALL modules (moat, competition, macro, Wall
-    Street, forecast, price catalyst, insiders, segments) and cite the exact
-    numbers the user sees in each section.
+    on the assembled `report`. Feeds `synthesize_core_thesis` /
+    `synthesize_critical_factors` so the thesis can rank signals across ALL
+    modules (moat, competition, macro, Wall Street, forecast, price catalyst,
+    insiders, segments) and cite the exact numbers the user sees in each
+    section.
 
     Defensive by construction: any module that errors or is empty is simply
     omitted — a partial digest is fine, a crash is not.
     """
     lines: List[str] = []
-
-    # 1. Recent Price Movement (+ catalyst)
-    try:
-        pa = report.get("price_action") or {}
-        chg = _f_num(pa.get("change_pct"), "{:+.1f}")
-        if chg is not None:
-            seg = f"PRICE MOVEMENT: {chg}% over {pa.get('window_label', 'recent period')}"
-            tier = pa.get("tier")
-            z = _f_num(pa.get("z_score"), "{:.1f}")
-            if tier:
-                seg += f"; {tier}" + (f" (z={z})" if z is not None else "")
-            ev = pa.get("event") if isinstance(pa.get("event"), dict) else None
-            tag = (ev or {}).get("tag") or pa.get("tag")
-            if tag and str(tag).strip().lower() not in ("typical", "normal", ""):
-                seg += f"; catalyst: {tag}"
-            lines.append(seg)
-    except Exception:
-        pass
-
-    # 2. Revenue Engine (segments)
-    try:
-        reng = report.get("revenue_engine") or {}
-        unit = reng.get("revenue_unit", "")
-        parts: List[str] = []
-        for s in (reng.get("segments") or [])[:3]:
-            if not isinstance(s, dict):
-                continue
-            cur, prev = s.get("current_revenue"), s.get("previous_revenue")
-            yoy = None
-            try:
-                if prev:
-                    yoy = (float(cur) - float(prev)) / abs(float(prev)) * 100.0
-            except (TypeError, ValueError, ZeroDivisionError):
-                yoy = None
-            curs = _f_num(cur, "{:,.0f}")
-            piece = f"{s.get('name', '?')} {curs}{unit}" if curs else f"{s.get('name', '?')}"
-            yoys = _f_num(yoy, "{:+.0f}")
-            if yoys is not None:
-                piece += f" ({yoys}% YoY)"
-            parts.append(piece)
-        if parts:
-            lines.append("REVENUE ENGINE: " + "; ".join(parts))
-    except Exception:
-        pass
-
-    # 3. Fundamentals & Growth (cards + overall) — sector-relative framing
-    #    lives in EVIDENCE; here we give the card values + the headline rollup.
-    try:
-        card_strs: List[str] = []
-        for c in (report.get("fundamental_metrics") or []):
-            if not isinstance(c, dict):
-                continue
-            stars = c.get("star_rating")
-            mstr = ", ".join(
-                f"{m.get('label', '?')} {m.get('value', '?')}"
-                for m in (c.get("metrics") or []) if isinstance(m, dict)
-            )
-            star_s = f" {stars}/5" if isinstance(stars, int) else ""
-            card_strs.append(f"{c.get('title', '?')}{star_s} [{mstr}]")
-        if card_strs:
-            lines.append("FUNDAMENTALS & GROWTH: " + " | ".join(card_strs))
-        oa = report.get("overall_assessment") or {}
-        avg = _f_num(oa.get("average_rating"), "{:.1f}")
-        if avg is not None:
-            lines.append(
-                f"  Overall fundamentals: {avg}/5 avg "
-                f"({oa.get('strong_count', 0)} strong / {oa.get('weak_count', 0)} weak metrics)"
-            )
-    except Exception:
-        pass
-
-    # 4. Future Forecast
-    try:
-        rf = report.get("revenue_forecast") or {}
-        bits: List[str] = []
-        cagr = _f_num(rf.get("cagr"), "{:+.1f}")
-        eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
-        if cagr is not None:
-            bits.append(f"revenue CAGR {cagr}%")
-        if eps is not None:
-            bits.append(f"EPS CAGR {eps}%")
-        if rf.get("management_guidance"):
-            bits.append(f"guidance {rf['management_guidance']}")
-        if bits:
-            lines.append("FUTURE FORECAST: " + ", ".join(bits))
-    except Exception:
-        pass
-
-    # 5. Insider & Management
-    try:
-        idata = report.get("insider_data") or {}
-        sent = idata.get("sentiment")
-        tx_strs = [
-            f"{t.get('type', '?')} {t.get('count', '?')} ({t.get('value', '?')})"
-            for t in (idata.get("transactions") or []) if isinstance(t, dict)
-        ]
-        if sent or tx_strs:
-            seg = f"INSIDER ({idata.get('timeframe', 'recent')}): {sent or 'n/a'}"
-            if tx_strs:
-                seg += " — " + ", ".join(tx_strs)
-            lines.append(seg)
-    except Exception:
-        pass
-
-    # 6. Industry & Competitive Moat
-    try:
-        moat = report.get("moat_competition") or {}
-        dim_strs: List[str] = []
-        for d in (moat.get("dimensions") or []):
-            if not isinstance(d, dict):
-                continue
-            sc = _f_num(d.get("score"), "{:.1f}")
-            if sc is None:
-                continue
-            ps = _f_num(d.get("peer_score"), "{:.1f}")
-            piece = f"{d.get('name', '?')} {sc}"
-            if ps is not None:
-                piece += f" (peer {ps})"
-            dim_strs.append(piece)
-        if dim_strs:
-            lines.append("MOAT (0-10, focal vs peer): " + ", ".join(dim_strs))
-        md = moat.get("market_dynamics") or {}
-        if isinstance(md, dict):
-            mbits: List[str] = []
-            if md.get("concentration"):
-                mbits.append(str(md["concentration"]))
-            if md.get("lifecycle_phase"):
-                mbits.append(str(md["lifecycle_phase"]).replace("_", " "))
-            c5 = _f_num(md.get("cagr_5yr"), "{:+.1f}")
-            if c5 is not None:
-                mbits.append(f"industry CAGR {c5}%")
-            if mbits:
-                lines.append("  Market structure: " + ", ".join(mbits))
-        comp_strs: List[str] = []
-        for cp in (moat.get("competitors") or [])[:3]:
-            if not isinstance(cp, dict):
-                continue
-            piece = cp.get("name") or cp.get("ticker") or "?"
-            cs = _f_num(cp.get("competitive_score"), "{:.1f}")
-            if cs is not None:
-                piece += f" {cs}/10"
-            if cp.get("threat_level"):
-                piece += f" {cp['threat_level']} threat"
-            comp_strs.append(piece)
-        if comp_strs:
-            lines.append("  Competitors: " + ", ".join(comp_strs))
-    except Exception:
-        pass
-
-    # 7. Macro & Geopolitical — only surface when MATERIAL (High or above).
-    #    Low/elevated macro is background noise, never a thesis-driving point.
-    try:
-        macro = report.get("macro_data") or {}
-        threat = str(macro.get("overall_threat_level") or "").strip().lower()
-        if threat in _MATERIAL_MACRO_THREATS:
-            rfs = [r for r in (macro.get("risk_factors") or []) if isinstance(r, dict)]
-            # Rank by severity first (the high+ factors are what matter),
-            # then by impact as a tiebreaker.
-            rfs.sort(
-                key=lambda r: (
-                    _MACRO_SEVERITY_RANK.get(str(r.get("severity") or "").lower(), 0),
-                    r.get("impact") or 0.0,
-                ),
-                reverse=True,
-            )
-            top_rf = rfs[:2]
-            seg = f"MACRO threat: {threat}"
-            if top_rf:
-                seg += " — " + ", ".join(
-                    f"{r.get('title', '?')} ({r.get('severity', '?')})" for r in top_rf
-                )
-            lines.append(seg)
-    except Exception:
-        pass
-
-    # 8. Wall Street Consensus
-    try:
-        ws = report.get("wall_street_consensus") or {}
-        bits = []
-        if ws.get("rating"):
-            bits.append(f"consensus {str(ws['rating']).replace('_', ' ')}")
-        cur, tgt = ws.get("current_price"), ws.get("target_price")
-        upside = None
+    for name in _DIGEST_ORDER:
         try:
-            if cur and tgt:
-                upside = (float(tgt) - float(cur)) / float(cur) * 100.0
-        except (TypeError, ValueError, ZeroDivisionError):
-            upside = None
-        ups, tgts = _f_num(upside, "{:+.0f}"), _f_num(tgt, "{:.0f}")
-        if ups is not None and tgts is not None:
-            bits.append(f"target ${tgts} ({ups}% vs current)")
-        if ws.get("valuation_status"):
-            bits.append(str(ws["valuation_status"]))
-        up, down = ws.get("momentum_upgrades"), ws.get("momentum_downgrades")
-        if isinstance(up, int) and isinstance(down, int) and (up or down):
-            bits.append(f"momentum {up} upgrades / {down} downgrades (12mo)")
-        if bits:
-            lines.append("WALL STREET: " + ", ".join(bits))
-    except Exception:
-        pass
+            lines.extend(_DIGEST_FORMATTERS[name](report) or [])
+        except Exception:
+            pass
+    return "\n".join(lines)
 
+
+def cross_section_context(report: Dict[str, Any], modules: List[str]) -> str:
+    """Return ONLY the requested modules' digest lines, in registry order,
+    each formatter independently defensive. Empty/quiet modules contribute
+    nothing (the caller's RELATED block then collapses to ""). Used to give a
+    per-section insight a SURGICAL slice of a related module's final verdict so
+    the report stays internally consistent — the insight cites the SAME numbers
+    the cross-module thesis does."""
+    lines: List[str] = []
+    for name in _DIGEST_ORDER:  # registry order, not caller order → stable
+        if name not in modules:
+            continue
+        fmt = _DIGEST_FORMATTERS.get(name)
+        if fmt is None:
+            continue
+        try:
+            lines.extend(fmt(report) or [])
+        except Exception:
+            pass
     return "\n".join(lines)
 
 

@@ -145,7 +145,13 @@ def compute_quality_score(
     silently returns a Buffett-default.
     """
     weights = PERSONA_WEIGHTS.get(persona_key, _EQUAL_WEIGHTS)
-    vitals = ticker_report_data.get("key_vitals") or {}
+    # `_scoring_inputs` is the internal per-dimension score layer; the legacy
+    # "key_vitals" fallback covers reports cached before the key was renamed.
+    vitals = (
+        ticker_report_data.get("_scoring_inputs")
+        or ticker_report_data.get("key_vitals")
+        or {}
+    )
 
     weighted_sum = 0.0
     for vital_name, weight in weights.items():

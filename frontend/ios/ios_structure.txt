@@ -53,7 +53,7 @@ RESEARCH TAB:
                                    and past reports list.
 
   TickerReportView.swift        -> Full AI-generated research report with sections:
-                                   executive summary, core thesis, key vitals,
+                                   executive summary, core thesis,
                                    fundamentals, revenue engine, moat/competition,
                                    insider activity, Wall Street consensus,
                                    future forecast, macro/geopolitical risks,
@@ -155,7 +155,7 @@ DATA MODELS (28 model files)
 HomeModels.swift                -> MarketTicker, MarketInsight, DailyBriefingItem,
                                    HomeTab, InvestorPersona, ResearchReport
 TickerDetailModels.swift        -> Stock detail, key stats, company profile
-TickerReportModels.swift        -> Full AI report structure (thesis, vitals, etc.)
+TickerReportModels.swift        -> Full AI report structure (thesis, fundamentals, etc.)
 TickerNewsModels.swift          -> News for a specific ticker
 SearchModels.swift              -> Search results, recent searches
 ResearchModels.swift            -> Analysis reports, personas, credits, trending
@@ -179,7 +179,6 @@ RevenueBreakdownModels.swift    -> Revenue by segment
 RevenueEngineModels.swift       -> Revenue driver analysis
 SignalOfConfidenceModels.swift  -> Dividends, buybacks, shares outstanding
 WhaleProfileModels.swift        -> Institutional investor profiles
-VitalRulesEngine.swift          -> Rules engine for financial vital signs
 InvestorPathModels.swift        -> Learning journey progression
 
 ================================================================================

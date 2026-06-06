@@ -1067,7 +1067,9 @@ def build_narrative_jobs(
     # that). The schema field stays nullable for backward compatibility
     # with older cached reports.
 
-    iv = (shell.get("key_vitals") or {}).get("insider")
+    iv = (
+        shell.get("_scoring_inputs") or shell.get("key_vitals") or {}
+    ).get("insider")
     if isinstance(iv, dict):
         jobs.append(NarrativeJob(
             label="insider_key_insight",

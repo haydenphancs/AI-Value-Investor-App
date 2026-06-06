@@ -130,7 +130,6 @@ class TickerReportViewModel: ObservableObject {
             print("✅ [TickerReport] Report loaded successfully for \(response.symbol)")
             print("   Quality Score: \(response.qualityScore)")
             print("   Agent: \(response.agent)")
-            print("   Vitals: valuation=\(response.keyVitals.valuation != nil), moat=\(response.keyVitals.moat != nil)")
             print("   Sections: fundamentals=\(response.fundamentalMetrics.count), criticalFactors=\(response.criticalFactors.count)")
 
             let reportData = response.toTickerReportData()

@@ -22,7 +22,7 @@ from app.services.agents.persona_scoring import (
 )
 
 
-# ── Fixtures: shape mirrors TickerReportResponse.key_vitals ──────────
+# ── Fixtures: shape mirrors the internal _scoring_inputs layer ───────
 
 
 def _vitals(
@@ -37,7 +37,7 @@ def _vitals(
     wallstreet_score: float = 5.0,
 ) -> dict:
     return {
-        "key_vitals": {
+        "_scoring_inputs": {
             "valuation":        {"status": valuation_status},
             "moat":             {"overall_rating": moat_rating},
             "financial_health": {"level": health_level},
@@ -131,7 +131,7 @@ def test_missing_vitals_score_as_zero():
     # vital's contribution should be 0 — not silently averaged in
     # at neutral 5/10. The user should see a lower score reflecting
     # incomplete data, not a fake-confident neutral.
-    incomplete = {"key_vitals": {
+    incomplete = {"_scoring_inputs": {
         "moat": {"overall_rating": "wide"},
         # everything else missing
     }}
@@ -169,7 +169,7 @@ def test_unknown_persona_falls_back_to_equal_weights():
 def test_score_is_clipped_to_zero_to_hundred():
     # Even if the AI emits an out-of-band score (e.g. 12/10),
     # the final must stay in [0, 100] so the iOS UI ring renders.
-    data = {"key_vitals": {
+    data = {"_scoring_inputs": {
         "revenue":     {"score": {"value": 99.0}},
         "insider":     {"score": {"value": 99.0}},
         "macro":       {"score": {"value": 99.0}},
@@ -189,4 +189,18 @@ def test_empty_data_returns_zero():
     # No vitals at all → score 0. Better than crashing or returning a
     # confident-looking neutral.
     assert compute_quality_score("warren_buffett", {}) == 0.0
-    assert compute_quality_score("warren_buffett", {"key_vitals": {}}) == 0.0
+    assert compute_quality_score("warren_buffett", {"_scoring_inputs": {}}) == 0.0
+
+
+def test_legacy_key_vitals_alias_still_scores():
+    # User-history reports cached before the rename carry "key_vitals"; the
+    # scorer's back-compat fallback must read them identically to the new
+    # "_scoring_inputs" key (those rows are never invalidated — see
+    # patch_legacy_price_action).
+    new = _vitals(moat_rating="wide")
+    legacy = {"key_vitals": new["_scoring_inputs"]}
+    assert (
+        compute_quality_score("warren_buffett", legacy)
+        == compute_quality_score("warren_buffett", new)
+    )
+    assert compute_quality_score("warren_buffett", legacy) > 0.0

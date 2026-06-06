@@ -177,30 +177,20 @@ def test_assemble_report_top_level_keys_match_swift_codable():
     expected = {
         "symbol", "company_name", "exchange", "logo_url", "live_date",
         "agent", "quality_score", "executive_summary_text",
-        "executive_summary_bullets", "key_vitals", "core_thesis",
+        "executive_summary_bullets", "core_thesis",
         "fundamental_metrics", "overall_assessment", "revenue_forecast",
         "insider_data", "key_management", "price_action", "revenue_engine",
         "moat_competition", "macro_data", "wall_street_consensus",
         "critical_factors", "disclaimer_text",
     }
     missing = expected - set(report.keys())
-    extra = set(report.keys()) - expected
+    # `_scoring_inputs` is an INTERNAL scoring field: assemble_report still builds
+    # it (the persona-rating input), but it's stripped from the iOS response
+    # (patch_legacy_price_action / schema model_dump) and is NOT in the Swift
+    # contract — so it's allowed as an extra key here, just not required.
+    extra = set(report.keys()) - expected - {"_scoring_inputs"}
     assert not missing, f"missing top-level keys: {missing}"
     assert not extra, f"unexpected top-level keys (would fail iOS decoder): {extra}"
-
-
-def test_key_vitals_has_all_eight_slots():
-    """Swift KeyVitalsDTO has 8 optional fields — every slot must be a
-    key in the assembled key_vitals dict (value may be None)."""
-    coll = TickerReportDataCollector()
-    out = _make_collected_data()
-    report = coll.assemble_report(out, stage_a_fallback())
-    expected = {
-        "valuation", "moat", "financial_health", "revenue",
-        "insider", "macro", "forecast", "wall_street",
-    }
-    missing = expected - set(report["key_vitals"].keys())
-    assert not missing, f"missing key_vitals: {missing}"
 
 
 def test_pros_cons_capped_at_four():

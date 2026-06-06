@@ -108,280 +108,6 @@ struct ExecutiveSummaryBullet: Identifiable {
     }
 }
 
-// MARK: - Valuation Status
-
-enum ValuationStatus: String {
-    case overpriced = "Overpriced"
-    case fairValue = "Fair Value"
-    case underpriced = "Underpriced"
-    case deepUndervalued = "Deep Undervalued"
-
-    var color: Color {
-        switch self {
-        case .overpriced: return AppColors.bearish
-        case .fairValue: return AppColors.neutral
-        case .underpriced: return AppColors.bullish
-        case .deepUndervalued: return AppColors.bullish
-        }
-    }
-
-    var backgroundColor: Color {
-        color.opacity(0.15)
-    }
-}
-
-// MARK: - Key Vital: Valuation Card Data
-
-struct ReportValuationData {
-    let status: ValuationStatus
-    let currentPrice: Double
-    let fairValue: Double
-    let upsidePotential: Double  // percentage
-
-    var formattedCurrentPrice: String {
-        String(format: "$%.2f", currentPrice)
-    }
-
-    var formattedFairValue: String {
-        String(format: "$%.0f", fairValue)
-    }
-
-    var formattedUpside: String {
-        let sign = upsidePotential >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", upsidePotential))%"
-    }
-
-    var upsideColor: Color {
-        upsidePotential >= 0 ? AppColors.bullish : AppColors.bearish
-    }
-}
-
-// MARK: - Moat Quality Tag
-
-struct MoatTag: Identifiable {
-    let id = UUID()
-    let label: String
-    let strength: MoatStrength
-
-    enum MoatStrength: String {
-        case wide = "Wide"
-        case narrow = "Narrow"
-        case none = "None"
-
-        var color: Color {
-            switch self {
-            case .wide: return AppColors.bullish
-            case .narrow: return AppColors.neutral
-            case .none: return AppColors.bearish
-            }
-        }
-    }
-}
-
-// MARK: - Key Vital: Moat Card Data
-
-struct ReportMoatData {
-    let overallRating: MoatTag.MoatStrength  // Wide, Narrow, or None
-    let primarySource: String                 // "High Switching Costs"
-    let tags: [MoatTag]
-    let valueLabel: String      // "Value" or "Stable"
-    let stabilityLabel: String  // "Stable"
-}
-
-// MARK: - Financial Health Indicator
-
-enum FinancialHealthLevel: String {
-    case strong = "Strong"
-    case moderate = "Moderate"
-    case weak = "Weak"
-    case critical = "Critical"
-
-    var color: Color {
-        switch self {
-        case .strong: return AppColors.bullish      // Green - Safe Zone
-        case .moderate: return AppColors.alertOrange // Orange - Grey Zone
-        case .weak: return AppColors.alertOrange     // Orange - Grey Zone
-        case .critical: return AppColors.bearish     // Red - Distress
-        }
-    }
-    
-    // Z-Score based level
-    static func fromZScore(_ score: Double) -> FinancialHealthLevel {
-        if score < 1.8 {
-            return .critical    // Red - Distress
-        } else if score < 3.0 {
-            return .weak        // Orange - Grey Zone (could also be .moderate)
-        } else {
-            return .strong      // Green - Safe Zone
-        }
-    }
-}
-
-// MARK: - Key Vital: Financial Health Card Data
-
-struct ReportFinancialHealthData {
-    let level: FinancialHealthLevel
-    let altmanZScore: Double
-    let altmanZLabel: String            // "Below 1.8 is risk"
-    let additionalMetric: String        // "Increasing Cost"
-    let additionalMetricStatus: FinancialHealthLevel
-    let fcfNote: String                 // "Negative FCF in last 2 years"
-
-    var formattedZScore: String {
-        String(format: "%.1f", altmanZScore)
-    }
-    
-    // Convert "Increasing Cost" to "Rising Expenses" for better clarity
-    var additionalMetricDisplayText: String {
-        if additionalMetric.lowercased().contains("increasing cost") {
-            return "Rising Expenses"
-        }
-        return additionalMetric
-    }
-}
-
-// MARK: - Vital Score (0.0-10.0 Scale)
-
-/// Internal importance score computed by VitalRulesEngine.
-/// The numeric value is never displayed in the UI — only VitalStatus is shown.
-struct VitalScore {
-    let value: Double           // 0.0-10.0 (importance, internal only)
-    let status: VitalStatus     // displayed on card badge
-
-    init(value: Double, status: VitalStatus) {
-        self.value = min(max(value, 0.0), 10.0)
-        self.status = status
-    }
-
-    /// Convenience initializer from a VitalEvaluation result.
-    init(from evaluation: VitalEvaluation) {
-        self.value = evaluation.score
-        self.status = evaluation.status
-    }
-
-    var shouldSurface: Bool {
-        status != .neutral
-    }
-}
-
-// MARK: - Key Vital: Revenue Card Data
-
-struct ReportRevenueVitalData {
-    let score: VitalScore
-    let totalRevenue: String            // "$14.1B"
-    let revenueGrowth: Double           // YoY percentage
-    let topSegment: String              // "Cloud Infrastructure"
-    let topSegmentGrowth: Double        // percentage
-
-    var formattedGrowth: String {
-        let sign = revenueGrowth >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", revenueGrowth))% YoY"
-    }
-
-    var formattedTopSegmentGrowth: String {
-        let sign = topSegmentGrowth >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", topSegmentGrowth))%"
-    }
-
-    var growthColor: Color {
-        revenueGrowth >= 0 ? AppColors.bullish : AppColors.bearish
-    }
-}
-
-// MARK: - Key Vital: Insider Card Data
-
-struct ReportInsiderVitalData {
-    let score: VitalScore
-    let sentiment: InsiderSentiment
-    let netActivity: String             // "Net Selling" or "Net Buying"
-    let buyCount: Int
-    let sellCount: Int
-    let keyInsight: String              // "Heavy insider selling last 90 days"
-
-    var activityColor: Color {
-        sentiment.color
-    }
-}
-
-// MARK: - Key Vital: Macro Card Data
-
-struct ReportMacroVitalData {
-    let score: VitalScore
-    let threatLevel: ThreatLevel
-    let topRisk: String                 // "Fed Rate Uncertainty"
-    let riskTrend: RiskTrend
-    let activeRiskCount: Int            // number of elevated+ risks
-
-    var formattedRiskCount: String {
-        "\(activeRiskCount) Active"
-    }
-}
-
-// MARK: - Key Vital: Forecast Card Data
-
-struct ReportForecastVitalData {
-    let score: VitalScore
-    let revenueCAGR: Double             // percentage
-    let epsCAGR: Double                 // percentage
-    let guidance: ManagementGuidance
-    let outlook: String                 // "Accelerating Growth"
-
-    var formattedRevenueCAGR: String {
-        "+\(String(format: "%.0f", revenueCAGR))% CAGR"
-    }
-
-    var formattedEPSCAGR: String {
-        "+\(String(format: "%.0f", epsCAGR))% CAGR"
-    }
-}
-
-// MARK: - Key Vital: Wall Street Card Data
-
-struct ReportWallStreetVitalData {
-    let score: VitalScore
-    let consensusRating: ConsensusRating
-    let priceTarget: Double
-    let currentPrice: Double
-    let upgrades: Int
-    let downgrades: Int
-
-    var formattedTarget: String {
-        String(format: "$%.0f", priceTarget)
-    }
-
-    var formattedUpside: String {
-        let upside = ((priceTarget - currentPrice) / currentPrice) * 100
-        let sign = upside >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", upside))%"
-    }
-
-    var upsideColor: Color {
-        priceTarget >= currentPrice ? AppColors.bullish : AppColors.bearish
-    }
-}
-
-// MARK: - Key Vitals Section
-// All fields are optional — VitalRulesEngine determines which vitals are
-// important enough to surface. nil = not noteworthy, don't display card.
-
-struct ReportKeyVitals {
-    let valuation: ReportValuationData?
-    let moat: ReportMoatData?
-    let financialHealth: ReportFinancialHealthData?
-    let revenue: ReportRevenueVitalData?
-    let insider: ReportInsiderVitalData?
-    let macro: ReportMacroVitalData?
-    let forecast: ReportForecastVitalData?
-    let wallStreet: ReportWallStreetVitalData?
-
-    /// Returns true if at least one vital card is present.
-    var hasAny: Bool {
-        valuation != nil || moat != nil || financialHealth != nil ||
-        revenue != nil || insider != nil || macro != nil ||
-        forecast != nil || wallStreet != nil
-    }
-}
-
 // MARK: - Core Thesis Bullet
 
 struct CoreThesisBullet: Identifiable {
@@ -653,6 +379,28 @@ enum ConsensusRating: String {
         case .strongBuy, .buy: return AppColors.bullish
         case .hold: return AppColors.neutral
         case .sell, .strongSell: return AppColors.bearish
+        }
+    }
+
+    var backgroundColor: Color {
+        color.opacity(0.15)
+    }
+}
+
+// MARK: - Valuation Status (Wall Street Consensus)
+
+enum ValuationStatus: String {
+    case overpriced = "Overpriced"
+    case fairValue = "Fair Value"
+    case underpriced = "Underpriced"
+    case deepUndervalued = "Deep Undervalued"
+
+    var color: Color {
+        switch self {
+        case .overpriced: return AppColors.bearish
+        case .fairValue: return AppColors.neutral
+        case .underpriced: return AppColors.bullish
+        case .deepUndervalued: return AppColors.bullish
         }
     }
 
@@ -1279,9 +1027,6 @@ struct TickerReportData: Identifiable {
     let executiveSummaryText: String
     let executiveSummaryBullets: [ExecutiveSummaryBullet]
 
-    // Key Vitals
-    let keyVitals: ReportKeyVitals
-
     // Core Thesis
     let coreThesis: ReportCoreThesis
 
@@ -1349,69 +1094,6 @@ extension TickerReportData {
                 sentiment: .negative
             )
         ],
-        keyVitals: ReportKeyVitals(
-            valuation: ReportValuationData(
-                status: .underpriced,
-                currentPrice: 142.82,
-                fairValue: 190,
-                upsidePotential: 33.0
-            ),
-            moat: ReportMoatData(
-                overallRating: .wide,
-                primarySource: "High Switching Costs",
-                tags: [
-                    MoatTag(label: "High Switching Costs", strength: .wide),
-                    MoatTag(label: "Network Effects", strength: .narrow)
-                ],
-                valueLabel: "Value",
-                stabilityLabel: "Stable"
-            ),
-            financialHealth: ReportFinancialHealthData(
-                level: FinancialHealthLevel.fromZScore(1.7),  // Will be .critical (Red - Distress)
-                altmanZScore: 1.7,
-                altmanZLabel: "Distress Zone (Below 1.8)",
-                additionalMetric: "Increasing Cost",
-                additionalMetricStatus: FinancialHealthLevel.fromZScore(1.7),
-                fcfNote: "Negative FCF in last 2 years"
-            ),
-            revenue: ReportRevenueVitalData(
-                score: VitalScore(value: 7.0, status: .good),
-                totalRevenue: "$14.1B",
-                revenueGrowth: 18,
-                topSegment: "Cloud (OCI)",
-                topSegmentGrowth: 66
-            ),
-            insider: ReportInsiderVitalData(
-                score: VitalScore(value: 9.0, status: .critical),
-                sentiment: .negative,
-                netActivity: "Net Selling",
-                buyCount: 3,
-                sellCount: 12,
-                keyInsight: "Heavy insider selling last 90 days"
-            ),
-            macro: ReportMacroVitalData(
-                score: VitalScore(value: 7.0, status: .warning),
-                threatLevel: .elevated,
-                topRisk: "Fed Rate Uncertainty",
-                riskTrend: .stable,
-                activeRiskCount: 4
-            ),
-            forecast: ReportForecastVitalData(
-                score: VitalScore(value: 7.0, status: .good),
-                revenueCAGR: 15,
-                epsCAGR: 18,
-                guidance: .raised,
-                outlook: "Accelerating Growth"
-            ),
-            wallStreet: ReportWallStreetVitalData(
-                score: VitalScore(value: 7.0, status: .good),
-                consensusRating: .strongBuy,
-                priceTarget: 190,
-                currentPrice: 142,
-                upgrades: 8,
-                downgrades: 3
-            )
-        ),
         coreThesis: ReportCoreThesis(
             bullCase: [
                 CoreThesisBullet(text: "70.51% gross margin shows durable enterprise-software pricing power"),

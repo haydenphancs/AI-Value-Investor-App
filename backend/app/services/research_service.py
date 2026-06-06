@@ -161,10 +161,12 @@ class ResearchService:
                 # Scoring
                 "overall_score": ticker_report_data.get("quality_score"),
                 "fair_value_estimate": (
-                    ticker_report_data.get("key_vitals", {})
-                    .get("valuation", {})
-                    .get("fair_value")
-                ),
+                    (
+                        ticker_report_data.get("_scoring_inputs")
+                        or ticker_report_data.get("key_vitals")
+                        or {}
+                    ).get("valuation") or {}
+                ).get("fair_value"),
 
                 # Generation metadata
                 "generation_time_seconds": generation_time,
@@ -307,9 +309,13 @@ class ResearchService:
         }
 
     def _extract_moat(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Extract moat analysis from key_vitals and moat_competition."""
-        moat_vital = data.get("key_vitals", {}).get("moat", {})
-        moat_comp = data.get("moat_competition", {})
+        """Extract moat analysis from the internal score inputs + moat_competition."""
+        # None-safe: slots are Optional and can be None. Legacy "key_vitals"
+        # fallback covers reports cached before the key was renamed.
+        moat_vital = (
+            data.get("_scoring_inputs") or data.get("key_vitals") or {}
+        ).get("moat") or {}
+        moat_comp = data.get("moat_competition") or {}
         if not moat_vital:
             return None
         return {
@@ -321,8 +327,12 @@ class ResearchService:
         }
 
     def _extract_valuation(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Extract valuation analysis from key_vitals."""
-        val = data.get("key_vitals", {}).get("valuation", {})
+        """Extract valuation analysis from the internal score inputs."""
+        # None-safe: slots are Optional and can be None. Legacy "key_vitals"
+        # fallback covers reports cached before the key was renamed.
+        val = (
+            data.get("_scoring_inputs") or data.get("key_vitals") or {}
+        ).get("valuation") or {}
         if not val:
             return None
         status = val.get("status", "fair_value")
@@ -360,7 +370,13 @@ class ResearchService:
     def _derive_recommendation(self, data: Dict[str, Any]) -> str:
         """Derive Buy/Hold/Sell from quality score and valuation."""
         score = data.get("quality_score", 50)
-        val_status = data.get("key_vitals", {}).get("valuation", {}).get("status", "fair_value")
+        # None-safe: slots are Optional and can be None. Legacy "key_vitals"
+        # fallback covers reports cached before the key was renamed.
+        val_status = (
+            (
+                data.get("_scoring_inputs") or data.get("key_vitals") or {}
+            ).get("valuation") or {}
+        ).get("status", "fair_value")
         if isinstance(score, str):
             try:
                 score = float(score)

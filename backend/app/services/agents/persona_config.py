@@ -41,6 +41,14 @@ class PersonaConfig:
     def __post_init__(self):
         self.system_prompt = _IDENTITY_RULE + self.system_prompt
 
+    @property
+    def agent_label(self) -> str:
+        """Short 'running' label, e.g. 'Buffett Agent' — used in the live
+        progress status while a report generates. Distinct from
+        `display_name` (which the AI uses to stay in character; never rename
+        that or the prompts say "as Buffett Agent")."""
+        return f"{self.display_name.split()[-1]} Agent"
+
 
 # ── Warren Buffett ────────────────────────────────────────────────────────────
 

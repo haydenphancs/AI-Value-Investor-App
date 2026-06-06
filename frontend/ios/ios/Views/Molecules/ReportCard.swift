@@ -94,7 +94,11 @@ struct ReportCard: View {
                         )
 
                         VStack(alignment: .leading, spacing: 0) {
-                            Text(report.persona.rawValue)
+                            // While running, show "Buffett Agent" instead of the
+                            // full name; failed keeps the full name.
+                            Text(report.status == .processing
+                                 ? report.persona.agentLabel
+                                 : report.persona.rawValue)
                                 .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)

@@ -342,6 +342,11 @@ class CollectedTickerData:
     key_management_partial: Dict[str, Any] = field(default_factory=dict)
     price_action_partial: Dict[str, Any] = field(default_factory=dict)
     price_catalyst_grounded: Optional[Dict[str, Any]] = None
+    # Market-wide WEB-GROUNDED geopolitical/macro-shock factors (wars, trade
+    # wars, oil shocks, pandemics) — shared across every ticker. Each carries
+    # `sources` (citations) for the future PDF. Replaces the old ungrounded
+    # Stage A AI geopolitical overlay.
+    geopolitical_factors: List[Dict[str, Any]] = field(default_factory=list)
     revenue_engine_partial: Dict[str, Any] = field(default_factory=dict)
     wall_street_consensus_partial: Dict[str, Any] = field(default_factory=dict)
     fundamental_metrics_partial: List[Dict[str, Any]] = field(default_factory=list)
@@ -376,6 +381,7 @@ class TickerReportDataCollector:
         self._compute_metrics(out)
         self._build_sections(out)
         await self._precompute_price_catalyst(out)
+        await self._precompute_geopolitical(out)
         await self._apply_intraday_chart(out)
         return out
 
@@ -425,6 +431,25 @@ class TickerReportDataCollector:
             "price_catalyst for %s: tag=%s tier=%s (%.1f%%)",
             out.ticker, pa.get("tag"), tier, pa.get("change_pct") or 0.0,
         )
+
+    async def _precompute_geopolitical(self, out: "CollectedTickerData") -> None:
+        """Fetch the market-wide web-grounded geopolitical/macro-shock factors
+        (shared across every ticker, ~7-day cache, stale-while-revalidate). A
+        graceful no-op on failure — the Macro module then shows the
+        deterministic FRED/FMP factors only. Cheap: at most one grounded scan
+        per ~week total, reused by every report.
+        """
+        try:
+            from app.services.geopolitical_macro_service import (
+                get_geopolitical_macro_service,
+            )
+            out.geopolitical_factors = (
+                await get_geopolitical_macro_service().get_geopolitical_factors()
+            )
+        except Exception as exc:
+            logger.warning(
+                "geopolitical precompute failed for %s: %s", out.ticker, exc,
+            )
 
     async def _apply_intraday_chart(self, out: "CollectedTickerData") -> None:
         """For a short-window BIG move, swap the daily sparkline for HOURLY
@@ -1648,45 +1673,47 @@ class TickerReportDataCollector:
         # Threat tier is computed deterministically via the composite
         # formula in `_compute_macro_threat` (0.5×breadth + 0.5×tail)
         # with sector β sensitivity — never delegated to Gemini.
-        ai_macro = ai.get("macro_data") or {}
-        ai_risk_factors = [
-            _sanitize_risk_factor(rf) for rf in (ai_macro.get("risk_factors") or [])
-        ]
+        ai_macro = ai.get("macro_data") or {}  # still used for headline + brief
         fred_factors = _build_macro_risk_factors_from_fred(out.fred_indicators)
         fmp_factors = _build_macro_risk_factors_from_indicators(
             out.macro_indicators
         )
+        # Geopolitical / macro-shock factors are now WEB-GROUNDED (real current
+        # events with citations) from geopolitical_macro_service, replacing the
+        # old ungrounded Stage A AI overlay (which rendered "Data unavailable").
+        # The list is market-wide; sector relevance is applied via the sector β
+        # inside `_compute_macro_threat`.
+        grounded_factors = list(out.geopolitical_factors or [])
 
-        # Compute composite on the FULL (uncapped) factor set so breadth
-        # isn't truncated by the 6-card UI ceiling — the cap is a render
-        # concern, not a math concern. AI factors that duplicate a
-        # deterministic category get filtered out first so the AI's
-        # vibey re-naming of "rate policy" doesn't double-count an
-        # existing FRED yield-curve emission.
-        ai_keyed_categories = {
+        # Compute composite on the FULL (uncapped) factor set so breadth isn't
+        # truncated by the 6-card UI ceiling. Grounded factors that duplicate a
+        # deterministic category are dropped first (the FMP oil number wins over
+        # a grounded "energy" narrative). Grounded factors are sourced, so
+        # `_compute_macro_threat` treats them like deterministic ones (not
+        # severity-capped, and they count toward the breadth gate).
+        deterministic_categories = {
             f.get("category") for f in (fred_factors + fmp_factors)
         }
-        ai_factors_kept = [
-            f for f in ai_risk_factors
-            if f.get("category") not in ai_keyed_categories
+        grounded_kept = [
+            f for f in grounded_factors
+            if f.get("category") not in deterministic_categories
         ]
-        full_factor_set = fred_factors + fmp_factors + ai_factors_kept
+        full_factor_set = fred_factors + fmp_factors + grounded_kept
 
         macro_sector = (out.profile or {}).get("sector")
         threat_level, composite = _compute_macro_threat(
             full_factor_set, macro_sector,
         )
 
-        # Now the display list — the merge helper caps at 6 cards and
-        # de-dupes by category for the rendered grid.
+        # Display list — dedupe by category (deterministic wins), surface the
+        # most severe first, cap at 6 (so a grounded geopolitical event isn't
+        # squeezed out by a stack of rate factors).
         merged_after_fred = _merge_macro_risk_factors(fred_factors, fmp_factors)
         risk_factors_internal = _merge_macro_risk_factors(
-            merged_after_fred, ai_risk_factors,
+            merged_after_fred, grounded_factors,
         )
-        # Strip internal `_risk_group` markers before the list goes to
-        # Pydantic — extra keys are silently ignored, but explicit is
-        # better than implicit (and the JSONB persist layer skips
-        # serializing dropped keys anyway).
+        # Strip internal `_`-prefixed markers (`_risk_group`, `_source`) before
+        # the list goes to Pydantic. `sources` (public) is preserved for the PDF.
         risk_factors = [_strip_risk_group(rf) for rf in risk_factors_internal]
         macro_data = {
             "overall_threat_level": threat_level,
@@ -4774,19 +4801,21 @@ def _build_macro_risk_factors_from_fred(
 
 def _merge_macro_risk_factors(
     deterministic: List[Dict[str, Any]],
-    ai_factors: List[Dict[str, Any]],
+    overlay: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Combine the two risk-factor lists; deterministic wins on overlap.
+    """Combine two risk-factor lists, dedupe by category (deterministic wins on
+    overlap so a sourced "Oil Price Pressure" isn't replaced by a vaguer overlay
+    entry), then surface the MOST SEVERE first and cap at 6 (iOS shows up to 6).
 
-    Deterministic factors come first (tradeable / numeric). AI-generated
-    factors are appended only when they don't duplicate a category we
-    already covered with real numbers — this prevents the AI from
-    overwriting a sourced "Oil Price Pressure" entry with a vaguer
-    "energy market dynamics" one. Caps total at 6 (iOS shows up to 6).
+    Severity-ranking the cap (rather than insertion order) ensures a
+    high-severity overlay factor — e.g. a grounded geopolitical event — isn't
+    squeezed out of the 6 cards by a stack of lower-severity deterministic ones.
+    Python's sort is stable, so within one severity tier deterministic factors
+    still precede overlay ones.
     """
     out: List[Dict[str, Any]] = list(deterministic)
     seen_categories = {f.get("category") for f in deterministic}
-    for f in ai_factors or []:
+    for f in overlay or []:
         if not isinstance(f, dict):
             continue
         cat = f.get("category")
@@ -4794,8 +4823,10 @@ def _merge_macro_risk_factors(
             continue
         out.append(f)
         seen_categories.add(cat)
-        if len(out) >= 6:
-            break
+    out.sort(
+        key=lambda rf: _SEVERITY_INT.get((rf.get("severity") or "low").lower(), 1),
+        reverse=True,
+    )
     return out[:6]
 
 

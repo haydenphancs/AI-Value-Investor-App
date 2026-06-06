@@ -4,7 +4,8 @@
 //
 //  Organism: Macro-Economic & Geopolitical deep dive content.
 //  Intelligence briefing design: DEFCON-style threat level bar,
-//  2-column risk gauge grid, and classified-style AI intelligence brief.
+//  severity-ranked risk-factor rows (top 3 + "show more"), and a
+//  classified-style AI intelligence brief.
 //
 
 import SwiftUI
@@ -12,10 +13,19 @@ import SwiftUI
 struct ReportMacroGeopoliticalSection: View {
     let data: ReportMacroData
 
+    @State private var showAllFactors = false
+
+    private let collapsedCount = 3
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
             // Threat Level Bar
             threatLevelSection
+
+            // Risk factors (severity-ranked, expandable rows)
+            if !data.riskFactors.isEmpty {
+                riskFactorsSection
+            }
 
             // Intelligence Brief
             intelligenceBriefSection
@@ -25,24 +35,75 @@ struct ReportMacroGeopoliticalSection: View {
     // MARK: - Threat Level
 
     private var threatLevelSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            ReportThreatLevelBar(level: data.overallThreatLevel)
+        // Just the DEFCON bar — the old AI headline was redundant now that
+        // the individual risk factors are listed below it.
+        ReportThreatLevelBar(level: data.overallThreatLevel)
+            .padding(AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .stroke(data.overallThreatLevel.color.opacity(0.2), lineWidth: 1)
+                    )
+            )
+    }
 
-            // Headline
-            Text(data.headline)
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textPrimary)
-                .lineSpacing(2)
+    // MARK: - Risk Factors
+
+    // Most material first: highest severity, then highest impact.
+    private var sortedFactors: [MacroRiskFactor] {
+        data.riskFactors.sorted {
+            if $0.severity.numericLevel != $1.severity.numericLevel {
+                return $0.severity.numericLevel > $1.severity.numericLevel
+            }
+            return $0.impact > $1.impact
         }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .stroke(data.overallThreatLevel.color.opacity(0.2), lineWidth: 1)
-                )
-        )
+    }
+
+    private var riskFactorsSection: some View {
+        let factors = sortedFactors
+        let visible = showAllFactors ? factors : Array(factors.prefix(collapsedCount))
+        let hiddenCount = factors.count - visible.count
+
+        return VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            VStack(spacing: 0) {
+                ForEach(Array(visible.enumerated()), id: \.element.id) { index, factor in
+                    ReportRiskFactorCard(factor: factor)
+
+                    if index < visible.count - 1 {
+                        Divider()
+                            .background(AppColors.textMuted.opacity(0.15))
+                            .padding(.horizontal, AppSpacing.md)
+                    }
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .stroke(AppColors.textMuted.opacity(0.12), lineWidth: 1)
+                    )
+            )
+
+            // Show more / less — only when there's something hidden.
+            if factors.count > collapsedCount {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showAllFactors.toggle() }
+                } label: {
+                    HStack(spacing: AppSpacing.xxs) {
+                        Text(showAllFactors ? "Show less" : "Show \(hiddenCount) more")
+                            .font(AppTypography.captionEmphasis)
+                        Image(systemName: showAllFactors ? "chevron.up" : "chevron.down")
+                            .font(AppTypography.iconTiny).fontWeight(.semibold)
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.xs)
+                }
+            }
+        }
     }
 
     // MARK: - Intelligence Brief

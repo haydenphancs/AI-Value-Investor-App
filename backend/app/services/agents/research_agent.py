@@ -48,6 +48,7 @@ from app.services.agents.narrative_prompts import (
     run_narrative_jobs,
     stage_a_fallback,
     synthesize_core_thesis,
+    synthesize_critical_factors,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
@@ -136,7 +137,7 @@ class ResearchAgent:
         evidence = build_financial_context(out)
 
         if progress_cb:
-            await progress_cb(20, f"{self.persona.display_name} analyzing data...")
+            await progress_cb(20, f"{self.persona.agent_label} analyzing data...")
 
         # ── Phase 2: agentic deep research ───────────────────────────
         research_text = await self._agentic_research(out, evidence)
@@ -165,6 +166,13 @@ class ResearchAgent:
         await asyncio.gather(
             run_narrative_jobs(jobs, self.gemini, self.persona),
             synthesize_core_thesis(report, self.persona, self.gemini, evidence),
+        )
+
+        # Critical Factors — after the thesis so it reads the FINAL bear case;
+        # distinct Deep Dive areas + broad watch triggers (Fed / war / earnings
+        # / analyst / market). Stage A/B factors stay as the fallback.
+        await synthesize_critical_factors(
+            report, self.persona, self.gemini, evidence,
         )
 
         if progress_cb:

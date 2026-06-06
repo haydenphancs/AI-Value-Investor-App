@@ -52,7 +52,6 @@ FALLBACK = {
     ),
     "moat_durability_note": "Data unavailable for this ticker.",
     "moat_competitive_insight": "Data unavailable for this ticker.",
-    "macro_headline": "Macro overview unavailable",
     "macro_intelligence_brief": (
         "Macro commentary unavailable. Risk factors above are sourced from "
         "filings and macro data."
@@ -328,43 +327,32 @@ EVIDENCE:
 Lead with the actual market dynamic (winner-take-most, fragmented, two-horse race, etc.), not the company name."""
 
 
-def _macro_headline_prompt(
-    persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
-) -> str:
-    threat = shell.get("macro_data", {}).get("overall_threat_level", "low")
-    factors = shell.get("macro_data", {}).get("risk_factors", [])
-    titles = ", ".join(f.get("title", "") for f in factors[:3])
-    return f"""Write the one-phrase macro headline shown above the risk factor list.
-
-OVERALL THREAT: {threat}
-TOP RISK TITLES: {titles or "none"}
-
-{_style_block(persona)}
-LENGTH: One phrase, under 8 words. NO period at the end.
-
-Capture the dominant macro flavor (e.g., "Rate sensitivity meets margin compression"). NOT a complete sentence."""
-
-
 def _macro_intelligence_brief_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
     macro = shell.get("macro_data", {})
+    threat = macro.get("overall_threat_level", "low")
     factors = macro.get("risk_factors", [])
     factor_str = "; ".join(
         f"{f.get('title')} ({f.get('severity')}, {f.get('trend')})"
-        for f in factors[:5]
-    ) or "no significant macro risks"
-    return f"""Write the macro intelligence brief — two tight sentences.
+        for f in factors[:6]
+    ) or "no significant macro risks tripping thresholds"
+    return f"""Write the Macro "Insight" — a tight read that captures the WHOLE macro backdrop and lands it on how it hits THIS company.
 
-RISK FACTORS: {factor_str}
+OVERALL THREAT LEVEL: {threat}
+ACTIVE MACRO RISK FACTORS (deterministic data + web-grounded geopolitical events): {factor_str}
 
-EVIDENCE:
+EVIDENCE (company fundamentals):
 {evidence}
 
 {_style_block(persona)}
-{_length_brief(2, 45)}
+LENGTH: Write 2-3 sentences, total under 65 words.
 
-Sentence 1: which one risk above hits THIS business hardest, and the specific number from EVIDENCE that proves it (debt ratio, foreign rev %, capex sensitivity, etc.). Sentence 2: what concrete macro shift would flip the picture. Do NOT restate the risk factors themselves — the user already sees them as cards above."""
+Synthesize the set into a verdict, then make it company-specific:
+- Open by naming the overall threat level and the 1-2 DOMINANT drivers from the factors above — name the real driver (rate policy, a war / tariff / sanctions event, inflation, credit stress, etc.), never a vague "macro headwinds".
+- Then explain how those drivers actually hit THIS business and cite ONE concrete number from EVIDENCE that proves the exposure (debt/equity, interest coverage, foreign-revenue %, capex intensity, margin, etc.).
+- If a sentence remains, end with the concrete macro shift that would flip the picture.
+The goal is the company impact — don't just list the factors back."""
 
 
 def _price_action_narrative_prompt(
@@ -408,7 +396,6 @@ def _price_action_narrative_prompt(
     # here so the AI can attribute moves like "sector rotation" or "war"
     # without us paying for a second LLM-grounded search call.
     macro = shell.get("macro_data") or {}
-    macro_headline = macro.get("headline") or ""
     macro_brief = macro.get("intelligence_brief") or ""
     risk_factors = macro.get("risk_factors") or []
     macro_risks_str = ""
@@ -420,10 +407,9 @@ def _price_action_narrative_prompt(
         ]
         macro_risks_str = "\n" + "\n".join(top_risks)
     macro_block = ""
-    if macro_headline or macro_brief or macro_risks_str:
+    if macro_brief or macro_risks_str:
         macro_block = (
             f"\nMACRO / GEOPOLITICAL CONTEXT:\n"
-            f"  Headline: {macro_headline or 'n/a'}\n"
             f"  Brief: {macro_brief or 'n/a'}"
             f"{macro_risks_str}\n"
         )
@@ -986,16 +972,11 @@ def build_narrative_jobs(
             fallback_value=FALLBACK["moat_competitive_insight"],
         ))
 
-    # ── macro: headline + intelligence_brief ──────────────────────────
+    # ── macro: intelligence_brief (the "Insight" — synthesizes the whole
+    #    Macro section). The old one-phrase `headline` job was dropped when
+    #    the headline was removed from the Macro card UI.
     macro = shell.get("macro_data")
     if isinstance(macro, dict):
-        jobs.append(NarrativeJob(
-            label="macro_headline",
-            prompt=_macro_headline_prompt(persona, evidence, shell),
-            word_cap=10,
-            apply=_setter_for_dict_key(macro, "headline"),
-            fallback_value=FALLBACK["macro_headline"],
-        ))
         jobs.append(NarrativeJob(
             label="macro_intelligence_brief",
             prompt=_macro_intelligence_brief_prompt(persona, evidence, shell),
@@ -1262,7 +1243,7 @@ RULES:
 - macro impact 0.0-1.0
 - 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout. EACH point MUST cite a concrete number drawn from the CARD VALUES block / evidence (gross margin %, D/E, FCF, P/E, EV/EBITDA, revenue/EPS CAGR, ROE, Altman Z, moat-dimension scores, forecast growth) — i.e. reflect the Deep Dive cards. GROUNDING — STRICT: any number cited MUST appear verbatim in the CARD VALUES block; never invent or recompute; if a metric shows "—"/"N/A", anchor on a different one. A generic point with no number is NOT acceptable.
 - 3-6 macro risk_factors (skip ones that don't materially affect this company)
-- 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each is a forward-looking thing to MONITOR going forward — a concern paired with what to watch next — NOT a static complaint or a restatement of the bear case. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Debt & Capital Allocation", "Cloud Capex Intensity").
+- 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each is a forward-looking thing to MONITOR going forward — a concern paired with what to watch next — NOT a static complaint or a restatement of the bear case. Each factor MUST cover a DIFFERENT area (never two on the same theme): spread across balance-sheet, competitive moat, macro/geopolitical/Fed, growth/forecast, valuation, insider. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Competitive Moat", "Fed & Rate Policy", "Geopolitical Exposure", "Growth Durability").
 - 3-5 competitors, ranked by relevance
 - DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
 - Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "watch" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
@@ -1719,3 +1700,177 @@ async def synthesize_core_thesis(
             f"{type(e).__name__}: {e}"
         )
         # keep Stage A thesis
+
+
+# ── Critical factors synthesis (post-assembly, cross-module) ──────────
+# The "Critical Factors to Watch" used to be generated in Stage A from
+# fundamentals-only evidence (its example titles were all debt-themed) and
+# the Stage B watch prompt only saw fundamentals — so the factors were
+# redundant and the watch defaulted to "next earnings". This synthesis runs
+# AFTER assembly + the thesis synthesis, reads the FINAL bear case + every
+# module verdict + the macro/geopolitical events, and rewrites the factors so
+# each covers a DISTINCT area with a broad, real "watch" trigger.
+
+
+_VALID_CF_SEVERITY = {"high", "medium", "low"}
+
+
+def _format_macro_watch_block(report: Dict[str, Any]) -> str:
+    """Ungated macro/geopolitical context for critical-factor 'watch' triggers
+    — threat level + every active risk factor (incl. web-grounded geopolitical
+    events), regardless of the high+ gating the thesis digest uses (a "watch
+    the Fed / a war" trigger is relevant even at "elevated")."""
+    try:
+        macro = report.get("macro_data") or {}
+        threat = str(macro.get("overall_threat_level") or "low").strip().lower()
+        rfs = [r for r in (macro.get("risk_factors") or []) if isinstance(r, dict)]
+        lines = [f"Overall macro threat: {threat}"]
+        for r in rfs[:8]:
+            lines.append(
+                f"- {r.get('title', '?')} "
+                f"({r.get('category', '?')}, {r.get('severity', '?')}, {r.get('trend', '?')})"
+            )
+        return "\n".join(lines)
+    except Exception:
+        return "Overall macro threat: n/a"
+
+
+def build_critical_factors_prompt(
+    persona: PersonaConfig,
+    company_name: str,
+    ticker: str,
+    evidence: str,
+    digest: str,
+    bear_block: str,
+    macro_watch: str,
+) -> str:
+    """Prompt that picks the 2-3 most important forward-looking things to
+    MONITOR — each on a DISTINCT Deep Dive area, with a real, varied watch
+    trigger (earnings AND Fed / war / AI-sector / analyst / market)."""
+    return f"""You are choosing the "Critical Factors to Watch" for {company_name} ({ticker}) as {persona.display_name} — the 2-3 most important forward-looking things an investor should MONITOR from here.
+
+Use ALL of the data below.
+
+EVIDENCE (company fundamentals — for grounding numbers):
+{evidence}
+
+MODULE DIGEST (final verdict of every Deep Dive module):
+{digest}
+
+BEAR CASE (the synthesized key risks — turn these into forward monitors, do NOT restate them):
+{bear_block}
+
+MACRO / GEOPOLITICAL (current threat level + active risk events, incl. web-grounded wars / tariffs / Fed / etc.):
+{macro_watch}
+
+PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
+
+Produce 2-3 critical factors. STRICT rules:
+- DIVERSITY — each factor MUST cover a DIFFERENT area. NEVER two on the same theme (do NOT give two debt / free-cash-flow factors). Spread across the areas that actually matter here: balance-sheet / fundamentals · competitive moat · macro / geopolitical / Fed · growth / forecast · valuation / Wall-Street · insider activity · price / catalyst. Pick the 2-3 most decision-relevant DISTINCT areas.
+- FORWARD-LOOKING — each is a thing to MONITOR going forward, not a static complaint and not a restatement of the bear case. Complement the bear case.
+- WATCH TRIGGER (breadth) — the "watch" must name the REAL trigger to track, and across the 2-3 factors SPAN A MIX — do NOT make every watch "next earnings". The trigger can be company-specific (next earnings/guidance, a specific debt/FCF number) OR external: the next Fed / rate decision, an escalation or resolution of a NAMED event from the MACRO block (a war, tariffs, sanctions), a major AI / sector headline, an analyst upgrade / downgrade, or an oil / USD / yield move. Use the macro/geopolitical events above when they are the real swing factor for this company.
+- GROUNDING (strict) — any number you cite MUST appear verbatim in EVIDENCE or the MODULE DIGEST. Never invent or recompute a number.
+- title = a short neutral monitor-area name (e.g. "Free Cash Flow", "Competitive Moat", "Fed & Rate Policy", "Geopolitical Exposure", "Growth Durability"). description = ONE sentence (≤22 words): what's notable now + why it matters, with a concrete number. watch = ONE sentence (≤22 words): what to track next + the trigger; do NOT begin with the word "Watch".
+- severity: "high" | "medium" | "low" (priority to watch).
+- Never name yourself, the underlying model, or any AI provider.
+
+Return ONLY valid JSON (no markdown fences, no commentary):
+
+{{
+  "critical_factors": [
+    {{"title": "...", "severity": "high|medium|low", "description": "...", "watch": "..."}}
+  ]
+}}"""
+
+
+def _clean_critical_factors(raw: Any) -> List[Dict[str, Any]]:
+    """Validate/normalize model-returned critical factors. Caps at 5
+    (mirrors the assemble_report safety net); `watch` is optional."""
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = _post_process(str(item.get("title") or "")).strip()
+        desc = _post_process(str(item.get("description") or "")).strip()
+        if not title or not desc:
+            continue
+        sev = str(item.get("severity") or "medium").strip().lower()
+        if sev not in _VALID_CF_SEVERITY:
+            sev = "medium"
+        watch: Optional[str] = None
+        watch_raw = item.get("watch")
+        if isinstance(watch_raw, str):
+            w = _post_process(watch_raw).strip()
+            if w and w.lower() not in ("null", "none", "n/a"):
+                watch = w
+        out.append({
+            "title": title[:60],
+            "description": desc,
+            "severity": sev,
+            "watch": watch,
+        })
+    return out[:5]
+
+
+async def synthesize_critical_factors(
+    report: Dict[str, Any],
+    persona: PersonaConfig,
+    gemini: GeminiClient,
+    evidence: str,
+) -> None:
+    """Rewrite `report['critical_factors']` with 2-3 forward-looking factors,
+    each on a DISTINCT Deep Dive area, drawn across all modules + the Bear
+    Case + the macro/geopolitical events. Mutates in place.
+
+    Runs AFTER `synthesize_core_thesis` so it reads the FINAL bear case. Only
+    overwrites when synthesis yields ≥2 valid factors; otherwise the Stage
+    A/B factors already on `report` stay as the fallback. Never raises.
+    """
+    ticker = report.get("symbol", "?")
+    try:
+        digest = build_module_digest(report)
+        bear = (report.get("core_thesis") or {}).get("bear_case") or []
+        bear_block = "\n".join(
+            f"- {b}" for b in bear if isinstance(b, str) and b.strip()
+        ) or "(none)"
+        macro_watch = _format_macro_watch_block(report)
+        if not digest.strip() and bear_block == "(none)":
+            return  # nothing to synthesize from; keep Stage A/B factors
+
+        company_name = report.get("company_name") or ticker
+        prompt = build_critical_factors_prompt(
+            persona, company_name, ticker, evidence, digest, bear_block, macro_watch,
+        )
+        result = await gemini.generate_json(
+            prompt=prompt,
+            system_instruction=persona.system_prompt,
+        )
+        parsed = parse_stage_a_response(result.get("text") or "")
+        if not isinstance(parsed, dict):
+            logger.warning(
+                f"Critical-factors synthesis returned unparseable JSON for "
+                f"{ticker}; keeping Stage A/B factors."
+            )
+            return
+
+        factors = _clean_critical_factors(parsed.get("critical_factors"))
+        if len(factors) < 2:
+            logger.info(
+                f"Critical-factors synthesis for {ticker} returned "
+                f"{len(factors)} valid factor(s); keeping Stage A/B factors."
+            )
+            return
+
+        report["critical_factors"] = factors
+        logger.info(
+            f"Critical factors synthesized for {ticker}: "
+            f"{len(factors)} (cross-module, distinct-area)."
+        )
+    except Exception as e:
+        logger.warning(
+            f"Critical-factors synthesis failed for {ticker}: "
+            f"{type(e).__name__}: {e}"
+        )
+        # keep Stage A/B factors

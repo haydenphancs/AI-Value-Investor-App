@@ -348,3 +348,30 @@ def test_ai_factor_cannot_supply_a_breadth_front():
     assert tier == "high", (
         f"AI factor must not unlock severe with one sourced front, got {tier} ({comp})"
     )
+
+
+def test_grounded_factor_is_sourced_not_capped_and_counts_as_a_front():
+    """A WEB-GROUNDED factor (_source='grounded') is sourced, so unlike an
+    ungrounded AI one it is NOT severity-capped and DOES count toward the
+    breadth gate. A lone grounded event still caps at 'high' (one front);
+    paired with a sourced deterministic front, the tier can reach severe/critical.
+    This is what lets a real crisis (a grounded war + a deterministic credit
+    blowout) register — while a single news item still can't alone read critical.
+    """
+    grounded = {
+        "category": "geopolitical", "title": "Major War", "impact": 1.0,
+        "description": "Active conflict disrupts energy and supply chains.",
+        "trend": "worsening", "severity": "critical",
+        "_risk_group": "geopolitical", "_source": "grounded",
+    }
+    # Lone grounded CRITICAL → one front → capped at "high" (breadth gate).
+    tier_lone, comp_lone = _compute_macro_threat([grounded], "Technology")
+    assert tier_lone == "high", (
+        f"a lone grounded factor should cap at high, got {tier_lone} ({comp_lone})"
+    )
+    # Grounded + a deterministic high front (credit blowout) → 2 fronts → severe+.
+    det = _build_macro_risk_factors_from_fred([_fred("BAMLH0A0HYM2", latest=9.5)])
+    tier_two, comp_two = _compute_macro_threat([grounded] + det, "Technology")
+    assert tier_two in ("severe", "critical"), (
+        f"grounded + a deterministic front should reach severe+, got {tier_two} ({comp_two})"
+    )

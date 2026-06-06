@@ -2,8 +2,11 @@
 //  ReportRiskFactorCard.swift
 //  ios
 //
-//  Molecule: Individual macro risk factor card with impact gauge, trend arrow, and severity badge.
-//  Designed with an intelligence-briefing aesthetic.
+//  Molecule: a single macro risk factor as a STATIC compact row — no expand
+//  (the section-level "Show more / less" handles density). Layout:
+//    icon · title ............................. trend (arrow + label)
+//    description (always visible)
+//  Severity is conveyed by the icon tint; the trend sits in the top-right slot.
 //
 
 import SwiftUI
@@ -13,119 +16,55 @@ struct ReportRiskFactorCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Top row: icon + severity badge
-            HStack {
-                // Category icon
+            // Top line: category icon · title · trend (right-aligned)
+            HStack(spacing: AppSpacing.sm) {
                 Image(systemName: factor.category.iconName)
                     .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(factor.severity.color)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 24, height: 24)
                     .background(
                         RoundedRectangle(cornerRadius: AppCornerRadius.small)
                             .fill(factor.severity.color.opacity(0.12))
                     )
 
-                Spacer()
+                Text(factor.title)
+                    .font(AppTypography.labelSmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(1)
 
-                // Severity tag
-                Text(factor.severity.rawValue)
-                    .font(AppTypography.captionTiny)
-                    .foregroundColor(factor.severity.color)
-                    .tracking(0.5)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(factor.severity.color.opacity(0.12))
-                    )
-            }
+                Spacer(minLength: AppSpacing.xs)
 
-            // Title
-            Text(factor.title)
-                .font(AppTypography.labelSmallEmphasis)
-                .foregroundColor(AppColors.textPrimary)
-                .lineLimit(2)
-
-            // Impact gauge
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                HStack {
-                    Text("Impact")
+                // Trend — moved into the slot the badge/chevron used to hold.
+                HStack(spacing: AppSpacing.xxs) {
+                    Image(systemName: factor.trend.iconName)
+                        .font(AppTypography.iconTiny).fontWeight(.semibold)
+                        .foregroundColor(factor.trend.color)
+                    Text(factor.trend.rawValue)
                         .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                    Spacer()
-                    Text("\(Int(factor.impact * 100))%")
-                        .font(AppTypography.captionEmphasis)
-                        .foregroundColor(gaugeColor)
+                        .foregroundColor(factor.trend.color)
                 }
-
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        // Track
-                        RoundedRectangle(cornerRadius: 2.5)
-                            .fill(AppColors.background)
-                            .frame(height: 5)
-
-                        // Fill with gradient
-                        RoundedRectangle(cornerRadius: 2.5)
-                            .fill(
-                                LinearGradient(
-                                    colors: [gaugeColor.opacity(0.7), gaugeColor],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .frame(width: geo.size.width * factor.impact, height: 5)
-                    }
-                }
-                .frame(height: 5)
             }
 
-            // Description
+            // Description — always shown.
             Text(factor.description)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .lineSpacing(2)
-                .lineLimit(3)
-
-            // Trend indicator
-            HStack(spacing: AppSpacing.xs) {
-                Image(systemName: factor.trend.iconName)
-                    .font(AppTypography.iconTiny).fontWeight(.semibold)
-                    .foregroundColor(factor.trend.color)
-
-                Text(factor.trend.rawValue)
-                    .font(AppTypography.caption)
-                    .foregroundColor(factor.trend.color)
-            }
-            .padding(.top, AppSpacing.xxs)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .stroke(factor.severity.color.opacity(0.15), lineWidth: 1)
-                )
-        )
-    }
-
-    private var gaugeColor: Color {
-        switch factor.impact {
-        case 0..<0.35: return AppColors.bullish
-        case 0.35..<0.60: return AppColors.neutral
-        case 0.60..<0.80: return AppColors.alertOrange
-        default: return AppColors.bearish
-        }
     }
 }
 
 #Preview {
-    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: AppSpacing.md) {
+    VStack(spacing: 0) {
         ForEach(TickerReportData.sampleOracle.macroData.riskFactors) { factor in
             ReportRiskFactorCard(factor: factor)
+            Divider().padding(.horizontal, AppSpacing.md)
         }
     }
+    .background(AppColors.cardBackgroundLight)
+    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
     .padding()
     .background(AppColors.cardBackground)
     .preferredColorScheme(.dark)

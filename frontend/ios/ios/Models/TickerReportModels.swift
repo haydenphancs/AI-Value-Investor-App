@@ -962,9 +962,11 @@ enum RiskTrend: String {
 
     var iconName: String {
         switch self {
-        case .improving: return "arrow.down.right"
+        // "up = good, down = bad" convention (pairs with the green/red color):
+        // improving trends up, worsening trends down.
+        case .improving: return "arrow.up.right"
         case .stable: return "arrow.right"
-        case .worsening: return "arrow.up.right"
+        case .worsening: return "arrow.down.right"
         }
     }
 

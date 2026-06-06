@@ -251,6 +251,14 @@ class MoatCompetitionResponse(BaseModel):
 # ── Deep Dive: Macro & Geopolitical ───────────────────────────────────────────
 
 
+class SourceCitationResponse(BaseModel):
+    """A web-search citation backing a grounded factor. Persisted for the
+    future report-detail PDF; the iOS report view does NOT render these."""
+    title: str
+    uri: str
+    publisher: str
+
+
 class MacroRiskFactorResponse(BaseModel):
     category: str  # "inflation" | "interest_rates" | "geopolitical" | etc
     title: str
@@ -258,6 +266,10 @@ class MacroRiskFactorResponse(BaseModel):
     description: str
     trend: str  # "improving" | "stable" | "worsening"
     severity: str  # "low" | "elevated" | "high" | "severe" | "critical"
+    # Web-search citations — only present on WEB-GROUNDED geopolitical factors
+    # (geopolitical_macro_service). Carried in the payload for the future PDF;
+    # iOS doesn't declare this key, so Swift Codable silently ignores it.
+    sources: Optional[List[SourceCitationResponse]] = None
 
 
 class MacroDataResponse(BaseModel):

@@ -58,6 +58,13 @@ struct AnalysisPersona: Identifiable, Hashable {
     /// Backwards-compat alias — call-sites used `persona.backendKey`.
     var backendKey: String { key }
 
+    /// Short "running" label, e.g. "Buffett Agent" — shown while a report is
+    /// processing (NOT the full `name`, which the AI uses to stay in character).
+    var agentLabel: String {
+        let last = name.split(separator: " ").last.map(String.init) ?? name
+        return "\(last) Agent"
+    }
+
     var accentColor: Color { Color(hex: accentColorHex) }
 
     static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {

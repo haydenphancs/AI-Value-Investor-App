@@ -42,6 +42,7 @@ from app.services.agents.narrative_prompts import (
     run_narrative_jobs,
     stage_a_fallback,
     synthesize_core_thesis,
+    synthesize_critical_factors,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
@@ -171,6 +172,12 @@ LENGTH: 2-4 sentences, total under 90 words."""
             run_narrative_jobs(jobs, self.gemini, persona),
             synthesize_core_thesis(report, persona, self.gemini, evidence),
         )
+
+        # 6. Critical Factors — synthesized AFTER the thesis so it reads the
+        #    FINAL bear case; spreads across DISTINCT Deep Dive areas with broad
+        #    watch triggers (Fed / war / earnings / analyst / market). Overwrites
+        #    on success; the Stage A/B factors stay as the fallback otherwise.
+        await synthesize_critical_factors(report, persona, self.gemini, evidence)
 
         # 6. Persist to cache (best-effort; failure logged but doesn't raise)
         await upsert_cached_report(ticker, persona_key, report)

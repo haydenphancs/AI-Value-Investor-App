@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     PRICE_CATALYST_AI_ENABLED: bool = True       # kill switch; false → FMP fallback
     PRICE_CATALYST_CACHE_TTL_HOURS: int = 24     # a move's reason is fresh daily
 
+    # Geopolitical macro grounding (Gemini web-search scan of REAL current
+    # macro-shock events — wars, trade wars, oil shocks, pandemics). One
+    # market-wide scan shared across every ticker, refreshed on-demand. When
+    # False, the Macro module shows deterministic FRED/FMP factors only.
+    GEOPOLITICAL_INTEL_AI_ENABLED: bool = True   # kill switch; false → no geo factors
+    GEOPOLITICAL_CACHE_TTL_DAYS: int = 7         # geopolitical regimes shift on weeks
+
     # Financial Modeling Prep
     FMP_API_KEY: str
     FMP_BASE_URL: str = "https://financialmodelingprep.com/stable"

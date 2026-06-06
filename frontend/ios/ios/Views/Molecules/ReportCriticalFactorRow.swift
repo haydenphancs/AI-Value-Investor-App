@@ -27,6 +27,20 @@ struct ReportCriticalFactorRow: View {
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(2)
+
+                // Forward-looking action — what to monitor next. Hidden when the
+                // backend didn't produce one (older cached reports / fallback).
+                if let watch = factor.watch, !watch.isEmpty {
+                    (Text("▸ Watch: ")
+                        .font(AppTypography.label).fontWeight(.semibold)
+                        .foregroundColor(AppColors.primaryBlue)
+                     + Text(watch)
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, AppSpacing.xxs)
+                }
             }
         }
         .padding(AppSpacing.md)

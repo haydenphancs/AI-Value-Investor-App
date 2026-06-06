@@ -93,13 +93,15 @@ struct TickerReportView: View {
 
                         // Executive Summary
                         ReportExecutiveSummaryCard(
-                            summaryText: report.executiveSummaryText,
-                            bullets: report.executiveSummaryBullets
+                            summaryText: report.executiveSummaryText
                         )
                         .padding(.horizontal, AppSpacing.lg)
 
-                        // Key Vitals
-                        ReportKeyVitalsSection(vitals: report.keyVitals)
+                        // Key Vitals — HIDDEN (redundant with the Deep Dive
+                        // modules below, which explain the same ground in depth).
+                        // Not deleted: uncomment to restore (and flip the backend
+                        // EMIT_KEY_VITALS flag in ticker_report_data_collector.py).
+                        // ReportKeyVitalsSection(vitals: report.keyVitals)
 
                         // Core Thesis
                         ReportCoreThesisSection(thesis: report.coreThesis)

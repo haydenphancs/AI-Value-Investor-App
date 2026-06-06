@@ -2,14 +2,14 @@
 //  ReportExecutiveSummaryCard.swift
 //  ios
 //
-//  Molecule: Executive summary section with description and categorized bullets
+//  Molecule: Executive summary — a general overview paragraph. (Category
+//  bullets were removed; the specific number-backed points live in Bull/Bear.)
 //
 
 import SwiftUI
 
 struct ReportExecutiveSummaryCard: View {
     let summaryText: String
-    let bullets: [ExecutiveSummaryBullet]
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -24,29 +24,12 @@ struct ReportExecutiveSummaryCard: View {
                     .foregroundColor(AppColors.textPrimary)
             }
 
-            // Summary text
+            // Summary text — a general overview (what the company is, how it's
+            // doing, the report's take). Specifics live in Bull/Bear below.
             Text(summaryText)
                 .font(AppTypography.label)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
-
-            // Bullet points
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
-                ForEach(bullets) { bullet in
-                    HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        Circle()
-                            .fill(bullet.sentiment.color)
-                            .frame(width: 6, height: 6)
-                            .padding(.top, 6)
-
-                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                            Text("\(bullet.category): \(bullet.text)")
-                                .font(AppTypography.labelSmall)
-                                .foregroundColor(AppColors.textSecondary)
-                        }
-                    }
-                }
-            }
         }
         .padding(AppSpacing.lg)
         .background(
@@ -58,8 +41,7 @@ struct ReportExecutiveSummaryCard: View {
 
 #Preview {
     ReportExecutiveSummaryCard(
-        summaryText: TickerReportData.sampleOracle.executiveSummaryText,
-        bullets: TickerReportData.sampleOracle.executiveSummaryBullets
+        summaryText: TickerReportData.sampleOracle.executiveSummaryText
     )
     .padding()
     .background(AppColors.background)

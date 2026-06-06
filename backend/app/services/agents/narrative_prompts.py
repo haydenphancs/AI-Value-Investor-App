@@ -44,7 +44,6 @@ FALLBACK = {
     "executive_summary_text": (
         "Live commentary unavailable. Numbers below reflect the latest filings."
     ),
-    "executive_summary_bullet": "Insight refreshed; commentary unavailable.",
     "overall_assessment_text": "Quality scoring updated; narrative unavailable.",
     "guidance_quote": None,
     "revenue_analysis_note": None,
@@ -66,7 +65,8 @@ FALLBACK = {
         "Insider data refreshed; commentary unavailable."
     ),
     "fundamental_quality_label": "—",
-    "critical_factor_description": "Detail unavailable for this risk factor.",
+    "critical_factor_description": "Signal unavailable for this factor.",
+    "critical_factor_watch": None,
     "wall_street_insight": None,
 }
 
@@ -189,44 +189,20 @@ async def run_narrative_jobs(
 def _executive_summary_text_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    bull = "; ".join(shell.get("core_thesis", {}).get("bull_case", [])[:4])
-    bear = "; ".join(shell.get("core_thesis", {}).get("bear_case", [])[:4])
-    return f"""Write the headline investment thesis for this report.
-
-EVIDENCE:
-{evidence}
-
-KEY BULLISH POINTS (already structured): {bull or "none"}
-KEY BEARISH POINTS (already structured): {bear or "none"}
-
-{_style_block(persona)}
-{_length_brief(2, 40)}
-
-Open with a hook (a number, a contrast, a status). Close with what makes this stock a buy/hold/avoid in your view. Do NOT just restate the bullish/bearish points — give the *thesis* that ties them together."""
-
-
-def _executive_summary_bullet_prompt(
-    persona: PersonaConfig,
-    evidence: str,
-    bullet: Dict[str, Any],
-    index: int,
-) -> str:
-    category = bullet.get("category") or "Insight"
-    sentiment = bullet.get("sentiment") or "neutral"
-    seed = bullet.get("text") or ""
-    return f"""Write one catchy bullet for the executive summary.
-
-CATEGORY: {category}
-SENTIMENT: {sentiment}
-SEED THOUGHT (rewrite or replace, don't pad): "{seed}"
+    return f"""Write the Executive Summary — a GENERAL, plain-English overview that orients the reader before the detailed sections below.
 
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-LENGTH: 1 short fragment under 12 words. NO leading bullet symbol, NO period at the end.
+LENGTH: Write 3-4 sentences, total under 65 words.
 
-This is bullet #{index + 1} of three — make it distinct from a generic summary. Lead with a number when possible."""
+Cover, in order:
+1. What the company is and does — its business and sector, in one plain sentence (use the company profile/description above).
+2. How it's doing overall — the big-picture trajectory and financial health, in broad strokes.
+3. The report's bottom-line take — the overall verdict in general terms.
+
+Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps."""
 
 
 def _overall_assessment_text_prompt(
@@ -888,20 +864,45 @@ def _critical_factor_description_prompt(
     evidence: str,
     factor: Dict[str, Any],
 ) -> str:
-    title = factor.get("title", "Risk")
+    title = factor.get("title", "Factor")
     severity = factor.get("severity", "medium")
-    return f"""Write the one-line description for this critical factor.
+    return f"""Write the SIGNAL line for this watch item — what's notable about it right now and why it matters — in one tight sentence.
 
 FACTOR: {title}
-SEVERITY: {severity}
+PRIORITY: {severity}
 
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-{_length_brief(1, 25)}
+LENGTH: Write 1 sentence, under 20 words.
 
-Be concrete about *what* the risk is — not just that it exists."""
+State the concrete situation (the number or fact) and why it matters. This is the SIGNAL only — do NOT give a verdict or advice; the "what to watch next" is written separately.
+
+Grounding rule — STRICT: any number you cite MUST appear verbatim in the EVIDENCE above. If the figure isn't in the evidence, describe the situation qualitatively — NEVER invent a number."""
+
+
+def _critical_factor_watch_prompt(
+    persona: PersonaConfig,
+    evidence: str,
+    factor: Dict[str, Any],
+) -> str:
+    title = factor.get("title", "Factor")
+    severity = factor.get("severity", "medium")
+    return f"""Write the WATCH line for this item — the forward-looking next step the investor should monitor.
+
+FACTOR: {title}
+PRIORITY: {severity}
+
+EVIDENCE:
+{evidence}
+
+{_style_block(persona)}
+LENGTH: Write 1 sentence, under 20 words. Do NOT begin with the word "Watch" — the UI already prints a "Watch:" label, so lead with the thing to track or another imperative verb (Track / Confirm / Check).
+
+Say specifically WHAT to track and WHEN, and what would confirm improvement or deterioration. Be concrete and time-bound when you can ("next earnings", "the next 10-Q", "Q3 guidance"). Shape examples: "Next earnings — is operating cash flow catching up to capex?"; "Track whether net debt falls as the buildout slows."
+
+If there is genuinely nothing actionable to monitor, write the literal word: NULL"""
 
 
 # The Wall Street Consensus "Insight" — a big-picture synthesis across all three
@@ -947,27 +948,14 @@ def build_narrative_jobs(
     field. Each job's `apply` mutates the shell in place when run."""
     jobs: List[NarrativeJob] = []
 
-    # ── executive_summary_text ────────────────────────────────────────
+    # ── executive_summary_text (general overview; bullets removed) ────
     jobs.append(NarrativeJob(
         label="executive_summary_text",
         prompt=_executive_summary_text_prompt(persona, evidence, shell),
-        word_cap=44,
+        word_cap=80,
         apply=lambda v: shell.__setitem__("executive_summary_text", v),
         fallback_value=FALLBACK["executive_summary_text"],
     ))
-
-    # ── executive_summary_bullets[i].text (fan out) ───────────────────
-    bullets = shell.get("executive_summary_bullets") or []
-    for i, bullet in enumerate(bullets):
-        if not isinstance(bullet, dict):
-            continue
-        jobs.append(NarrativeJob(
-            label=f"executive_summary_bullet_{i}",
-            prompt=_executive_summary_bullet_prompt(persona, evidence, bullet, i),
-            word_cap=14,
-            apply=_setter_for_dict_key(bullet, "text"),
-            fallback_value=bullet.get("text") or FALLBACK["executive_summary_bullet"],
-        ))
 
     # ── overall_assessment.text ───────────────────────────────────────
     if isinstance(shell.get("overall_assessment"), dict):
@@ -1102,7 +1090,9 @@ def build_narrative_jobs(
             fallback_value=FALLBACK["fundamental_quality_label"],
         ))
 
-    # ── critical_factors[i].description (fan out) ─────────────────────
+    # ── critical_factors[i].description + watch (fan out) ─────────────
+    # Each factor gets TWO Stage-B lines: a short SIGNAL (description) and a
+    # forward-looking WATCH action. Both mutate the same factor dict.
     factors = shell.get("critical_factors") or []
     for i, factor in enumerate(factors):
         if not isinstance(factor, dict):
@@ -1110,9 +1100,17 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label=f"critical_factor_description_{i}",
             prompt=_critical_factor_description_prompt(persona, evidence, factor),
-            word_cap=28,
+            word_cap=26,
             apply=_setter_for_dict_key(factor, "description"),
             fallback_value=factor.get("description") or FALLBACK["critical_factor_description"],
+        ))
+        jobs.append(NarrativeJob(
+            label=f"critical_factor_watch_{i}",
+            prompt=_critical_factor_watch_prompt(persona, evidence, factor),
+            word_cap=28,
+            apply=_setter_with_null(factor, "watch"),
+            fallback_value=FALLBACK["critical_factor_watch"],
+            nullable=True,
         ))
 
     # ── wall_street_consensus.wall_street_insight ────────────────────
@@ -1192,12 +1190,9 @@ Return ONLY valid JSON (no markdown fences):
 
 {{
   "quality_score": 0,
-  "executive_summary_bullets": [
-    {{"category": "Catalyst|Valuation|Risk|Growth|Moat", "sentiment": "positive|neutral|negative", "text": ""}}
-  ],
   "core_thesis": {{
-    "bull_case": ["<2-4 sentences, each ≤18 words. Count matches the strength of the case — use 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"],
-    "bear_case": ["<2-4 sentences, each ≤18 words. Count matches the strength of the case — use 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"]
+    "bull_case": ["<2-4 points, each ≤22 words and each CITING A CONCRETE NUMBER from the CARD VALUES block (e.g. '70.51% gross margin', '4.21 D/E'). Count matches the strength — 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"],
+    "bear_case": ["<2-4 points, each ≤22 words and each CITING A CONCRETE NUMBER from the CARD VALUES block. Count matches the strength — 2 when only two distinct strong points exist, 4 only when four genuinely non-overlapping points exist>"]
   }},
   "revenue_forecast": {{
     "management_guidance": "raised|maintained|lowered",
@@ -1255,7 +1250,7 @@ Return ONLY valid JSON (no markdown fences):
     "wall_street_insight": null
   }},
   "critical_factors": [
-    {{"title": "Factor Title", "severity": "high|medium|low", "description": ""}}
+    {{"title": "Factor Title", "severity": "high|medium|low", "description": "", "watch": ""}}
   ]
 }}
 
@@ -1263,13 +1258,12 @@ RULES:
 - quality_score: integer 0-100 reflecting your conviction on this stock
 - moat dimension scores 0.0-10.0
 - macro impact 0.0-1.0
-- 3-4 executive_summary_bullets (don't pad to 5)
-- 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout.
+- 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout. EACH point MUST cite a concrete number drawn from the CARD VALUES block / evidence (gross margin %, D/E, FCF, P/E, EV/EBITDA, revenue/EPS CAGR, ROE, Altman Z, moat-dimension scores, forecast growth) — i.e. reflect the Deep Dive cards. GROUNDING — STRICT: any number cited MUST appear verbatim in the CARD VALUES block; never invent or recompute; if a metric shows "—"/"N/A", anchor on a different one. A generic point with no number is NOT acceptable.
 - 3-6 macro risk_factors (skip ones that don't materially affect this company)
-- 2-4 critical_factors
+- 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each is a forward-looking thing to MONITOR going forward — a concern paired with what to watch next — NOT a static complaint or a restatement of the bear case. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Debt & Capital Allocation", "Cloud Capex Intensity").
 - 3-5 competitors, ranked by relevance
 - DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
-- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
+- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "watch" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
 - moat_competition.market_dynamics.concentration AND moat_competition.competitors are RECOMPUTED downstream from real FMP peer + sector data — your values for those fields are discarded. You may still fill them as best-guess for sanity, but accuracy doesn't matter there.
 - moat_competition.market_dynamics.current_tam / future_tam: STRICT EXTRACTION ONLY. Set to a USD-denominated number (e.g. 150000000000 for $150B) **only when the EARNINGS-CALL TRANSCRIPT EXCERPT or the company description above contains an explicit, quoted TAM/addressable-market figure**. Set both to 0 when no figure is disclosed. Do NOT estimate from sector context, competitor data, or your training-data knowledge of the industry. Forced fabrication here is the highest-cost failure mode for this product.
 - moat_competition.market_dynamics.tam_source_quote: when current_tam > 0, paste the verbatim sentence from the transcript / description that contains the figure (≤ 200 chars). When current_tam = 0, return "".
@@ -1324,9 +1318,7 @@ def stage_a_fallback() -> Dict[str, Any]:
     """
     return {
         "quality_score": 50,
-        "executive_summary_bullets": [
-            {"category": "Notice", "sentiment": "neutral", "text": ""}
-        ],
+        "executive_summary_bullets": [],  # removed from UI; kept empty for contract
         "core_thesis": {"bull_case": [], "bear_case": []},
         "fundamental_metrics": [],
         "overall_assessment": {

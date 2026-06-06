@@ -35,7 +35,11 @@ from app.api.error_response import (
     error_body_from_exception,
     make_error_response,
 )
-from app.schemas.ticker_report import RevenueForecastResponse, TickerReportResponse
+from app.schemas.ticker_report import (
+    CriticalFactorResponse,
+    RevenueForecastResponse,
+    TickerReportResponse,
+)
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
     stage_a_fallback,
@@ -273,6 +277,63 @@ def test_revenue_forecast_carries_insight_field():
     insight_jobs[0].apply("Revenue compounds ~15% on cloud demand; EPS faster on leverage.")
     assert rf["insight"].startswith("Revenue compounds")
     RevenueForecastResponse.model_validate(rf)
+
+
+def test_critical_factors_capped_at_five():
+    """'never more than 5' — even if Stage A returns 7 critical_factors,
+    assemble_report truncates to 5 before Stage B fans out narrative jobs."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    shell = stage_a_fallback()
+    shell["critical_factors"] = [
+        {"title": f"Factor {i}", "severity": "medium", "description": "", "watch": ""}
+        for i in range(7)
+    ]
+    report = coll.assemble_report(out, shell)
+    assert len(report["critical_factors"]) <= 5
+
+
+def test_critical_factors_carry_watch_action():
+    """Each critical factor gains a forward-looking `watch` line written by a
+    `critical_factor_watch_*` Stage-B job; a populated watch validates against
+    CriticalFactorResponse so the iOS CriticalFactorDTO decode can't crash."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    shell = stage_a_fallback()
+    shell["critical_factors"] = [
+        {"title": "Free Cash Flow", "severity": "high", "description": "", "watch": ""},
+        {"title": "Valuation", "severity": "medium", "description": "", "watch": ""},
+    ]
+    report = coll.assemble_report(out, shell)
+
+    persona = get_persona_config("warren_buffett")
+    evidence = build_financial_context(out)
+    jobs = build_narrative_jobs(persona, evidence, report)
+    watch_jobs = [j for j in jobs if j.label.startswith("critical_factor_watch_")]
+    assert len(watch_jobs) == len(report["critical_factors"]), (
+        "expected one critical_factor_watch_* job per factor"
+    )
+
+    # Populate one factor end-to-end; watch is optional/nullable but must stay
+    # Pydantic-valid when present.
+    cf = report["critical_factors"][0]
+    cf["watch"] = "Next earnings — is operating cash flow catching up to capex?"
+    CriticalFactorResponse.model_validate(cf)
+
+
+def test_executive_summary_bullets_removed_emits_empty():
+    """The Executive Summary is now a general overview paragraph; its category
+    bullets were removed (the specifics moved to Bull/Bear). assemble_report
+    must always emit an empty list — even if a legacy shell carried bullets —
+    so the response contract / iOS decode stays stable and nothing renders."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    shell = stage_a_fallback()
+    shell["executive_summary_bullets"] = [
+        {"category": "Risk", "sentiment": "negative", "text": "legacy bullet"}
+    ]
+    report = coll.assemble_report(out, shell)
+    assert report["executive_summary_bullets"] == []
 
 
 def test_narrative_fallbacks_keep_pydantic_valid():

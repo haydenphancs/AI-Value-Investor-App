@@ -772,27 +772,26 @@ struct ReportWallStreetConsensus {
 struct CriticalFactor: Identifiable {
     let id = UUID()
     let title: String
-    let description: String
-    let severity: CriticalSeverity
+    let description: String          // short SIGNAL — what's notable + why
+    let severity: CriticalSeverity   // priority to watch
+    let watch: String?               // forward-looking action; nil → hide line
 
     enum CriticalSeverity {
         case high, medium, low
 
+        // Calm, non-red "watch" palette — priority is conveyed by a subtle
+        // color (high amber → medium gold → low blue) so the list reads as
+        // "things to monitor" rather than "something is wrong".
         var color: Color {
             switch self {
-            case .high: return AppColors.bearish
-            case .medium: return AppColors.alertOrange
-            case .low: return AppColors.neutral
+            case .high: return AppColors.alertOrange
+            case .medium: return AppColors.neutral
+            case .low: return AppColors.primaryBlue
             }
         }
 
-        var iconName: String {
-            switch self {
-            case .high: return "exclamationmark.triangle.fill"
-            case .medium: return "exclamationmark.circle.fill"
-            case .low: return "info.circle.fill"
-            }
-        }
+        // One calm "watch" symbol for every priority — no alarm triangles.
+        var iconName: String { "eye.fill" }
     }
 }
 
@@ -1332,7 +1331,7 @@ extension TickerReportData {
         qualityRating: ReportQualityRating(
             score: 82
         ),
-        executiveSummaryText: "Oracle is successfully pivoting to cloud infrastructure (OCI) with a massive backlog, but cash burn increases a short-term risk.",
+        executiveSummaryText: "Oracle is a legacy enterprise-software leader re-platforming its business around cloud infrastructure (OCI). Profitability stays strong, but the balance sheet is stretched and free cash flow has turned negative. Overall, this report weighs a credible cloud-growth story against real balance-sheet and valuation risk.",
         executiveSummaryBullets: [
             ExecutiveSummaryBullet(
                 category: "Catalyst",
@@ -1415,14 +1414,14 @@ extension TickerReportData {
         ),
         coreThesis: ReportCoreThesis(
             bullCase: [
-                CoreThesisBullet(text: "$12.5B safety net: Oracle's cloud infrastructure revenue provides a massive cushion against legacy decline"),
-                CoreThesisBullet(text: "IaaS widening: Cloud infrastructure growing 66% YoY, capturing enterprise AI workloads"),
-                CoreThesisBullet(text: "TikTok safety: Strategic partnership positions Oracle as critical infrastructure provider")
+                CoreThesisBullet(text: "70.51% gross margin shows durable enterprise-software pricing power"),
+                CoreThesisBullet(text: "Cloud infrastructure growing 66% YoY, capturing enterprise AI workloads"),
+                CoreThesisBullet(text: "~30% operating margin funds the cloud buildout from core profits")
             ],
             bearCase: [
-                CoreThesisBullet(text: "Cash flow deceleration: Negative $195 FCF as massive Capex spend outpaces revenue growth"),
-                CoreThesisBullet(text: "Credit downgrade danger: Rising debt levels and negative FCF threaten investment-grade rating"),
-                CoreThesisBullet(text: "Aggressive self-image: Aggressive cloud data center construction schedule escalating true infrastructure costs")
+                CoreThesisBullet(text: "Free cash flow is negative (−$394M) as capex outpaces operating cash"),
+                CoreThesisBullet(text: "Heavy leverage: 4.21 debt-to-equity against negative free cash flow"),
+                CoreThesisBullet(text: "Rich valuation: 41.63 P/E prices in growth that isn't yet proven")
             ]
         ),
         fundamentalMetrics: [
@@ -1669,19 +1668,22 @@ extension TickerReportData {
         ),
         criticalFactors: [
             CriticalFactor(
-                title: "Credit Agency Downgrade",
-                description: "Monitor S&P and Moody's ratings for debt-laden companies.",
-                severity: .high
+                title: "Free Cash Flow",
+                description: "FCF is negative (−$394M) on heavy cloud capex.",
+                severity: .high,
+                watch: "Next earnings — is operating cash flow catching up to capex spend?"
             ),
             CriticalFactor(
-                title: "Accounting Depreciation Changes",
-                description: "Watch for shifts in infrastructure depreciation schedules.",
-                severity: .medium
+                title: "Debt & Capital Allocation",
+                description: "Debt is elevated (D/E 4.21) against negative free cash flow.",
+                severity: .medium,
+                watch: "Track whether net debt falls as the cloud buildout slows."
             ),
             CriticalFactor(
-                title: "Capex vs Revenue Trajectory",
-                description: "Track if cloud revenue growth catches up to infrastructure spend.",
-                severity: .medium
+                title: "Valuation",
+                description: "Shares trade at 41.6× earnings — a rich multiple.",
+                severity: .medium,
+                watch: "Confirm earnings growth keeps pace, or the multiple compresses."
             )
         ],
         disclaimerText: "This analysis is for educational purposes only and does not constitute financial advice. AI-generated content may be inaccurate. Always conduct your own research and consult with a qualified financial advisor before making investment decisions."

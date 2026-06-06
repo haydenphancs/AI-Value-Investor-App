@@ -716,9 +716,10 @@ struct CriticalFactorDTO: Codable {
     let title: String
     let description: String
     let severity: String
+    let watch: String?
 
     enum CodingKeys: String, CodingKey {
-        case title, description, severity
+        case title, description, severity, watch
     }
 }
 
@@ -1100,7 +1101,7 @@ extension TickerReportAPIResponse {
                 default: return .low
                 }
             }()
-            return CriticalFactor(title: f.title, description: f.description, severity: sev)
+            return CriticalFactor(title: f.title, description: f.description, severity: sev, watch: f.watch)
         }
 
         return TickerReportData(

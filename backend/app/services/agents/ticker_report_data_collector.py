@@ -66,6 +66,16 @@ from app.services.sector_aggregates_service import (
 logger = logging.getLogger(__name__)
 
 
+# Feature flag: the iOS "Key Vitals" strip is hidden (redundant with the Deep
+# Dive modules, which cover the same ground in depth). When False, report runs
+# emit an empty (all-null) `key_vitals` object — the 8-slot shape is preserved
+# so iOS still decodes — so a generated report carries NO Key Vitals content.
+# (The underlying vital derivations are cheap pure functions on already-collected
+# data — no extra FMP/Gemini calls — so they're left running; only the output is
+# dropped.) Flip to True + uncomment ReportKeyVitalsSection on iOS to restore.
+EMIT_KEY_VITALS = False
+
+
 DISCLAIMER = (
     "This analysis is for educational purposes only and does not constitute "
     "financial advice. AI-generated content may be inaccurate. Always conduct "
@@ -1204,14 +1214,20 @@ class TickerReportDataCollector:
             "agent": _AGENT_MAP.get(out.persona_key, "buffett"),
         }
 
-        # ── Valuation vital ───────────────────────────────────────────
-        out.valuation_vital = _build_valuation_vital(
-            current_price, fair_value, upside, out.snap_valuation
+        # ── Valuation vital (Key Vitals — gated off via EMIT_KEY_VITALS) ─
+        out.valuation_vital = (
+            _build_valuation_vital(
+                current_price, fair_value, upside, out.snap_valuation
+            )
+            if EMIT_KEY_VITALS else {}
         )
 
-        # ── Financial health vital ────────────────────────────────────
-        out.financial_health_vital = _build_health_vital(
-            c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative")
+        # ── Financial health vital (Key Vitals — gated off) ───────────
+        out.financial_health_vital = (
+            _build_health_vital(
+                c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative")
+            )
+            if EMIT_KEY_VITALS else {}
         )
 
         # ── Revenue vital — top segment hooked from real segments ─────
@@ -1226,16 +1242,22 @@ class TickerReportDataCollector:
             segments_built[0]["name"] if segments_built else "Primary"
         )
         top_segment_growth = _segment_growth_pct(segments_built)
-        out.revenue_vital = _build_revenue_vital(
-            c.get("total_revenue") or 0.0,
-            c.get("revenue_growth_yoy"),
-            top_segment_name,
-            top_segment_growth,
+        # revenue_vital is Key Vitals — gated off. segments_built above is
+        # kept (the revenue-engine section reuses it downstream).
+        out.revenue_vital = (
+            _build_revenue_vital(
+                c.get("total_revenue") or 0.0,
+                c.get("revenue_growth_yoy"),
+                top_segment_name,
+                top_segment_growth,
+            )
+            if EMIT_KEY_VITALS else {}
         )
 
-        # ── Forecast vital ────────────────────────────────────────────
-        out.forecast_vital = _build_forecast_vital(
-            c.get("revenue_cagr"), c.get("eps_cagr")
+        # ── Forecast vital (Key Vitals — gated off) ───────────────────
+        out.forecast_vital = (
+            _build_forecast_vital(c.get("revenue_cagr"), c.get("eps_cagr"))
+            if EMIT_KEY_VITALS else {}
         )
 
         # ── Wall Street vital + consensus from AnalystService ────────
@@ -1618,7 +1640,7 @@ class TickerReportDataCollector:
                 + (coverage_note if (coverage_note and ai_competitive_insight) else "")
             ),
         }
-        moat_vital = _derive_moat_vital(moat_dims)
+        moat_vital = _derive_moat_vital(moat_dims) if EMIT_KEY_VITALS else None
 
         # ── Macro: deterministic numeric factors merge into AI's qualitative
         # ones. Order of priority (real data wins on category collision):
@@ -1684,19 +1706,34 @@ class TickerReportDataCollector:
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
-        macro_vital = _derive_macro_vital(risk_factors, threat_level, composite)
+        macro_vital = (
+            _derive_macro_vital(risk_factors, threat_level, composite)
+            if EMIT_KEY_VITALS else None
+        )
 
         # ── Key vitals (assembled) ────────────────────────────────────
-        key_vitals = {
-            "valuation": out.valuation_vital,
-            "moat": moat_vital,
-            "financial_health": out.financial_health_vital,
-            "revenue": out.revenue_vital,
-            "insider": insider_vital,
-            "macro": macro_vital,
-            "forecast": out.forecast_vital,
-            "wall_street": out.wall_street_vital,
-        }
+        # Hidden in the iOS UI (redundant with the Deep Dive modules). When
+        # EMIT_KEY_VITALS is off, emit an all-null object: report runs put no
+        # Key Vitals content in the output, while the 8-slot shape is preserved
+        # so iOS still decodes and the schema-parity test stays green. Flip the
+        # flag (top of this file) + uncomment ReportKeyVitalsSection to restore.
+        _VITAL_SLOTS = (
+            "valuation", "moat", "financial_health", "revenue",
+            "insider", "macro", "forecast", "wall_street",
+        )
+        if EMIT_KEY_VITALS:
+            key_vitals = {
+                "valuation": out.valuation_vital,
+                "moat": moat_vital,
+                "financial_health": out.financial_health_vital,
+                "revenue": out.revenue_vital,
+                "insider": insider_vital,
+                "macro": macro_vital,
+                "forecast": out.forecast_vital,
+                "wall_street": out.wall_street_vital,
+            }
+        else:
+            key_vitals = {slot: None for slot in _VITAL_SLOTS}
 
         # ── Top-level assembly ────────────────────────────────────────
         report: Dict[str, Any] = {
@@ -1712,9 +1749,10 @@ class TickerReportDataCollector:
                 ai.get("executive_summary_text")
                 or "Data unavailable for this ticker."
             ),
-            "executive_summary_bullets": list(
-                ai.get("executive_summary_bullets") or []
-            ),
+            # Removed from the UI — the Executive Summary is now a general
+            # overview paragraph; the specific points live in Bull/Bear.
+            # Emitted empty to keep the response contract / iOS decode stable.
+            "executive_summary_bullets": [],
 
             "key_vitals": key_vitals,
 
@@ -1735,7 +1773,10 @@ class TickerReportDataCollector:
             "macro_data": macro_data,
             "wall_street_consensus": wall_street_consensus,
 
-            "critical_factors": list(ai.get("critical_factors") or []),
+            # Hard cap at 5 ("never more than 5") — the Stage A prompt targets
+            # 2-3, this is the deterministic safety net. Applied before Stage B
+            # so only the kept factors get narrative jobs.
+            "critical_factors": list(ai.get("critical_factors") or [])[:5],
 
             "disclaimer_text": DISCLAIMER,
         }

@@ -43,6 +43,11 @@ class DeepDiveMetricCardResponse(BaseModel):
     star_rating: int
     metrics: List[DeepDiveMetricResponse]
     quality_label: str
+    # Sentiment of `quality_label` ("positive" | "negative" | "neutral"),
+    # derived server-side. iOS colors the card footer by this so a negative
+    # takeaway reads red even when the star_rating (mirrored from the
+    # Financials tab) is high. Defaulted for reports cached before this field.
+    quality_sentiment: str = "neutral"
 
 
 class OverallAssessmentResponse(BaseModel):
@@ -361,7 +366,7 @@ class TickerReportResponse(BaseModel):
     live_date: str
 
     # Agent & Rating
-    agent: str  # "buffett" | "wood" | "lynch" | "dalio"
+    agent: str  # "buffett" | "wood" | "lynch" | "ackman" (legacy reports: "dalio")
     quality_score: float
 
     # Executive Summary

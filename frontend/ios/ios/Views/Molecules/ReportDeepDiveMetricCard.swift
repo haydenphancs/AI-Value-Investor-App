@@ -18,6 +18,18 @@ struct ReportDeepDiveMetricCard: View {
         }
     }
 
+    /// Footer color follows the takeaway's SENTIMENT, not the star rating —
+    /// a negative note ("Debt 4.21, Far Too High") must read red even on a
+    /// high-starred card. Neutral/mixed (and legacy reports without the field)
+    /// fall back to the star-based color, preserving the prior look.
+    private var labelColor: Color {
+        switch data.qualitySentiment.lowercased() {
+        case "negative": return AppColors.bearish
+        case "positive": return AppColors.bullish
+        default: return ratingColor
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             // Title row with stars
@@ -76,7 +88,7 @@ struct ReportDeepDiveMetricCard: View {
             // Quality label
             Text(data.qualityLabel)
                 .font(AppTypography.labelSmall)
-                .foregroundColor(ratingColor)
+                .foregroundColor(labelColor)
                 .lineLimit(2)
                 .minimumScaleFactor(0.9)
                 .italic()

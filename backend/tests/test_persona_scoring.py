@@ -2,11 +2,12 @@
 Tests for persona_scoring.compute_quality_score.
 
 Lock the contract that
-  - per-persona weights live in PERSONA_WEIGHTS and sum to 1.0,
+  - per-persona weights live in PERSONA_WEIGHTS, sum to 1.0, and cover
+    all eight vitals,
   - the same `ticker_report_data` produces persona-specific scores
     (Buffett caring about moat ≠ Wood caring about moat),
-  - missing vitals contribute 0 (penalize companies that can't be
-    measured on dimensions a persona cares about),
+  - missing vitals are RENORMALIZED out (a dimension we couldn't measure
+    redistributes its weight rather than deflating the score),
   - unknown persona keys fall back to equal weights and never crash.
 """
 
@@ -17,9 +18,17 @@ import math
 import pytest
 
 from app.services.agents.persona_scoring import (
+    _HEALTH_SCALE,
     PERSONA_WEIGHTS,
     compute_quality_score,
 )
+from app.services.agents.ticker_report_data_collector import (
+    _build_forecast_vital,
+    _build_health_vital,
+    _build_wall_street_sections,
+    _derive_moat_vital,
+)
+from app.services.agents.narrative_prompts import _thesis_target_counts
 
 
 # ── Fixtures: shape mirrors the internal _scoring_inputs layer ───────
@@ -61,10 +70,23 @@ def test_persona_weights_sum_to_one(persona_key):
     )
 
 
-def test_buffett_weights_moat_at_30_percent():
-    # Locks the brief — Buffett's #1 priority is moat. If this drifts,
-    # the scoring is no longer faithful to the persona prompt.
-    assert PERSONA_WEIGHTS["warren_buffett"]["moat"] == 0.30
+def test_buffett_top_weight_is_moat():
+    # Locks the brief — Buffett's #1 priority is moat. If this drifts, the
+    # scoring is no longer faithful to the persona prompt. The exact weight
+    # is tunable; that moat is his single highest weight is not.
+    w = PERSONA_WEIGHTS["warren_buffett"]
+    assert max(w, key=w.get) == "moat"
+
+
+def test_each_persona_covers_all_eight_vitals():
+    # The redesign weights every dimension (incl. macro, forecast, wall_street)
+    # for every persona — no vital is silently dead weight.
+    eight = {
+        "valuation", "moat", "financial_health", "revenue",
+        "insider", "macro", "forecast", "wall_street",
+    }
+    for persona_key, w in PERSONA_WEIGHTS.items():
+        assert set(w) == eight, f"{persona_key} is missing {eight - set(w)}"
 
 
 def test_wood_weights_growth_axes_above_value_axes():
@@ -126,11 +148,10 @@ def test_buffett_overall_score_higher_than_wood_for_wide_moat_value_company():
 # ── Edge cases ───────────────────────────────────────────────────────
 
 
-def test_missing_vitals_score_as_zero():
-    # If the agent drops a vital this persona cares about, that
-    # vital's contribution should be 0 — not silently averaged in
-    # at neutral 5/10. The user should see a lower score reflecting
-    # incomplete data, not a fake-confident neutral.
+def test_missing_vitals_renormalize_over_present_weights():
+    # If the agent drops vitals, the score is RENORMALIZED over the vitals
+    # actually present — a dimension we couldn't measure redistributes its
+    # weight instead of dragging the score down as if the company failed it.
     incomplete = {"_scoring_inputs": {
         "moat": {"overall_rating": "wide"},
         # everything else missing
@@ -138,9 +159,20 @@ def test_missing_vitals_score_as_zero():
 
     score = compute_quality_score("warren_buffett", incomplete)
 
-    # Buffett moat weight is 0.30, moat="wide" → 8.5/10. Other
-    # vitals contribute 0. Expected: 0.30 * 8.5 * 10 = 25.5
-    assert score == 25.5
+    # Only moat present (wide → 8.5/10). Renormalized over the single present
+    # weight → 8.5 * 10 = 85.0, NOT deflated to 0.26 * 8.5 * 10 = 22.1.
+    assert score == 85.0
+
+
+def test_partial_data_not_capped_by_missing_weight():
+    # A company measured strong on the two dimensions we COULD assess should
+    # not be capped below 100 just because other vitals are absent.
+    partial = {"_scoring_inputs": {
+        "moat":             {"overall_rating": "wide"},   # 8.5
+        "financial_health": {"level": "strong"},          # 8.5
+    }}
+    # Buffett: both present (weights .26 + .22), both 8.5 → renormalized 85.0.
+    assert compute_quality_score("warren_buffett", partial) == 85.0
 
 
 def test_unknown_persona_falls_back_to_equal_weights():
@@ -204,3 +236,120 @@ def test_legacy_key_vitals_alias_still_scores():
         == compute_quality_score("warren_buffett", new)
     )
     assert compute_quality_score("warren_buffett", legacy) > 0.0
+
+
+# ── Vital builders: deterministic sub-scores are RESPONSIVE ─────────
+
+
+def test_health_vital_responsive_and_levels_all_mappable():
+    # The old _build_health_vital set `level` from Altman-Z only and left a
+    # numeric score absent for non-"strong" companies, so the scorer dropped
+    # the dimension. Now every level carries a numeric, monotonic score AND is
+    # mappable by _HEALTH_SCALE (the fallback path) — the root of the original
+    # bug where moderate/weak/critical → None → dimension dropped.
+    strong = _build_health_vital(altman_z=4.0, debt_equity=0.4, fcf_negative=False)
+    moderate = _build_health_vital(altman_z=2.6, debt_equity=0.4, fcf_negative=False)
+    weak = _build_health_vital(altman_z=2.0, debt_equity=0.4, fcf_negative=False)
+    critical = _build_health_vital(altman_z=1.0, debt_equity=0.4, fcf_negative=False)
+
+    scores = [v["score"]["value"] for v in (critical, weak, moderate, strong)]
+    assert scores == sorted(scores), f"health score not monotonic: {scores}"
+    assert strong["score"]["value"] > critical["score"]["value"]
+
+    for v in (strong, moderate, weak, critical):
+        assert _HEALTH_SCALE.get(v["level"]) is not None
+
+
+def test_health_vital_penalizes_leverage_and_negative_fcf():
+    # Same Altman-Z, but heavy debt + cash burn must score materially lower —
+    # the ORCL case (D/E 4.21, negative FCF) the old code ignored.
+    clean = _build_health_vital(altman_z=3.2, debt_equity=0.3, fcf_negative=False)
+    levered = _build_health_vital(altman_z=3.2, debt_equity=4.21, fcf_negative=True)
+    assert levered["score"]["value"] < clean["score"]["value"]
+    # D/E > 2.5 (−1.5) + negative FCF (−1.0) = −2.5 off the same base.
+    assert round(clean["score"]["value"] - levered["score"]["value"], 1) == 2.5
+
+
+def test_forecast_vital_responsive_to_cagr():
+    # Was hard-coded 7.0 regardless of growth.
+    fast = _build_forecast_vital(revenue_cagr=35.0, eps_cagr=35.0)
+    flat = _build_forecast_vital(revenue_cagr=0.0, eps_cagr=0.0)
+    shrinking = _build_forecast_vital(revenue_cagr=-20.0, eps_cagr=-20.0)
+    assert (
+        fast["score"]["value"]
+        > flat["score"]["value"]
+        > shrinking["score"]["value"]
+    )
+    assert flat["score"]["value"] == 5.0  # neutral base
+
+
+def test_wall_street_vital_responsive_to_upside():
+    # Was hard-coded 7.0. analyst=None path: score driven by fair-value upside.
+    high, _ = _build_wall_street_sections(None, None, 100.0, 150.0, [])
+    low, _ = _build_wall_street_sections(None, None, 100.0, 90.0, [])
+    assert high["score"]["value"] > low["score"]["value"]
+
+
+def test_moat_vital_rewards_breadth_not_just_max():
+    # The old code took the single MAX dimension, so these scored identically.
+    one_wall = _derive_moat_vital([
+        {"name": "Switching Costs", "score": 9.0},
+        {"name": "Network", "score": 2.0},
+        {"name": "Cost", "score": 2.0},
+        {"name": "Brand", "score": 2.0},
+    ])
+    many_walls = _derive_moat_vital([
+        {"name": "Switching Costs", "score": 9.0},
+        {"name": "Network", "score": 8.5},
+        {"name": "Cost", "score": 8.0},
+        {"name": "Brand", "score": 8.0},
+    ])
+    assert many_walls["score"]["value"] > one_wall["score"]["value"]
+
+
+def test_moat_vital_docked_by_high_competitor_threat():
+    dims = [{"name": "Brand", "score": 8.0}, {"name": "Scale", "score": 7.5}]
+    safe = _derive_moat_vital(dims, competitors=[{"threat_level": "low"}])
+    threatened = _derive_moat_vital(dims, competitors=[{"threat_level": "high"}])
+    assert threatened["score"]["value"] < safe["score"]["value"]
+
+
+# ── Signal-driven Bull/Bear count (same substrate as the score) ─────
+
+
+def _scoring_report(**scores) -> dict:
+    """Minimal assembled-report shape for _thesis_target_counts: numeric
+    sub-scores under _scoring_inputs."""
+    return {"_scoring_inputs": {
+        name: {"score": {"value": v}} for name, v in scores.items()
+    }}
+
+
+def test_target_counts_quiet_stock_floors_at_two():
+    # All eight vitals neutral (~5/10) → no strong, no weak → floor 2/2.
+    report = _scoring_report(
+        valuation=5.0, moat=5.0, financial_health=5.0, revenue=5.0,
+        insider=5.0, macro=5.0, forecast=5.0, wall_street=5.0,
+    )
+    assert _thesis_target_counts(report) == (2, 2)
+
+
+def test_target_counts_many_strong_signals_raise_bull_to_cap():
+    # Six strong dimensions → bull clamps to the UI cap of 5; no weak → bear 2.
+    report = _scoring_report(
+        valuation=8.0, moat=8.5, financial_health=9.0, revenue=8.0,
+        insider=7.5, macro=8.0, forecast=5.0, wall_street=5.0,
+    )
+    bull, bear = _thesis_target_counts(report)
+    assert bull == 5
+    assert bear == 2
+
+
+def test_target_counts_many_weak_signals_raise_bear():
+    report = _scoring_report(
+        valuation=3.0, moat=3.0, financial_health=2.0, revenue=3.5,
+        insider=5.0, macro=4.0, forecast=5.0, wall_street=5.0,
+    )
+    bull, bear = _thesis_target_counts(report)
+    assert bear >= 4
+    assert bull == 2

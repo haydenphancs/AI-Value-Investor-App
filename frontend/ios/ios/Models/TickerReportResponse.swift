@@ -105,12 +105,15 @@ struct FundamentalMetricCardDTO: Codable {
     let starRating: Int
     let metrics: [DeepDiveMetricDTO]
     let qualityLabel: String
+    // Optional: reports cached before this field omit it → nil → "neutral".
+    let qualitySentiment: String?
 
     enum CodingKeys: String, CodingKey {
         case title
         case starRating = "star_rating"
         case metrics
         case qualityLabel = "quality_label"
+        case qualitySentiment = "quality_sentiment"
     }
 }
 
@@ -563,7 +566,12 @@ extension TickerReportAPIResponse {
             case "buffett": return .buffett
             case "wood": return .wood
             case "lynch": return .lynch
-            case "dalio": return .dalio
+            case "ackman": return .ackman
+            // Legacy: cached/history reports tagged the Ackman persona "dalio"
+            // before the badge was renamed. Every such report was an Ackman
+            // analysis (there was never a real Dalio persona), so map it to
+            // .ackman rather than a default.
+            case "dalio": return .ackman
             default: return .buffett
             }
         }()
@@ -606,7 +614,8 @@ extension TickerReportAPIResponse {
                     }()
                     return DeepDiveMetric(label: m.label, value: m.value, trend: trend)
                 },
-                qualityLabel: card.qualityLabel
+                qualityLabel: card.qualityLabel,
+                qualitySentiment: card.qualitySentiment ?? "neutral"
             )
         }
 

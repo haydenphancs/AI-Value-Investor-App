@@ -62,6 +62,7 @@ from app.services.sector_aggregates_service import (
     SectorAggregates,
     get_sector_aggregates,
 )
+from app.services.agents.persona_scoring import compute_quality_score
 
 logger = logging.getLogger(__name__)
 
@@ -92,15 +93,13 @@ DISCLAIMER = (
 )
 
 # Persona key (backend) → agent tag (frontend enum).
-# Swift's ReportAgentPersona currently exposes buffett/wood/lynch/dalio;
-# bill_ackman is mapped to "dalio" for the badge until iOS adds an
-# Ackman-specific case.
+# Swift's ReportAgentPersona exposes buffett/wood/lynch/ackman. iOS still maps
+# the legacy "dalio" tag → .ackman for reports cached before this rename.
 _AGENT_MAP: Dict[str, str] = {
     "warren_buffett": "buffett",
     "cathie_wood": "wood",
     "peter_lynch": "lynch",
-    "bill_ackman": "dalio",
-    "ray_dalio": "dalio",
+    "bill_ackman": "ackman",
 }
 
 # FMP segmentation metadata keys to drop when extracting segment dicts.
@@ -1362,6 +1361,10 @@ class TickerReportDataCollector:
         meta = out.meta
 
         # ── Quality score ─────────────────────────────────────────────
+        # FALLBACK only: the AI's Stage-A self-rating. Overwritten below by
+        # the deterministic persona-weighted compute_quality_score once the
+        # scoring_inputs vitals are assembled (kept here for the rare case
+        # where no vitals could be built).
         quality_score = _coerce_score(ai.get("quality_score"), default=50.0)
 
         # ── Overall assessment ─ numerics deterministic from cards;
@@ -1661,7 +1664,7 @@ class TickerReportDataCollector:
                 + (coverage_note if (coverage_note and ai_competitive_insight) else "")
             ),
         }
-        moat_vital = _derive_moat_vital(moat_dims)
+        moat_vital = _derive_moat_vital(moat_dims, deterministic_competitors)
 
         # ── Macro: deterministic numeric factors merge into AI's qualitative
         # ones. Order of priority (real data wins on category collision):
@@ -1746,6 +1749,17 @@ class TickerReportDataCollector:
             "forecast": out.forecast_vital,
             "wall_street": out.wall_street_vital,
         }
+
+        # Deterministic, persona-weighted headline score — the SINGLE source
+        # of truth for BOTH entry paths (the report endpoint and the research
+        # agent both flow through assemble_report). Overrides the AI's Stage-A
+        # self-rating (`quality_score` above), keeping it only as the fallback
+        # when no vitals could be built. This is what makes the number
+        # reproducible and grounded in the modules rather than LLM variance.
+        if scoring_inputs:
+            quality_score = compute_quality_score(
+                out.persona_key, {"_scoring_inputs": scoring_inputs}
+            )
 
         # ── Top-level assembly ────────────────────────────────────────
         report: Dict[str, Any] = {
@@ -2040,6 +2054,40 @@ def _format_revenue(rev: Optional[float]) -> str:
     return f"${rev:,.0f}"
 
 
+def _format_money_compact(value: Optional[float]) -> str:
+    """Signed, compact dollar string for AI-facing context (evidence + digest).
+
+    Large values are abbreviated (-$394M, $1.2B, $53B, $2.1T); values under $1M
+    are written out in full ($250,000). The Bull/Bear thesis and Critical
+    Factors quote these numbers VERBATIM, so shortening them here is what turns
+    "Free CF: $-394,000,000" into "Free CF: -$394M". Unlike `_format_revenue`,
+    this handles negatives (FCF, buybacks). 0 → "$0"; None/unparseable → "N/A".
+    """
+    if value is None:
+        return "N/A"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if v == 0:
+        return "$0"
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+
+    def _abbr(x: float) -> str:
+        s = f"{x:.1f}"
+        return s[:-2] if s.endswith(".0") else s  # 394.0 → "394", 1.2 → "1.2"
+
+    if a >= 1e12:
+        return f"{sign}${_abbr(a / 1e12)}T"
+    if a >= 1e9:
+        return f"{sign}${_abbr(a / 1e9)}B"
+    if a >= 1e6:
+        return f"{sign}${_abbr(a / 1e6)}M"
+    # Under $1M — write it out in full.
+    return f"{sign}${a:,.0f}"
+
+
 def _format_currency_short(v: float) -> str:
     """For insider transaction value column ($K/M/B)."""
     if v <= 0:
@@ -2163,8 +2211,26 @@ def _build_health_vital(
     debt_equity: Optional[float],
     fcf_negative: bool,
 ) -> Dict[str, Any]:
+    """Continuous 0-10 `score.value` blending Altman-Z (solvency core) with
+    leverage and FCF. The old version set `level` from Altman-Z ONLY and left
+    D/E and negative FCF as cosmetic labels that never touched the score — so
+    a heavily-levered, cash-burning company with a benign Z scored as healthy.
+    Now leverage + FCF apply real penalties. `level` is kept for the card.
+    """
+    # Leverage + FCF penalties apply on both the known-Z and unknown-Z paths.
+    leverage_penalty = 0.0
+    if debt_equity is not None:
+        if debt_equity > 2.5:
+            leverage_penalty = 1.5
+        elif debt_equity > 1.0:
+            leverage_penalty = 0.5
+    fcf_penalty = 1.0 if fcf_negative else 0.0
+
     if altman_z is None:
+        # No solvency core — neutral base, but still dock leverage/FCF.
+        score_value = max(0.0, min(10.0, 5.0 - leverage_penalty - fcf_penalty))
         return {
+            "score": {"value": round(score_value, 1), "status": "neutral"},
             "level": "moderate",
             "altman_z_score": 0.0,
             "altman_z_label": "Data unavailable",
@@ -2174,16 +2240,29 @@ def _build_health_vital(
             "fcf_note": "FCF data unavailable",
         }
 
+    # Continuous Altman-Z base, piecewise-aligned to the published zone bands.
     if altman_z < 1.8:
         level, z_label = "critical", "Distress Zone (Below 1.8)"
+        base = max(0.0, 1.0 + (altman_z / 1.8) * 3.0)        # 0..4
     elif altman_z < 2.4:
         level, z_label = "weak", "Grey Zone (1.8-3.0)"
+        base = 4.0 + ((altman_z - 1.8) / 0.6) * 2.0          # 4..6
     elif altman_z < 3.0:
         level, z_label = "moderate", "Grey Zone (1.8-3.0)"
+        base = 6.0 + ((altman_z - 2.4) / 0.6) * 2.0          # 6..8
     else:
         level, z_label = "strong", "Safe Zone (Above 3.0)"
+        base = 8.0 + min(2.0, (altman_z - 3.0) * 0.5)        # 8..10
+
+    score_value = max(0.0, min(10.0, base - leverage_penalty - fcf_penalty))
+    status = (
+        "good" if score_value >= 6.5
+        else "critical" if score_value < 3.5
+        else "neutral"
+    )
 
     return {
+        "score": {"value": round(score_value, 1), "status": status},
         "level": level,
         "altman_z_score": altman_z,
         "altman_z_label": z_label,
@@ -2243,8 +2322,15 @@ def _build_forecast_vital(
         status, outlook = "warning", "Decelerating"
     else:
         status, outlook = "neutral", "Steady Growth"
+
+    # Responsive 0-10 (was hard-coded 7.0): revenue CAGR drives the base,
+    # EPS CAGR tilts it ±1. rev +40% → ~10, flat → 5, −30% → ~1.
+    base = 5.0 + max(-30.0, min(40.0, rev)) / 8.0
+    eps_tilt = max(-40.0, min(40.0, eps)) / 40.0
+    score_value = round(max(0.0, min(10.0, base + eps_tilt)), 1)
+
     return {
-        "score": {"value": 7.0, "status": status},
+        "score": {"value": score_value, "status": status},
         "revenue_cagr": rev,
         "eps_cagr": eps,
         "guidance": "maintained",  # AI overrides with real management_guidance
@@ -2311,8 +2397,20 @@ def _build_wall_street_sections(
     else:
         ws_status = "neutral"
 
+    # Responsive 0-10 (was hard-coded 7.0): analyst target upside drives the
+    # base, the consensus rating nudges it, and 12-mo momentum (upgrades minus
+    # downgrades) tilts ±1.5. No analyst coverage → ws_upside 0 → neutral ~5.0
+    # (honest default, never a fabricated bullish 7.0).
+    _CONSENSUS_NUDGE = {
+        "strong_buy": 1.0, "buy": 0.5, "hold": 0.0, "sell": -1.0, "strong_sell": -2.0,
+    }
+    ws_base = 5.0 + max(-40.0, min(40.0, ws_upside)) / 8.0
+    ws_momentum = max(-1.5, min(1.5, (upgrades - downgrades) * 0.25))
+    ws_score_value = round(max(0.0, min(10.0,
+        ws_base + _CONSENSUS_NUDGE.get(consensus_rating, 0.0) + ws_momentum)), 1)
+
     wall_street_vital = {
-        "score": {"value": 7.0, "status": ws_status},
+        "score": {"value": ws_score_value, "status": ws_status},
         "consensus_rating": consensus_rating,
         "price_target": round(target_price if target_price > 0 else (fair_value or 0.0), 2),
         "current_price": round(current_price, 2),
@@ -2716,6 +2814,7 @@ def _snapshot_to_card(
             "star_rating": 0,
             "metrics": metrics,
             "quality_label": "Data unavailable",
+            "quality_sentiment": "neutral",
         }
 
     metrics = [
@@ -2728,7 +2827,8 @@ def _snapshot_to_card(
         "title": title,
         "star_rating": int(snap.rating or 0),
         "metrics": metrics,
-        "quality_label": "",  # Stage B narrative writes this
+        "quality_label": "",  # Stage B narrative writes this (+ quality_sentiment)
+        "quality_sentiment": "neutral",  # overwritten by the label job's sentiment
     }
 
 
@@ -5629,8 +5729,20 @@ def _build_competitors(
     return out
 
 
-def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Derive overall_rating, primary_source, and tags from real scores."""
+def _derive_moat_vital(
+    moat_dims: List[Dict[str, Any]],
+    competitors: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Derive overall_rating (card label), tags, and a continuous 0-10
+    `score.value` from the FULL dimension profile.
+
+    The score was previously taken from the single MAX dimension, so five
+    strong moat walls scored identically to one. It now blends the strongest
+    pillars (a moat is defined by its best walls) while rewarding breadth, and
+    is docked when a competitor poses a high threat. `overall_rating` still
+    reflects the top pillar so the moat card's wide/narrow/none label is
+    unchanged.
+    """
     if not moat_dims:
         return {
             "overall_rating": "none",
@@ -5647,6 +5759,32 @@ def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
     else:
         overall_rating = "none"
 
+    # Composite that rewards breadth without averaging away a deep single moat.
+    ranked = sorted(
+        (float(d.get("score") or 0.0) for d in moat_dims), reverse=True
+    )
+    if len(ranked) >= 3:
+        composite = 0.5 * ranked[0] + 0.3 * ranked[1] + 0.2 * ranked[2]
+    elif len(ranked) == 2:
+        composite = 0.6 * ranked[0] + 0.4 * ranked[1]
+    else:
+        composite = ranked[0]
+
+    # Dock the moat when a competitor poses a real threat (erodes durability).
+    threat_penalty = 0.0
+    for cp in (competitors or []):
+        tl = str((cp or {}).get("threat_level") or "").lower()
+        if tl in ("high", "severe", "critical"):
+            threat_penalty = max(threat_penalty, 1.0)
+        elif tl == "elevated":
+            threat_penalty = max(threat_penalty, 0.5)
+    composite = max(0.0, min(10.0, composite - threat_penalty))
+    moat_status = (
+        "good" if composite >= 7.0
+        else "critical" if composite < 4.0
+        else "neutral"
+    )
+
     tags = []
     for d in moat_dims:
         s = float(d.get("score") or 0.0)
@@ -5662,6 +5800,7 @@ def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
             break
 
     return {
+        "score": {"value": round(composite, 1), "status": moat_status},
         "overall_rating": overall_rating,
         "primary_source": primary_source,
         "tags": tags or [{"label": primary_source, "strength": overall_rating}],
@@ -5829,12 +5968,12 @@ def _derive_macro_vital(
 
 
 def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Pydantic-safe core_thesis. Bull/bear cap to 4 each (Phase 2 also
-    enforces this in the prompt; this is the post-write defense)."""
+    """Pydantic-safe core_thesis. Bull/bear cap to 5 each (the prompt also
+    enforces a signal-driven 2-5 count; this is the post-write defense)."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
-    bull = list(thesis.get("bull_case") or [])[:4]
-    bear = list(thesis.get("bear_case") or [])[:4]
+    bull = list(thesis.get("bull_case") or [])[:5]
+    bear = list(thesis.get("bear_case") or [])[:5]
     return {"bull_case": bull, "bear_case": bear}
 
 
@@ -5876,7 +6015,7 @@ def build_financial_context(out: CollectedTickerData) -> str:
             f"Industry: {profile.get('industry', 'N/A')}"
         )
         parts.append(
-            f"Market Cap: ${(profile.get('mktCap', 0) or 0):,.0f}"
+            f"Market Cap: {_format_money_compact(profile.get('mktCap', 0) or 0)}"
         )
         parts.append(f"CEO: {profile.get('ceo', 'N/A')}")
         parts.append(
@@ -5918,21 +6057,21 @@ def build_financial_context(out: CollectedTickerData) -> str:
         for stmt in income[:3]:
             yr = stmt.get("calendarYear", "?")
             parts.append(
-                f"\n[{yr}] Revenue: ${stmt.get('revenue', 0):,.0f} | "
-                f"Net Income: ${stmt.get('netIncome', 0):,.0f}"
+                f"\n[{yr}] Revenue: {_format_money_compact(stmt.get('revenue', 0))} | "
+                f"Net Income: {_format_money_compact(stmt.get('netIncome', 0))}"
             )
 
     if balance:
         b = balance[0]
-        parts.append(f"\nTotal Assets: ${b.get('totalAssets', 0):,.0f}")
-        parts.append(f"Total Debt: ${b.get('totalDebt', 0):,.0f}")
-        parts.append(f"Cash: ${b.get('cashAndCashEquivalents', 0):,.0f}")
+        parts.append(f"\nTotal Assets: {_format_money_compact(b.get('totalAssets', 0))}")
+        parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0))}")
+        parts.append(f"Cash: {_format_money_compact(b.get('cashAndCashEquivalents', 0))}")
 
     if cash_flow:
         cf = cash_flow[0]
-        parts.append(f"\nOperating CF: ${cf.get('operatingCashFlow', 0):,.0f}")
-        parts.append(f"Free CF: ${cf.get('freeCashFlow', 0):,.0f}")
-        parts.append(f"Buybacks: ${cf.get('commonStockRepurchased', 0):,.0f}")
+        parts.append(f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0))}")
+        parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0))}")
+        parts.append(f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0))}")
 
     if ratios:
         r0 = ratios[0]
@@ -5948,7 +6087,7 @@ def build_financial_context(out: CollectedTickerData) -> str:
         for est in estimates[:2]:
             parts.append(
                 f"  {est.get('date', '?')}: "
-                f"Rev ${_est_revenue(est):,.0f}, "
+                f"Rev {_format_money_compact(_est_revenue(est))}, "
                 f"EPS ${_est_eps(est):.2f}"
             )
 

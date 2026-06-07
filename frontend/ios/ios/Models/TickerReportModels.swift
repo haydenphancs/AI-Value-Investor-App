@@ -237,6 +237,13 @@ struct ReportOverallAssessment {
 
 // MARK: - Revenue Forecast Data
 
+struct EarningsTrackRecordPoint: Identifiable {
+    let id = UUID()
+    let period: String            // "Q1 '24"
+    let surprisePercent: Double   // signed beat (+) / miss (−), %
+    let beat: Bool
+}
+
 struct ReportRevenueForecast {
     let cagr: Double                    // revenue growth percentage
     let epsGrowth: Double               // EPS growth percentage
@@ -251,6 +258,10 @@ struct ReportRevenueForecast {
     // it does. nil on older cached reports / the fallback path — the view
     // hides the Insight card when nil or empty.
     let insight: String?
+    // Earnings beat/miss track record — last ~6 reported quarters vs estimate.
+    // `var` with defaults so sample/memberwise inits need no change.
+    var earningsTrackRecord: [EarningsTrackRecordPoint] = []
+    var beatSummary: String? = nil      // "Beat 6 of 8"
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
@@ -355,11 +366,34 @@ struct InsiderTransaction: Identifiable {
     let value: String
 }
 
+struct ReportCapitalAllocation {
+    let buybackStatus: String     // Diluting / … / Very High
+    let dividendStatus: String    // Low / Fair / High / Very High
+    let dividendYield: Double
+    let buybackYield: Double
+    let totalYield: Double
+    let shareCountChange: Double  // % (negative = shrinking via buybacks)
+
+    /// Sentiment of the buyback status → drives the chip color (green/red).
+    var buybackSentiment: String {
+        let s = buybackStatus.lowercased()
+        if s.contains("dilut") { return "negative" }
+        if s == "high" || s == "very high" || s == "moderate" { return "positive" }
+        return "neutral"
+    }
+
+    var dividendYieldText: String { String(format: "%.2f%%", dividendYield) }
+    var shareCountChangeText: String {
+        String(format: "%@%.1f%%", shareCountChange >= 0 ? "+" : "", shareCountChange)
+    }
+}
+
 struct ReportInsiderData {
     let sentiment: InsiderSentiment
     let timeframe: String           // "Last 90 Days"
     let transactions: [InsiderTransaction]
     let ownershipNote: String?      // "The stock is heavily sold off by insiders."
+    var capitalAllocation: ReportCapitalAllocation? = nil
 }
 
 // MARK: - Key Management
@@ -1018,6 +1052,39 @@ struct ReportMacroData {
 
 // MARK: - Deep Dive Module
 
+// MARK: - Hidden Market Signals (congress trades + short interest)
+
+struct CongressSignal {
+    let numBuyers: Int
+    let numSellers: Int
+    let totalBuysInMillions: Double
+    let totalSellsInMillions: Double
+    let netDirection: String   // "buy" | "sell" | "balanced"
+    let period: String         // "Last 12 Months"
+}
+
+struct ShortInterestPoint: Identifiable {
+    let id = UUID()
+    let settlementDate: String?
+    let sharesShort: Double?
+    let daysToCover: Double?
+}
+
+struct ShortInterestSignal {
+    let percentOfFloat: Double?
+    let daysToCover: Double?
+    let sharesShort: Double?
+    let change3m: Double?       // % vs ~3 months ago
+    let settlementDate: String?
+    let history: [ShortInterestPoint]  // up to 12 points; empty → no chart
+}
+
+struct ReportHiddenMarketSignals {
+    let congress: CongressSignal?
+    let shortInterest: ShortInterestSignal?
+    let insight: String
+}
+
 struct DeepDiveModule: Identifiable {
     let id = UUID()
     let title: String
@@ -1034,6 +1101,7 @@ enum DeepDiveModuleType {
     case moatCompetition
     case macroGeopolitical
     case wallStreetConsensus
+    case hiddenMarketSignals
 }
 
 // MARK: - Full Report Data
@@ -1082,6 +1150,9 @@ struct TickerReportData: Identifiable {
 
     // Deep Dive: Wall Street
     let wallStreetConsensus: ReportWallStreetConsensus
+
+    // Deep Dive: Hidden Market Signals (nil → module hidden)
+    var hiddenMarketSignals: ReportHiddenMarketSignals? = nil
 
     // Critical Factors
     let criticalFactors: [CriticalFactor]

@@ -70,6 +70,7 @@ FALLBACK = {
     "critical_factor_description": "Signal unavailable for this factor.",
     "critical_factor_watch": None,
     "wall_street_insight": None,
+    "hidden_market_signals_insight": "",
 }
 
 
@@ -746,6 +747,27 @@ Focus on the WHY, not just the numbers:
 Cite ONE concrete projected number from the projections above to anchor the read. Do NOT just list the projections back."""
 
 
+def _hidden_market_signals_insight_prompt(
+    persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
+) -> str:
+    """One-line synthesis of the Hidden Market Signals module — what the
+    congressional trades and short interest TOGETHER imply. Grounded only in
+    the numbers the user sees on the card (via the hidden-signals digest)."""
+    signals = _related_context_block(
+        "the hidden positioning signals",
+        cross_section_context(shell, ["hidden_signals"]),
+    )
+    return f"""Write the Hidden Market Signals insight — a one-line read on what congressional trading and short interest TOGETHER imply.
+{signals}
+{_style_block(persona)}
+LENGTH: ONE sentence, under 22 words.
+
+- Lead with the louder signal (heavy congress buying/selling, or notably high/rising short interest).
+- If they conflict (politicians buying while shorts build), say so — that tension IS the signal.
+- Cite ONE concrete number from above (e.g. "3 congress buyers", "short 6.2% of float"). Never invent a number.
+- If both are quiet, say positioning is unremarkable. Never fabricate drama."""
+
+
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -1157,6 +1179,17 @@ def build_narrative_jobs(
             word_cap=90,
             apply=_setter_for_dict_key(rf, "insight"),
             fallback_value=FALLBACK["revenue_forecast_insight"],
+        ))
+
+    # ── hidden_market_signals.insight ────────────────────────────────
+    hms = shell.get("hidden_market_signals")
+    if isinstance(hms, dict):
+        jobs.append(NarrativeJob(
+            label="hidden_market_signals_insight",
+            prompt=_hidden_market_signals_insight_prompt(persona, evidence, shell),
+            word_cap=24,
+            apply=_setter_for_dict_key(hms, "insight"),
+            fallback_value=FALLBACK["hidden_market_signals_insight"],
         ))
 
     # ── revenue_forecast.guidance_quote ──────────────────────────────
@@ -1658,6 +1691,8 @@ def _digest_forecast(report: Dict[str, Any]) -> List[str]:
         bits.append(f"EPS CAGR {eps}%")
     if rf.get("management_guidance"):
         bits.append(f"guidance {rf['management_guidance']}")
+    if rf.get("beat_summary"):
+        bits.append(str(rf["beat_summary"]).lower())  # "beat 6 of 8"
     if bits:
         out.append("FUTURE FORECAST: " + ", ".join(bits))
     return out
@@ -1677,6 +1712,52 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
         if tx_strs:
             seg += " — " + ", ".join(tx_strs)
         out.append(seg)
+    ca = idata.get("capital_allocation")
+    if isinstance(ca, dict):
+        ca_bits: List[str] = []
+        if ca.get("buyback_status"):
+            ca_bits.append(f"buybacks {ca['buyback_status']}")
+        dy = _f_num(ca.get("dividend_yield"), "{:.1f}")
+        if dy is not None and (ca.get("dividend_yield") or 0) > 0:
+            ca_bits.append(f"div yield {dy}%")
+        scc = _f_num(ca.get("share_count_change"), "{:+.1f}")
+        if scc is not None:
+            ca_bits.append(f"share count {scc}% YoY")
+        if ca_bits:
+            out.append("  Capital allocation: " + ", ".join(ca_bits))
+    return out
+
+
+def _digest_hidden_signals(report: Dict[str, Any]) -> List[str]:
+    """Hidden Market Signals — congressional trades + short interest."""
+    out: List[str] = []
+    hms = report.get("hidden_market_signals")
+    if not isinstance(hms, dict):
+        return out
+    bits: List[str] = []
+    cg = hms.get("congress")
+    if isinstance(cg, dict) and (cg.get("num_buyers") or cg.get("num_sellers")):
+        bits.append(
+            f"Congress {cg.get('num_buyers', 0)} buyer(s) / "
+            f"{cg.get('num_sellers', 0)} seller(s), net {cg.get('net_direction', '?')} "
+            f"({cg.get('period', '12mo')})"
+        )
+    si = hms.get("short_interest")
+    if isinstance(si, dict):
+        sbits: List[str] = []
+        pf = _f_num(si.get("percent_of_float"), "{:.1f}")
+        if pf is not None:
+            sbits.append(f"{pf}% of float")
+        dtc = _f_num(si.get("days_to_cover"), "{:.1f}")
+        if dtc is not None:
+            sbits.append(f"{dtc}d to cover")
+        ch = _f_num(si.get("change_3m"), "{:+.0f}")
+        if ch is not None:
+            sbits.append(f"{ch}% vs 3mo")
+        if sbits:
+            bits.append("Short interest " + ", ".join(sbits))
+    if bits:
+        out.append("HIDDEN SIGNALS: " + "; ".join(bits))
     return out
 
 
@@ -1794,6 +1875,7 @@ _DIGEST_FORMATTERS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
     "moat": _digest_moat,
     "macro": _digest_macro,
     "wall_street": _digest_wall_street,
+    "hidden_signals": _digest_hidden_signals,
 }
 _DIGEST_ORDER: List[str] = list(_DIGEST_FORMATTERS)
 
@@ -1907,7 +1989,7 @@ _BULL_SIGNAL = 7.5
 _BEAR_SIGNAL = 4.0
 _SCORING_VITALS = (
     "valuation", "moat", "financial_health", "revenue",
-    "insider", "macro", "forecast", "wall_street",
+    "insider", "macro", "forecast", "wall_street", "capital_allocation",
 )
 
 

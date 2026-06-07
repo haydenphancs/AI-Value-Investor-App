@@ -52,6 +52,8 @@ from app.schemas.analyst import (
 )
 from app.schemas.holders import HoldersResponse
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
+from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
+from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.services._insider_common import (
     classify_insider_transaction,
@@ -265,6 +267,11 @@ class CollectedTickerData:
     earnings_dates: List[str] = field(default_factory=list)
     analyst_analysis: Optional[AnalystAnalysisResponse] = None
     holders_response: Optional[HoldersResponse] = None
+    # ── Capital Allocation (buybacks + dividends), Earnings beat/miss,
+    #    Short interest — reused services; feed the new report blocks. ──
+    signal_of_confidence: Optional[SignalOfConfidenceResponse] = None
+    earnings: Optional[EarningsResponse] = None
+    short_interest: Optional[Dict[str, Any]] = None
 
     # ── Snapshot services (parity with TickerDetailView Financials tab) ──
     snap_profitability: Optional[SnapshotItemResponse] = None
@@ -516,6 +523,11 @@ class TickerReportDataCollector:
         from app.services.revenue_breakdown_service import (
             get_revenue_breakdown_service,
         )
+        from app.services.signal_of_confidence_service import (
+            get_signal_of_confidence_service,
+        )
+        from app.services.earnings_service import get_earnings_service
+        from app.integrations.finra_short_interest import get_short_interest
 
         analyst_service = AnalystService()
         holders_service = HoldersService()
@@ -549,6 +561,18 @@ class TickerReportDataCollector:
             ("earnings_dates", self.fmp.get_historical_earnings_dates(ticker), []),
             ("analyst_analysis", analyst_service.get_analysis(ticker), None),
             ("holders_response", holders_service.get_holders(ticker), None),
+            # Capital Allocation (buybacks + dividends) — same service the
+            # Financials tab's "Signal of Confidence" uses (own 2-tier cache).
+            (
+                "signal_of_confidence",
+                get_signal_of_confidence_service().get_signal_of_confidence(ticker),
+                None,
+            ),
+            # Earnings beat/miss track record — structured quarterly surprises.
+            ("earnings", get_earnings_service().get_earnings(ticker), None),
+            # Short interest snapshot + 12-pt FINRA series (Hidden Market
+            # Signals). Own 16-18 day cache; degrades to None.
+            ("short_interest", get_short_interest(ticker), None),
             # Snapshot services — same data the Financials tab shows in
             # TickerDetailView. Fetching here gives the report cards the
             # exact same numbers the user already sees on the other view.
@@ -1393,6 +1417,11 @@ class TickerReportDataCollector:
             insider_ai.get("ownership_note")
             or insider_data.get("ownership_note")
         )
+        # Capital Allocation block (buybacks + dividends) — reuses the same
+        # Signal of Confidence service the Financials tab uses. None hides it.
+        insider_data["capital_allocation"] = _build_capital_allocation_block(
+            out.signal_of_confidence
+        )
 
         # ── Insider vital: AI provides only key_insight ──────────────
         insider_vital = dict(out.insider_vital_partial)
@@ -1433,6 +1462,8 @@ class TickerReportDataCollector:
         revenue_forecast = dict(out.revenue_forecast_partial)
         ai_rf = ai.get("revenue_forecast") or {}
         _overlay_ai_guidance(revenue_forecast, ai_rf)
+        # Earnings beat/miss track record (last ~6 reported quarters).
+        _attach_earnings_track_record(revenue_forecast, out.earnings)
 
         # ── Wall Street consensus: AI fills only wall_street_insight ─────
         wall_street_consensus = dict(out.wall_street_consensus_partial)
@@ -1748,6 +1779,12 @@ class TickerReportDataCollector:
             "macro": macro_vital,
             "forecast": out.forecast_vital,
             "wall_street": out.wall_street_vital,
+            # 9th dimension — disciplined return of capital (buybacks/dividends).
+            # None when the Signal of Confidence service had no data → the
+            # persona scorer renormalizes it out (no deflation).
+            "capital_allocation": _build_capital_allocation_vital(
+                out.signal_of_confidence
+            ),
         }
 
         # Deterministic, persona-weighted headline score — the SINGLE source
@@ -1798,6 +1835,14 @@ class TickerReportDataCollector:
             "moat_competition": moat_competition,
             "macro_data": macro_data,
             "wall_street_consensus": wall_street_consensus,
+            # New module — congress trades (reused from holders_response, so it
+            # matches the Holders tab) + short interest snapshot/series. None
+            # when both sub-signals are absent → iOS hides the module.
+            "hidden_market_signals": _build_hidden_market_signals(
+                out.holders_response,
+                out.short_interest,
+                (out.quote or {}).get("sharesOutstanding"),
+            ),
 
             # Hard cap at 5 ("never more than 5") — the Stage A prompt targets
             # 2-3, this is the deterministic safety net. Applied before Stage B
@@ -2336,6 +2381,153 @@ def _build_forecast_vital(
         "guidance": "maintained",  # AI overrides with real management_guidance
         "outlook": outlook,
     }
+
+
+# ── Capital Allocation · Earnings Track Record · Hidden Market Signals ──
+# New Deep-Dive data blocks, all sourced from services the app already runs
+# (reused, not rebuilt) so the report stays consistent with TickerDetailView.
+
+
+def _build_capital_allocation_block(
+    soc: Optional[SignalOfConfidenceResponse],
+) -> Optional[Dict[str, Any]]:
+    """Compact capital-allocation block for the Insider & Management section.
+    Reuses the Signal of Confidence service (same numbers as the Financials
+    tab). None when unavailable → iOS hides the block."""
+    if soc is None:
+        return None
+    s = soc.summary
+    div = soc.dividend_info
+    return {
+        "buyback_status": (div.buyback_status if div else "Low"),
+        "dividend_status": (div.status if div else "Fair"),
+        "dividend_yield": round(s.dividend_yield, 2),
+        "buyback_yield": round(s.buyback_yield, 2),
+        "total_yield": round(s.total_yield, 2),
+        "share_count_change": round(s.share_count_change, 2),
+    }
+
+
+def _build_capital_allocation_vital(
+    soc: Optional[SignalOfConfidenceResponse],
+) -> Optional[Dict[str, Any]]:
+    """0-10 capital-allocation score (9th persona-scoring dimension):
+    disciplined return of capital scores high. Total shareholder yield rewards;
+    a shrinking share count (buybacks) rewards; dilution penalises. None when
+    no data → the persona scorer renormalizes it out (no score deflation)."""
+    if soc is None:
+        return None
+    s = soc.summary
+    total_yield = (s.dividend_yield or 0.0) + (s.buyback_yield or 0.0)
+    scc = s.share_count_change or 0.0  # negative = shrinking (good)
+    scc_term = max(-3.0, min(3.0, scc * 0.3))
+    score = max(0.0, min(10.0, 5.0 + min(4.0, total_yield * 0.5) - scc_term))
+    status = "good" if score >= 6.5 else "critical" if score < 3.5 else "neutral"
+    return {"score": {"value": round(score, 1), "status": status}}
+
+
+def _attach_earnings_track_record(
+    revenue_forecast: Dict[str, Any],
+    earnings: Optional[EarningsResponse],
+) -> None:
+    """Add `earnings_track_record` (last ~6 REPORTED quarters' beat/miss vs
+    estimate) + a `beat_summary` to the forecast dict. Safe no-op: emits an
+    empty list + None summary when earnings are unavailable."""
+    record: List[Dict[str, Any]] = []
+    if earnings is not None:
+        reported = [
+            q for q in (earnings.eps_quarters or [])
+            if q.actual_value is not None and q.surprise_percent is not None
+        ]
+        reported.sort(key=lambda q: q.fiscal_date or "")  # oldest → newest
+        for q in reported[-6:]:
+            record.append({
+                "period": q.quarter,
+                "surprise_percent": round(q.surprise_percent, 1),
+                "beat": q.surprise_percent > 0,
+            })
+    revenue_forecast["earnings_track_record"] = record
+    if record:
+        beats = sum(1 for r in record if r["beat"])
+        revenue_forecast["beat_summary"] = f"Beat {beats} of {len(record)}"
+    else:
+        revenue_forecast["beat_summary"] = None
+
+
+def _build_short_interest_signal(
+    si: Dict[str, Any], shares_outstanding: Optional[float],
+) -> Dict[str, Any]:
+    """Snapshot (+ up to 12-point series) for the short-interest signal.
+    `% of float` is taken directly when present, else derived from
+    shares_short / sharesOutstanding (approximate float)."""
+    shares_short = si.get("shares_short")
+    pct = si.get("short_percent_of_float")
+    if pct is None and shares_short and shares_outstanding:
+        try:
+            pct = round(float(shares_short) / float(shares_outstanding) * 100, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pct = None
+    history: List[Dict[str, Any]] = []
+    for p in (si.get("history") or [])[-12:]:
+        if not isinstance(p, dict):
+            continue
+        history.append({
+            "settlement_date": p.get("settlement_date"),
+            "shares_short": p.get("shares_short"),
+            "days_to_cover": p.get("days_to_cover"),
+        })
+    return {
+        "percent_of_float": pct,
+        "days_to_cover": si.get("short_ratio"),
+        "shares_short": shares_short,
+        "change_3m": si.get("short_change_3m"),
+        "settlement_date": si.get("settlement_date"),
+        "history": history,
+    }
+
+
+def _build_hidden_market_signals(
+    holders: Optional[HoldersResponse],
+    short_interest: Optional[Dict[str, Any]],
+    shares_outstanding: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """New "Hidden Market Signals" module: congressional trades (REUSED from
+    `holders_response`, so the numbers match the Holders tab exactly) + short
+    interest. `insight` is filled by the Stage-B narrative pass. Returns None
+    when BOTH sub-signals are absent → iOS hides the whole module."""
+    congress: Optional[Dict[str, Any]] = None
+    try:
+        summ = (
+            holders.recent_activities.congress_activities.summary
+            if holders is not None else None
+        )
+        if summ is not None and (summ.num_buyers or summ.num_sellers):
+            net = (summ.total_buys_in_millions or 0.0) - (
+                summ.total_sells_in_millions or 0.0
+            )
+            congress = {
+                "num_buyers": summ.num_buyers,
+                "num_sellers": summ.num_sellers,
+                "total_buys_in_millions": round(summ.total_buys_in_millions or 0.0, 2),
+                "total_sells_in_millions": round(summ.total_sells_in_millions or 0.0, 2),
+                "net_direction": (
+                    "buy" if net > 0 else "sell" if net < 0 else "balanced"
+                ),
+                "period": summ.period_description or "Last 12 Months",
+            }
+    except Exception:
+        congress = None
+
+    short: Optional[Dict[str, Any]] = None
+    if short_interest:
+        try:
+            short = _build_short_interest_signal(short_interest, shares_outstanding)
+        except Exception:
+            short = None
+
+    if congress is None and short is None:
+        return None
+    return {"congress": congress, "short_interest": short, "insight": ""}
 
 
 def _build_wall_street_sections(

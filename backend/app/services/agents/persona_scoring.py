@@ -32,67 +32,68 @@ from typing import Any, Dict, Optional
 
 PERSONA_WEIGHTS: Dict[str, Dict[str, float]] = {
     # Quality-at-a-fair-price: moat + balance-sheet durability dominate;
-    # growth/analyst noise is de-emphasised but macro tail-risk still counts.
+    # capital-allocation discipline (buybacks/dividends) matters to Buffett.
     "warren_buffett": {
-        "moat":             0.26,
-        "financial_health": 0.22,
-        "valuation":        0.18,
-        "insider":          0.12,
-        "revenue":          0.08,
-        "macro":            0.06,
-        "forecast":         0.04,
-        "wall_street":      0.04,
+        "moat":              0.24,
+        "financial_health":  0.20,
+        "valuation":         0.16,
+        "capital_allocation": 0.12,
+        "insider":           0.10,
+        "revenue":           0.07,
+        "macro":             0.05,
+        "forecast":          0.03,
+        "wall_street":       0.03,
     },
-    # Innovation/growth: revenue + forward forecast lead; traditional value
-    # and balance-sheet weight is light; macro/secular regime matters.
+    # Innovation/growth: revenue + forward forecast lead; value, balance-sheet
+    # and capital-return weight is light; macro/secular regime matters.
     "cathie_wood": {
-        "revenue":          0.24,
-        "forecast":         0.24,
-        "moat":             0.14,
-        "valuation":        0.08,
-        "insider":          0.08,
-        "wall_street":      0.08,
-        "macro":            0.08,
-        "financial_health": 0.06,
+        "revenue":           0.23,
+        "forecast":          0.23,
+        "moat":              0.14,
+        "macro":             0.08,
+        "valuation":         0.08,
+        "insider":           0.07,
+        "wall_street":       0.07,
+        "capital_allocation": 0.05,
+        "financial_health":  0.05,
     },
     # GARP: growth (forecast/revenue) balanced against price (valuation) and
     # a solid balance sheet — Lynch's "buy what you know, at a sane price".
     "peter_lynch": {
-        "forecast":         0.22,
-        "revenue":          0.18,
-        "valuation":        0.18,
-        "financial_health": 0.14,
-        "insider":          0.08,
-        "moat":             0.08,
-        "wall_street":      0.06,
-        "macro":            0.06,
+        "forecast":          0.20,
+        "revenue":           0.17,
+        "valuation":         0.17,
+        "financial_health":  0.13,
+        "capital_allocation": 0.08,
+        "insider":           0.07,
+        "moat":              0.07,
+        "wall_street":       0.06,
+        "macro":             0.05,
     },
-    # Concentrated activist value: balance-sheet quality + valuation + moat
-    # carry the thesis; insider noise is minimal.
+    # Concentrated activist value: balance-sheet quality + valuation + moat +
+    # capital-allocation discipline carry the thesis; insider noise is minimal.
     "bill_ackman": {
-        "financial_health": 0.22,
-        "valuation":        0.22,
-        "moat":             0.18,
-        "forecast":         0.12,
-        "revenue":          0.12,
-        "macro":            0.08,
-        "wall_street":      0.04,
-        "insider":          0.02,
+        "financial_health":  0.20,
+        "valuation":         0.20,
+        "moat":              0.16,
+        "capital_allocation": 0.12,
+        "forecast":          0.10,
+        "revenue":           0.10,
+        "macro":             0.07,
+        "wall_street":       0.03,
+        "insider":           0.02,
     },
 }
 
-# Equal weight across all 8 vitals — used for unknown persona keys so
-# we never crash on a missing config and instead degrade to a neutral
-# average.
+# Equal weight across all 9 vitals — used for unknown persona keys so we never
+# crash on a missing config and instead degrade to a neutral average. (The
+# scorer renormalizes over present vitals, so the exact sum need not be 1.0.)
 _EQUAL_WEIGHTS: Dict[str, float] = {
-    "valuation":        0.125,
-    "moat":             0.125,
-    "financial_health": 0.125,
-    "revenue":          0.125,
-    "insider":          0.125,
-    "macro":            0.125,
-    "forecast":         0.125,
-    "wall_street":      0.125,
+    v: 1.0 / 9.0
+    for v in (
+        "valuation", "moat", "financial_health", "revenue", "insider",
+        "macro", "forecast", "wall_street", "capital_allocation",
+    )
 }
 
 

@@ -21,14 +21,14 @@ enum ReportAgentPersona: String, CaseIterable {
     case buffett = "ANALYZED BY BUFFETT AGENT"
     case wood = "ANALYZED BY WOOD AGENT"
     case lynch = "ANALYZED BY LYNCH AGENT"
-    case dalio = "ANALYZED BY DALIO AGENT"
+    case ackman = "ANALYZED BY ACKMAN AGENT"
 
     var starRating: Double {
         switch self {
         case .buffett: return 4.0
         case .wood: return 3.5
         case .lynch: return 4.5
-        case .dalio: return 4.0
+        case .ackman: return 4.0
         }
     }
 }
@@ -130,6 +130,25 @@ struct DeepDiveMetricCard: Identifiable {
     let starRating: Int         // 1-5
     let metrics: [DeepDiveMetric]
     let qualityLabel: String    // "A Cash Machine", "Priced for perfection", etc.
+    /// Sentiment of `qualityLabel` ("positive" | "negative" | "neutral"),
+    /// derived server-side. Drives the footer COLOR independently of the star
+    /// rating (which mirrors the Financials tab and can disagree with the
+    /// takeaway — e.g. a 4★ Health card whose footer is "Debt 4.21, Far Too High").
+    let qualitySentiment: String
+
+    init(
+        title: String,
+        starRating: Int,
+        metrics: [DeepDiveMetric],
+        qualityLabel: String,
+        qualitySentiment: String = "neutral"
+    ) {
+        self.title = title
+        self.starRating = starRating
+        self.metrics = metrics
+        self.qualityLabel = qualityLabel
+        self.qualitySentiment = qualitySentiment
+    }
 
     /// True when any metric in this card has been compared to the sector
     /// average (and therefore renders with a trailing " *"). Drives the

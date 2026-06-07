@@ -318,7 +318,7 @@ TONE: Be direct, analytical, and conviction-driven. Present the thesis as if you
 
 _ACKMAN_CONFIG = PersonaConfig(
     key="bill_ackman",
-    agent_tag="dalio",  # Frontend expects "dalio" for this persona slot
+    agent_tag="ackman",  # iOS ReportAgentPersona.ackman badge
     display_name="Bill Ackman",
     system_prompt=_ACKMAN_PROMPT,
     extra_data=["quarterly_income", "quarterly_cashflow", "sec_filings", "dividends"],

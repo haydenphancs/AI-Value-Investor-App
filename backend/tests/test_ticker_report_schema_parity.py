@@ -193,9 +193,9 @@ def test_assemble_report_top_level_keys_match_swift_codable():
     assert not extra, f"unexpected top-level keys (would fail iOS decoder): {extra}"
 
 
-def test_pros_cons_capped_at_four():
-    """Even if the AI returns 7 bull_case bullets, assemble_report
-    truncates to 4 (Phase 2 invariant)."""
+def test_pros_cons_capped_at_five():
+    """Even if the AI returns 7 bull_case bullets, assemble_report truncates
+    to 5 — the signal-driven thesis count tops out at the UI's 2-5 range."""
     coll = TickerReportDataCollector()
     out = _make_collected_data()
     shell = stage_a_fallback()
@@ -204,8 +204,8 @@ def test_pros_cons_capped_at_four():
         "bear_case": [f"bear {i}" for i in range(6)],
     }
     report = coll.assemble_report(out, shell)
-    assert len(report["core_thesis"]["bull_case"]) <= 4
-    assert len(report["core_thesis"]["bear_case"]) <= 4
+    assert len(report["core_thesis"]["bull_case"]) <= 5
+    assert len(report["core_thesis"]["bear_case"]) <= 5
 
 
 def test_narrative_jobs_build_without_error_for_fallback_shell():

@@ -29,10 +29,13 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.integrations.gemini import GeminiClient
 from app.services.agents.persona_config import PersonaConfig
+# Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
+# driven by the EXACT same 0-10 module substrate that drives the quality score.
+from app.services.agents.persona_scoring import _vital_score
 
 logger = logging.getLogger(__name__)
 
@@ -1203,7 +1206,7 @@ def build_narrative_jobs(
             label=f"fundamental_quality_label_{i}",
             prompt=_fundamental_quality_label_prompt(persona, evidence, card),
             word_cap=6,
-            apply=_setter_for_dict_key(card, "quality_label"),
+            apply=_setter_for_label_with_sentiment(card),
             fallback_value=FALLBACK["fundamental_quality_label"],
         ))
 
@@ -1251,6 +1254,60 @@ def build_narrative_jobs(
 def _setter_for_dict_key(target: Dict[str, Any], key: str) -> Callable[[Any], None]:
     def _apply(value: Any) -> None:
         target[key] = value
+    return _apply
+
+
+# ── Fundamentals-card footer sentiment ────────────────────────────────
+# The per-card footer label ("Debt 4.21, Far Too High") is AI-written and can
+# contradict the card's star rating — which is FMP's snapshot rating, mirrored
+# from the Financials tab for cross-view parity, so we don't touch it. iOS
+# colors the footer by this derived sentiment instead, so a negative takeaway
+# reads red even on a high-starred card. Deterministic + testable; the label
+# vocabulary is constrained by `_fundamental_quality_label_prompt`.
+_LABEL_NEG_CUES = (
+    "too high", "far too high", "heavy debt", "high debt", "deep debt",
+    "debt load", "burning cash", "cash burn", "too pricey", "pricey",
+    "overvalued", "overpriced", "expensive", "slowing", "declin", "shrinking",
+    "weak", "thin margin", "value trap", "cheap for a reason", "distress",
+    "stretched", "unprofitable", "losses", "negative",
+)
+_LABEL_POS_CUES = (
+    "exceptional", "strong", "robust", "healthy", "fat margin", "cash machine",
+    "accelerat", "outstanding", "solid", "excellent", "dominant", "wide moat",
+    "undervalued", "real growth", "growing", "steady profit", "durable",
+    "high quality", "bargain", "rock-solid", "rock solid",
+)
+
+
+def _classify_label_sentiment(text: Optional[str]) -> str:
+    """positive / negative / neutral for a fundamentals-card footer label.
+
+    Negative-only cues → "negative"; positive-only → "positive"; both (mixed,
+    e.g. "Growing Sales, Burning Cash") or neither → "neutral". iOS renders
+    neutral with the existing star-based color, so a mixed/quiet card and any
+    legacy report missing this field look exactly as they do today.
+    """
+    t = (text or "").lower()
+    neg = any(c in t for c in _LABEL_NEG_CUES)
+    pos = any(c in t for c in _LABEL_POS_CUES)
+    if neg and not pos:
+        return "negative"
+    if pos and not neg:
+        return "positive"
+    return "neutral"
+
+
+def _setter_for_label_with_sentiment(
+    card: Dict[str, Any],
+) -> Callable[[Any], None]:
+    """Apply for the per-card label job: writes both `quality_label` and the
+    derived `quality_sentiment`, so the footer color tracks the takeaway, not
+    the (Financials-tab-mirrored) star rating."""
+    def _apply(value: Any) -> None:
+        card["quality_label"] = value
+        card["quality_sentiment"] = _classify_label_sentiment(
+            value if isinstance(value, str) else ""
+        )
     return _apply
 
 
@@ -1788,10 +1845,14 @@ def build_thesis_synthesis_prompt(
     ticker: str,
     evidence: str,
     digest: str,
+    bull_target: int,
+    bear_target: int,
 ) -> str:
-    """Prompt that selects the few MOST IMPORTANT bull/bear points across
-    every Deep Dive module — ranked by decision-impact, grounded in the
-    data, diversified so the thesis isn't four fundamental ratios."""
+    """Prompt that selects the MOST IMPORTANT bull/bear points across every
+    Deep Dive module — ranked by decision-impact, grounded in the data,
+    diversified so the thesis isn't four fundamental ratios. `bull_target`/
+    `bear_target` (2-5 each) are computed from how many module sub-scores read
+    strong/weak, so the count tracks the modules rather than defaulting to 3."""
     return f"""You are assembling the INVESTMENT THESIS — the Bull Case and Bear Case — for {company_name} ({ticker}) as {persona.display_name}.
 
 Two blocks of FINAL, verified data are below. EVIDENCE carries the fundamentals and sector context; MODULE DIGEST carries the headline verdict of every other Deep Dive module (price movement & catalyst, revenue segments, forward forecast & guidance, insider activity, competitive moat, competitors, macro threat, Wall Street consensus).
@@ -1805,11 +1866,11 @@ MODULE DIGEST (final verdicts the user sees in each Deep Dive section — verifi
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
 
 YOUR JOB — think hard, then surface ONLY the most important points:
-Pick the 2-4 STRONGEST reasons to OWN this stock (bull_case) and the 2-4 STRONGEST reasons to AVOID/worry about it (bear_case). Imagine a portfolio manager with 30 seconds: what actually moves the buy/hold/sell decision?
+Pick the {bull_target} STRONGEST reasons to OWN this stock (bull_case) and the {bear_target} STRONGEST reasons to AVOID/worry about it (bear_case). Imagine a portfolio manager with 30 seconds: what actually moves the buy/hold/sell decision?
 
 SELECTION RULES (strict):
 - Rank EVERY candidate signal across BOTH blocks by decision-impact = magnitude × how far it deviates from sector / peers / its own history × how much it changes the thesis. Keep only the top few. Discard the merely-fine.
-- 2-4 bull + 2-4 bear. Use FEWER when only two points truly matter — do NOT pad to four. Two razor-sharp points beat four mild ones. Bull and bear counts can differ.
+- Return EXACTLY {bull_target} bull and {bear_target} bear points — these counts were computed from how many distinct dimensions show genuinely strong (bull) or weak (bear) signals. Fill every slot with a distinct, grounded point; never pad with filler, never repeat a point, never merge two into one to hit the count. Each must be razor-sharp.
 - DIVERSIFY across modules — take at most ~2 points from any single module. A bull_case made of four valuation/margin ratios is a FAILURE: when the real signal is a wide moat, a price catalyst, raised guidance, a critical macro threat, hostile insider selling, or a strong Wall Street target, that is what belongs here. A quiet/neutral module contributes nothing — skip it.
 - Each point ≤22 words, plain English, no hedging, no clichés. Lead with the number/verdict.
 - GROUNDING — STRICT: every number or named verdict you cite MUST appear verbatim in the EVIDENCE or MODULE DIGEST above (e.g. 'Switching Costs moat 8.5 vs peer 7.0', 'analyst target +18%', 'Extreme -12% move on guidance cut', 'Critical macro threat', '70.51% gross margin', '4.21 D/E'). NEVER invent or recompute a number. A generic point with no concrete number/verdict is NOT acceptable.
@@ -1825,7 +1886,7 @@ Return ONLY valid JSON (no markdown fences, no commentary):
 
 def _clean_thesis_points(raw: Any) -> List[str]:
     """Coerce a model-returned list into clean, capped bullet strings.
-    Caps at 4 (matches `_sanitize_thesis` in the collector)."""
+    Caps at 5 (matches `_sanitize_thesis` in the collector)."""
     if not isinstance(raw, list):
         return []
     out: List[str] = []
@@ -1835,7 +1896,49 @@ def _clean_thesis_points(raw: Any) -> List[str]:
         cleaned = _post_process(item)  # strips quotes / markdown / stray labels
         if cleaned:
             out.append(cleaned)
-    return out[:4]
+    return out[:5]
+
+
+# Signal thresholds on the 0-10 module sub-scores: a dimension is a "strong"
+# (bull) signal at/above _BULL_SIGNAL and a "weak" (bear) signal at/below
+# _BEAR_SIGNAL. Everything between is a quiet/neutral module that contributes
+# no thesis point. Tunable.
+_BULL_SIGNAL = 7.5
+_BEAR_SIGNAL = 4.0
+_SCORING_VITALS = (
+    "valuation", "moat", "financial_health", "revenue",
+    "insider", "macro", "forecast", "wall_street",
+)
+
+
+def _thesis_target_counts(report: Dict[str, Any]) -> Tuple[int, int]:
+    """Return (bull_target, bear_target) for the Bull/Bear thesis, derived from
+    the SAME eight module sub-scores that drive the headline score.
+
+    Counts how many of the eight 0-10 vital sub-scores read strong (≥ _BULL_
+    SIGNAL → a bull point) or weak (≤ _BEAR_SIGNAL → a bear point). Clamped to
+    the UI's 2-5 range: a quiet stock yields 2/2, a stock with many strong/weak
+    fronts up to 5/5. This is what makes the number of bullets track the Deep
+    Dive modules instead of clustering at 3.
+
+    Recent Price Movement is deliberately EXCLUDED — it is momentum, not a
+    quality signal, and (like the headline score) must not drive the count. A
+    material price catalyst can still surface as a thesis POINT via the module
+    digest; it just doesn't inflate the target count.
+    """
+    vitals = report.get("_scoring_inputs") or report.get("key_vitals") or {}
+    bull = 0
+    bear = 0
+    for name in _SCORING_VITALS:
+        score = _vital_score(vitals, name)
+        if score is None:
+            continue
+        if score >= _BULL_SIGNAL:
+            bull += 1
+        elif score <= _BEAR_SIGNAL:
+            bear += 1
+
+    return (max(2, min(5, bull)), max(2, min(5, bear)))
 
 
 async def synthesize_core_thesis(
@@ -1859,8 +1962,10 @@ async def synthesize_core_thesis(
             return  # nothing extra to synthesize from; keep Stage A thesis
 
         company_name = report.get("company_name") or ticker
+        bull_target, bear_target = _thesis_target_counts(report)
         prompt = build_thesis_synthesis_prompt(
             persona, company_name, ticker, evidence, digest,
+            bull_target, bear_target,
         )
         result = await gemini.generate_json(
             prompt=prompt,

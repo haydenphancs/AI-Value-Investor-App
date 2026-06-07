@@ -35,6 +35,7 @@ struct TickerReportAPIResponse: Codable {
     let moatCompetition: MoatCompetitionDTO
     let macroData: MacroDataDTO
     let wallStreetConsensus: WallStreetConsensusDTO
+    let hiddenMarketSignals: HiddenMarketSignalsDTO?
     let criticalFactors: [CriticalFactorDTO]
     let disclaimerText: String
 
@@ -59,8 +60,71 @@ struct TickerReportAPIResponse: Codable {
         case moatCompetition = "moat_competition"
         case macroData = "macro_data"
         case wallStreetConsensus = "wall_street_consensus"
+        case hiddenMarketSignals = "hidden_market_signals"
         case criticalFactors = "critical_factors"
         case disclaimerText = "disclaimer_text"
+    }
+}
+
+// MARK: - Hidden Market Signals
+
+struct CongressSignalDTO: Codable {
+    let numBuyers: Int
+    let numSellers: Int
+    let totalBuysInMillions: Double
+    let totalSellsInMillions: Double
+    let netDirection: String
+    let period: String
+
+    enum CodingKeys: String, CodingKey {
+        case numBuyers = "num_buyers"
+        case numSellers = "num_sellers"
+        case totalBuysInMillions = "total_buys_in_millions"
+        case totalSellsInMillions = "total_sells_in_millions"
+        case netDirection = "net_direction"
+        case period
+    }
+}
+
+struct ShortInterestPointDTO: Codable {
+    let settlementDate: String?
+    let sharesShort: Double?
+    let daysToCover: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case settlementDate = "settlement_date"
+        case sharesShort = "shares_short"
+        case daysToCover = "days_to_cover"
+    }
+}
+
+struct ShortInterestSignalDTO: Codable {
+    let percentOfFloat: Double?
+    let daysToCover: Double?
+    let sharesShort: Double?
+    let change3m: Double?
+    let settlementDate: String?
+    let history: [ShortInterestPointDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case percentOfFloat = "percent_of_float"
+        case daysToCover = "days_to_cover"
+        case sharesShort = "shares_short"
+        case change3m = "change_3m"
+        case settlementDate = "settlement_date"
+        case history
+    }
+}
+
+struct HiddenMarketSignalsDTO: Codable {
+    let congress: CongressSignalDTO?
+    let shortInterest: ShortInterestSignalDTO?
+    let insight: String?
+
+    enum CodingKeys: String, CodingKey {
+        case congress
+        case shortInterest = "short_interest"
+        case insight
     }
 }
 
@@ -154,6 +218,18 @@ struct RevenueProjectionDTO: Codable {
     }
 }
 
+struct EarningsTrackRecordPointDTO: Codable {
+    let period: String
+    let surprisePercent: Double
+    let beat: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case period
+        case surprisePercent = "surprise_percent"
+        case beat
+    }
+}
+
 struct RevenueForecastDTO: Codable {
     let cagr: Double
     let epsGrowth: Double
@@ -163,6 +239,8 @@ struct RevenueForecastDTO: Codable {
     let guidanceSpeaker: String?
     let guidancePeriod: String?
     let insight: String?
+    let earningsTrackRecord: [EarningsTrackRecordPointDTO]?
+    let beatSummary: String?
 
     enum CodingKeys: String, CodingKey {
         case cagr
@@ -173,6 +251,8 @@ struct RevenueForecastDTO: Codable {
         case guidanceSpeaker = "guidance_speaker"
         case guidancePeriod = "guidance_period"
         case insight
+        case earningsTrackRecord = "earnings_track_record"
+        case beatSummary = "beat_summary"
     }
 }
 
@@ -189,15 +269,35 @@ struct InsiderTransactionDTO: Codable {
     }
 }
 
+struct CapitalAllocationDTO: Codable {
+    let buybackStatus: String
+    let dividendStatus: String
+    let dividendYield: Double
+    let buybackYield: Double
+    let totalYield: Double
+    let shareCountChange: Double
+
+    enum CodingKeys: String, CodingKey {
+        case buybackStatus = "buyback_status"
+        case dividendStatus = "dividend_status"
+        case dividendYield = "dividend_yield"
+        case buybackYield = "buyback_yield"
+        case totalYield = "total_yield"
+        case shareCountChange = "share_count_change"
+    }
+}
+
 struct InsiderDataDTO: Codable {
     let sentiment: String
     let timeframe: String
     let transactions: [InsiderTransactionDTO]
     let ownershipNote: String?
+    let capitalAllocation: CapitalAllocationDTO?
 
     enum CodingKeys: String, CodingKey {
         case sentiment, timeframe, transactions
         case ownershipNote = "ownership_note"
+        case capitalAllocation = "capital_allocation"
     }
 }
 
@@ -669,7 +769,13 @@ extension TickerReportAPIResponse {
             guidanceQuote: revenueForecast.guidanceQuote,
             guidanceSpeaker: revenueForecast.guidanceSpeaker,
             guidancePeriod: revenueForecast.guidancePeriod,
-            insight: revenueForecast.insight
+            insight: revenueForecast.insight,
+            earningsTrackRecord: (revenueForecast.earningsTrackRecord ?? []).map {
+                EarningsTrackRecordPoint(
+                    period: $0.period, surprisePercent: $0.surprisePercent, beat: $0.beat
+                )
+            },
+            beatSummary: revenueForecast.beatSummary
         )
 
         // Insider Data
@@ -679,7 +785,17 @@ extension TickerReportAPIResponse {
             transactions: insiderData.transactions.map { t in
                 InsiderTransaction(type: t.type, count: t.count, shares: t.shares, value: t.value)
             },
-            ownershipNote: insiderData.ownershipNote
+            ownershipNote: insiderData.ownershipNote,
+            capitalAllocation: insiderData.capitalAllocation.map { c in
+                ReportCapitalAllocation(
+                    buybackStatus: c.buybackStatus,
+                    dividendStatus: c.dividendStatus,
+                    dividendYield: c.dividendYield,
+                    buybackYield: c.buybackYield,
+                    totalYield: c.totalYield,
+                    shareCountChange: c.shareCountChange
+                )
+            }
         )
 
         // Key Management — split into top holders (10%+ owners) and
@@ -819,6 +935,37 @@ extension TickerReportAPIResponse {
             return CriticalFactor(title: f.title, description: f.description, severity: sev, watch: f.watch)
         }
 
+        // Hidden Market Signals (nil → the module is hidden)
+        let hiddenSignals: ReportHiddenMarketSignals? = hiddenMarketSignals.map { hms in
+            ReportHiddenMarketSignals(
+                congress: hms.congress.map { c in
+                    CongressSignal(
+                        numBuyers: c.numBuyers, numSellers: c.numSellers,
+                        totalBuysInMillions: c.totalBuysInMillions,
+                        totalSellsInMillions: c.totalSellsInMillions,
+                        netDirection: c.netDirection, period: c.period
+                    )
+                },
+                shortInterest: hms.shortInterest.map { s in
+                    ShortInterestSignal(
+                        percentOfFloat: s.percentOfFloat,
+                        daysToCover: s.daysToCover,
+                        sharesShort: s.sharesShort,
+                        change3m: s.change3m,
+                        settlementDate: s.settlementDate,
+                        history: (s.history ?? []).map { p in
+                            ShortInterestPoint(
+                                settlementDate: p.settlementDate,
+                                sharesShort: p.sharesShort,
+                                daysToCover: p.daysToCover
+                            )
+                        }
+                    )
+                },
+                insight: hms.insight ?? ""
+            )
+        }
+
         return TickerReportData(
             symbol: symbol,
             companyName: companyName,
@@ -840,6 +987,7 @@ extension TickerReportAPIResponse {
             moatCompetition: mc,
             macroData: macro,
             wallStreetConsensus: ws,
+            hiddenMarketSignals: hiddenSignals,
             criticalFactors: factors,
             disclaimerText: disclaimerText
         )

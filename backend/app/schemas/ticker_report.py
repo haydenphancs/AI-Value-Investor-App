@@ -74,6 +74,12 @@ class RevenueProjectionResponse(BaseModel):
     is_forecast: bool
 
 
+class EarningsTrackRecordPointResponse(BaseModel):
+    period: str  # e.g. "Q1 '24"
+    surprise_percent: float  # signed beat (+) / miss (−) vs estimate, %
+    beat: bool
+
+
 class RevenueForecastResponse(BaseModel):
     cagr: float
     eps_growth: float
@@ -91,6 +97,10 @@ class RevenueForecastResponse(BaseModel):
     # the projected revenue/EPS growth + what the guidance stance signals).
     # Written by `_revenue_forecast_insight_prompt`; None on the fallback path.
     insight: Optional[str] = None
+    # Earnings beat/miss track record — last ~6 reported quarters vs estimate.
+    # Empty list + None summary on older cached reports / no earnings data.
+    earnings_track_record: List[EarningsTrackRecordPointResponse] = []
+    beat_summary: Optional[str] = None  # e.g. "Beat 6 of 8"
 
 
 # ── Deep Dive: Insider & Management ───────────────────────────────────────────
@@ -103,11 +113,25 @@ class InsiderTransactionResponse(BaseModel):
     value: str
 
 
+class CapitalAllocationResponse(BaseModel):
+    # Shareholder-return discipline, reused from the Signal of Confidence
+    # service (same numbers as the Financials tab). Shown in Insider &
+    # Management; also feeds the 9th persona-scoring dimension.
+    buyback_status: str   # Diluting / Diluting (Mild) / Low / Moderate / High / Very High
+    dividend_status: str  # Low / Fair / High / Very High
+    dividend_yield: float
+    buyback_yield: float
+    total_yield: float
+    share_count_change: float  # % (negative = shrinking via buybacks)
+
+
 class InsiderDataResponse(BaseModel):
     sentiment: str
     timeframe: str
     transactions: List[InsiderTransactionResponse]
     ownership_note: Optional[str] = None
+    # Capital Allocation (buybacks + dividends). None when unavailable → hidden.
+    capital_allocation: Optional[CapitalAllocationResponse] = None
 
 
 class KeyManagerResponse(BaseModel):
@@ -354,6 +378,43 @@ class CriticalFactorResponse(BaseModel):
     watch: Optional[str] = None
 
 
+# ── Deep Dive: Hidden Market Signals (congress + short interest) ───────────────
+
+
+class CongressSignalResponse(BaseModel):
+    # Reused from holders_response → identical to the TickerDetailView Holders
+    # tab. Net buyers/sellers + dollar flow over the trailing window.
+    num_buyers: int
+    num_sellers: int
+    total_buys_in_millions: float
+    total_sells_in_millions: float
+    net_direction: str  # "buy" | "sell" | "balanced"
+    period: str  # e.g. "Last 12 Months"
+
+
+class ShortInterestPointResponse(BaseModel):
+    settlement_date: Optional[str] = None
+    shares_short: Optional[float] = None
+    days_to_cover: Optional[float] = None
+
+
+class ShortInterestSignalResponse(BaseModel):
+    percent_of_float: Optional[float] = None
+    days_to_cover: Optional[float] = None
+    shares_short: Optional[float] = None
+    change_3m: Optional[float] = None  # % vs ~3 months ago
+    settlement_date: Optional[str] = None
+    # Up to 12 FINRA settlement-date points. Empty when only a snapshot was
+    # available (Nasdaq/Yahoo fallback) → iOS renders no trend chart.
+    history: List[ShortInterestPointResponse] = []
+
+
+class HiddenMarketSignalsResponse(BaseModel):
+    congress: Optional[CongressSignalResponse] = None
+    short_interest: Optional[ShortInterestSignalResponse] = None
+    insight: str = ""  # Stage-B one-line synthesis
+
+
 # ── Full Ticker Report ────────────────────────────────────────────────────────
 
 
@@ -401,6 +462,10 @@ class TickerReportResponse(BaseModel):
 
     # Deep Dive: Wall Street Consensus
     wall_street_consensus: WallStreetConsensusResponse
+
+    # Deep Dive: Hidden Market Signals (congress + short interest). None when
+    # both sub-signals are absent → iOS hides the module.
+    hidden_market_signals: Optional[HiddenMarketSignalsResponse] = None
 
     # Critical Factors
     critical_factors: List[CriticalFactorResponse]

@@ -2,7 +2,8 @@
 //  ReportInsiderSection.swift
 //  ios
 //
-//  Organism: Insider & Management deep dive content combining activity table and management info
+//  Organism: Insider & Management deep dive — insider activity, capital
+//  allocation (buybacks + dividends), and key management.
 //
 
 import SwiftUI
@@ -16,8 +17,81 @@ struct ReportInsiderSection: View {
             // Insider Activity
             ReportInsiderActivityTable(insiderData: insiderData)
 
+            // Capital Allocation (buybacks + dividends) — shown when available.
+            if let ca = insiderData.capitalAllocation {
+                capitalAllocationCard(ca)
+            }
+
             // Key Management
             ReportKeyManagementTable(management: management)
+        }
+    }
+
+    // MARK: - Capital Allocation
+
+    private func capitalAllocationCard(_ ca: ReportCapitalAllocation) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Capital Allocation")
+                .font(AppTypography.label)
+                .fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            HStack(alignment: .top, spacing: AppSpacing.sm) {
+                metric(
+                    label: "Buybacks",
+                    value: ca.buybackStatus,
+                    color: sentimentColor(ca.buybackSentiment)
+                )
+                cardDivider
+                metric(
+                    label: "Dividend Yield",
+                    value: ca.dividendYield > 0 ? ca.dividendYieldText : "None",
+                    color: AppColors.textPrimary
+                )
+                cardDivider
+                metric(
+                    label: "Share Count",
+                    value: ca.shareCountChangeText,
+                    color: ca.shareCountChange < 0 ? AppColors.bullish
+                        : ca.shareCountChange > 0 ? AppColors.bearish
+                        : AppColors.textSecondary
+                )
+            }
+        }
+        .padding(AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.cardBackgroundLight)
+        )
+    }
+
+    private var cardDivider: some View {
+        Rectangle()
+            .fill(AppColors.textMuted.opacity(0.2))
+            .frame(width: 1, height: 30)
+    }
+
+    private func metric(label: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(AppTypography.labelSmall)
+                .foregroundColor(AppColors.textMuted)
+            Text(value)
+                .font(AppTypography.label)
+                .fontWeight(.semibold)
+                .foregroundColor(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sentimentColor(_ s: String) -> Color {
+        switch s {
+        case "positive": return AppColors.bullish
+        case "negative": return AppColors.bearish
+        default: return AppColors.neutral
         }
     }
 }

@@ -78,15 +78,15 @@ def test_buffett_top_weight_is_moat():
     assert max(w, key=w.get) == "moat"
 
 
-def test_each_persona_covers_all_eight_vitals():
-    # The redesign weights every dimension (incl. macro, forecast, wall_street)
-    # for every persona — no vital is silently dead weight.
-    eight = {
-        "valuation", "moat", "financial_health", "revenue",
-        "insider", "macro", "forecast", "wall_street",
+def test_each_persona_covers_all_nine_vitals():
+    # Every dimension (incl. macro, forecast, wall_street, capital_allocation)
+    # is weighted for every persona — no vital is silently dead weight.
+    nine = {
+        "valuation", "moat", "financial_health", "revenue", "insider",
+        "macro", "forecast", "wall_street", "capital_allocation",
     }
     for persona_key, w in PERSONA_WEIGHTS.items():
-        assert set(w) == eight, f"{persona_key} is missing {eight - set(w)}"
+        assert set(w) == nine, f"{persona_key} is missing {nine - set(w)}"
 
 
 def test_wood_weights_growth_axes_above_value_axes():

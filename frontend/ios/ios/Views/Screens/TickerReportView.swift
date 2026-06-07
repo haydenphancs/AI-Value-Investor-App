@@ -182,7 +182,11 @@ struct TickerReportView: View {
                 .padding(.bottom, AppSpacing.md)
 
             VStack(spacing: 0) {
-                ForEach(viewModel.deepDiveModules) { module in
+                ForEach(viewModel.deepDiveModules.filter { module in
+                    // Hide the Hidden Market Signals module when no congress /
+                    // short-interest data is available for this ticker.
+                    module.type != .hiddenMarketSignals || report.hiddenMarketSignals != nil
+                }) { module in
                     ReportDeepDiveSection(module: module) {
                         deepDiveContent(for: module.type, report: report)
                     }
@@ -219,6 +223,10 @@ struct TickerReportView: View {
             ReportMacroGeopoliticalSection(data: report.macroData)
         case .wallStreetConsensus:
             ReportWallStreetSection(consensus: report.wallStreetConsensus)
+        case .hiddenMarketSignals:
+            if let hms = report.hiddenMarketSignals {
+                ReportHiddenMarketSignalsSection(data: hms)
+            }
         }
     }
 

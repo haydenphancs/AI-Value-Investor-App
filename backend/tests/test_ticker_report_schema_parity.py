@@ -181,6 +181,7 @@ def test_assemble_report_top_level_keys_match_swift_codable():
         "fundamental_metrics", "overall_assessment", "revenue_forecast",
         "insider_data", "key_management", "price_action", "revenue_engine",
         "moat_competition", "macro_data", "wall_street_consensus",
+        "hidden_market_signals",
         "critical_factors", "disclaimer_text",
     }
     missing = expected - set(report.keys())

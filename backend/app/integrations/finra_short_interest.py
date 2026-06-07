@@ -20,7 +20,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from dotenv import load_dotenv
@@ -386,6 +386,29 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
                         result["short_change_3m"] = change_pct
             except (ValueError, TypeError):
                 pass
+
+        # Keep the full settlement-date series for the report's short-interest
+        # trend chart — we ALREADY fetched ~6 months of rows above; the
+        # integration previously discarded all but the latest. Last 12 points,
+        # oldest→newest (FINRA publishes twice monthly → ~6 months).
+        history: List[Dict[str, Any]] = []
+        for row in rows[-12:]:
+            ss_h = row.get("currentShortPositionQuantity")
+            if ss_h is None:
+                continue
+            point: Dict[str, Any] = {
+                "settlement_date": row.get("settlementDate"),
+                "shares_short": int(ss_h),
+            }
+            dtc_h = row.get("daysToCoverQuantity")
+            if dtc_h is not None:
+                try:
+                    point["days_to_cover"] = round(float(dtc_h), 2)
+                except (TypeError, ValueError):
+                    pass
+            history.append(point)
+        if len(history) >= 2:
+            result["history"] = history
 
         logger.info(f"FINRA short interest for {ticker}: shares_short={shares_short}")
         return result

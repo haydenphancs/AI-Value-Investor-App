@@ -123,9 +123,9 @@ def test_hidden_market_signals_short_interest_only():
             {"settlement_date": "2026-05-15", "shares_short": 5_000_000, "days_to_cover": 1.8},
         ],
     }
-    hms = _build_hidden_market_signals(None, si, shares_outstanding=100_000_000)
+    hms = _build_hidden_market_signals(None, si, float_shares=100_000_000)
     assert hms["congress"] is None
-    assert hms["short_interest"]["percent_of_float"] == 5.0  # 5M / 100M
+    assert hms["short_interest"]["percent_of_float"] == 5.0  # 5M / 100M float
     assert hms["short_interest"]["days_to_cover"] == 1.8
     assert len(hms["short_interest"]["history"]) == 2
 

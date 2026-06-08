@@ -272,6 +272,9 @@ class CollectedTickerData:
     signal_of_confidence: Optional[SignalOfConfidenceResponse] = None
     earnings: Optional[EarningsResponse] = None
     short_interest: Optional[Dict[str, Any]] = None
+    # Shares-float (freeFloat %, floatShares, outstandingShares) — same FMP
+    # source stock_overview uses for "Short % of Float", so the report matches.
+    shares_float: Dict[str, Any] = field(default_factory=dict)
 
     # ── Snapshot services (parity with TickerDetailView Financials tab) ──
     snap_profitability: Optional[SnapshotItemResponse] = None
@@ -570,9 +573,12 @@ class TickerReportDataCollector:
             ),
             # Earnings beat/miss track record — structured quarterly surprises.
             ("earnings", get_earnings_service().get_earnings(ticker), None),
-            # Short interest snapshot + 12-pt FINRA series (Hidden Market
+            # Short interest snapshot + 12-month FINRA series (Hidden Market
             # Signals). Own 16-18 day cache; degrades to None.
             ("short_interest", get_short_interest(ticker), None),
+            # Shares float — the canonical "% of float" divisor (matches the
+            # Overview tab's Short % of Float). Cheap single FMP call.
+            ("shares_float", self.fmp.get_shares_float(ticker), {}),
             # Snapshot services — same data the Financials tab shows in
             # TickerDetailView. Fetching here gives the report cards the
             # exact same numbers the user already sees on the other view.
@@ -1841,7 +1847,11 @@ class TickerReportDataCollector:
             "hidden_market_signals": _build_hidden_market_signals(
                 out.holders_response,
                 out.short_interest,
-                (out.quote or {}).get("sharesOutstanding"),
+                # % of float divisor — prefer real float shares (matches the
+                # Overview tab), fall back to outstanding / quote.
+                (out.shares_float or {}).get("floatShares")
+                or (out.shares_float or {}).get("outstandingShares")
+                or (out.quote or {}).get("sharesOutstanding"),
             ),
 
             # Hard cap at 5 ("never more than 5") — the Stage A prompt targets
@@ -2455,16 +2465,16 @@ def _attach_earnings_track_record(
 
 
 def _build_short_interest_signal(
-    si: Dict[str, Any], shares_outstanding: Optional[float],
+    si: Dict[str, Any], float_shares: Optional[float],
 ) -> Dict[str, Any]:
-    """Snapshot (+ up to 12-point series) for the short-interest signal.
+    """Snapshot (+ up to 12-month FINRA series) for the short-interest signal.
     `% of float` is taken directly when present, else derived from
-    shares_short / sharesOutstanding (approximate float)."""
+    shares_short / float_shares (the real free float, matching the Overview tab)."""
     shares_short = si.get("shares_short")
     pct = si.get("short_percent_of_float")
-    if pct is None and shares_short and shares_outstanding:
+    if pct is None and shares_short and float_shares:
         try:
-            pct = round(float(shares_short) / float(shares_outstanding) * 100, 2)
+            pct = round(float(shares_short) / float(float_shares) * 100, 2)
         except (TypeError, ValueError, ZeroDivisionError):
             pct = None
     history: List[Dict[str, Any]] = []
@@ -2489,7 +2499,7 @@ def _build_short_interest_signal(
 def _build_hidden_market_signals(
     holders: Optional[HoldersResponse],
     short_interest: Optional[Dict[str, Any]],
-    shares_outstanding: Optional[float],
+    float_shares: Optional[float],
 ) -> Optional[Dict[str, Any]]:
     """New "Hidden Market Signals" module: congressional trades (REUSED from
     `holders_response`, so the numbers match the Holders tab exactly) + short
@@ -2521,7 +2531,7 @@ def _build_hidden_market_signals(
     short: Optional[Dict[str, Any]] = None
     if short_interest:
         try:
-            short = _build_short_interest_signal(short_interest, shares_outstanding)
+            short = _build_short_interest_signal(short_interest, float_shares)
         except Exception:
             short = None
 

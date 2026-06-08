@@ -75,6 +75,7 @@ struct CongressSignalDTO: Codable {
     let totalSellsInMillions: Double
     let netDirection: String
     let period: String
+    let trades: [CongressActivityDTO]?
 
     enum CodingKeys: String, CodingKey {
         case numBuyers = "num_buyers"
@@ -83,6 +84,7 @@ struct CongressSignalDTO: Codable {
         case totalSellsInMillions = "total_sells_in_millions"
         case netDirection = "net_direction"
         case period
+        case trades
     }
 }
 
@@ -943,7 +945,8 @@ extension TickerReportAPIResponse {
                         numBuyers: c.numBuyers, numSellers: c.numSellers,
                         totalBuysInMillions: c.totalBuysInMillions,
                         totalSellsInMillions: c.totalSellsInMillions,
-                        netDirection: c.netDirection, period: c.period
+                        netDirection: c.netDirection, period: c.period,
+                        trades: (c.trades ?? []).map { $0.toDisplayModel() }
                     )
                 },
                 shortInterest: hms.shortInterest.map { s in

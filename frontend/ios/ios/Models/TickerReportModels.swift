@@ -1061,6 +1061,7 @@ struct CongressSignal {
     let totalSellsInMillions: Double
     let netDirection: String   // "buy" | "sell" | "balanced"
     let period: String         // "Last 12 Months"
+    let trades: [CongressActivity]   // individual trades (who traded), last 12 months
 }
 
 struct ShortInterestPoint: Identifiable {

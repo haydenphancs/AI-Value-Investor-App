@@ -9,7 +9,7 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
-from app.schemas.holders import SmartMoneyDataSchema
+from app.schemas.holders import SmartMoneyDataSchema, CongressActivitySchema
 
 
 # ── Atomic Sub-Models ──────────────────────────────────────────────────────────
@@ -390,6 +390,9 @@ class CongressSignalResponse(BaseModel):
     total_sells_in_millions: float
     net_direction: str  # "buy" | "sell" | "balanced"
     period: str  # e.g. "Last 12 Months"
+    # Individual trades (last 12 months, most-recent first) so the UI can show
+    # WHO traded — same shape/objects as the Holders → Congress tab rows.
+    trades: List[CongressActivitySchema] = []
 
 
 class ShortInterestPointResponse(BaseModel):

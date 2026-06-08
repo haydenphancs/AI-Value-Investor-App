@@ -98,7 +98,7 @@ struct ReportHiddenMarketSignalsSection: View {
 
     private func shortInterestCard(_ s: ShortInterestSignal) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Short Interest")
+            Text("Short Selling")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 

@@ -109,6 +109,23 @@ TABLE_NAME = "ticker_report_cache"
 CACHE_SCHEMA_FLOOR = datetime(2026, 6, 7, 0, 0, 0, tzinfo=timezone.utc)
 
 
+def _short_interest_payload_stale(report: Any) -> bool:
+    """A cached report whose short-interest signal has a 3-month change but an
+    EMPTY `history` is a pre-feature artifact: current code always builds the
+    12-month settlement series whenever `change_3m` exists (it needs >=2 FINRA
+    rows ~90 days apart → >=2 history points). Treat such a report as stale so
+    it regenerates and the trend chart fills — robust to entries cached AFTER
+    the date floor by not-yet-redeployed code. Nasdaq/Yahoo-only tickers have
+    change_3m=None and are never flagged, so this cannot loop once the backend
+    runs the history-building code. Mirrors
+    `finra_short_interest._is_stale_finra_snapshot` at the report layer."""
+    try:
+        si = ((report or {}).get("hidden_market_signals") or {}).get("short_interest") or {}
+        return si.get("change_3m") is not None and not (si.get("history") or [])
+    except Exception:
+        return False
+
+
 def _legacy_tier_from_change(pct: float) -> str:
     """Map |%| change to the 4-tier vocabulary for legacy entries that
     pre-date the σ-based classifier. No σ is stored on these payloads, so
@@ -247,6 +264,13 @@ async def get_cached_report(
 
             data = entry.get("ticker_report_data")
             if not isinstance(data, dict):
+                return None
+            if _short_interest_payload_stale(data):
+                logger.info(
+                    f"ticker_report_cache SHORT-INTEREST-STALE for "
+                    f"{ticker}/{persona} (change_3m present, history empty) — "
+                    f"regenerating so the 12-month chart fills"
+                )
                 return None
             return data
         except Exception as e:

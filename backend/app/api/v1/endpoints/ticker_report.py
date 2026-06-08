@@ -41,6 +41,7 @@ from app.services.agents.ticker_report_data_collector import (
 )
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
+    _short_interest_payload_stale,
     patch_legacy_price_action,
 )
 from app.services.ticker_report_service import TickerReportService
@@ -181,7 +182,14 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
             .execute()
         )
         if result.data and result.data[0].get("ticker_report_data"):
-            return result.data[0]["ticker_report_data"]
+            rpt = result.data[0]["ticker_report_data"]
+            if _short_interest_payload_stale(rpt):
+                logger.info(
+                    f"Legacy report for {ticker}/{persona} has short-interest "
+                    f"change_3m but empty history — skipping stale row"
+                )
+                return None
+            return rpt
         return None
 
     return await asyncio.to_thread(_query)

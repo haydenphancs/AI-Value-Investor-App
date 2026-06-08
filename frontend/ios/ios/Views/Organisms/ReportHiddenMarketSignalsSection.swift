@@ -349,7 +349,7 @@ private struct ShortInterestTrendChart: View {
                 AxisValueLabel {
                     if let m = value.as(Double.self) {
                         Text(leftLabel(m))
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -359,30 +359,39 @@ private struct ShortInterestTrendChart: View {
                     AxisValueLabel {
                         if let m = value.as(Double.self) {
                             Text(String(format: "%.1f", yToDtc(m)))
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundColor(AppColors.textMuted)
                         }
                     }
                 }
             }
         }
-        // Inset the first/last bars from the y-axis labels so they don't touch.
-        // Extra trailing room lets the most-recent x-label (far right) render
-        // instead of being clipped against the plot edge / right %-axis.
-        .chartXScale(range: .plotDimension(startPadding: 10, endPadding: 20))
+        // Bars fill the full width (original look) — small symmetric padding only.
+        .chartXScale(range: .plotDimension(startPadding: 8, endPadding: 8))
         .chartXAxis {
             AxisMarks(values: xTickIdx) { value in
                 AxisGridLine().foregroundStyle(AppColors.textMuted.opacity(0.1))
-                AxisValueLabel {
+                // First label anchors leading, last anchors trailing, so the edge
+                // dates (incl. the most-recent month) sit fully under their column
+                // instead of overflowing / truncating at the plot edge.
+                AxisValueLabel(anchor: xLabelAnchor(value.as(Int.self) ?? -1)) {
                     if let i = value.as(Int.self), i >= 0, i < points.count {
                         Text(Self.mmYY.string(from: points[i].date))
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
             }
         }
         .frame(height: 260)
+    }
+
+    // Edge x-labels anchor inward (first → leading, last → trailing) so they
+    // align under their column without overflowing the plot edge.
+    private func xLabelAnchor(_ idx: Int) -> UnitPoint {
+        if idx <= 0 { return .topLeading }
+        if idx >= points.count - 1 { return .topTrailing }
+        return .top
     }
 }
 

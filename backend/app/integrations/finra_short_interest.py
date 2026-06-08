@@ -7,12 +7,15 @@ Sources (in priority order):
   3. Yahoo Finance via proxy — covers all stocks (NYSE, AMEX, etc.)
 
 Two-tier cache-aside pattern:
-  Tier 1: In-memory dict (16-day TTL — covers one FINRA reporting period)
-  Tier 2: Supabase short_interest_cache table (18-day TTL)
+  Tier 1: In-memory dict (3-day TTL)
+  Tier 2: Supabase short_interest_cache table (3-day TTL)
   Miss:   Try FINRA first, then Nasdaq, then Yahoo proxy fallback
 
-FINRA publishes short interest twice monthly (~15th and end of month).
-Data updates are slow, so aggressive caching is safe and appropriate.
+FINRA publishes short interest twice monthly (~15th and end of month) with an
+~8-business-day reporting lag. The 3-day TTL sits UNDER that ~14-day publish
+cadence, so a freshly published print surfaces within ~3 days instead of being
+masked for a full cycle — while still collapsing repeated views into a single
+call (FINRA limit ~1,200/min, so the extra calls are immaterial).
 """
 
 import base64
@@ -46,9 +49,9 @@ _HEADERS = {
 # ── In-memory cache (Tier 1) ────────────────────────────────────
 
 _cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL = 16 * 86400  # 16 days — one FINRA reporting period + buffer
+_CACHE_TTL = 3 * 86400  # 3 days — under FINRA's ~14-day publish cadence so new prints surface promptly
 
-_SUPABASE_TTL_DAYS = 18  # slightly longer than in-memory for stale fallback
+_SUPABASE_TTL_DAYS = 3  # matches in-memory; under the ~14-day publish cadence (was 18)
 
 # Entries written before the 12-month `history` series feature lack the
 # `history` key. This date floor invalidates those rows ONCE (re-fetch a fresh
@@ -114,6 +117,21 @@ def _mem_cache_get(key: str) -> Optional[Any]:
 
 def _mem_cache_set(key: str, value: Any):
     _cache[key] = (time.time(), value)
+
+
+def _is_stale_finra_snapshot(data: Any) -> bool:
+    """True for a FINRA payload that has the 3-month change (`short_change_3m`,
+    a FINRA-only field) but NO `history` series — a pre-feature artifact written
+    before the integration built the 12-month series. Forces a re-fetch so the
+    trend chart can fill. CANNOT loop: current FINRA code always builds `history`
+    whenever short_change_3m exists (change_3m needs >=2 settlement rows ~90 days
+    apart → >=2 history points). Nasdaq/Yahoo snapshots carry no short_change_3m,
+    so legitimate snapshot-only tickers are never flagged."""
+    return (
+        isinstance(data, dict)
+        and data.get("short_change_3m") is not None
+        and not data.get("history")
+    )
 
 
 # ── Supabase cache (Tier 2) ─────────────────────────────────────
@@ -680,14 +698,14 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
     ticker = ticker.upper()
     mem_key = f"finra_short:{ticker}"
 
-    # Tier 1: In-memory cache
+    # Tier 1: In-memory cache (skip a stale pre-feature snapshot → re-fetch)
     cached = _mem_cache_get(mem_key)
-    if cached is not None:
+    if cached is not None and not _is_stale_finra_snapshot(cached):
         return cached
 
-    # Tier 2: Supabase cache
+    # Tier 2: Supabase cache (same self-heal)
     sb_data = _supabase_cache_get(ticker)
-    if sb_data is not None:
+    if sb_data is not None and not _is_stale_finra_snapshot(sb_data):
         _mem_cache_set(mem_key, sb_data)
         return sb_data
 

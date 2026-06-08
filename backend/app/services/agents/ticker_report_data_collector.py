@@ -2478,7 +2478,9 @@ def _build_short_interest_signal(
         except (TypeError, ValueError, ZeroDivisionError):
             pct = None
     history: List[Dict[str, Any]] = []
-    for p in (si.get("history") or [])[-12:]:
+    # Up to 24 biweekly FINRA settlement points ≈ 12 months (FINRA publishes
+    # twice monthly). The integration already caps the series at rows[-24:].
+    for p in (si.get("history") or [])[-24:]:
         if not isinstance(p, dict):
             continue
         history.append({

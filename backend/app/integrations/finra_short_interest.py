@@ -278,11 +278,12 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
 
     try:
         client = await _get_finra_client()
-        # Fetch ~6 months of data so we can compute 3-month change.
-        # Results come oldest-first; we take the last row for latest.
+        # Fetch ~12 months of data — enough for the report's short-interest
+        # trend chart (FINRA publishes twice monthly → ~24 points) and the
+        # 3-month change. Results come oldest-first; last row is the latest.
         now = datetime.now(timezone.utc)
-        six_months_ago = now - timedelta(days=180)
-        start_date = six_months_ago.strftime("%Y-%m-%d")
+        twelve_months_ago = now - timedelta(days=365)
+        start_date = twelve_months_ago.strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")
 
         resp = await client.post(
@@ -388,11 +389,11 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
                 pass
 
         # Keep the full settlement-date series for the report's short-interest
-        # trend chart — we ALREADY fetched ~6 months of rows above; the
-        # integration previously discarded all but the latest. Last 12 points,
-        # oldest→newest (FINRA publishes twice monthly → ~6 months).
+        # trend chart — we ALREADY fetched ~12 months of rows above; the
+        # integration previously discarded all but the latest. Last 24 points,
+        # oldest→newest (FINRA publishes twice monthly → ~12 months).
         history: List[Dict[str, Any]] = []
-        for row in rows[-12:]:
+        for row in rows[-24:]:
             ss_h = row.get("currentShortPositionQuantity")
             if ss_h is None:
                 continue

@@ -757,12 +757,12 @@ def _hidden_market_signals_insight_prompt(
         "the hidden positioning signals",
         cross_section_context(shell, ["hidden_signals"]),
     )
-    return f"""Write the Hidden Market Signals insight — a one-line read on what congressional trading and short interest TOGETHER imply.
+    return f"""Write the Hidden Market Signals insight — a one-line read on what congressional trading and short selling TOGETHER imply.
 {signals}
 {_style_block(persona)}
 LENGTH: ONE sentence, under 22 words.
 
-- Lead with the louder signal (heavy congress buying/selling, or notably high/rising short interest).
+- Lead with the louder signal (heavy congress buying/selling, or notably high/rising short selling).
 - If they conflict (politicians buying while shorts build), say so — that tension IS the signal.
 - Cite ONE concrete number from above (e.g. "3 congress buyers", "short 6.2% of float"). Never invent a number.
 - If both are quiet, say positioning is unremarkable. Never fabricate drama."""
@@ -1755,7 +1755,8 @@ def _digest_hidden_signals(report: Dict[str, Any]) -> List[str]:
         if ch is not None:
             sbits.append(f"{ch}% vs 3mo")
         if sbits:
-            bits.append("Short interest " + ", ".join(sbits))
+            # UI label is "Short Selling" (data field stays short_interest).
+            bits.append("Short selling " + ", ".join(sbits))
     if bits:
         out.append("HIDDEN SIGNALS: " + "; ".join(bits))
     return out

@@ -1076,7 +1076,7 @@ struct ShortInterestSignal {
     let sharesShort: Double?
     let change3m: Double?       // % vs ~3 months ago
     let settlementDate: String?
-    let history: [ShortInterestPoint]  // up to 12 points; empty → no chart
+    let history: [ShortInterestPoint]  // up to 24 points (~12 months biweekly); empty → no chart
 }
 
 struct ReportHiddenMarketSignals {

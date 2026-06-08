@@ -67,6 +67,12 @@ struct ReportHiddenMarketSignalsSection: View {
                 .font(AppTypography.label).fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
 
+            // 12-month dual-axis trend (the hero) — green bars = short interest
+            // (shares, left axis), white line = short float % (right axis).
+            // Falls back to a note when the FINRA settlement series is absent.
+            shortChart(s)
+
+            // Snapshot footer — current % of float, days to cover, 3-month change.
             HStack(spacing: AppSpacing.sm) {
                 if let pf = s.percentOfFloat {
                     statPill(value: String(format: "%.1f%%", pf), label: "of Float", color: shortColor(pf))
@@ -82,11 +88,6 @@ struct ReportHiddenMarketSignalsSection: View {
                     )
                 }
             }
-
-            // 12-month dual-axis trend — green bars = short interest (shares,
-            // left axis), white line = short float % (right axis). Only when
-            // the FINRA settlement series is available.
-            shortChart(s)
         }
         .modifier(HMSCardBackground())
     }
@@ -117,6 +118,13 @@ struct ReportHiddenMarketSignalsSection: View {
                 ShortInterestTrendChart(points: points, pctPerM: pctPerM)
             }
             .padding(.top, AppSpacing.xs)
+        } else {
+            // No FINRA settlement series for this ticker (snapshot-only source)
+            // — keep the snapshot pills, but say why the trend is missing.
+            Text("12-month trend data unavailable")
+                .font(AppTypography.labelSmall)
+                .foregroundColor(AppColors.textMuted)
+                .padding(.top, AppSpacing.xs)
         }
     }
 
@@ -205,14 +213,18 @@ private struct ShortInterestTrendChart: View {
         let vals = points.map { $0.sharesM }
         let yMin = (vals.min() ?? 0) * 0.9
         let yMax = (vals.max() ?? 1) * 1.05
+        // ~24 biweekly points → thin bars; ~12 monthly → wider.
+        let barWidth: MarkDimension = points.count > 14 ? .fixed(8) : .fixed(14)
 
         return Chart {
             ForEach(points) { item in
                 BarMark(
                     x: .value("Date", item.date),
-                    y: .value("Shares Short", item.sharesM)
+                    y: .value("Shares Short", item.sharesM),
+                    width: barWidth
                 )
                 .foregroundStyle(AppColors.bullish)
+                .cornerRadius(3)
             }
             ForEach(points) { item in
                 LineMark(
@@ -220,13 +232,13 @@ private struct ShortInterestTrendChart: View {
                     y: .value("Shares Short", item.sharesM)
                 )
                 .foregroundStyle(pctPerM == nil ? Color.clear : Color.white)
-                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                .lineStyle(StrokeStyle(lineWidth: 2))
                 .interpolationMethod(.catmullRom)
             }
         }
         .chartYScale(domain: yMin...yMax)
         .chartYAxis {
-            AxisMarks(position: .leading) { value in
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
                 AxisGridLine().foregroundStyle(AppColors.textMuted.opacity(0.12))
                 AxisValueLabel {
                     if let m = value.as(Double.self) {
@@ -237,7 +249,7 @@ private struct ShortInterestTrendChart: View {
                 }
             }
             if let k = pctPerM {
-                AxisMarks(position: .trailing) { value in
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
                     AxisValueLabel {
                         if let m = value.as(Double.self) {
                             Text(String(format: "%.1f%%", m * k))
@@ -254,7 +266,7 @@ private struct ShortInterestTrendChart: View {
                 AxisValueLabel(format: .dateTime.month(.abbreviated))
             }
         }
-        .frame(height: 150)
+        .frame(height: 240)
     }
 }
 
@@ -277,6 +289,21 @@ private struct ShortInterestTrendChart: View {
     let model = ReportHiddenMarketSignals(
         congress: congress, shortInterest: signal,
         insight: "Congress is net buying while short interest climbs to 6.2% of float — a notable tension."
+    )
+    return ReportHiddenMarketSignalsSection(data: model)
+        .padding()
+        .background(AppColors.background)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Snapshot only — no series") {
+    let signal = ShortInterestSignal(
+        percentOfFloat: 4.2, daysToCover: 2.1, sharesShort: 12_000_000,
+        change3m: -3.0, settlementDate: "2025-12-15", history: []
+    )
+    let model = ReportHiddenMarketSignals(
+        congress: nil, shortInterest: signal,
+        insight: "Short interest snapshot only — no settlement series available for this ticker."
     )
     return ReportHiddenMarketSignalsSection(data: model)
         .padding()

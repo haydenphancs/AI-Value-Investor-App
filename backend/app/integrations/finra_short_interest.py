@@ -50,6 +50,12 @@ _CACHE_TTL = 16 * 86400  # 16 days — one FINRA reporting period + buffer
 
 _SUPABASE_TTL_DAYS = 18  # slightly longer than in-memory for stale fallback
 
+# Entries written before the 12-month `history` series feature lack the
+# `history` key. This date floor invalidates those rows ONCE (re-fetch a fresh
+# FINRA series), without permanently re-fetching legit snapshot-only
+# Nasdaq/Yahoo tickers — mirrors the ticker_report_cache schema-floor pattern.
+_SI_SCHEMA_FLOOR = datetime(2026, 6, 7, 0, 0, 0, tzinfo=timezone.utc)
+
 # ── Nasdaq safeguards ───────────────────────────────────────────
 
 _nasdaq_kill_switch: bool = False
@@ -137,6 +143,12 @@ def _supabase_cache_get(ticker: str) -> Optional[Dict[str, Any]]:
         age = datetime.now(timezone.utc) - cached_at
         if age > timedelta(days=_SUPABASE_TTL_DAYS):
             logger.info(f"Short interest Supabase cache STALE (age={age}) for {ticker}")
+            return None
+
+        # Pre-feature rows lack the `history` series — treat as a miss so the
+        # 12-month trend chart can fill from a fresh FINRA fetch.
+        if cached_at < _SI_SCHEMA_FLOOR:
+            logger.info(f"Short interest Supabase cache PRE-FLOOR for {ticker} — forcing re-fetch")
             return None
 
         data = entry.get("response_json")

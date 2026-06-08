@@ -11,13 +11,15 @@ import SwiftUI
 struct CongressActivityRow: View {
     let activity: CongressActivity
     var background: Color = AppColors.cardBackground
+    var nameFont: Font = AppTypography.bodyEmphasis
+    var valueFont: Font = AppTypography.bodyEmphasis
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             // Left side: Name, Role, Date
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(activity.name)
-                    .font(AppTypography.bodyEmphasis)
+                    .font(nameFont)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
@@ -36,7 +38,7 @@ struct CongressActivityRow: View {
             // Right side: Change value, Owner tag, Price
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 Text(activity.formattedRange)
-                    .font(AppTypography.bodyEmphasis)
+                    .font(valueFont)
                     .foregroundColor(activity.changeColor)
 
                 Text(activity.ownerLabel)

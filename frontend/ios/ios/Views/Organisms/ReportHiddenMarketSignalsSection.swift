@@ -12,6 +12,7 @@ import Charts
 
 struct ReportHiddenMarketSignalsSection: View {
     let data: ReportHiddenMarketSignals
+    @State private var showAllCongress = false
 
     private static let dateParser: DateFormatter = {
         let f = DateFormatter()
@@ -40,6 +41,11 @@ struct ReportHiddenMarketSignalsSection: View {
     private func congressCard(_ c: CongressSignal) -> some View {
         let netColor: Color = c.netDirection == "buy" ? AppColors.bullish
             : c.netDirection == "sell" ? AppColors.bearish : AppColors.neutral
+        // Pills count UNIQUE politicians (num_buyers/num_sellers), matching the
+        // Holders → Congress tab — a person who discloses multiple trades counts
+        // once. The list below shows the individual disclosures.
+        let visible = showAllCongress ? c.trades : Array(c.trades.prefix(3))
+        let hiddenCount = c.trades.count - visible.count
         return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Congressional Trades")
@@ -55,12 +61,32 @@ struct ReportHiddenMarketSignalsSection: View {
                 statPill(value: c.netDirection.capitalized, label: "Net", color: netColor)
             }
 
-            // Who actually traded — individual disclosures (last 12 months),
-            // reusing the Holders → Congress row so names/amounts match exactly.
+            // Who actually traded — top 3, expandable ("Show N more"). Reuses the
+            // Holders → Congress row (names/amounts match) at the insight size.
             if !c.trades.isEmpty {
                 VStack(spacing: AppSpacing.xs) {
-                    ForEach(c.trades) { trade in
-                        CongressActivityRow(activity: trade, background: AppColors.cardBackgroundLight)
+                    ForEach(visible) { trade in
+                        CongressActivityRow(
+                            activity: trade,
+                            background: AppColors.cardBackgroundLight,
+                            nameFont: AppTypography.label,
+                            valueFont: AppTypography.label.weight(.medium)
+                        )
+                    }
+                }
+                if c.trades.count > 3 {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showAllCongress.toggle() }
+                    } label: {
+                        HStack(spacing: AppSpacing.xxs) {
+                            Text(showAllCongress ? "Show less" : "Show \(hiddenCount) more")
+                                .font(AppTypography.captionEmphasis)
+                            Image(systemName: showAllCongress ? "chevron.up" : "chevron.down")
+                                .font(AppTypography.iconTiny).fontWeight(.semibold)
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, AppSpacing.xs)
                     }
                 }
             }
@@ -256,7 +282,7 @@ private struct ShortInterestTrendChart: View {
         // Swift Charts drops it, leaving the top label below the peak).
         let yMax = hi + span * 0.55
         // ~24 biweekly points → thin bars; ~12 monthly → wider.
-        let barWidth: MarkDimension = points.count > 14 ? .fixed(8) : .fixed(14)
+        let barWidth: MarkDimension = points.count > 14 ? .fixed(6) : .fixed(11)
         // 4 evenly-spaced x-ticks BY INDEX: far-left, ~1/3, ~2/3, far-right.
         let n = points.count
         let xTickIdx: [Int] = n >= 2

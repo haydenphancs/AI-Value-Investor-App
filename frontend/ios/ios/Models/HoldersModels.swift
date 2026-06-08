@@ -962,7 +962,7 @@ struct CongressActivity: Identifiable {
             if parts.count == 2,
                let low = Double(parts[0].trimmingCharacters(in: .whitespaces)),
                let high = Double(parts[1].trimmingCharacters(in: .whitespaces)) {
-                return "\(sign)\(Self.formatDollarCompact(low)) - \(Self.formatDollarCompact(high))"
+                return "(\(sign)) \(Self.formatDollarCompact(low)) - \(Self.formatDollarCompact(high))"
             }
         }
 
@@ -970,7 +970,7 @@ struct CongressActivity: Identifiable {
         if clean.lowercased().hasPrefix("over ") {
             let numStr = String(clean.dropFirst(5)).trimmingCharacters(in: .whitespaces)
             if let val = Double(numStr) {
-                return "\(sign)Over \(Self.formatDollarCompact(val))"
+                return "(\(sign)) Over \(Self.formatDollarCompact(val))"
             }
         }
 
@@ -982,12 +982,12 @@ struct CongressActivity: Identifiable {
     var formattedChange: String {
         let sign = changeInMillions >= 0 ? "+" : "-"
         if abs(changeInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
+            return "(\(sign)) $\(String(format: "%.2f", abs(changeInMillions) / 1000))B"
         }
         if abs(changeInMillions) >= 1 {
-            return "\(sign)$\(String(format: "%.2f", abs(changeInMillions)))M"
+            return "(\(sign)) $\(String(format: "%.2f", abs(changeInMillions)))M"
         }
-        return "\(sign)$\(String(format: "%.0f", abs(changeInMillions) * 1000))K"
+        return "(\(sign)) $\(String(format: "%.0f", abs(changeInMillions) * 1000))K"
     }
 
     var formattedDate: String {
@@ -1020,22 +1020,25 @@ struct CongressActivity: Identifiable {
 
     /// Format a dollar amount into compact notation: $1K, $50K, $5M, $25M, $1B
     static func formatDollarCompact(_ value: Double) -> String {
+        // Round to a whole unit when within rounding distance (congress brackets
+        // are $X,001 → e.g. 15.001 → "$15K", not "$15.0K"); keep a decimal only
+        // for a genuine fraction like $2.5K.
         if value >= 1_000_000_000 {
             let b = value / 1_000_000_000
-            return b.truncatingRemainder(dividingBy: 1) == 0
-                ? String(format: "$%.0fB", b)
+            return abs(b - b.rounded()) < 0.01
+                ? String(format: "$%.0fB", b.rounded())
                 : String(format: "$%.1fB", b)
         }
         if value >= 1_000_000 {
             let m = value / 1_000_000
-            return m.truncatingRemainder(dividingBy: 1) == 0
-                ? String(format: "$%.0fM", m)
+            return abs(m - m.rounded()) < 0.01
+                ? String(format: "$%.0fM", m.rounded())
                 : String(format: "$%.1fM", m)
         }
         if value >= 1_000 {
             let k = value / 1_000
-            return k.truncatingRemainder(dividingBy: 1) == 0
-                ? String(format: "$%.0fK", k)
+            return abs(k - k.rounded()) < 0.01
+                ? String(format: "$%.0fK", k.rounded())
                 : String(format: "$%.1fK", k)
         }
         return String(format: "$%.0f", value)

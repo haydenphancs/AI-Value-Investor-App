@@ -10,7 +10,14 @@ transformation math so the report stays consistent and correct.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 from app.schemas.earnings import EarningsQuarterSchema, EarningsResponse
+from app.schemas.holders import (
+    CongressActivitySchema,
+    CongressActivitySummarySchema,
+)
 from app.schemas.signal_of_confidence import (
     DividendInfoSchema,
     SignalOfConfidenceResponse,
@@ -133,3 +140,45 @@ def test_hidden_market_signals_short_interest_only():
 def test_hidden_market_signals_none_when_both_absent():
     # No congress, no short interest → module hidden.
     assert _build_hidden_market_signals(None, None, None) is None
+
+
+def test_hidden_market_signals_congress_trades():
+    """Congress sub-signal surfaces the per-politician trade list (WHO traded),
+    filtered to the trailing 12 months and sorted most-recent first."""
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    older = (now - timedelta(days=120)).strftime("%Y-%m-%d")
+    stale = (now - timedelta(days=400)).strftime("%Y-%m-%d")  # outside 12-month window
+    acts = [
+        CongressActivitySchema(
+            name="Pelosi, Nancy", role="Representative (CA-11)", date=recent,
+            transaction_type="Purchase", amount_range="$500K - $1M",
+            change_in_millions=0.75,
+        ),
+        CongressActivitySchema(
+            name="Tuberville, Tommy", role="Senator (AL)", date=older,
+            transaction_type="Sale", amount_range="$100K - $250K",
+            change_in_millions=-0.18,
+        ),
+        CongressActivitySchema(
+            name="Old, Trade", role="Senator (TX)", date=stale,
+            transaction_type="Sale",
+        ),
+    ]
+    summary = CongressActivitySummarySchema(
+        num_buyers=1, num_sellers=2,
+        total_buys_in_millions=0.75, total_sells_in_millions=0.18,
+        period_description="Last 12 Months",
+    )
+    holders = SimpleNamespace(recent_activities=SimpleNamespace(
+        congress_activities=SimpleNamespace(summary=summary, activities=acts)))
+
+    hms = _build_hidden_market_signals(holders, None, None)
+    assert hms is not None
+    congress = hms["congress"]
+    assert congress["num_buyers"] == 1 and congress["num_sellers"] == 2
+    trades = congress["trades"]
+    # Stale (>12mo) trade dropped; recent two kept, most-recent first.
+    assert [t["name"] for t in trades] == ["Pelosi, Nancy", "Tuberville, Tommy"]
+    assert trades[0]["transaction_type"] == "Purchase"
+    assert trades[0]["amount_range"] == "$500K - $1M"

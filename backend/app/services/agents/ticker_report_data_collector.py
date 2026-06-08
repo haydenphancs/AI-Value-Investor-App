@@ -2517,6 +2517,17 @@ def _build_hidden_market_signals(
             net = (summ.total_buys_in_millions or 0.0) - (
                 summ.total_sells_in_millions or 0.0
             )
+            # Per-trade detail (WHO traded). The `.activities` list is all-time;
+            # filter to the trailing 12 months (matches the summary window) and
+            # sort most-recent-first. Same objects the Holders → Congress tab
+            # renders, so iOS reuses its CongressActivity row.
+            acts = holders.recent_activities.congress_activities.activities or []
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%d")
+            recent = sorted(
+                [a for a in acts if (a.date or "")[:10] >= cutoff],
+                key=lambda a: a.date or "",
+                reverse=True,
+            )
             congress = {
                 "num_buyers": summ.num_buyers,
                 "num_sellers": summ.num_sellers,
@@ -2526,6 +2537,7 @@ def _build_hidden_market_signals(
                     "buy" if net > 0 else "sell" if net < 0 else "balanced"
                 ),
                 "period": summ.period_description or "Last 12 Months",
+                "trades": [a.model_dump() for a in recent],
             }
     except Exception:
         congress = None

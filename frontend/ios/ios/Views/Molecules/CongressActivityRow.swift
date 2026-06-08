@@ -10,6 +10,7 @@ import SwiftUI
 
 struct CongressActivityRow: View {
     let activity: CongressActivity
+    var background: Color = AppColors.cardBackground
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
@@ -52,7 +53,7 @@ struct CongressActivityRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .fill(background)
         )
     }
 }

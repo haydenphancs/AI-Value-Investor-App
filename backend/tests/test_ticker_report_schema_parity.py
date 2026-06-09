@@ -36,9 +36,16 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.schemas.ticker_report import (
+    CapitalAllocationResponse,
     CriticalFactorResponse,
     RevenueForecastResponse,
     TickerReportResponse,
+)
+from app.schemas.signal_of_confidence import (
+    DividendInfoSchema,
+    SignalOfConfidenceDataPointSchema,
+    SignalOfConfidenceResponse,
+    SignalOfConfidenceSummarySchema,
 )
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
@@ -52,6 +59,7 @@ from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricRespo
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
+    _build_capital_allocation_block,
     _build_fundamental_metrics_from_snapshots,
     _build_price_action,
     _compute_price_volatility,
@@ -362,6 +370,94 @@ def test_price_action_carries_ground_truth_fields():
     assert "_news_headlines" not in TickerReportResponse.model_validate(
         report
     ).price_action.model_dump()
+
+
+# ── Capital Allocation block parity ───────────────────────────────────
+
+
+def _make_signal_of_confidence(
+    *, share_count_change: float = 3.7
+) -> SignalOfConfidenceResponse:
+    """Two quarters of rising shares (a 'Diluting' story like Oracle) + the
+    T12M summary, mirroring what SignalOfConfidenceService produces."""
+    points = [
+        SignalOfConfidenceDataPointSchema(
+            period="Q2 '23",
+            dividend_yield=0.90,
+            buyback_yield=0.40,
+            dividend_amount=900.0,
+            buyback_amount=400.0,
+            shares_outstanding=1000.0,
+        ),
+        SignalOfConfidenceDataPointSchema(
+            period="Q2 '25",
+            dividend_yield=0.93,
+            buyback_yield=0.50,
+            dividend_amount=950.0,
+            buyback_amount=500.0,
+            shares_outstanding=1037.0,
+        ),
+    ]
+    return SignalOfConfidenceResponse(
+        symbol="ORCL",
+        data_points=points,
+        summary=SignalOfConfidenceSummarySchema(
+            total_yield=1.43,
+            dividend_yield=0.93,
+            buyback_yield=0.50,
+            share_count_change=share_count_change,
+        ),
+        dividend_info=DividendInfoSchema(
+            ex_dividend_date="2025-04-10",
+            payment_date="2025-04-24",
+            five_year_avg_yield=1.0,
+            status="Low",
+            buyback_status="Diluting",
+        ),
+    )
+
+
+def test_capital_allocation_block_forwards_data_points():
+    """The Insider & Management capital-allocation card now carries the
+    per-quarter `data_points` series so iOS can draw the dilution mini-chart
+    and label the share-count window. The block must forward each point with
+    the exact 6 keys the iOS SignalOfConfidenceDataPointDTO decodes, preserve
+    oldest→newest order, and validate against CapitalAllocationResponse — drift
+    here is a JSONDecoder crash on the report screen."""
+    block = _build_capital_allocation_block(_make_signal_of_confidence())
+
+    assert block is not None
+    # Summary fields still present (unchanged contract)
+    assert block["buyback_status"] == "Diluting"
+    assert block["share_count_change"] == 3.7
+
+    dps = block["data_points"]
+    assert isinstance(dps, list) and len(dps) == 2
+    expected_keys = {
+        "period", "dividend_yield", "buyback_yield",
+        "dividend_amount", "buyback_amount", "shares_outstanding",
+    }
+    for dp in dps:
+        assert set(dp.keys()) == expected_keys
+    # oldest → newest preserved (drives the window label + chart x-axis)
+    assert dps[0]["period"] == "Q2 '23"
+    assert dps[-1]["period"] == "Q2 '25"
+
+    # Whole block must Pydantic-validate (list-of-dicts coerces to the schema).
+    model = CapitalAllocationResponse.model_validate(block)
+    assert len(model.data_points) == 2
+    assert model.data_points[-1].shares_outstanding == 1037.0
+
+
+def test_capital_allocation_block_none_when_no_signal():
+    """No Signal of Confidence → None so iOS hides the whole card (and the
+    schema's data_points default stays an empty list, never None)."""
+    assert _build_capital_allocation_block(None) is None
+    assert CapitalAllocationResponse(
+        buyback_status="Low", dividend_status="Fair",
+        dividend_yield=0.0, buyback_yield=0.0,
+        total_yield=0.0, share_count_change=0.0,
+    ).data_points == []
 
 
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))

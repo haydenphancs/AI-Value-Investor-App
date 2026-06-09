@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
 from app.schemas.holders import SmartMoneyDataSchema, CongressActivitySchema
+from app.schemas.signal_of_confidence import SignalOfConfidenceDataPointSchema
 
 
 # ── Atomic Sub-Models ──────────────────────────────────────────────────────────
@@ -123,6 +124,11 @@ class CapitalAllocationResponse(BaseModel):
     buyback_yield: float
     total_yield: float
     share_count_change: float  # % (negative = shrinking via buybacks)
+    # Per-quarter series (same data the Financials-tab chart uses) so the
+    # Insider & Management card can render a compact dilution mini-chart and
+    # label the share-count window. Empty when Signal of Confidence is
+    # unavailable → iOS falls back to the numbers-only card.
+    data_points: List[SignalOfConfidenceDataPointSchema] = Field(default_factory=list)
 
 
 class InsiderDataResponse(BaseModel):

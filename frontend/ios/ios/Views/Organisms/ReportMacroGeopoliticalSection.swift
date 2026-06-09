@@ -67,25 +67,14 @@ struct ReportMacroGeopoliticalSection: View {
         let hiddenCount = factors.count - visible.count
 
         return VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            VStack(spacing: 0) {
-                ForEach(Array(visible.enumerated()), id: \.element.id) { index, factor in
+            // Flat rows in the standard report-list style (matches Key
+            // Management / Recent Transactions / Congress) — each row carries
+            // its own hairline divider, no outer card.
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                ForEach(visible) { factor in
                     ReportRiskFactorCard(factor: factor)
-
-                    if index < visible.count - 1 {
-                        Divider()
-                            .background(AppColors.textMuted.opacity(0.15))
-                            .padding(.horizontal, AppSpacing.md)
-                    }
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackgroundLight)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .stroke(AppColors.textMuted.opacity(0.12), lineWidth: 1)
-                    )
-            )
 
             // Show more / less — only when there's something hidden.
             if factors.count > collapsedCount {

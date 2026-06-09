@@ -160,6 +160,10 @@ class KeyManagerResponse(BaseModel):
     # IN-type 13G filing is available. iOS renders this as a green
     # "43% owner" chip next to the name.
     percent_ownership: Optional[float] = None
+    # Direct ownership % (this person's shares / shares outstanding). iOS shows
+    # it for OFFICERS in the right column ("0.43% / 1.0M"); top holders use the
+    # 13G chip above instead. None when shares-outstanding is unavailable.
+    percent_owned: Optional[float] = None
 
 
 class KeyManagementResponse(BaseModel):

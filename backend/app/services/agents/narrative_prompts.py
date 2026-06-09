@@ -1218,7 +1218,11 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="hidden_market_signals_insight",
             prompt=_hidden_market_signals_insight_prompt(persona, evidence, shell),
-            word_cap=24,
+            # Headroom over the prompt's "2 to 4 sentences" target so the full
+            # insight is never chopped mid-thought with "…". Was 24, which
+            # truncated the (now multi-sentence) insight; the prompt was upgraded
+            # to 2-4 sentences but this cap wasn't. Safety net, not the target.
+            word_cap=90,
             apply=_setter_for_dict_key(hms, "insight"),
             fallback_value=FALLBACK["hidden_market_signals_insight"],
         ))

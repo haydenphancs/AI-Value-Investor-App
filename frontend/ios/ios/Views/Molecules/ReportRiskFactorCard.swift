@@ -15,56 +15,61 @@ struct ReportRiskFactorCard: View {
     let factor: MacroRiskFactor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Top line: category icon · title · trend (right-aligned)
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: factor.category.iconName)
-                    .font(AppTypography.iconSmall).fontWeight(.medium)
-                    .foregroundColor(factor.severity.color)
-                    .frame(width: 24, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                            .fill(factor.severity.color.opacity(0.12))
-                    )
+        // Standard report-list-row framing (Key Management style): flat, no card
+        // chrome, hairline divider below. Content is title-row + description
+        // (variable height) rather than a name/value pair.
+        VStack(spacing: AppSpacing.xs) {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Top line: category icon · title · trend (right-aligned)
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: factor.category.iconName)
+                        .font(AppTypography.iconSmall).fontWeight(.medium)
+                        .foregroundColor(factor.severity.color)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                                .fill(factor.severity.color.opacity(0.12))
+                        )
 
-                Text(factor.title)
-                    .font(AppTypography.labelSmallEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-                    .lineLimit(1)
+                    Text(factor.title)
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(1)
 
-                Spacer(minLength: AppSpacing.xs)
+                    Spacer(minLength: AppSpacing.xs)
 
-                // Trend — moved into the slot the badge/chevron used to hold.
-                HStack(spacing: AppSpacing.xxs) {
-                    Image(systemName: factor.trend.iconName)
-                        .font(AppTypography.iconTiny).fontWeight(.semibold)
-                        .foregroundColor(factor.trend.color)
-                    Text(factor.trend.rawValue)
-                        .font(AppTypography.caption)
-                        .foregroundColor(factor.trend.color)
+                    // Trend — moved into the slot the badge/chevron used to hold.
+                    HStack(spacing: AppSpacing.xxs) {
+                        Image(systemName: factor.trend.iconName)
+                            .font(AppTypography.iconTiny).fontWeight(.semibold)
+                            .foregroundColor(factor.trend.color)
+                        Text(factor.trend.rawValue)
+                            .font(AppTypography.caption)
+                            .foregroundColor(factor.trend.color)
+                    }
                 }
-            }
 
-            // Description — always shown.
-            Text(factor.description)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
+                // Description — always shown.
+                Text(factor.description)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+                .background(AppColors.textMuted.opacity(0.15))
         }
-        .padding(AppSpacing.md)
     }
 }
 
 #Preview {
-    VStack(spacing: 0) {
+    VStack(alignment: .leading, spacing: AppSpacing.md) {
         ForEach(TickerReportData.sampleOracle.macroData.riskFactors) { factor in
             ReportRiskFactorCard(factor: factor)
-            Divider().padding(.horizontal, AppSpacing.md)
         }
     }
-    .background(AppColors.cardBackgroundLight)
-    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
     .padding()
     .background(AppColors.cardBackground)
     .preferredColorScheme(.dark)

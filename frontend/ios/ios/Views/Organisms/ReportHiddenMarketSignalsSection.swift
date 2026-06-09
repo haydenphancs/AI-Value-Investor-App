@@ -55,22 +55,28 @@ struct ReportHiddenMarketSignalsSection: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
-            HStack(spacing: AppSpacing.sm) {
-                statPill(value: "\(c.numBuyers)", label: c.numBuyers == 1 ? "Buyer" : "Buyers", color: AppColors.bullish)
-                statPill(value: "\(c.numSellers)", label: c.numSellers == 1 ? "Seller" : "Sellers", color: AppColors.bearish)
-                statPill(value: c.netDirection.capitalized, label: "Net", color: netColor)
-            }
+            ReportMetricsStrip(metrics: [
+                ReportMetricItem(label: c.numBuyers == 1 ? "Buyer" : "Buyers", value: "\(c.numBuyers)", valueColor: AppColors.bullish),
+                ReportMetricItem(label: c.numSellers == 1 ? "Seller" : "Sellers", value: "\(c.numSellers)", valueColor: AppColors.bearish),
+                ReportMetricItem(label: "Net", value: c.netDirection.capitalized, valueColor: netColor),
+            ])
 
-            // Who actually traded — top 3, expandable ("Show N more"). Reuses the
-            // Holders → Congress row (names/amounts match) at the insight size.
+            // Who actually traded — top 3, expandable ("Show N more"). Uses the
+            // standard report list row (Key Management style) so it matches the
+            // other report lists; 3 lines: name/role/date · range/owner/price.
             if !c.trades.isEmpty {
-                VStack(spacing: AppSpacing.xs) {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
                     ForEach(visible) { trade in
-                        CongressActivityRow(
-                            activity: trade,
-                            background: AppColors.cardBackgroundLight,
-                            nameFont: AppTypography.label,
-                            valueFont: AppTypography.label.weight(.medium)
+                        ReportListRow(
+                            leftPrimary: trade.name,
+                            leftLines: [
+                                ReportRowText(text: trade.role),
+                                ReportRowText(text: trade.formattedDate),
+                            ],
+                            rightLines: [
+                                ReportRowText(text: trade.formattedRange, color: trade.changeColor, isPrimary: true),
+                                ReportRowText(text: trade.ownerLabel, color: trade.ownerColor),
+                            ] + (trade.formattedPrice.isEmpty ? [] : [ReportRowText(text: trade.formattedPrice)])
                         )
                     }
                 }
@@ -97,34 +103,43 @@ struct ReportHiddenMarketSignalsSection: View {
     // MARK: - Short interest
 
     private func shortInterestCard(_ s: ShortInterestSignal) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+        let metrics = shortMetrics(s)
+        return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Short Selling")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
-            // 12-month dual-axis trend (the hero) — green bars = short interest
-            // (shares, left axis), white line = short float % (right axis).
-            // Falls back to a note when the FINRA settlement series is absent.
-            shortChart(s)
-
-            // Snapshot footer — current % of float, days to cover, 3-month change.
-            HStack(spacing: AppSpacing.sm) {
-                if let pf = s.percentOfFloat {
-                    statPill(value: String(format: "%.1f%%", pf), label: "of Float", color: shortColor(pf))
-                }
-                if let dtc = s.daysToCover {
-                    statPill(value: String(format: "%.1f", dtc), label: "Days to Cover", color: AppColors.textPrimary)
-                }
-                if let ch = s.change3m {
-                    statPill(
-                        value: String(format: "%@%.0f%%", ch >= 0 ? "+" : "", ch),
-                        label: "vs 3mo",
-                        color: ch > 0 ? AppColors.bearish : AppColors.bullish
-                    )
-                }
+            // Snapshot strip (TOP) — % of float · days to cover · 3-month change —
+            // in one gray card with "|" dividers (same style as Capital Allocation).
+            if !metrics.isEmpty {
+                ReportMetricsStrip(metrics: metrics)
             }
+
+            // 12-month dual-axis trend (the hero) — blue bars = short interest
+            // (shares, left axis), white line = days to cover (right axis); legend
+            // below. Falls back to a note when the FINRA settlement series is absent.
+            shortChart(s)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Current snapshot metrics for the strip — % of float, days to cover, 3-mo change.
+    private func shortMetrics(_ s: ShortInterestSignal) -> [ReportMetricItem] {
+        var m: [ReportMetricItem] = []
+        if let pf = s.percentOfFloat {
+            m.append(ReportMetricItem(label: "of Float", value: String(format: "%.1f%%", pf), valueColor: shortColor(pf)))
+        }
+        if let dtc = s.daysToCover {
+            m.append(ReportMetricItem(label: "Days to Cover", value: String(format: "%.1f", dtc), valueColor: AppColors.textPrimary))
+        }
+        if let ch = s.change3m {
+            m.append(ReportMetricItem(
+                label: "vs 3mo",
+                value: String(format: "%@%.0f%%", ch >= 0 ? "+" : "", ch),
+                valueColor: ch > 0 ? AppColors.bearish : AppColors.bullish
+            ))
+        }
+        return m
     }
 
     @ViewBuilder
@@ -153,13 +168,15 @@ struct ReportHiddenMarketSignalsSection: View {
 
         if points.count >= 2 {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                ShortInterestTrendChart(points: points, pctPerM: pctPerM)
+                // Legend BELOW the chart, with dots (matches the other charts).
                 HStack(spacing: AppSpacing.md) {
                     legendItem(color: AppColors.primaryBlue, label: pctPerM != nil ? "Short float" : "Short interest")
                     if hasDTC {
-                        legendItem(color: .white, label: "Days to cover")
+                        legendItem(color: AppColors.textSecondary, label: "Days to cover")
                     }
                 }
-                ShortInterestTrendChart(points: points, pctPerM: pctPerM)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
             .padding(.top, AppSpacing.xs)
         } else {
@@ -173,12 +190,14 @@ struct ReportHiddenMarketSignalsSection: View {
     }
 
     private func legendItem(color: Color, label: String) -> some View {
-        HStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 1.5)
+        // Same dot (8×8), spacing, and font (caption) as the Bought/Sold legend
+        // (SmartMoneyFlowLegendItem) in Insider Activity.
+        HStack(spacing: AppSpacing.xs) {
+            Circle()
                 .fill(color)
-                .frame(width: 14, height: 3)
+                .frame(width: 8, height: 8)
             Text(label)
-                .font(.system(size: 10))
+                .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
     }
@@ -216,24 +235,6 @@ struct ReportHiddenMarketSignalsSection: View {
     }
 
     // MARK: - Helpers
-
-    private func statPill(value: String, label: String, color: Color) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(color)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            Text(label)
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, AppSpacing.sm)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-        )
-    }
 
     private func shortColor(_ pctFloat: Double) -> Color {
         if pctFloat >= 10 { return AppColors.bearish }
@@ -331,7 +332,10 @@ private struct ShortInterestTrendChart: View {
                     x: .value("Period", item.idx),
                     y: .value("Days to cover", dtcToY(item.dtc ?? 0))
                 )
-                .foregroundStyle(Color.white)
+                // Was Color.white (== textPrimary, identical to the "2.1%"
+                // metric) and read as too bright — use the "Short Selling"
+                // header color (textSecondary) instead.
+                .foregroundStyle(AppColors.textSecondary)
                 .lineStyle(StrokeStyle(lineWidth: 2))
                 .interpolationMethod(.catmullRom)
             }

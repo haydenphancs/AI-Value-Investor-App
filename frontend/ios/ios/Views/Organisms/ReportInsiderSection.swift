@@ -37,78 +37,48 @@ struct ReportInsiderSection: View {
     // MARK: - Capital Allocation
 
     private func capitalAllocationCard(_ ca: ReportCapitalAllocation) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Section header — OUTSIDE the card, same style as "Insider Activity"
+            // / "Key Management" (bodySmallEmphasis · textSecondary).
             Text("Capital Allocation")
-                .font(AppTypography.label)
-                .fontWeight(.semibold)
-                .foregroundColor(AppColors.textPrimary)
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textSecondary)
 
-            HStack(alignment: .top, spacing: AppSpacing.sm) {
-                metric(
+            // The three metrics in one gray card — shared strip (same style as
+            // Congressional Trades / Short Selling).
+            ReportMetricsStrip(metrics: [
+                ReportMetricItem(
                     label: "Dividend Yield",
-                    value: ca.dividendYield > 0 ? ca.dividendYieldText : "None",
-                    color: AppColors.textPrimary
-                )
-                cardDivider
-                metric(
+                    value: ca.dividendYield > 0 ? ca.dividendYieldText : "None"
+                ),
+                ReportMetricItem(
                     label: "Buybacks",
                     value: ca.buybackStatus,
-                    color: sentimentColor(ca.buybackSentiment)
-                )
-                cardDivider
-                metric(
+                    valueColor: sentimentColor(ca.buybackSentiment)
+                ),
+                ReportMetricItem(
                     label: "Share Count",
                     value: ca.shareCountChangeText,
-                    color: ca.shareCountChange < 0 ? AppColors.bullish
+                    valueColor: ca.shareCountChange < 0 ? AppColors.bullish
                         : ca.shareCountChange > 0 ? AppColors.bearish
                         : AppColors.textSecondary
-                )
-            }
+                ),
+            ])
 
-            // Dilution mini-chart — shows WHY the buyback status reads as it
-            // does (rising shares = diluting). The x-axis labels the quarters,
-            // so the share-count window is self-evident; tap a quarter for the
-            // per-period values. Hidden when fewer than 2 quarters exist.
+            // Dilution mini-chart — FLAT (no card), so the chart reads cleanly
+            // against the section like the Hidden Market Signals charts. Shows
+            // WHY the buyback status reads as it does (rising shares = diluting);
+            // the x-axis labels the quarters; tap a quarter for values. Hidden
+            // when fewer than 2 quarters exist.
             if ca.hasTrend {
-                Rectangle()
-                    .fill(AppColors.textMuted.opacity(0.15))
-                    .frame(height: 1)
-                    .padding(.top, AppSpacing.xs)
+                VStack(spacing: AppSpacing.xs) {
+                    CapitalAllocationMiniChart(dataPoints: ca.dataPoints, selectedPeriod: $selectedChartPeriod)
 
-                CapitalAllocationMiniChart(dataPoints: ca.dataPoints, selectedPeriod: $selectedChartPeriod)
-
-                SignalOfConfidenceLegendView()
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, AppSpacing.xs)
+                    SignalOfConfidenceLegendView()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
             }
         }
-        .padding(AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-        )
-    }
-
-    private var cardDivider: some View {
-        Rectangle()
-            .fill(AppColors.textMuted.opacity(0.2))
-            .frame(width: 1, height: 30)
-    }
-
-    private func metric(label: String, value: String, color: Color) -> some View {
-        VStack(alignment: .center, spacing: 2) {
-            Text(label)
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-            Text(value)
-                .font(AppTypography.label)
-                .fontWeight(.semibold)
-                .foregroundColor(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private func sentimentColor(_ s: String) -> Color {

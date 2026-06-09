@@ -439,47 +439,15 @@ struct ReportConsensusBar: View {
                     .foregroundColor(AppColors.textMuted)
             }
 
-            HStack(spacing: AppSpacing.md) {
-                Spacer(minLength: 0)
-                HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "arrow.up")
-                        .font(AppTypography.iconTiny).fontWeight(.bold)
-                        .foregroundColor(AppColors.bullish)
-                    Text("\(consensus.momentumUpgrades)")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
-                    Text("Upgrades")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                // Maintains — gray "equal" icon, mirroring the Analysis tab's
-                // AnalystActionBadge treatment (AppColors.textSecondary).
-                HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "equal")
-                        .font(AppTypography.iconTiny).fontWeight(.bold)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("\(consensus.momentumMaintains)")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
-                    Text("Maintains")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "arrow.down")
-                        .font(AppTypography.iconTiny).fontWeight(.bold)
-                        .foregroundColor(AppColors.bearish)
-                    Text("\(consensus.momentumDowngrades)")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
-                    Text("Downgrades")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-                Spacer(minLength: 0)
-            }
+            // Upgrades · Maintains · Downgrades in ONE gray card with "|"
+            // dividers (same ReportMetricsStrip as Capital Allocation / Congress
+            // / Short Selling). Count on top, label below; value colored by
+            // direction (green up / red down) in place of the old arrow icons.
+            ReportMetricsStrip(metrics: [
+                ReportMetricItem(label: "Upgrades", value: "\(consensus.momentumUpgrades)", valueColor: AppColors.bullish),
+                ReportMetricItem(label: "Maintains", value: "\(consensus.momentumMaintains)", valueColor: AppColors.textPrimary),
+                ReportMetricItem(label: "Downgrades", value: "\(consensus.momentumDowngrades)", valueColor: AppColors.bearish),
+            ])
         }
     }
 

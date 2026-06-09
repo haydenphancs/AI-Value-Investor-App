@@ -1337,11 +1337,17 @@ class TickerReportDataCollector:
         out.insider_vital_partial = insider_vital_partial
 
         # ── Key management roster ─────────────────────────────────────
+        _km_shares_out = (
+            (out.shares_float or {}).get("outstandingShares")
+            or (out.quote or {}).get("sharesOutstanding")
+            or 0
+        )
         out.key_management_partial = _build_key_management(
             out.insider_roster,
             profile,
             current_price,
             beneficial_owners=out.beneficial_owners,
+            shares_outstanding=float(_km_shares_out or 0),
         )
 
         # ── Price action: deterministic earnings + news-catalyst event ──
@@ -1442,9 +1448,16 @@ class TickerReportDataCollector:
                     update={"price_data": [], "daily_prices": []}
                 ).model_dump()
             recent = hr.recent_activities.insider_activities
-            if recent.activities:
+            # Informative trades only (open-market P/S) — drops RSU vesting,
+            # option exercises, gifts. Matches the aggregate table above, which
+            # is also informative-only.
+            informative = [
+                a for a in recent.activities
+                if a.transaction_type in ("Informative Buy", "Informative Sell")
+            ]
+            if informative:
                 insider_data["recent_transactions"] = recent.model_copy(
-                    update={"activities": recent.activities[:10]}
+                    update={"activities": informative[:10]}
                 ).model_dump()
 
         # ── Insider vital: AI provides only key_insight ──────────────
@@ -3312,7 +3325,7 @@ def _build_revenue_forecast_partial(
 def _build_insider_sections(
     insider_trades: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Aggregate the last 90 days of real insider trades.
+    """Aggregate the last 12 months of real insider trades.
 
     Sentiment is derived from net dollar value (buys − sells), not raw
     counts — a single $50M sell from the CEO outweighs three $100K
@@ -3323,7 +3336,10 @@ def _build_insider_sections(
     insider_data only lacks `ownership_note`, and the partial vital
     only lacks `key_insight` — both filled in `assemble_report`.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    # 12-month window so the aggregate matches the 12-mo flow chart + the
+    # recent-transactions list shown alongside it (was 90 days, which disagreed
+    # with the chart's timeline).
+    cutoff = datetime.now(timezone.utc) - timedelta(days=365)
 
     def _is_in_window(t: Dict[str, Any]) -> bool:
         date_str = (t.get("transactionDate") or t.get("filingDate") or "")[:10]
@@ -3397,7 +3413,7 @@ def _build_insider_sections(
 
     insider_data_partial = {
         "sentiment": sentiment,
-        "timeframe": "Last 90 Days",
+        "timeframe": "Last 12 Months",
         "transactions": transactions,
         "ownership_note": None,  # AI fills
     }
@@ -3472,6 +3488,7 @@ def _build_key_management(
     profile: Dict[str, Any],
     current_price: float = 0.0,
     beneficial_owners: Optional[List[Dict[str, Any]]] = None,
+    shares_outstanding: float = 0.0,
 ) -> Dict[str, Any]:
     """Split key management into two sub-sections so the UI can render
     them under separate sub-headers:
@@ -3572,12 +3589,20 @@ def _build_key_management(
             cleaned_title = _clean_role_title(
                 r.get("title") or r.get("typeOfOwner")
             )
+            # Direct ownership % = this person's shares / shares outstanding.
+            # iOS shows it for OFFICERS ("0.43% / 1.0M"); top holders use the
+            # 13G beneficial chip (percent_ownership) instead.
+            percent_owned = (
+                round(shares / shares_outstanding * 100, 6)
+                if shares_outstanding > 0 and shares > 0 else None
+            )
             row = {
                 "name": normalize_insider_name(r.get("owner")),
                 "title": cleaned_title,
                 "ownership": _format_shares_short(shares),
                 "ownership_value": value_str,
                 "percent_ownership": round(pct, 1) if pct else None,
+                "percent_owned": percent_owned,
             }
 
             cik = r.get("cik") or ""
@@ -3613,6 +3638,7 @@ def _build_key_management(
             "ownership": "—",
             "ownership_value": "—",
             "percent_ownership": None,
+            "percent_owned": None,
         })
 
     return {
@@ -6377,7 +6403,7 @@ def build_financial_context(out: CollectedTickerData) -> str:
             for t in txns
         ]
         parts.append(
-            f"\nInsider Activity (90d): {i.get('sentiment', 'neutral')} "
+            f"\nInsider Activity (12mo): {i.get('sentiment', 'neutral')} "
             f"— " + ", ".join(tx_strs)
         )
 

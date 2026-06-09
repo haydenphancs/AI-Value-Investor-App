@@ -9,7 +9,11 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
-from app.schemas.holders import SmartMoneyDataSchema, CongressActivitySchema
+from app.schemas.holders import (
+    SmartMoneyDataSchema,
+    CongressActivitySchema,
+    InsiderActivitiesDataSchema,
+)
 from app.schemas.signal_of_confidence import SignalOfConfidenceDataPointSchema
 
 
@@ -138,6 +142,12 @@ class InsiderDataResponse(BaseModel):
     ownership_note: Optional[str] = None
     # Capital Allocation (buybacks + dividends). None when unavailable → hidden.
     capital_allocation: Optional[CapitalAllocationResponse] = None
+    # Insider trend + specifics, reused from holders_response (same numbers as
+    # the Holders tab). insider_flow = 12-mo buy/sell volume series (compact
+    # chart); recent_transactions = per-trade list (top ~10; iOS shows 3 + more).
+    # None when holders data is unavailable → iOS hides these blocks.
+    insider_flow: Optional[SmartMoneyDataSchema] = None
+    recent_transactions: Optional[InsiderActivitiesDataSchema] = None
 
 
 class KeyManagerResponse(BaseModel):

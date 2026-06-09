@@ -400,6 +400,10 @@ struct ReportInsiderData {
     let transactions: [InsiderTransaction]
     let ownershipNote: String?      // "The stock is heavily sold off by insiders."
     var capitalAllocation: ReportCapitalAllocation? = nil
+    // Insider trend chart + recent trades (reused from the Holders tab, same
+    // numbers). nil / empty → those blocks hide. Compact, not the full tab.
+    var insiderFlow: SmartMoneyData? = nil
+    var recentTransactions: [InsiderActivity] = []
 }
 
 // MARK: - Key Management
@@ -1305,7 +1309,22 @@ extension TickerReportData {
                     SignalOfConfidenceDataPoint(period: "Q4 '24", dividendYield: 0.93, buybackYield: 0.50, dividendAmount: 1180, buybackAmount: 610, sharesOutstanding: 1031),
                     SignalOfConfidenceDataPoint(period: "Q1 '25", dividendYield: 0.93, buybackYield: 0.44, dividendAmount: 1190, buybackAmount: 560, sharesOutstanding: 1037)
                 ]
-            )
+            ),
+            insiderFlow: SmartMoneyData(
+                tab: .insider,
+                priceData: [],
+                dailyPrices: [],
+                flowData: [
+                    SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 0.0, sellVolume: 0.5),
+                    SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 0.2, sellVolume: 0.0),
+                    SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 0.0, sellVolume: 1.2),
+                    SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 0.0, sellVolume: 0.8),
+                    SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 0.1, sellVolume: 0.0),
+                    SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 0.0, sellVolume: 0.015)
+                ],
+                summary: SmartMoneyFlowSummary(totalNetFlow: -2.2, totalBuy: 0.3, totalSell: 2.5, isPositive: false, periodDescription: "12-Month", unit: .shares)
+            ),
+            recentTransactions: Array(InsiderActivity.sampleData.prefix(5))
         ),
         keyManagement: ReportKeyManagement(
             topHolders: [

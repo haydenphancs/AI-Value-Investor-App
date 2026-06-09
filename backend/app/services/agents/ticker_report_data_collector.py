@@ -1429,6 +1429,24 @@ class TickerReportDataCollector:
             out.signal_of_confidence
         )
 
+        # Insider trend chart + recent transactions — reused from
+        # holders_response (same numbers as the Holders tab; NO extra fetch).
+        # insider_flow drops the price arrays (the report chart hides the price
+        # line); recent transactions are capped (iOS shows 3 + "Show more").
+        # Left None when there's no data → iOS hides the blocks.
+        hr = out.holders_response
+        if hr is not None:
+            sm = hr.insider_data
+            if sm.flow_data:
+                insider_data["insider_flow"] = sm.model_copy(
+                    update={"price_data": [], "daily_prices": []}
+                ).model_dump()
+            recent = hr.recent_activities.insider_activities
+            if recent.activities:
+                insider_data["recent_transactions"] = recent.model_copy(
+                    update={"activities": recent.activities[:10]}
+                ).model_dump()
+
         # ── Insider vital: AI provides only key_insight ──────────────
         insider_vital = dict(out.insider_vital_partial)
         insider_vital["key_insight"] = (

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ReportInsiderActivityTable: View {
     let insiderData: ReportInsiderData
+    @State private var showAllTransactions = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -77,6 +78,51 @@ struct ReportInsiderActivityTable: View {
             // Interpretation now lives in the Key Management Insight
             // (ReportKeyManagementTable), which anchors in the dominant
             // holder's stake instead of restating the table.
+
+            // Insider trend (12-mo buy/sell) + recent transactions — reused from
+            // the Holders tab (same numbers), compact: no price line, top-3 + more.
+            if let flow = insiderData.insiderFlow, !flow.flowData.isEmpty {
+                SmartMoneyFlowChart(
+                    priceData: [],
+                    dailyPrices: [],
+                    flowData: flow.flowData,
+                    showPriceChart: false,
+                    showVolumeYAxis: true
+                )
+                SmartMoneyFlowLegend(buyLabel: "Bought", sellLabel: "Sold")
+            }
+
+            if !insiderData.recentTransactions.isEmpty {
+                Text("Recent Transactions")
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.top, AppSpacing.xs)
+
+                ForEach(showAllTransactions
+                        ? insiderData.recentTransactions
+                        : Array(insiderData.recentTransactions.prefix(3))) { tx in
+                    InsiderActivityRow(activity: tx)
+                }
+
+                if insiderData.recentTransactions.count > 3 {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showAllTransactions.toggle() }
+                    } label: {
+                        HStack(spacing: AppSpacing.xxs) {
+                            Text(showAllTransactions
+                                 ? "Show less"
+                                 : "Show \(insiderData.recentTransactions.count - 3) more")
+                                .font(AppTypography.captionEmphasis)
+                            Image(systemName: showAllTransactions ? "chevron.up" : "chevron.down")
+                                .font(AppTypography.iconTiny).fontWeight(.semibold)
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, AppSpacing.xs)
+                    }
+                }
+            }
         }
     }
 }

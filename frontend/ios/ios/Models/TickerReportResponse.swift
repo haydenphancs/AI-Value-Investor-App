@@ -300,11 +300,18 @@ struct InsiderDataDTO: Codable {
     let transactions: [InsiderTransactionDTO]
     let ownershipNote: String?
     let capitalAllocation: CapitalAllocationDTO?
+    // 12-mo insider buy/sell flow (compact chart) + recent per-trade list,
+    // reused from the Holders tab (same DTOs). Optional → tolerates older/cached
+    // payloads and tickers with no insider data.
+    let insiderFlow: SmartMoneyDataDTO?
+    let recentTransactions: InsiderActivitiesDataDTO?
 
     enum CodingKeys: String, CodingKey {
         case sentiment, timeframe, transactions
         case ownershipNote = "ownership_note"
         case capitalAllocation = "capital_allocation"
+        case insiderFlow = "insider_flow"
+        case recentTransactions = "recent_transactions"
     }
 }
 
@@ -812,7 +819,9 @@ extension TickerReportAPIResponse {
                         )
                     }
                 )
-            }
+            },
+            insiderFlow: insiderData.insiderFlow?.toDisplayModel(),
+            recentTransactions: insiderData.recentTransactions?.toDisplayModel().activities ?? []
         )
 
         // Key Management — split into top holders (10%+ owners) and

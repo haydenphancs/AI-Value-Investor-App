@@ -2415,6 +2415,11 @@ def _build_capital_allocation_block(
         "buyback_yield": round(s.buyback_yield, 2),
         "total_yield": round(s.total_yield, 2),
         "share_count_change": round(s.share_count_change, 2),
+        # Forward the per-quarter series (already computed — no extra fetch) so
+        # iOS can draw the compact dilution mini-chart and derive the share-count
+        # window label. share_count_change is measured oldest→newest across these
+        # points, so the chart makes the (up to ~2yr) window self-evident.
+        "data_points": [dp.model_dump() for dp in soc.data_points],
     }
 
 

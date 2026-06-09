@@ -57,6 +57,27 @@ struct ReportInsiderSection: View {
                         : AppColors.textSecondary
                 )
             }
+
+            // Dilution mini-chart — shows WHY the buyback status reads as it
+            // does (rising shares = diluting). The window caption scopes the
+            // cumulative (up to ~2yr) share-count change so it isn't misread
+            // as a 1-year figure. Hidden when fewer than 2 quarters exist.
+            if ca.hasTrend {
+                Rectangle()
+                    .fill(AppColors.textMuted.opacity(0.15))
+                    .frame(height: 1)
+                    .padding(.top, AppSpacing.xs)
+
+                Text("Share count change over \(ca.shareCountWindowText)")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                CapitalAllocationMiniChart(dataPoints: ca.dataPoints)
+
+                SignalOfConfidenceLegendView()
+                    .padding(.top, AppSpacing.xs)
+            }
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)

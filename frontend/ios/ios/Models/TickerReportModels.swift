@@ -373,6 +373,9 @@ struct ReportCapitalAllocation {
     let buybackYield: Double
     let totalYield: Double
     let shareCountChange: Double  // % (negative = shrinking via buybacks)
+    // Per-quarter series (same data as the Financials-tab chart). Empty when
+    // Signal of Confidence is unavailable → the card renders numbers-only.
+    let dataPoints: [SignalOfConfidenceDataPoint]
 
     /// Sentiment of the buyback status → drives the chip color (green/red).
     var buybackSentiment: String {
@@ -385,6 +388,19 @@ struct ReportCapitalAllocation {
     var dividendYieldText: String { String(format: "%.2f%%", dividendYield) }
     var shareCountChangeText: String {
         String(format: "%@%.1f%%", shareCountChange >= 0 ? "+" : "", shareCountChange)
+    }
+
+    /// ≥2 quarters available → the mini-chart + window caption can render.
+    var hasTrend: Bool { dataPoints.count >= 2 }
+
+    /// The window the share-count change is measured over, derived from the
+    /// actual quarters (e.g. "Q2 '23 → Q2 '25"). Labels the figure so the
+    /// cumulative (up to ~2yr) change isn't misread as a 1-year number.
+    var shareCountWindowText: String {
+        guard hasTrend,
+              let first = dataPoints.first?.period,
+              let last = dataPoints.last?.period else { return "" }
+        return "\(first) → \(last)"
     }
 }
 
@@ -1280,7 +1296,26 @@ extension TickerReportData {
                 InsiderTransaction(type: "Buys", count: 3, shares: "12", value: "$1,234"),
                 InsiderTransaction(type: "Sells", count: 12, shares: "45", value: "$4.1M")
             ],
-            ownershipNote: "The stock is heavily sold off by insiders."
+            ownershipNote: "The stock is heavily sold off by insiders.",
+            // Oracle's capital-allocation story: small dividend, modest buybacks,
+            // but a share count rising +3.7% over the window → "Diluting".
+            capitalAllocation: ReportCapitalAllocation(
+                buybackStatus: "Diluting",
+                dividendStatus: "Low",
+                dividendYield: 0.93,
+                buybackYield: 0.42,
+                totalYield: 1.35,
+                shareCountChange: 3.7,
+                dataPoints: [
+                    SignalOfConfidenceDataPoint(period: "Q3 '23", dividendYield: 0.90, buybackYield: 0.30, dividendAmount: 1100, buybackAmount: 360, sharesOutstanding: 1000),
+                    SignalOfConfidenceDataPoint(period: "Q4 '23", dividendYield: 0.91, buybackYield: 0.35, dividendAmount: 1120, buybackAmount: 420, sharesOutstanding: 1006),
+                    SignalOfConfidenceDataPoint(period: "Q1 '24", dividendYield: 0.92, buybackYield: 0.28, dividendAmount: 1130, buybackAmount: 340, sharesOutstanding: 1012),
+                    SignalOfConfidenceDataPoint(period: "Q2 '24", dividendYield: 0.93, buybackYield: 0.45, dividendAmount: 1150, buybackAmount: 540, sharesOutstanding: 1019),
+                    SignalOfConfidenceDataPoint(period: "Q3 '24", dividendYield: 0.92, buybackYield: 0.40, dividendAmount: 1160, buybackAmount: 480, sharesOutstanding: 1026),
+                    SignalOfConfidenceDataPoint(period: "Q4 '24", dividendYield: 0.93, buybackYield: 0.50, dividendAmount: 1180, buybackAmount: 610, sharesOutstanding: 1031),
+                    SignalOfConfidenceDataPoint(period: "Q1 '25", dividendYield: 0.93, buybackYield: 0.44, dividendAmount: 1190, buybackAmount: 560, sharesOutstanding: 1037)
+                ]
+            )
         ),
         keyManagement: ReportKeyManagement(
             topHolders: [

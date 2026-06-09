@@ -278,6 +278,10 @@ struct CapitalAllocationDTO: Codable {
     let buybackYield: Double
     let totalYield: Double
     let shareCountChange: Double
+    // Per-quarter series (reuses the Signal of Confidence point DTO) so the
+    // card can draw the compact dilution mini-chart + label the share-count
+    // window. Optional → tolerates older/cached payloads without the key.
+    let dataPoints: [SignalOfConfidenceDataPointDTO]?
 
     enum CodingKeys: String, CodingKey {
         case buybackStatus = "buyback_status"
@@ -286,6 +290,7 @@ struct CapitalAllocationDTO: Codable {
         case buybackYield = "buyback_yield"
         case totalYield = "total_yield"
         case shareCountChange = "share_count_change"
+        case dataPoints = "data_points"
     }
 }
 
@@ -795,7 +800,17 @@ extension TickerReportAPIResponse {
                     dividendYield: c.dividendYield,
                     buybackYield: c.buybackYield,
                     totalYield: c.totalYield,
-                    shareCountChange: c.shareCountChange
+                    shareCountChange: c.shareCountChange,
+                    dataPoints: (c.dataPoints ?? []).map { p in
+                        SignalOfConfidenceDataPoint(
+                            period: p.period,
+                            dividendYield: p.dividendYield,
+                            buybackYield: p.buybackYield,
+                            dividendAmount: p.dividendAmount,
+                            buybackAmount: p.buybackAmount,
+                            sharesOutstanding: p.sharesOutstanding
+                        )
+                    }
                 )
             }
         )

@@ -12,6 +12,12 @@ import SwiftUI
 struct ReportKeyManagementTable: View {
     let management: ReportKeyManagement
 
+    // Each sub-list shows 3 by default; the rest collapse behind "Show N more"
+    // (same pattern as the Hidden Market Signals congress list).
+    private let collapsedCount = 3
+    @State private var showAllTopHolders = false
+    @State private var showAllOfficers = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Key Management")
@@ -29,13 +35,11 @@ struct ReportKeyManagementTable: View {
             .foregroundColor(AppColors.textMuted)
 
             if !management.topHolders.isEmpty {
-                sectionHeader("Top Holders")
-                ForEach(management.topHolders) { managerRow($0) }
+                managerSubsection("Top Holders", management.topHolders, expanded: $showAllTopHolders)
             }
 
             if !management.officers.isEmpty {
-                sectionHeader("Officers")
-                ForEach(management.officers) { managerRow($0) }
+                managerSubsection("Officers", management.officers, expanded: $showAllOfficers)
             }
 
             // Ownership insight
@@ -75,6 +79,38 @@ struct ReportKeyManagementTable: View {
             .fontWeight(.semibold)
             .foregroundColor(AppColors.textMuted)
             .padding(.top, AppSpacing.xs)
+    }
+
+    /// One labeled sub-list capped at `collapsedCount`, with a "Show N more" /
+    /// "Show less" toggle when there are extra rows.
+    @ViewBuilder
+    private func managerSubsection(
+        _ title: String,
+        _ managers: [KeyManager],
+        expanded: Binding<Bool>
+    ) -> some View {
+        sectionHeader(title)
+        let visible = expanded.wrappedValue ? managers : Array(managers.prefix(collapsedCount))
+        ForEach(visible) { managerRow($0) }
+        if managers.count > collapsedCount {
+            showMoreButton(hidden: managers.count - collapsedCount, expanded: expanded)
+        }
+    }
+
+    private func showMoreButton(hidden: Int, expanded: Binding<Bool>) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { expanded.wrappedValue.toggle() }
+        } label: {
+            HStack(spacing: AppSpacing.xxs) {
+                Text(expanded.wrappedValue ? "Show less" : "Show \(hidden) more")
+                    .font(AppTypography.captionEmphasis)
+                Image(systemName: expanded.wrappedValue ? "chevron.up" : "chevron.down")
+                    .font(AppTypography.iconTiny).fontWeight(.semibold)
+            }
+            .foregroundColor(AppColors.primaryBlue)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, AppSpacing.xs)
+        }
     }
 
     private func managerRow(_ manager: KeyManager) -> some View {

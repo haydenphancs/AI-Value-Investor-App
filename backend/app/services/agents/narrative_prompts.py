@@ -77,9 +77,11 @@ FALLBACK = {
 # ── Style brief shared across all narrative prompts ───────────────────
 
 
-_STYLE_BRIEF = """STYLE: Catchy, punchy, plain-English. Sound like a sharp portfolio manager talking to a smart friend — confident, specific, never marketing-speak. NEVER use clichés ("strong tailwinds", "well-positioned", "going forward", "in the long run", "robust", "best-in-class"). NEVER hedge ("could potentially", "may possibly", "it remains to be seen"). Cite a concrete number when one is available in the data.
+_STYLE_BRIEF = """STYLE: Catchy, punchy, plain English. Sound like a sharp portfolio manager talking to a smart friend: confident, specific, never marketing speak. NEVER use clichés ("strong tailwinds", "well positioned", "going forward", "in the long run", "robust", "best in class"). NEVER hedge ("could potentially", "may possibly", "it remains to be seen"). Cite a concrete number when one is available in the data.
 
-PERSONA VOICE: Stay in character as {persona_name}. Apply your lens — {narrative_lens} — but never name yourself, never mention the underlying technology, model, or AI provider, and never say "as an AI".
+PUNCTUATION: Never use a dash as punctuation: no em dash, no en dash, no hyphen. Replace any dash break with a comma, semicolon, or period. Write compound terms as two words (e.g. "short selling"). Write ranges and negative numbers in words (e.g. "10 to 20 percent", "down 8%", "fell 3%"), never with a minus sign.
+
+PERSONA VOICE: Stay in character as {persona_name}. Apply your lens ({narrative_lens}) but never name yourself, never mention the underlying technology, model, or AI provider, and never say "as an AI".
 
 OUTPUT: Return ONLY the requested text. No JSON, no markdown, no quotes, no preamble like "Here is" or "The narrative is". Just the prose."""
 
@@ -129,6 +131,26 @@ def _related_context_block(topic: str, context: str) -> str:
 _QUOTE_CHARS = ("“", "”", "‘", "’", '"', "'", "`")
 
 
+def _strip_dashes(text: str) -> str:
+    """Bulletproof backstop for the STYLE no-dash rule: guarantee no em dash,
+    en dash, figure dash, horizontal bar, or spaced connector hyphen survives
+    in narrative output, whatever the model does. Em/figure/bar dashes are
+    clause connectors and become a comma; an en dash between digits is a range
+    and becomes "to" (else a comma); a spaced ASCII hyphen becomes a comma.
+    Unspaced hyphens ("10-20", "Coca-Cola") and a minus inside a number ("-8%")
+    are LEFT intact so numbers and proper nouns are never mangled."""
+    if not text:
+        return text
+    out = re.sub(r"\s*[‒—―]\s*", ", ", text)
+    out = re.sub(r"(?<=\d)\s*–\s*(?=\d)", " to ", out)
+    out = re.sub(r"\s*–\s*", ", ", out)
+    out = re.sub(r"\s+-\s+", ", ", out)
+    out = re.sub(r"\s*,(?:\s*,)+", ",", out)   # collapse doubled commas
+    out = re.sub(r"\s+,", ",", out)            # no space before a comma
+    out = re.sub(r"\s{2,}", " ", out)
+    return re.sub(r"^[\s,]+", "", out).strip()
+
+
 def _post_process(text: str, word_cap: Optional[int] = None) -> str:
     """Strip stray markdown, leading labels, enclosing quotes; cap words."""
     if not text:
@@ -145,6 +167,9 @@ def _post_process(text: str, word_cap: Optional[int] = None) -> str:
     # Strip any markdown bullets/asterisks/code fences that leaked through.
     out = re.sub(r"^[*\-•]+\s*", "", out)
     out = out.replace("```", "").strip()
+
+    # Bulletproof backstop for the STYLE no-dash rule (see _strip_dashes).
+    out = _strip_dashes(out)
 
     if word_cap and word_cap > 0:
         words = out.split()
@@ -750,22 +775,28 @@ Cite ONE concrete projected number from the projections above to anchor the read
 def _hidden_market_signals_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    """One-line synthesis of the Hidden Market Signals module — what the
-    congressional trades and short interest TOGETHER imply. Grounded only in
-    the numbers the user sees on the card (via the hidden-signals digest)."""
+    """2-4 sentence synthesis of the Hidden Market Signals module — what the
+    congressional trades and short selling TOGETHER imply for the stock, with a
+    severity read on the short-selling level. Grounded only in the numbers the
+    user sees on the card (via the hidden-signals digest)."""
     signals = _related_context_block(
         "the hidden positioning signals",
         cross_section_context(shell, ["hidden_signals"]),
     )
-    return f"""Write the Hidden Market Signals insight — a one-line read on what congressional trading and short selling TOGETHER imply.
+    return f"""Write the Hidden Market Signals insight: in 2 to 4 sentences, what congressional trading and short selling TOGETHER imply for the stock, and the likely effect on the shares.
 {signals}
 {_style_block(persona)}
-LENGTH: ONE sentence, under 22 words.
+LENGTH: 2 to 4 sentences. Lean to 2 if only one signal is notable, 3 to 4 only if both carry weight. If both are quiet, 1 to 2 sentences saying positioning looks unremarkable.
 
-- Lead with the louder signal (heavy congress buying/selling, or notably high/rising short selling).
-- If they conflict (politicians buying while shorts build), say so — that tension IS the signal.
-- Cite ONE concrete number from above (e.g. "3 congress buyers", "short 6.2% of float"). Never invent a number.
-- If both are quiet, say positioning is unremarkable. Never fabricate drama."""
+Cover BOTH signals and connect them to the stock:
+* SHORT SELLING: state the % of float and what that LEVEL means (the bracketed tag above is authoritative). Under 10% is low, little bearish conviction. 10 to 20% is elevated, a real bearish camp forming. 20 to 30% is high, a serious short squeeze watch. 30% or more is extreme. If "squeeze fuel" is flagged (days to cover at least 5), note shorts cannot exit quickly. ALWAYS read the vs 3mo change: a rising value means bearish bets are BUILDING, a falling value means shorts are COVERING (pressure easing, often bullish).
+* CONGRESS: the net of buyers versus sellers and which way it leans.
+* EFFECT: say what it means for the shares. For example, high or rising short selling is a sentiment headwind and downward pressure (but elevated squeeze risk if good news lands), shorts covering is a tailwind, and politicians buying while shorts build is a tension worth flagging.
+* If the two signals conflict, name that tension, because the contrast IS the signal.
+
+RULES:
+* Ground EVERY claim in the numbers above and cite the key ones (e.g. "11% of float", "up 8% vs 3mo", "4 sellers"). NEVER invent a number.
+* No hype. If a level is low, say so plainly and do not manufacture drama."""
 
 
 def _key_management_insight_prompt(
@@ -1722,7 +1753,17 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
             ca_bits.append(f"div yield {dy}%")
         scc = _f_num(ca.get("share_count_change"), "{:+.1f}")
         if scc is not None:
-            ca_bits.append(f"share count {scc}% YoY")
+            # share_count_change spans the whole series (oldest→newest, up to
+            # ~2yr), NOT year-over-year — cite the real window so the narrative
+            # doesn't annualize it. Matches the iOS card's window caption.
+            dps = ca.get("data_points") or []
+            if len(dps) >= 2:
+                ca_bits.append(
+                    f"share count {scc}% over "
+                    f"{dps[0].get('period')} to {dps[-1].get('period')}"
+                )
+            else:
+                ca_bits.append(f"share count {scc}%")
         if ca_bits:
             out.append("  Capital allocation: " + ", ".join(ca_bits))
     return out
@@ -1747,13 +1788,33 @@ def _digest_hidden_signals(report: Dict[str, Any]) -> List[str]:
         sbits: List[str] = []
         pf = _f_num(si.get("percent_of_float"), "{:.1f}")
         if pf is not None:
-            sbits.append(f"{pf}% of float")
+            # Deterministic severity by % of float (industry convention): <10
+            # low, 10-20 elevated, 20-30 high/squeeze-watch, 30+ extreme. Feed
+            # the LABEL to the model so flagging doesn't rely on it comparing
+            # numbers itself.
+            try:
+                v = float(si.get("percent_of_float"))
+                lvl = ("extreme" if v >= 30 else "high" if v >= 20
+                       else "elevated" if v >= 10 else "low")
+            except (TypeError, ValueError):
+                lvl = "low"
+            sbits.append(f"{pf}% of float [{lvl}]")
         dtc = _f_num(si.get("days_to_cover"), "{:.1f}")
         if dtc is not None:
             sbits.append(f"{dtc}d to cover")
-        ch = _f_num(si.get("change_3m"), "{:+.0f}")
+            try:
+                if float(si.get("days_to_cover")) >= 5:
+                    sbits.append("shorts hard to unwind (squeeze fuel)")
+            except (TypeError, ValueError):
+                pass
+        ch = si.get("change_3m")
         if ch is not None:
-            sbits.append(f"{ch}% vs 3mo")
+            # Word form (no minus sign) so the evidence carries no dashes either.
+            try:
+                v = float(ch)
+                sbits.append(f"{'up' if v >= 0 else 'down'} {abs(v):.0f}% vs 3mo")
+            except (TypeError, ValueError):
+                pass
         if sbits:
             # UI label is "Short Selling" (data field stays short_interest).
             bits.append("Short selling " + ", ".join(sbits))

@@ -460,6 +460,77 @@ def test_capital_allocation_block_none_when_no_signal():
     ).data_points == []
 
 
+# ── Insider trend chart + recent transactions parity ──────────────────
+
+
+def test_assemble_report_forwards_insider_flow_and_transactions():
+    """The Insider section now carries the 12-mo insider flow series + a recent
+    trade list, reused from holders_response (same source as the Holders tab).
+    assemble_report must forward them with the keys iOS decodes (SmartMoneyDataDTO
+    / InsiderActivityDTO), trim the price arrays, cap the activity list at 10, and
+    keep the whole report Pydantic-valid. None-safe when holders are absent."""
+    from app.schemas.holders import (
+        HoldersResponse,
+        SmartMoneyDataSchema,
+        SmartMoneyFlowDataPointSchema,
+        RecentActivitiesSchema,
+        InsiderActivitiesDataSchema,
+        InsiderActivitySchema,
+    )
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.holders_response = HoldersResponse(
+        symbol="AAPL",
+        insider_data=SmartMoneyDataSchema(
+            tab="Insider",
+            flow_data=[
+                SmartMoneyFlowDataPointSchema(month="12/2025", buy_volume=0.0, sell_volume=0.015),
+                SmartMoneyFlowDataPointSchema(month="01/2026", buy_volume=0.5, sell_volume=0.0),
+            ],
+        ),
+        recent_activities=RecentActivitiesSchema(
+            insider_activities=InsiderActivitiesDataSchema(
+                activities=[
+                    InsiderActivitySchema(
+                        name=f"Insider {i}", title="Officer", date="2026-01-15",
+                        change_in_millions=-0.01, transaction_type="Informative Sell",
+                        price_at_transaction=160.5,
+                    )
+                    for i in range(15)
+                ]
+            )
+        ),
+    )
+
+    report = coll.assemble_report(out, stage_a_fallback())
+    insider = report["insider_data"]
+
+    # Flow series forwarded with the iOS-decoded keys; price arrays trimmed.
+    flow = insider["insider_flow"]
+    assert flow is not None
+    assert flow["flow_data"][0]["month"] == "12/2025"
+    assert {"month", "buy_volume", "sell_volume"} <= set(flow["flow_data"][0].keys())
+    assert flow["price_data"] == [] and flow["daily_prices"] == []
+
+    # Recent trades forwarded + capped at 10, with the keys iOS decodes.
+    recent = insider["recent_transactions"]
+    assert recent is not None
+    assert len(recent["activities"]) == 10
+    assert {
+        "name", "title", "date", "change_in_millions",
+        "transaction_type", "price_at_transaction",
+    } <= set(recent["activities"][0].keys())
+
+    # Whole report still validates against the iOS contract.
+    TickerReportResponse.model_validate(report)
+
+    # None-safe: no holders_response → blocks omitted (schema defaults to None).
+    bare = coll.assemble_report(_make_collected_data(), stage_a_fallback())
+    assert bare["insider_data"].get("insider_flow") is None
+    assert bare["insider_data"].get("recent_transactions") is None
+
+
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
 def test_every_persona_has_narrative_lens(persona_key):
     """Phase 2 added narrative_lens — each persona must populate it."""

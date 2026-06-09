@@ -390,18 +390,8 @@ struct ReportCapitalAllocation {
         String(format: "%@%.1f%%", shareCountChange >= 0 ? "+" : "", shareCountChange)
     }
 
-    /// ≥2 quarters available → the mini-chart + window caption can render.
+    /// ≥2 quarters available → the mini-chart can render.
     var hasTrend: Bool { dataPoints.count >= 2 }
-
-    /// The window the share-count change is measured over, derived from the
-    /// actual quarters (e.g. "Q2 '23 → Q2 '25"). Labels the figure so the
-    /// cumulative (up to ~2yr) change isn't misread as a 1-year number.
-    var shareCountWindowText: String {
-        guard hasTrend,
-              let first = dataPoints.first?.period,
-              let last = dataPoints.last?.period else { return "" }
-        return "\(first) → \(last)"
-    }
 }
 
 struct ReportInsiderData {

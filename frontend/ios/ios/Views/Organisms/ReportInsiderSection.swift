@@ -12,6 +12,11 @@ struct ReportInsiderSection: View {
     let insiderData: ReportInsiderData
     let management: ReportKeyManagement
 
+    // Owns the mini-chart's selected quarter so a tap anywhere outside a chart
+    // column dismisses the popup (mirrors the Institutions chart in Wall Street
+    // Consensus). The chart's own tap wins for taps on a column.
+    @State private var selectedChartPeriod: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
             // Insider Activity
@@ -25,6 +30,8 @@ struct ReportInsiderSection: View {
             // Key Management
             ReportKeyManagementTable(management: management)
         }
+        .contentShape(Rectangle())
+        .onTapGesture { selectedChartPeriod = nil }
     }
 
     // MARK: - Capital Allocation
@@ -38,15 +45,15 @@ struct ReportInsiderSection: View {
 
             HStack(alignment: .top, spacing: AppSpacing.sm) {
                 metric(
-                    label: "Buybacks",
-                    value: ca.buybackStatus,
-                    color: sentimentColor(ca.buybackSentiment)
-                )
-                cardDivider
-                metric(
                     label: "Dividend Yield",
                     value: ca.dividendYield > 0 ? ca.dividendYieldText : "None",
                     color: AppColors.textPrimary
+                )
+                cardDivider
+                metric(
+                    label: "Buybacks",
+                    value: ca.buybackStatus,
+                    color: sentimentColor(ca.buybackSentiment)
                 )
                 cardDivider
                 metric(
@@ -59,23 +66,19 @@ struct ReportInsiderSection: View {
             }
 
             // Dilution mini-chart — shows WHY the buyback status reads as it
-            // does (rising shares = diluting). The window caption scopes the
-            // cumulative (up to ~2yr) share-count change so it isn't misread
-            // as a 1-year figure. Hidden when fewer than 2 quarters exist.
+            // does (rising shares = diluting). The x-axis labels the quarters,
+            // so the share-count window is self-evident; tap a quarter for the
+            // per-period values. Hidden when fewer than 2 quarters exist.
             if ca.hasTrend {
                 Rectangle()
                     .fill(AppColors.textMuted.opacity(0.15))
                     .frame(height: 1)
                     .padding(.top, AppSpacing.xs)
 
-                Text("Share count change over \(ca.shareCountWindowText)")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                CapitalAllocationMiniChart(dataPoints: ca.dataPoints)
+                CapitalAllocationMiniChart(dataPoints: ca.dataPoints, selectedPeriod: $selectedChartPeriod)
 
                 SignalOfConfidenceLegendView()
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, AppSpacing.xs)
             }
         }
@@ -94,7 +97,7 @@ struct ReportInsiderSection: View {
     }
 
     private func metric(label: String, value: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .center, spacing: 2) {
             Text(label)
                 .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
@@ -105,7 +108,7 @@ struct ReportInsiderSection: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private func sentimentColor(_ s: String) -> Color {

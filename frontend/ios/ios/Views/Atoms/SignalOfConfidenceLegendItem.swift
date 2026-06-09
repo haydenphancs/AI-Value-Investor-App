@@ -14,7 +14,9 @@ struct SignalOfConfidenceLegendItem: View {
         HStack(spacing: AppSpacing.xs) {
             Circle()
                 .fill(metricType.color)
-                .frame(width: 10, height: 10)
+                // 8×8 to match the other report legend dots (Bought/Sold in
+                // Insider Activity, Short float/Days to cover in Short Selling).
+                .frame(width: 8, height: 8)
 
             Text(metricType.rawValue)
                 .font(AppTypography.caption)

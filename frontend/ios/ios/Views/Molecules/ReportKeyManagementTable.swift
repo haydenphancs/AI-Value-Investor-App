@@ -24,16 +24,6 @@ struct ReportKeyManagementTable: View {
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textSecondary)
 
-            // Column header sits above the first non-empty sub-section.
-            HStack {
-                Text("")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Ownership")
-                    .frame(width: 80, alignment: .trailing)
-            }
-            .font(AppTypography.caption)
-            .foregroundColor(AppColors.textMuted)
-
             if !management.topHolders.isEmpty {
                 managerSubsection("Top Holders", management.topHolders, expanded: $showAllTopHolders)
             }
@@ -144,15 +134,19 @@ struct ReportKeyManagementTable: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                    Text(manager.ownership)
+                    // Officers: "pct% / shares" (e.g. "0.43% / 1.0M"). Top
+                    // holders: just shares (their % is the green chip on the left).
+                    Text(manager.ownershipPrimaryText)
                         .font(AppTypography.label)
                         .fontWeight(.medium)
                         .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                     Text(manager.ownershipValue)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }
-                .frame(width: 80, alignment: .trailing)
+                .frame(width: 120, alignment: .trailing)
             }
 
             Divider()

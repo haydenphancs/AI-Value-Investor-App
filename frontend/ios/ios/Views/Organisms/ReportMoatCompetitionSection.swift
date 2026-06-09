@@ -122,17 +122,17 @@ struct ReportMoatCompetitionSection: View {
                     .frame(height: 40)
                     .background(AppColors.cardBackgroundLight)
 
-                // Column 3: Concentration — rendered as a pill via
-                // `isBadge: true` so the strongest-moat signal still
-                // reads as a colored chip (Monopoly = bullish green,
-                // Fragmented = alert orange) even after moving out of
-                // the right-side slot in the industry row.
+                // Column 3: Concentration — plain WHITE text, same labelSmall
+                // bold as CAGR / TAM (no badge, no color). Concentration is an
+                // industry-structure fact (HHI across all firms in the
+                // industry), who-agnostic — a bullish-green "Monopoly" can
+                // mislead when the focal company isn't the dominant firm, so it
+                // renders as a neutral value like the others.
                 marketMetricColumn(
                     label: "Concentration",
                     value: data.marketDynamics.concentration.rawValue,
-                    valueColor: data.marketDynamics.concentration.color,
-                    subtitle: nil,
-                    isBadge: true
+                    valueColor: AppColors.textPrimary,
+                    subtitle: nil
                 )
                 .frame(maxWidth: 105)
             }

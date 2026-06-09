@@ -321,11 +321,13 @@ struct KeyManagerDTO: Codable {
     let ownership: String
     let ownershipValue: String
     let percentOwnership: Double?
+    let percentOwned: Double?
 
     enum CodingKeys: String, CodingKey {
         case name, title, ownership
         case ownershipValue = "ownership_value"
         case percentOwnership = "percent_ownership"
+        case percentOwned = "percent_owned"
     }
 }
 
@@ -832,7 +834,8 @@ extension TickerReportAPIResponse {
                 title: m.title,
                 ownership: m.ownership,
                 ownershipValue: m.ownershipValue,
-                percentOwnership: m.percentOwnership
+                percentOwnership: m.percentOwnership,
+                percentOwned: m.percentOwned
             )
         }
         let management = ReportKeyManagement(

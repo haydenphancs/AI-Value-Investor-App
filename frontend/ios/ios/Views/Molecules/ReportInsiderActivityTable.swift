@@ -33,44 +33,54 @@ struct ReportInsiderActivityTable: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
-            // Table header
-            HStack {
-                Text("")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Count")
-                    .frame(width: 50, alignment: .center)
-                Text("Shares")
-                    .frame(width: 50, alignment: .center)
-                Text("Value")
-                    .frame(width: 60, alignment: .trailing)
-            }
-            .font(AppTypography.caption)
-            .foregroundColor(AppColors.textMuted)
-
-            // Table rows
-            ForEach(insiderData.transactions) { transaction in
+            // Buys/Sells table — gray card (matches the Capital Allocation
+            // metrics card: cardBackgroundLight + rounded corner + md padding).
+            VStack(spacing: AppSpacing.sm) {
+                // Table header
                 HStack {
-                    Text(transaction.type)
-                        .font(AppTypography.label)
-                        .foregroundColor(transaction.type == "Buys" ? AppColors.bullish : AppColors.bearish)
+                    Text("")
                         .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Text("\(transaction.count)")
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
+                    Text("Count")
                         .frame(width: 50, alignment: .center)
-
-                    Text(transaction.shares)
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
+                    Text("Shares")
                         .frame(width: 50, alignment: .center)
-
-                    Text(transaction.value)
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textPrimary)
+                    Text("Value")
                         .frame(width: 60, alignment: .trailing)
                 }
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+
+                // Table rows
+                ForEach(insiderData.transactions) { transaction in
+                    HStack {
+                        Text(transaction.type)
+                            .font(AppTypography.label)
+                            .foregroundColor(transaction.type == "Buys" ? AppColors.bullish : AppColors.bearish)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text("\(transaction.count)")
+                            .font(AppTypography.label)
+                            .foregroundColor(AppColors.textPrimary)
+                            .frame(width: 50, alignment: .center)
+
+                        Text(transaction.shares)
+                            .font(AppTypography.label)
+                            .foregroundColor(AppColors.textPrimary)
+                            .frame(width: 50, alignment: .center)
+
+                        Text(transaction.value)
+                            .font(AppTypography.label)
+                            .foregroundColor(AppColors.textPrimary)
+                            .frame(width: 60, alignment: .trailing)
+                    }
+                }
             }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+            )
 
             // The red `ownership_note` banner that used to live here was
             // removed — it paraphrased the buy/sell table directly above
@@ -102,7 +112,18 @@ struct ReportInsiderActivityTable: View {
                 ForEach(showAllTransactions
                         ? insiderData.recentTransactions
                         : Array(insiderData.recentTransactions.prefix(3))) { tx in
-                    InsiderActivityRow(activity: tx)
+                    ReportListRow(
+                        leftPrimary: tx.name,
+                        leftLines: [
+                            ReportRowText(text: tx.title),
+                            ReportRowText(text: tx.formattedDate),
+                        ],
+                        rightLines: [
+                            ReportRowText(text: tx.formattedChange, color: tx.changeColor, isPrimary: true),
+                            ReportRowText(text: tx.transactionType.rawValue, color: tx.transactionType.color),
+                            ReportRowText(text: tx.formattedPrice),
+                        ]
+                    )
                 }
 
                 if insiderData.recentTransactions.count > 3 {

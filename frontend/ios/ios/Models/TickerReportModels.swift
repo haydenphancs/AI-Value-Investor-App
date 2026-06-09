@@ -396,7 +396,7 @@ struct ReportCapitalAllocation {
 
 struct ReportInsiderData {
     let sentiment: InsiderSentiment
-    let timeframe: String           // "Last 90 Days"
+    let timeframe: String           // "Last 12 Months"
     let transactions: [InsiderTransaction]
     let ownershipNote: String?      // "The stock is heavily sold off by insiders."
     var capitalAllocation: ReportCapitalAllocation? = nil
@@ -415,10 +415,38 @@ struct KeyManager: Identifiable {
     let ownership: String       // e.g. "40.3%", "$2,025", etc.
     let ownershipValue: String  // dollar amount or additional info
     let percentOwnership: Double?  // 13G beneficial %, nil for non-5%-filers
+    // Direct ownership % (shares / shares outstanding). Shown for OFFICERS in
+    // the right column ("0.43% / 1.0M"); top holders use the 13G chip instead.
+    var percentOwned: Double? = nil
 
     var percentOwnershipLabel: String? {
         guard let pct = percentOwnership, pct > 0 else { return nil }
         return String(format: "%.0f%% owner", pct)
+    }
+
+    /// Significant-figure % string for the direct-ownership figure (officers
+    /// can be tiny, e.g. "0.0032%"); below 0.001% it collapses to "<0.001%".
+    var formattedPercentOwned: String? {
+        guard let pct = percentOwned, pct > 0 else { return nil }
+        if pct < 0.001 { return "<0.001%" }
+        let fmt: String
+        switch pct {
+        case 10...:       fmt = "%.1f%%"
+        case 1..<10:      fmt = "%.2f%%"
+        case 0.1..<1:     fmt = "%.2f%%"
+        case 0.01..<0.1:  fmt = "%.3f%%"
+        default:          fmt = "%.4f%%"   // 0.001 ..< 0.01
+        }
+        return String(format: fmt, pct)
+    }
+
+    /// Right-column primary text. Officers (no 13G chip) show "pct% / shares";
+    /// top holders show just the share count (the chip carries their %).
+    var ownershipPrimaryText: String {
+        if let pctText = formattedPercentOwned, percentOwnershipLabel == nil {
+            return "\(pctText) / \(ownership)"
+        }
+        return ownership
     }
 }
 
@@ -1285,7 +1313,7 @@ extension TickerReportData {
         ),
         insiderData: ReportInsiderData(
             sentiment: .negative,
-            timeframe: "Last 90 Days",
+            timeframe: "Last 12 Months",
             transactions: [
                 InsiderTransaction(type: "Buys", count: 3, shares: "12", value: "$1,234"),
                 InsiderTransaction(type: "Sells", count: 12, shares: "45", value: "$4.1M")
@@ -1331,10 +1359,10 @@ extension TickerReportData {
                 KeyManager(name: "Lawrence Joseph Ellison", title: "director, 10 percent owner, Executive Chairman", ownership: "1.16B", ownershipValue: "$214.5B", percentOwnership: 43)
             ],
             officers: [
-                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer", ownership: "1.0M", ownershipValue: "$192.3M", percentOwnership: nil),
-                KeyManager(name: "Marla Smith", title: "Chief Financial Officer", ownership: "224K", ownershipValue: "$41.6M", percentOwnership: nil),
-                KeyManager(name: "Dania Caral", title: "Pres., Global Field Operations", ownership: "249K", ownershipValue: "$46.2M", percentOwnership: nil),
-                KeyManager(name: "Jeffrey Henley", title: "director, Vice Chairman", ownership: "745K", ownershipValue: "$138.1M", percentOwnership: nil)
+                KeyManager(name: "Dietrich Niebuhr", title: "Chief Executive Officer", ownership: "1.0M", ownershipValue: "$192.3M", percentOwnership: nil, percentOwned: 0.037),
+                KeyManager(name: "Marla Smith", title: "Chief Financial Officer", ownership: "224K", ownershipValue: "$41.6M", percentOwnership: nil, percentOwned: 0.0083),
+                KeyManager(name: "Dania Caral", title: "Pres., Global Field Operations", ownership: "249K", ownershipValue: "$46.2M", percentOwnership: nil, percentOwned: 0.0092),
+                KeyManager(name: "Jeffrey Henley", title: "director, Vice Chairman", ownership: "745K", ownershipValue: "$138.1M", percentOwnership: nil, percentOwned: 0.0276)
             ],
             ownershipInsight: "Oracle's high ownership ensures long-term thinking, though governance risk is high."
         ),

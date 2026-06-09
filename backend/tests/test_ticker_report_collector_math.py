@@ -393,9 +393,9 @@ def test_insider_filter_mixed_set():
 
 
 def test_insider_window_excludes_old_trades():
-    """The 90-day window must drop trades older than the cutoff even when
+    """The 12-month window must drop trades older than the cutoff even when
     they pass the informative filter."""
-    trades = [_trade(transaction_type="P-Purchase", days_ago=120)]
+    trades = [_trade(transaction_type="P-Purchase", days_ago=400)]
     insider, _ = _build_insider_sections(trades)
     counts = {t["type"]: t["count"] for t in insider["transactions"]}
     assert counts["Buys"] == 0

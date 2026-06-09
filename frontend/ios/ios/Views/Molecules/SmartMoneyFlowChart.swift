@@ -52,11 +52,13 @@ struct SmartMoneyFlowChart: View {
     /// Show all labels for quarterly (≤8 bars), sparse for monthly (12 bars)
     private var xAxisLabels: [String] {
         if isQuarterly { return allMonths }
-        guard flowData.count >= 3 else { return allMonths }
-        let first = flowData.first?.month ?? ""
-        let middle = flowData[flowData.count / 2].month
-        let last = flowData.last?.month ?? ""
-        return [first, middle, last]
+        let n = flowData.count
+        guard n >= 4 else { return allMonths }
+        // 4 evenly-spaced month labels (far-left, ~1/3, ~2/3, far-right) — was 3.
+        let idxs = Array(Set((0..<4).map {
+            Int((Double($0) * Double(n - 1) / 3.0).rounded())
+        })).sorted()
+        return idxs.map { flowData[$0].month }
     }
 
     /// Format label for x-axis display
@@ -234,6 +236,19 @@ struct SmartMoneyFlowChart: View {
             RuleMark(y: .value("Zero", 0))
                 .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
                 .lineStyle(StrokeStyle(lineWidth: 0.5))
+
+            // No-activity months — a thin gray dash at the zero line so an empty
+            // month reads as "no trades that month", not a rendering gap.
+            ForEach(flowData.filter { $0.buyVolume <= 0 && $0.sellVolume <= 0 }) { point in
+                RectangleMark(
+                    x: .value("Month", point.month),
+                    y: .value("Zero", 0),
+                    width: .fixed(barWidth),
+                    height: .fixed(2)
+                )
+                .foregroundStyle(AppColors.textMuted.opacity(0.55))
+                .cornerRadius(1)
+            }
         }
         .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
         .chartXAxis {
@@ -241,7 +256,8 @@ struct SmartMoneyFlowChart: View {
                 AxisValueLabel {
                     if let stringValue = value.as(String.self) {
                         Text(formatMonthLabel(stringValue))
-                            .font(AppTypography.caption)
+                            // size 10 to match the Capital Allocation chart axis.
+                            .font(.system(size: 10))
                             .foregroundStyle(AppColors.textMuted)
                     }
                 }
@@ -255,7 +271,8 @@ struct SmartMoneyFlowChart: View {
                     AxisValueLabel {
                         if let doubleValue = value.as(Double.self) {
                             Text(formatVolumeValue(doubleValue))
-                                .font(AppTypography.caption)
+                                // size 10 to match the Capital Allocation chart axis.
+                                .font(.system(size: 10))
                                 .foregroundStyle(AppColors.textMuted)
                         }
                     }

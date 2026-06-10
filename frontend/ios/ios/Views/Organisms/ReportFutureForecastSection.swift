@@ -9,10 +9,34 @@ import SwiftUI
 
 struct ReportFutureForecastSection: View {
     let forecast: ReportRevenueForecast
+    /// Opens the full yearly continuity sheet. Passed nil (button hidden) when
+    /// the backend didn't supply the annual_timeline series (older reports).
+    var onViewTimeline: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             ReportForecastChart(forecast: forecast)
+
+            // Entry point to the full yearly continuity view (historical actuals
+            // → forecast, with an optional price line). Keeps this module compact
+            // while the whole arc lives one tap away.
+            if let onViewTimeline {
+                Button(action: onViewTimeline) {
+                    HStack(spacing: AppSpacing.xxs) {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(AppTypography.iconTiny)
+                        Text("View full timeline")
+                            .font(AppTypography.captionEmphasis)
+                        Image(systemName: "chevron.right")
+                            .font(AppTypography.iconTiny).fontWeight(.semibold)
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.xs)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
 
             // Earnings beat/miss track record — last reported quarters vs
             // estimate. Hidden when the backend produced no earnings data.

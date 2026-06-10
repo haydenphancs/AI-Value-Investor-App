@@ -90,6 +90,11 @@ class RevenueForecastResponse(BaseModel):
     eps_growth: float
     management_guidance: str  # "raised" | "maintained" | "lowered"
     projections: List[RevenueProjectionResponse]
+    # ONE continuous yearly series (historical actuals is_forecast=False → ALL
+    # forward estimates is_forecast=True, gapless) for the "Earnings Timeline"
+    # sheet. Independent of the curated `projections` window above; the client
+    # uses this directly. Empty on older cached reports / when no data.
+    annual_timeline: List[RevenueProjectionResponse] = Field(default_factory=list)
     guidance_quote: Optional[str] = None
     # Attribution metadata for the quote — only populated when the AI
     # extracted a verbatim quote from the earnings-call transcript.

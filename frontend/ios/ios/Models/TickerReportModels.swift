@@ -262,6 +262,9 @@ struct ReportRevenueForecast {
     // `var` with defaults so sample/memberwise inits need no change.
     var earningsTrackRecord: [EarningsTrackRecordPoint] = []
     var beatSummary: String? = nil      // "Beat 6 of 8"
+    // ONE gapless yearly series (historical actuals → all forward estimates)
+    // for the Earnings Timeline sheet. Empty on older cached reports.
+    var annualTimeline: [RevenueProjection] = []
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"

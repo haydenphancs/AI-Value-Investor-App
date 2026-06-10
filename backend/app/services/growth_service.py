@@ -79,10 +79,20 @@ def _annual_period_label(record: Dict[str, Any]) -> str:
     return _extract_year(record)
 
 
-def _quarterly_period_label(record: Dict[str, Any]) -> str:
+def _quarterly_period_label(
+    record: Dict[str, Any], use_fiscal_year: bool = False
+) -> str:
     """Build quarterly period label like \"Q1'21\" from FMP income statement."""
     period = record.get("period", "")  # "Q1", "Q2", etc.
-    year = _extract_year(record)
+    # Off-calendar fiscal years (e.g. Oracle, FY ends May 31) get non-monotonic
+    # quarter LABELS when the fiscal quarter is paired with the calendar year
+    # (fiscal Q1/Aug shares a calendar year with the prior fiscal Q4/May).
+    # use_fiscal_year pairs it with FMP's fiscalYear ("Q1'26") for DISPLAY only;
+    # the sector-benchmark join stays on the calendar label (see `_match_period`).
+    if use_fiscal_year and record.get("fiscalYear"):
+        year = str(record.get("fiscalYear"))
+    else:
+        year = _extract_year(record)
     if len(year) >= 4:
         return f"{period}'{year[-2:]}"
     return f"{period}'{year}"
@@ -136,7 +146,11 @@ def _compute_growth_points(
                 continue
 
             results.append({
-                "period": _quarterly_period_label(rec),
+                # period = fiscal label for DISPLAY; _match_period = calendar
+                # label for the sector-benchmark join (identical to the
+                # calendar-keyed sector_benchmarks rows so the overlay matches).
+                "period": _quarterly_period_label(rec, use_fiscal_year=True),
+                "_match_period": _quarterly_period_label(rec),
                 "value": current_val,
                 "yoy_change_percent": _compute_yoy(current_val, prev_val),
                 "cal_year": cal_year,
@@ -282,8 +296,14 @@ class GrowthService:
                     period=p["period"],
                     value=p["value"],
                     yoy_change_percent=p["yoy_change_percent"],
-                    sector_average_yoy=metric_benchmarks.get(p["period"]),
-                    sector_average_qoq=qoq_metric_benchmarks.get(p["period"]),
+                    # Match on the calendar key (_match_period); annual points
+                    # have no _match_period and fall back to period (also calendar).
+                    sector_average_yoy=metric_benchmarks.get(
+                        p.get("_match_period", p["period"])
+                    ),
+                    sector_average_qoq=qoq_metric_benchmarks.get(
+                        p.get("_match_period", p["period"])
+                    ),
                 )
                 for p in points
             ]

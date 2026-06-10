@@ -570,15 +570,20 @@ class HoldersService:
         all_insider_acts = self._build_insider_activities(
             insider_trades, insider_roster
         )
-        # Filter to last 12 months for summary (matches Smart Money window)
-        month_keys_set = set(self._generate_month_keys(12))
-        acts_in_window = [
-            a for a in all_insider_acts
-            if f"{a.date[5:7]}/{a.date[:4]}" in month_keys_set
-        ]
+        # Insider summary window = trailing 365 days (day-level), the SAME cutoff
+        # the insider flow chart and the report's Insider table use — so the
+        # summary card's volumes/buyer counts describe the same span as the bars
+        # beside them (was 12 calendar months, which dropped the partial 13th
+        # month and could disagree with the chart at the boundary).
+        insider_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=365)
+        ).strftime("%Y-%m-%d")
+        acts_in_window = [a for a in all_insider_acts if a.date >= insider_cutoff]
         insider_summary = self._build_insider_activity_summary(acts_in_window)
 
-        # Build congress activities — return all for frontend
+        # Build congress activities — return all for frontend.
+        # Congress summary keeps the calendar-month window (unchanged).
+        month_keys_set = set(self._generate_month_keys(12))
         all_congress_acts = self._build_congress_activities(
             senate_trades or [], house_trades or [], daily_prices
         )
@@ -1080,7 +1085,13 @@ class HoldersService:
         Uses insider-trading/search results which have per-transaction
         shares and price. Falls back to quarterly stats if needed.
         """
-        month_keys = self._generate_month_keys(12)
+        # Trailing-365-day window — the SAME cutoff the report's Insider table
+        # and recent-transactions list use, so the chart bars, the table totals,
+        # and the list can't describe different time spans. 365 days touches up
+        # to 13 calendar months, so generate 13 buckets; the oldest is partial
+        # and a day-level cutoff (below) keeps only its post-cutoff trades.
+        cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+        month_keys = self._generate_month_keys(13)
         monthly_flows: Dict[str, Dict[str, float]] = {
             m: {"buy": 0.0, "sell": 0.0} for m in month_keys
         }
@@ -1110,11 +1121,19 @@ class HoldersService:
             if not date_str:
                 continue
 
+            # Day-level window so the chart's totals equal the report table's
+            # (which filters on the same 365-day cutoff). A trade in the partial
+            # oldest month but dated before the cutoff is excluded.
             try:
-                m_key = f"{date_str[5:7]}/{date_str[:4]}"
-            except (IndexError, ValueError):
+                tx_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc
+                )
+            except (ValueError, TypeError):
+                continue
+            if tx_dt < cutoff:
                 continue
 
+            m_key = f"{date_str[5:7]}/{date_str[:4]}"
             if m_key not in monthly_flows:
                 continue
 
@@ -1127,12 +1146,14 @@ class HoldersService:
                 continue
             shares_millions = shares / 1_000_000
 
-            # Determine buy vs sell from acquisitionOrDisposition field
-            acq_disp = (tx.get("acquisitionOrDisposition") or "").upper()
-            if acq_disp == "A":
+            # Buy vs sell from the transactionType classification (P=Buy /
+            # S=Sell) — the SAME rule the report table and the recent-trade list
+            # use. (Was acquisitionOrDisposition A/D, which could disagree with
+            # the table and silently dropped any row whose A/D field was blank.)
+            if "Buy" in classified:
                 monthly_flows[m_key]["buy"] += shares_millions
                 informative_count += 1
-            elif acq_disp == "D":
+            else:  # "Informative Sell"
                 monthly_flows[m_key]["sell"] += shares_millions
                 informative_count += 1
 
@@ -1144,8 +1165,13 @@ class HoldersService:
         flow_data = [
             SmartMoneyFlowDataPointSchema(
                 month=m,
-                buy_volume=round(monthly_flows[m]["buy"], 2),
-                sell_volume=round(monthly_flows[m]["sell"], 2),
+                # 6 dp keeps single-share fidelity (1 share = 1e-6 M). The old
+                # round(,2) zeroed out any month under ~5,000 shares, so a real
+                # small insider buy arrived as 0.0 and rendered as a 0-height
+                # (invisible) bar. iOS floors tiny non-zero bars to a visible
+                # minimum, but only if the value survives to it.
+                buy_volume=round(monthly_flows[m]["buy"], 6),
+                sell_volume=round(monthly_flows[m]["sell"], 6),
                 has_activity=(monthly_flows[m]["buy"] > 0 or monthly_flows[m]["sell"] > 0),
             )
             for m in month_keys

@@ -802,13 +802,14 @@ RULES:
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
-    """Single-sentence read on insider alignment that:
-    1. Anchors on the dominant 10%+ holder's stake when one exists.
-    2. Applies the BUY/SELL signal asymmetry — Lynch principle: insiders
-       buy for one reason (they expect the price to rise) but sell for
-       many (tax, diversification, estate planning, scheduled 10b5-1).
-       Leads with buys when present; acknowledges sells without
-       dismissing them as "minor".
+    """2 to 3 sentence section insight for "Insider & Management" that
+    synthesizes THREE topics into one read on alignment + capital stewardship:
+    1. Ownership / management: the dominant 10%+ holder's stake (structural
+       alignment).
+    2. Insider activity: recent buy/sell flow, applying the Lynch BUY/SELL
+       signal asymmetry (insiders buy for one reason, sell for many).
+    3. Capital allocation: dividends plus whether the company is returning
+       capital or NET-diluting (stock-comp issuance outpacing buybacks).
     """
     km = shell.get("key_management", {}) or {}
     # `top_holders` is the curated 10%+ list from `_build_key_management`
@@ -857,41 +858,82 @@ def _key_management_insight_prompt(
     else:
         flow_state = "NO transactions — focus on structural alignment, not flow"
 
-    return f"""Write a one-sentence insight on insider/exec ownership alignment.
+    # Topic 3: capital allocation (now part of this section). INTERPRET the
+    # stewardship signal, don't restate the card's figures. Net share-count
+    # change is the tell — a company can buy back stock yet still dilute when
+    # stock-comp issuance outpaces it.
+    ca = insider.get("capital_allocation") or {}
+    if not ca:
+        capital_line = "Data unavailable; cover only ownership and insider flow."
+    else:
+        scc = ca.get("share_count_change")
+        div_yield = ca.get("dividend_yield") or 0
+        dps = ca.get("data_points") or []
+        newest_bb = (dps[-1].get("buyback_amount") if dps else 0) or 0
+        div_desc = (
+            f"pays a dividend (about {div_yield}% yield)"
+            if div_yield > 0 else "pays no dividend"
+        )
+        if scc is not None and scc > 2.0:
+            steward = (
+                "is NET-DILUTING: the share count is rising"
+                + (
+                    " even though it buys back some stock, so stock-comp "
+                    "issuance is outpacing repurchases"
+                    if newest_bb > 0
+                    else " and it is not repurchasing stock"
+                )
+                + ", eroding per-share ownership"
+            )
+        elif scc is not None and scc < -2.0:
+            steward = (
+                "is RETURNING capital: real buybacks are shrinking the share "
+                "base and concentrating per-share ownership"
+            )
+        else:
+            steward = (
+                "keeps the share count roughly flat, neither meaningfully "
+                "diluting nor shrinking it"
+            )
+        capital_line = f"The company {div_desc} and {steward}."
 
+    return f"""Write a 2 to 3 sentence insight for the "Insider & Management" section. Synthesize the THREE topics below into ONE read on how aligned management is with shareholders and how well they steward capital. Weave them; do NOT list them separately.
+
+TOPIC 1 (OWNERSHIP / MANAGEMENT):
 {anchor_line}
-RECENT 90-DAY SENTIMENT: {sentiment}
-FLOW STATE: {flow_state}
+
+TOPIC 2 (INSIDER ACTIVITY, recent flow):
+Sentiment: {sentiment}. {flow_state}
+
+TOPIC 3 (CAPITAL ALLOCATION):
+{capital_line}
 
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-LENGTH: 1 sentence, under 28 words.
+LENGTH: 2 to 3 sentences, under 60 words.
 
-SIGNAL ASYMMETRY (most important rule — Peter Lynch):
-- BUYS carry HIGH signal. Insiders buy for one reason only: they think the stock will rise. Even a small buy alongside a dominant holder is a strong endorsement.
-- SELLS carry LOW-to-medium signal. Sells happen for many reasons (tax, diversification, estate, scheduled 10b5-1). The motive isn't knowable from the filing alone.
-- A dominant holder's stake structurally aligns interests, but does NOT erase that selling occurred.
+SIGNAL ASYMMETRY (most important rule, Peter Lynch):
+- BUYS carry HIGH signal. Insiders buy for one reason only: they expect the stock to rise. Even a small buy alongside a dominant holder is a strong endorsement.
+- SELLS carry LOW to medium signal. They happen for many reasons (tax, diversification, estate, scheduled 10b5-1); name selling but qualify the motive, never treat it as proof of a bearish view.
+- A dominant holder's large stake structurally aligns interests but does NOT erase selling or dilution.
+
+HOW TO WEAVE (synthesis, not a list):
+- Open on ownership alignment plus the insider buy/sell signal.
+- Then capital-allocation stewardship: are they returning capital or net-diluting shareholders? Dilution despite buybacks (stock-comp heavy) is the key tell; say it plainly.
+- Close on the combined implication: aligned and shareholder-friendly, aligned but diluting, misaligned, or too mixed to act on.
 
 RULES:
-- Do NOT restate exact buy/sell counts, share totals, or dollar values from the table above the insight box.
-- Buy present → lead with it as a high-conviction signal; pair with dominant-holder anchor if one exists.
-- Sell-only + dominant holder → name the sell, qualify the motive (tax / diversification / scheduled), then anchor in the stake.
-- Sell-only + no dominant holder → treat as more material; flag whether the pattern warrants tracking.
-- No transactions + dominant holder → structural alignment is locked in regardless of 90-day flow.
-- End with the IMPLICATION: alignment strengthening, intact, weakening, or signal too ambiguous to act on.
+- INTERPRET; do NOT restate exact buy/sell counts, share totals, dollar values, the dividend yield, or the dilution percentage already shown in the cards.
+- If capital-allocation data is unavailable, cover only ownership and insider flow.
 
-FORBIDDEN PHRASES (dismissive or restate the visible table):
+FORBIDDEN PHRASES (dismissive or restating the visible cards):
 - "suggesting management isn't increasing their stake"
 - "indicates a lack of skin in the game"
-- "shows no purchases in the last 90 days"
+- "minor insider selling"
 - "only a $X million sale"
 - "no buys and N sells"
-- "minor insider selling"
-- "doesn't weaken"
-- "doesn't materially affect"
-- "immaterial against"
 """
 
 
@@ -1240,7 +1282,9 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="key_management_insight",
             prompt=_key_management_insight_prompt(persona, evidence, shell),
-            word_cap=34,
+            # 2-3 sentence synthesis (ownership + insider flow + capital
+            # allocation), up from the old single-sentence (34).
+            word_cap=70,
             apply=_setter_for_dict_key(km, "ownership_insight"),
             fallback_value=FALLBACK["key_management_insight"],
         ))

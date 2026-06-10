@@ -464,11 +464,14 @@ def test_capital_allocation_block_none_when_no_signal():
 
 
 def test_assemble_report_forwards_insider_flow_and_transactions():
-    """The Insider section now carries the 12-mo insider flow series + a recent
-    trade list, reused from holders_response (same source as the Holders tab).
-    assemble_report must forward them with the keys iOS decodes (SmartMoneyDataDTO
-    / InsiderActivityDTO), trim the price arrays, cap the activity list at 10, and
-    keep the whole report Pydantic-valid. None-safe when holders are absent."""
+    """The Insider section carries the insider flow series + a recent-trade list,
+    reused from holders_response (same source as the Holders tab). assemble_report
+    forwards them with the keys iOS decodes (SmartMoneyDataDTO / InsiderActivityDTO),
+    trims the price arrays, WINDOWS the trades to the trailing 365 days (the same
+    cutoff as the Insider table + flow chart), keeps ALL in-window informative
+    trades newest-first (no cap, so a counted buy is never hidden), and stays
+    Pydantic-valid. None-safe when holders are absent."""
+    from datetime import datetime, timezone, timedelta
     from app.schemas.holders import (
         HoldersResponse,
         SmartMoneyDataSchema,
@@ -478,8 +481,37 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
         InsiderActivitySchema,
     )
 
+    now = datetime.now(timezone.utc)
+
+    def _d(days_ago: int) -> str:
+        return (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
     coll = TickerReportDataCollector()
     out = _make_collected_data()
+    activities = [
+        # 12 recent in-window sells (newest-first dates)
+        *[
+            InsiderActivitySchema(
+                name=f"Insider {i}", title="Officer", date=_d(10 + i),
+                change_in_millions=-0.01, transaction_type="Informative Sell",
+                price_at_transaction=160.5,
+            )
+            for i in range(12)
+        ],
+        # an older-but-in-window BUY — would have been pushed off a top-10 cap,
+        # which is exactly the bug this windowing+uncapping fixes.
+        InsiderActivitySchema(
+            name="Director Buyer", title="Director", date=_d(200),
+            change_in_millions=0.0005, transaction_type="Informative Buy",
+            price_at_transaction=233.87,
+        ),
+        # a trade OUTSIDE the 365-day window — must be dropped.
+        InsiderActivitySchema(
+            name="Ancient Seller", title="Officer", date=_d(400),
+            change_in_millions=-5.0, transaction_type="Informative Sell",
+            price_at_transaction=90.0,
+        ),
+    ]
     out.holders_response = HoldersResponse(
         symbol="AAPL",
         insider_data=SmartMoneyDataSchema(
@@ -490,16 +522,7 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
             ],
         ),
         recent_activities=RecentActivitiesSchema(
-            insider_activities=InsiderActivitiesDataSchema(
-                activities=[
-                    InsiderActivitySchema(
-                        name=f"Insider {i}", title="Officer", date="2026-01-15",
-                        change_in_millions=-0.01, transaction_type="Informative Sell",
-                        price_at_transaction=160.5,
-                    )
-                    for i in range(15)
-                ]
-            )
+            insider_activities=InsiderActivitiesDataSchema(activities=activities),
         ),
     )
 
@@ -509,18 +532,25 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
     # Flow series forwarded with the iOS-decoded keys; price arrays trimmed.
     flow = insider["insider_flow"]
     assert flow is not None
-    assert flow["flow_data"][0]["month"] == "12/2025"
     assert {"month", "buy_volume", "sell_volume"} <= set(flow["flow_data"][0].keys())
     assert flow["price_data"] == [] and flow["daily_prices"] == []
 
-    # Recent trades forwarded + capped at 10, with the keys iOS decodes.
+    # Recent trades: windowed to 365d (the 400-day trade dropped), uncapped,
+    # newest-first, and the in-window BUY survives (never hidden by a cap).
     recent = insider["recent_transactions"]
     assert recent is not None
-    assert len(recent["activities"]) == 10
+    acts = recent["activities"]
+    assert len(acts) == 13  # 12 sells + 1 buy; the 400-day-old sell excluded
+    cutoff = _d(365)
+    assert all(a["date"] >= cutoff for a in acts)
+    assert any(a["transaction_type"] == "Informative Buy" for a in acts)
+    assert [a["date"] for a in acts] == sorted(
+        (a["date"] for a in acts), reverse=True
+    )
     assert {
         "name", "title", "date", "change_in_millions",
         "transaction_type", "price_at_transaction",
-    } <= set(recent["activities"][0].keys())
+    } <= set(acts[0].keys())
 
     # Whole report still validates against the iOS contract.
     TickerReportResponse.model_validate(report)

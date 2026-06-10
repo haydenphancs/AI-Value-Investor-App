@@ -1450,14 +1450,23 @@ class TickerReportDataCollector:
             recent = hr.recent_activities.insider_activities
             # Informative trades only (open-market P/S) — drops RSU vesting,
             # option exercises, gifts. Matches the aggregate table above, which
-            # is also informative-only.
+            # is also informative-only. Windowed to the SAME trailing 365 days
+            # as the table + flow chart, and kept in FULL (no [:10] cap), newest
+            # first: iOS shows 3 collapsed + "Show N more", so an older-but-
+            # counted buy is always reachable instead of being hidden behind a
+            # wall of more-recent sells.
+            insider_cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=365)
+            ).strftime("%Y-%m-%d")
             informative = [
                 a for a in recent.activities
                 if a.transaction_type in ("Informative Buy", "Informative Sell")
+                and a.date >= insider_cutoff
             ]
+            informative.sort(key=lambda a: a.date, reverse=True)
             if informative:
                 insider_data["recent_transactions"] = recent.model_copy(
-                    update={"activities": informative[:10]}
+                    update={"activities": informative}
                 ).model_dump()
 
         # ── Insider vital: AI provides only key_insight ──────────────

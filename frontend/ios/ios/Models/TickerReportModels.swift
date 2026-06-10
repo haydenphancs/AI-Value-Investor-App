@@ -298,6 +298,8 @@ struct RevenueProjection: Identifiable {
     let eps: Double         // EPS value e.g. 4.50
     let epsLabel: String    // display label e.g. "$4.50"
     let epsYoyPct: Double?  // YoY %, nil for the first visible year when no anchor exists
+    let revenueAnalystCount: Int? // analysts behind a forecast year; nil on actuals
+    let epsAnalystCount: Int?     // analysts behind a forecast year; nil on actuals
     let isForecast: Bool
 
     /// Compact YoY string for the bar/dot annotations. Returns nil when
@@ -1340,15 +1342,24 @@ extension TickerReportData {
             epsGrowth: 18,
             managementGuidance: .raised,
             projections: [
-                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67B",  revenueYoyPct: 18, eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25, isForecast: false),
-                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$89B",  revenueYoyPct: 32, eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,  isForecast: true),
-                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130B", revenueYoyPct: 46, eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35, isForecast: true),
-                RevenueProjection(period: "2029", revenue: 179, revenueLabel: "$179B", revenueYoyPct: 37, eps: 15.14, epsLabel: "$15.14", epsYoyPct: 41, isForecast: true)
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67B",  revenueYoyPct: 18, eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$89B",  revenueYoyPct: 32, eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true),
+                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130B", revenueYoyPct: 46, eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35, revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true),
+                RevenueProjection(period: "2029", revenue: 179, revenueLabel: "$179B", revenueYoyPct: 37, eps: 15.14, epsLabel: "$15.14", epsYoyPct: 41, revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true)
             ],
             guidanceQuote: "CFO expects accelerating cloud demand in Q3",
             guidanceSpeaker: "CFO",
             guidancePeriod: "Q3 2026",
-            insight: "Revenue is projected to compound ~15% to $179B by 2029 as cloud demand outruns the maturing license base, with EPS growing faster (+18% CAGR) on operating leverage. Management raising guidance signals real confidence the backlog converts. The steepening 2028 ramp is the swing factor — execution risk concentrates there."
+            insight: "Revenue is projected to compound ~15% to $179B by 2029 as cloud demand outruns the maturing license base, with EPS growing faster (+18% CAGR) on operating leverage. Management raising guidance signals real confidence the backlog converts. The steepening 2028 ramp is the swing factor — execution risk concentrates there.",
+            annualTimeline: [
+                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true),
+                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true),
+                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true)
+            ],
+            forecastAnalystCount: 31
         ),
         insiderData: ReportInsiderData(
             sentiment: .negative,

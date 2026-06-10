@@ -207,6 +207,9 @@ struct RevenueProjectionDTO: Codable {
     let eps: Double
     let epsLabel: String
     let epsYoyPct: Double?
+    // Analyst coverage behind a forecast year; nil on actuals / older reports.
+    let revenueAnalystCount: Int?
+    let epsAnalystCount: Int?
     let isForecast: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -216,6 +219,8 @@ struct RevenueProjectionDTO: Codable {
         case eps
         case epsLabel = "eps_label"
         case epsYoyPct = "eps_yoy_pct"
+        case revenueAnalystCount = "revenue_analyst_count"
+        case epsAnalystCount = "eps_analyst_count"
         case isForecast = "is_forecast"
     }
 }
@@ -782,6 +787,8 @@ extension TickerReportAPIResponse {
                         eps: p.eps,
                         epsLabel: p.epsLabel,
                         epsYoyPct: epsYoy,
+                        revenueAnalystCount: p.revenueAnalystCount,
+                        epsAnalystCount: p.epsAnalystCount,
                         isForecast: p.isForecast
                     )
                 }
@@ -801,6 +808,8 @@ extension TickerReportAPIResponse {
                     period: $0.period, revenue: $0.revenue,
                     revenueLabel: $0.revenueLabel, revenueYoyPct: $0.revenueYoyPct,
                     eps: $0.eps, epsLabel: $0.epsLabel, epsYoyPct: $0.epsYoyPct,
+                    revenueAnalystCount: $0.revenueAnalystCount,
+                    epsAnalystCount: $0.epsAnalystCount,
                     isForecast: $0.isForecast
                 )
             },

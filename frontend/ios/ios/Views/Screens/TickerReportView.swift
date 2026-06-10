@@ -14,17 +14,6 @@ struct TickerReportView: View {
 
     // Overflow-menu UI state (••• menu actions)
     @State private var showDeleteConfirm: Bool = false
-    // Earnings Timeline sheet (opened from the Future Forecast module).
-    @State private var timelineItem: TimelineSheetItem?
-
-    /// Carries what the Earnings Timeline sheet needs (annual series + ticker)
-    /// so `.sheet(item:)` can present it.
-    private struct TimelineSheetItem: Identifiable {
-        let id = UUID()
-        let ticker: String
-        let timeline: [RevenueProjection]
-        let analystCount: Int?
-    }
 
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
@@ -62,13 +51,6 @@ struct TickerReportView: View {
         .navigationBarHidden(true)
         .sheet(isPresented: $viewModel.showChatResponse) {
             chatResponseSheet
-        }
-        .sheet(item: $timelineItem) { item in
-            ReportEarningsTimelineView(
-                ticker: item.ticker,
-                timeline: item.timeline,
-                analystCount: item.analystCount
-            )
         }
         .alert("Delete this report?", isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -231,13 +213,7 @@ struct TickerReportView: View {
         case .futureForecast:
             ReportFutureForecastSection(
                 forecast: report.revenueForecast,
-                onViewTimeline: report.revenueForecast.annualTimeline.isEmpty ? nil : {
-                    timelineItem = TimelineSheetItem(
-                        ticker: report.symbol,
-                        timeline: report.revenueForecast.annualTimeline,
-                        analystCount: report.revenueForecast.forecastAnalystCount
-                    )
-                }
+                ticker: report.symbol
             )
         case .insiderManagement:
             ReportInsiderSection(

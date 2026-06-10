@@ -9,34 +9,28 @@ import SwiftUI
 
 struct ReportFutureForecastSection: View {
     let forecast: ReportRevenueForecast
-    /// Opens the full yearly continuity sheet. Passed nil (button hidden) when
-    /// the backend didn't supply the annual_timeline series (older reports).
-    var onViewTimeline: (() -> Void)? = nil
+    /// Ticker — the inline Earnings Timeline panel uses it to lazily fetch the
+    /// share-price overlay from the /earnings endpoint.
+    let ticker: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            ReportForecastChart(forecast: forecast)
-
-            // Entry point to the full yearly continuity view (historical actuals
-            // → forecast, with an optional price line). Keeps this module compact
-            // while the whole arc lives one tap away.
-            if let onViewTimeline {
-                Button(action: onViewTimeline) {
-                    HStack(spacing: AppSpacing.xxs) {
-                        Image(systemName: "chart.xyaxis.line")
-                            .font(AppTypography.iconTiny)
-                        Text("View full timeline")
-                            .font(AppTypography.captionEmphasis)
-                        Image(systemName: "chevron.right")
-                            .font(AppTypography.iconTiny).fontWeight(.semibold)
-                    }
-                    .foregroundColor(AppColors.primaryBlue)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.xs)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(PlainButtonStyle())
+            // The continuity Earnings Timeline — reported actuals → analyst
+            // forecast, with a price toggle, horizontal scroll, and a
+            // tap-to-inspect popup — shown INLINE; it replaced the old 4-bar
+            // forecast chart. Falls back to the legacy chart only for older
+            // reports that predate the annual_timeline payload.
+            if !forecast.annualTimeline.isEmpty {
+                ReportEarningsTimelinePanel(
+                    ticker: ticker,
+                    timeline: forecast.annualTimeline,
+                    analystCount: forecast.forecastAnalystCount
+                )
+            } else {
+                ReportForecastChart(forecast: forecast)
             }
+
+            companyGuidance
 
             // Earnings beat/miss track record — last reported quarters vs
             // estimate. Hidden when the backend produced no earnings data.
@@ -75,6 +69,41 @@ struct ReportFutureForecastSection: View {
                         .lineSpacing(3)
                 }
                 .padding(AppSpacing.md)
+            }
+        }
+    }
+
+    // MARK: - Company Guidance
+
+    /// Management guidance badge + verbatim quote. Lifted out of
+    /// ReportForecastChart so it shows under either chart (inline timeline or the
+    /// legacy fallback).
+    private var companyGuidance: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.sm) {
+                Text("Company Guidance")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+
+            ReportSentimentBadge(
+                text: forecast.managementGuidance.rawValue,
+                textColor: forecast.managementGuidance.color,
+                backgroundColor: forecast.managementGuidance.backgroundColor
+            )
+
+            if let quote = forecast.guidanceQuote {
+                HStack(alignment: .top, spacing: AppSpacing.sm) {
+                    Rectangle()
+                        .fill(AppColors.primaryBlue)
+                        .frame(width: 2)
+
+                    Text("\"\(quote)\"")
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary)
+                        .italic()
+                }
+                .padding(.top, AppSpacing.xs)
             }
         }
     }
@@ -132,7 +161,7 @@ struct ReportFutureForecastSection: View {
 }
 
 #Preview {
-    ReportFutureForecastSection(forecast: TickerReportData.sampleOracle.revenueForecast)
+    ReportFutureForecastSection(forecast: TickerReportData.sampleOracle.revenueForecast, ticker: "ORCL")
         .padding()
         .background(AppColors.cardBackground)
         .preferredColorScheme(.dark)

@@ -76,6 +76,11 @@ class RevenueProjectionResponse(BaseModel):
     eps: float
     eps_label: str
     eps_yoy_pct: Optional[float] = None
+    # Analyst coverage behind a FORECAST year (FMP numAnalysts*). None on
+    # historical actual rows and older cached reports. Shown per-column in the
+    # Earnings Timeline tap-to-inspect popup.
+    revenue_analyst_count: Optional[int] = None
+    eps_analyst_count: Optional[int] = None
     is_forecast: bool
 
 

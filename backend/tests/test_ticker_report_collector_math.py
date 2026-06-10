@@ -174,6 +174,11 @@ def test_forecast_annual_timeline_continuity():
     assert [t["revenue"] for t in tl] == [50.0, 53.0, 57.0, 65.0, 88.0, 130.0]
     assert tl[0]["revenue_yoy_pct"] is None     # oldest, no prior
     assert tl[3]["revenue_yoy_pct"] == 14.0     # 2026 vs 2025: (65-57)/57*100
+    # Per-year analyst coverage rides each FORECAST row (FMP numAnalysts*);
+    # actuals carry None, and forecast years without counts stay None.
+    assert tl[2]["revenue_analyst_count"] is None and tl[2]["eps_analyst_count"] is None  # 2025 actual
+    assert tl[3]["revenue_analyst_count"] == 12 and tl[3]["eps_analyst_count"] == 10      # 2026 forecast
+    assert tl[4]["revenue_analyst_count"] is None and tl[4]["eps_analyst_count"] is None  # 2027, no counts
     # The curated module `projections` are independent + unchanged (all forecast).
     assert all(p["is_forecast"] is True for p in result["projections"])
     # Forecast attribution: nearest forecast year's analyst count (max rev/eps).

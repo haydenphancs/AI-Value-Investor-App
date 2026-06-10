@@ -3263,6 +3263,11 @@ def _build_revenue_engine(
     }
 
 
+def _int_or_none(v: Any) -> Optional[int]:
+    """FMP `numAnalysts*` → int, or None when absent / zero / unparseable."""
+    return int(v) if isinstance(v, (int, float)) and v else None
+
+
 def _build_annual_timeline(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
@@ -3282,26 +3287,31 @@ def _build_annual_timeline(
         except ValueError:
             return None
 
-    # (year, revenue, eps, is_forecast)
-    rows: List[Tuple[int, float, float, bool]] = []
+    # (year, revenue, eps, is_forecast, revenue_analyst_count, eps_analyst_count)
+    rows: List[Tuple[int, float, float, bool, Optional[int], Optional[int]]] = []
     for rec in sorted((income or []), key=lambda r: r.get("date", "")):
         y = _year(rec)
         if y is not None:
+            # Reported actuals have no analyst coverage.
             rows.append(
-                (y, _safe_float(rec, "revenue"), _safe_float(rec, "epsDiluted"), False)
+                (y, _safe_float(rec, "revenue"), _safe_float(rec, "epsDiluted"), False, None, None)
             )
-    last_actual = max((y for y, _, _, _ in rows), default=None)
+    last_actual = max((y for y, *_ in rows), default=None)
     for est in sorted((estimates or []), key=lambda r: r.get("date", "")):
         y = _year(est)
         if y is None:
             continue
         if last_actual is not None and y <= last_actual:
             continue  # actuals win for already-reported years
-        rows.append((y, _est_revenue(est), _est_eps(est), True))
+        rows.append((
+            y, _est_revenue(est), _est_eps(est), True,
+            _int_or_none(est.get("numAnalystsRevenue")),
+            _int_or_none(est.get("numAnalystsEps")),
+        ))
     if not rows:
         return []
 
-    max_rev = max((r for _, r, _, _ in rows), default=0.0)
+    max_rev = max((r for _, r, *_ in rows), default=0.0)
     divisor = 1e12 if max_rev >= 1e12 else 1e9 if max_rev >= 1e9 else 1e6
 
     def _yoy(curr: float, prior: Optional[float]) -> Optional[float]:
@@ -3310,7 +3320,7 @@ def _build_annual_timeline(
         return round((curr - prior) / prior * 100, 1)
 
     series: List[Dict[str, Any]] = []
-    for i, (year, rev, eps, is_fc) in enumerate(rows):
+    for i, (year, rev, eps, is_fc, rev_n, eps_n) in enumerate(rows):
         prior_rev = rows[i - 1][1] if i > 0 else None
         prior_eps = rows[i - 1][2] if i > 0 else None
         series.append({
@@ -3321,6 +3331,8 @@ def _build_annual_timeline(
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps else "$0",
             "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
+            "revenue_analyst_count": rev_n,
+            "eps_analyst_count": eps_n,
             "is_forecast": is_fc,
         })
     return series
@@ -3418,6 +3430,8 @@ def _build_revenue_forecast_partial(
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps else "$0",
             "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
+            "revenue_analyst_count": _int_or_none(est.get("numAnalystsRevenue")),
+            "eps_analyst_count": _int_or_none(est.get("numAnalystsEps")),
             # FMP `analyst-estimates` is forward-looking only — every entry
             # is a future-period analyst estimate, never an actual.
             "is_forecast": True,

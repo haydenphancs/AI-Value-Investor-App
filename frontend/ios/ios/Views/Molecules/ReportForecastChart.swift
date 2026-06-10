@@ -2,7 +2,11 @@
 //  ReportForecastChart.swift
 //  ios
 //
-//  Molecule: Revenue forecast bar chart with EPS line overlay and management guidance
+//  Molecule: Revenue forecast bar chart with EPS line overlay. Now a FALLBACK —
+//  the Future Forecast module shows the inline ReportEarningsTimelinePanel when
+//  the report carries annual_timeline; this renders only for older reports that
+//  predate it. Company Guidance was lifted up to ReportFutureForecastSection so
+//  it shows in both paths.
 //
 
 import SwiftUI
@@ -114,35 +118,6 @@ struct ReportForecastChart: View {
                 }
             }
             .frame(maxWidth: .infinity)
-
-            // Management Guidance
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                HStack(spacing: AppSpacing.sm) {
-                    Text("Company Guidance")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                ReportSentimentBadge(
-                    text: forecast.managementGuidance.rawValue,
-                    textColor: forecast.managementGuidance.color,
-                    backgroundColor: forecast.managementGuidance.backgroundColor
-                )
-
-                if let quote = forecast.guidanceQuote {
-                    HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        Rectangle()
-                            .fill(AppColors.primaryBlue)
-                            .frame(width: 2)
-
-                        Text("\"\(quote)\"")
-                            .font(AppTypography.label)
-                            .foregroundColor(AppColors.textSecondary)
-                            .italic()
-                    }
-                    .padding(.top, AppSpacing.xs)
-                }
-            }
         }
     }
 }

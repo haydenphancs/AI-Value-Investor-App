@@ -155,7 +155,8 @@ def test_forecast_annual_timeline_continuity():
     (is_forecast=True) — including the 2026 the curated `projections` window
     skips. Sorted oldest→newest, scaled by one shared divisor."""
     estimates = [  # forward incl. 2026 (which the curated projections may skip)
-        {"date": "2026-12-31", "estimatedRevenueAvg": 65_000_000_000, "estimatedEpsAvg": 5.0},
+        {"date": "2026-12-31", "estimatedRevenueAvg": 65_000_000_000, "estimatedEpsAvg": 5.0,
+         "numAnalystsRevenue": 12, "numAnalystsEps": 10},
         {"date": "2027-12-31", "estimatedRevenueAvg": 88_000_000_000, "estimatedEpsAvg": 6.0},
         {"date": "2028-12-31", "estimatedRevenueAvg": 130_000_000_000, "estimatedEpsAvg": 8.0},
     ]
@@ -175,6 +176,8 @@ def test_forecast_annual_timeline_continuity():
     assert tl[3]["revenue_yoy_pct"] == 14.0     # 2026 vs 2025: (65-57)/57*100
     # The curated module `projections` are independent + unchanged (all forecast).
     assert all(p["is_forecast"] is True for p in result["projections"])
+    # Forecast attribution: nearest forecast year's analyst count (max rev/eps).
+    assert result["forecast_analyst_count"] == 12
 
 
 def test_forecast_annual_timeline_edge_cases():

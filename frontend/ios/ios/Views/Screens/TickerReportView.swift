@@ -23,6 +23,7 @@ struct TickerReportView: View {
         let id = UUID()
         let ticker: String
         let timeline: [RevenueProjection]
+        let analystCount: Int?
     }
 
     init(ticker: String) {
@@ -63,7 +64,11 @@ struct TickerReportView: View {
             chatResponseSheet
         }
         .sheet(item: $timelineItem) { item in
-            ReportEarningsTimelineView(ticker: item.ticker, timeline: item.timeline)
+            ReportEarningsTimelineView(
+                ticker: item.ticker,
+                timeline: item.timeline,
+                analystCount: item.analystCount
+            )
         }
         .alert("Delete this report?", isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -229,7 +234,8 @@ struct TickerReportView: View {
                 onViewTimeline: report.revenueForecast.annualTimeline.isEmpty ? nil : {
                     timelineItem = TimelineSheetItem(
                         ticker: report.symbol,
-                        timeline: report.revenueForecast.annualTimeline
+                        timeline: report.revenueForecast.annualTimeline,
+                        analystCount: report.revenueForecast.forecastAnalystCount
                     )
                 }
             )

@@ -244,6 +244,7 @@ struct RevenueForecastDTO: Codable {
     let earningsTrackRecord: [EarningsTrackRecordPointDTO]?
     let beatSummary: String?
     let annualTimeline: [RevenueProjectionDTO]?
+    let forecastAnalystCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case cagr
@@ -257,6 +258,7 @@ struct RevenueForecastDTO: Codable {
         case earningsTrackRecord = "earnings_track_record"
         case beatSummary = "beat_summary"
         case annualTimeline = "annual_timeline"
+        case forecastAnalystCount = "forecast_analyst_count"
     }
 }
 
@@ -801,7 +803,8 @@ extension TickerReportAPIResponse {
                     eps: $0.eps, epsLabel: $0.epsLabel, epsYoyPct: $0.epsYoyPct,
                     isForecast: $0.isForecast
                 )
-            }
+            },
+            forecastAnalystCount: revenueForecast.forecastAnalystCount
         )
 
         // Insider Data

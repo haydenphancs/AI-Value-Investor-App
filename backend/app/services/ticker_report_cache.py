@@ -106,7 +106,12 @@ TABLE_NAME = "ticker_report_cache"
 # 2026-06-07: bumped to today so reports cached after the moat change but
 #     before the Hidden Market Signals 12-month short-interest `history`
 #     series re-assemble and surface the new trend chart.
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 7, 0, 0, 0, tzinfo=timezone.utc)
+# 2026-06-10: bumped again so cached reports re-assemble with the recent
+#     additions — the 12-month insider window + 3-topic Insider & Management
+#     Insight, the Capital Allocation net-share-count verdict, fiscal-year
+#     quarter labels, and the Future Forecast `annual_timeline` (Earnings
+#     Timeline view).
+CACHE_SCHEMA_FLOOR = datetime(2026, 6, 10, 0, 0, 0, tzinfo=timezone.utc)
 
 
 def _short_interest_payload_stale(report: Any) -> bool:

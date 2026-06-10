@@ -15,9 +15,10 @@ import SwiftUI
 struct ReportEarningsTimelineView: View {
     let ticker: String
     let timeline: [RevenueProjection]   // gapless actuals -> forecast
+    let analystCount: Int?              // analysts behind the nearest forecast year
 
     @Environment(\.dismiss) private var dismiss
-    @State private var showPrice = false
+    @State private var showPrice = true
     @State private var dailyPrices: [EarningsDailyPricePoint] = []
     @State private var didLoad = false
 
@@ -43,7 +44,14 @@ struct ReportEarningsTimelineView: View {
 
                     legend
 
-                    Text("Solid bars are reported actuals; lighter bars right of the dashed line are the analyst forecast.")
+                    if let n = analystCount {
+                        Text("Forecast: consensus of \(n) analyst\(n == 1 ? "" : "s").")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+
+                    Text("Solid bars are reported actuals; lighter bars from the dashed marker on are the analyst forecast. Scroll to see all years.")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                         .fixedSize(horizontal: false, vertical: true)

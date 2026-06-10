@@ -51,17 +51,20 @@ struct ReportInsiderSection: View {
                     label: "Dividend Yield",
                     value: ca.dividendYield > 0 ? ca.dividendYieldText : "None"
                 ),
+                // Buybacks = gross $ actually spent on repurchases this quarter
+                // (green), "$0" white when none — NOT the dilution verdict.
                 ReportMetricItem(
                     label: "Buybacks",
-                    value: ca.buybackStatus,
-                    valueColor: sentimentColor(ca.buybackSentiment)
+                    value: ca.newestBuybackText,
+                    valueColor: ca.newestBuybackColor
                 ),
+                // Share Count = the % first, with the net verdict in parens only
+                // when meaningful (beyond ±2%), e.g. "+3.7% (Diluting)". Color
+                // follows the verdict (red diluting / green reducing / neutral).
                 ReportMetricItem(
                     label: "Share Count",
-                    value: ca.shareCountChangeText,
-                    valueColor: ca.shareCountChange < 0 ? AppColors.bullish
-                        : ca.shareCountChange > 0 ? AppColors.bearish
-                        : AppColors.textSecondary
+                    value: ca.shareCountVerdictText,
+                    valueColor: ca.shareCountVerdictColor
                 ),
             ])
 
@@ -78,14 +81,6 @@ struct ReportInsiderSection: View {
                         .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
-        }
-    }
-
-    private func sentimentColor(_ s: String) -> Color {
-        switch s {
-        case "positive": return AppColors.bullish
-        case "negative": return AppColors.bearish
-        default: return AppColors.neutral
         }
     }
 }

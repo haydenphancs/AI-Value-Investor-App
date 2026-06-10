@@ -88,10 +88,20 @@ def _extract_year(record: Dict[str, Any]) -> str:
     return ""
 
 
-def _quarterly_period_label(record: Dict[str, Any]) -> str:
+def _quarterly_period_label(
+    record: Dict[str, Any], use_fiscal_year: bool = False
+) -> str:
     """Build period label like \"Q2 '24\" (with space before apostrophe)."""
     period = record.get("period", "")  # "Q1", "Q2", etc.
-    year = _extract_year(record)
+    # `period` is FMP's FISCAL quarter. For off-calendar fiscal years (e.g.
+    # Oracle, FY ends May 31) pairing it with the CALENDAR year is non-monotonic:
+    # fiscal Q1 (Aug) shares a calendar year with the prior fiscal Q4 (May), so
+    # "Q1 '25" sorts after "Q4 '25". use_fiscal_year pairs it with FMP's
+    # fiscalYear ("Q1 '26") — how the company reports it — keeping labels in order.
+    if use_fiscal_year and record.get("fiscalYear"):
+        year = str(record.get("fiscalYear"))
+    else:
+        year = _extract_year(record)
     if len(year) >= 4:
         return f"{period} '{year[-2:]}"
     return f"{period} '{year}"
@@ -337,7 +347,9 @@ class SignalOfConfidenceService:
             if not date:
                 continue
 
-            label = _quarterly_period_label(rec)
+            # Fiscal-year labels so off-calendar-FY companies (e.g. Oracle) read
+            # monotonically: fiscal Q1 (Aug 2025) -> "Q1 '26", not "Q1 '25".
+            label = _quarterly_period_label(rec, use_fiscal_year=True)
             if not label or not label.startswith("Q"):
                 continue
 

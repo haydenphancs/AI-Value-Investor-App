@@ -392,6 +392,40 @@ struct ReportCapitalAllocation {
 
     /// ≥2 quarters available → the mini-chart can render.
     var hasTrend: Bool { dataPoints.count >= 2 }
+
+    /// Newest quarter's gross buyback spend (data points are oldest→newest, so
+    /// `.last` is the most recent). Green when the company bought back stock;
+    /// "$0" white when it didn't — a plain spend figure, distinct from the
+    /// net-dilution verdict (which lives on Share Count).
+    var newestBuybackText: String {
+        guard let amt = dataPoints.last?.buybackAmount, amt > 0 else { return "$0" }
+        if amt >= 1000 { return String(format: "$%.1fB", amt / 1000) }  // amt is $ millions
+        if amt >= 1 { return String(format: "$%.0fM", amt) }
+        return String(format: "$%.1fM", amt)
+    }
+    var newestBuybackColor: Color {
+        (dataPoints.last?.buybackAmount ?? 0) > 0
+            ? AppColors.confidenceBuybacks   // green, matches the buyback bars
+            : AppColors.textPrimary          // white "$0", like the dividend yield
+    }
+
+    /// Net share-count read: the % first, with a verdict in parens ONLY when the
+    /// change is meaningful — beyond ±2%, the same threshold the backend uses to
+    /// flag dilution. e.g. "+3.7% (Diluting)", "-4.1% (Reducing)", or just
+    /// "+1.2%" inside the ±2% noise band. NET read: a company can spend on
+    /// buybacks yet still read "Diluting" if stock-comp issuance outpaced them.
+    private var _shareCountDiluting: Bool { shareCountChange > 2.0 }
+    private var _shareCountReducing: Bool { shareCountChange < -2.0 }
+    var shareCountVerdictText: String {
+        if _shareCountDiluting { return "\(shareCountChangeText) (Diluting)" }
+        if _shareCountReducing { return "\(shareCountChangeText) (Reducing)" }
+        return shareCountChangeText
+    }
+    var shareCountVerdictColor: Color {
+        if _shareCountDiluting { return AppColors.bearish }
+        if _shareCountReducing { return AppColors.bullish }
+        return AppColors.textSecondary
+    }
 }
 
 struct ReportInsiderData {

@@ -96,10 +96,20 @@ def _annual_period_label(record: Dict[str, Any]) -> str:
     return _extract_year(record)
 
 
-def _quarterly_period_label(record: Dict[str, Any]) -> str:
+def _quarterly_period_label(
+    record: Dict[str, Any], use_fiscal_year: bool = False
+) -> str:
     """Quarterly period label like \"Q1'24\"."""
     period = record.get("period", "")  # "Q1", "Q2", etc.
-    year = _extract_year(record)
+    # Off-calendar fiscal years (e.g. Oracle, FY ends May 31) get non-monotonic
+    # quarter LABELS when the fiscal quarter is paired with the calendar year
+    # (fiscal Q1/Aug shares a calendar year with the prior fiscal Q4/May).
+    # use_fiscal_year pairs it with FMP's fiscalYear ("Q1'26") for DISPLAY only;
+    # the sector-benchmark join stays on the calendar label (see `_match_period`).
+    if use_fiscal_year and record.get("fiscalYear"):
+        year = str(record.get("fiscalYear"))
+    else:
+        year = _extract_year(record)
     if len(year) >= 4:
         return f"{period}'{year[-2:]}"
     return f"{period}'{year}"
@@ -142,7 +152,12 @@ def _build_margin_points(
         if revenue is None or revenue == 0:
             continue
 
-        label = _quarterly_period_label(rec) if is_quarterly else _annual_period_label(rec)
+        if is_quarterly:
+            label = _quarterly_period_label(rec, use_fiscal_year=True)  # fiscal display
+            match_period = _quarterly_period_label(rec)                 # calendar join key
+        else:
+            label = _annual_period_label(rec)
+            match_period = label
         if not label:
             continue
 
@@ -155,7 +170,8 @@ def _build_margin_points(
         free_cash_flow = _safe_float(cf_rec, "freeCashFlow")
 
         results.append({
-            "period": label,
+            "period": label,                 # fiscal label (display)
+            "_match_period": match_period,    # calendar label (sector-benchmark join)
             "gross_margin": _compute_margin(gross_profit, revenue),
             "operating_margin": _compute_margin(operating_income, revenue),
             "fcf_margin": _compute_margin(free_cash_flow, revenue),
@@ -384,7 +400,11 @@ class ProfitPowerService:
             net_margin_benchmarks = benchmarks.get("net_margin", {})
             schemas = []
             for p in points:
-                raw_benchmark = net_margin_benchmarks.get(p["period"])
+                # Match on the calendar key (_match_period); annual points have
+                # no _match_period and fall back to period (also calendar).
+                raw_benchmark = net_margin_benchmarks.get(
+                    p.get("_match_period", p["period"])
+                )
                 sector_avg = round(raw_benchmark * 100, 2) if raw_benchmark is not None else None
                 schemas.append(ProfitPowerDataPointSchema(
                     period=p["period"],

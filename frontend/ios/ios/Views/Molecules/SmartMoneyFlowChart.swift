@@ -214,7 +214,7 @@ struct SmartMoneyFlowChart: View {
             ForEach(flowData) { point in
                 BarMark(
                     x: .value("Month", point.month),
-                    y: .value("Buy", point.buyVolume),
+                    y: .value("Buy", displayVolume(point.buyVolume)),
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.buyVolume)
@@ -225,7 +225,7 @@ struct SmartMoneyFlowChart: View {
             ForEach(flowData) { point in
                 BarMark(
                     x: .value("Month", point.month),
-                    y: .value("Sell", -point.sellVolume),
+                    y: .value("Sell", -displayVolume(point.sellVolume)),
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.sellVolume)
@@ -310,6 +310,22 @@ struct SmartMoneyFlowChart: View {
         return max(maxBuy, maxSell) * 1.15
     }
 
+    // A month with real but tiny volume — e.g. a single 480-share insider buy
+    // among millions of shares of selling — would round to a 0-height bar and
+    // vanish. Floor every NON-ZERO bar to this fraction of the axis so "activity
+    // happened" is always visible. Magnitudes below the floor all render at the
+    // SAME minimal height (a presence marker, not a true-to-scale bar) — an
+    // intentional trade-off for the huge dynamic range when one month dwarfs the
+    // rest. Truly-empty months stay at 0 and get the gray no-activity dash.
+    private static let minBarHeightRatio: Double = 0.04
+
+    /// Plotted bar height: the true value, but never a sliver thinner than the
+    /// visible floor when non-zero. Zero stays zero.
+    private func displayVolume(_ value: Double) -> Double {
+        guard value > 0 else { return 0 }
+        return max(value, maxVolume * Self.minBarHeightRatio)
+    }
+
     // MARK: - Formatting
 
     private func formatPriceValue(_ value: Double) -> String {
@@ -326,9 +342,12 @@ struct SmartMoneyFlowChart: View {
         } else if absValue >= 1 {
             return String(format: "%.0fM", value)
         } else if absValue >= 0.01 {
-            return String(format: "$%.0fK", value * 1000)
+            // Share count in thousands — NOT dollars (these bars are Form-4
+            // share volumes). The old "$%.0fK" mislabeled e.g. 100K shares as
+            // "$100K".
+            return String(format: "%.0fK", value * 1000)
         } else if absValue > 0 {
-            return String(format: "$%.1fK", value * 1000)
+            return String(format: "%.1fK", value * 1000)
         }
         return "0"
     }

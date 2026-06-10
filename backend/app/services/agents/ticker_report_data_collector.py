@@ -1366,7 +1366,7 @@ class TickerReportDataCollector:
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
-            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr")
+            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -3263,10 +3263,74 @@ def _build_revenue_engine(
     }
 
 
+def _build_annual_timeline(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """One continuous yearly revenue+EPS series for the Earnings Timeline view:
+    historical ACTUALS (annual income, is_forecast=False) followed GAPLESSLY by
+    ALL forward analyst estimates after the last reported year (is_forecast=True).
+
+    Self-contained: its own divisor + YoY, independent of the curated forecast
+    window in `_build_revenue_forecast_partial`. Reuses inputs the collector
+    already fetched (no new FMP calls). Returns [] when there is no data.
+    """
+    def _year(rec: Dict[str, Any]) -> Optional[int]:
+        ds = rec.get("date") or ""
+        try:
+            return int(ds[:4]) if len(ds) >= 4 else None
+        except ValueError:
+            return None
+
+    # (year, revenue, eps, is_forecast)
+    rows: List[Tuple[int, float, float, bool]] = []
+    for rec in sorted((income or []), key=lambda r: r.get("date", "")):
+        y = _year(rec)
+        if y is not None:
+            rows.append(
+                (y, _safe_float(rec, "revenue"), _safe_float(rec, "epsDiluted"), False)
+            )
+    last_actual = max((y for y, _, _, _ in rows), default=None)
+    for est in sorted((estimates or []), key=lambda r: r.get("date", "")):
+        y = _year(est)
+        if y is None:
+            continue
+        if last_actual is not None and y <= last_actual:
+            continue  # actuals win for already-reported years
+        rows.append((y, _est_revenue(est), _est_eps(est), True))
+    if not rows:
+        return []
+
+    max_rev = max((r for _, r, _, _ in rows), default=0.0)
+    divisor = 1e12 if max_rev >= 1e12 else 1e9 if max_rev >= 1e9 else 1e6
+
+    def _yoy(curr: float, prior: Optional[float]) -> Optional[float]:
+        if prior is None or prior <= 0:
+            return None
+        return round((curr - prior) / prior * 100, 1)
+
+    series: List[Dict[str, Any]] = []
+    for i, (year, rev, eps, is_fc) in enumerate(rows):
+        prior_rev = rows[i - 1][1] if i > 0 else None
+        prior_eps = rows[i - 1][2] if i > 0 else None
+        series.append({
+            "period": str(year),
+            "revenue": round(rev / divisor, 2) if rev else 0.0,
+            "revenue_label": _format_revenue(rev),
+            "revenue_yoy_pct": _yoy(rev, prior_rev) if rev else None,
+            "eps": round(eps, 2) if eps else 0.0,
+            "eps_label": f"${eps:.2f}" if eps else "$0",
+            "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
+            "is_forecast": is_fc,
+        })
+    return series
+
+
 def _build_revenue_forecast_partial(
     estimates: List[Dict[str, Any]],
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
+    income: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     # Pick 4 chart-visible projections (current FY + 3 forward) plus the
     # off-screen anchor (FY before "current") for the leftmost bar's YoY
@@ -3319,11 +3383,17 @@ def _build_revenue_forecast_partial(
             # is a future-period analyst estimate, never an actual.
             "is_forecast": True,
         })
+
     return {
         "cagr": revenue_cagr if revenue_cagr is not None else 0.0,
         "eps_growth": eps_cagr if eps_cagr is not None else 0.0,
         "management_guidance": "maintained",  # AI overrides via Stage A
         "projections": projections,
+        # Full GAPLESS yearly series (historical actuals + ALL forward estimates
+        # after the last reported year) for the "Earnings Timeline" sheet —
+        # independent of the curated `projections` window above (own divisor +
+        # YoY). The module chart keeps using `projections`; the sheet uses this.
+        "annual_timeline": _build_annual_timeline(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
         "guidance_period": None,        # AI fills via Stage A (PR 6)

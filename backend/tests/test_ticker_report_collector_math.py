@@ -149,6 +149,46 @@ def test_forecast_sorted_oldest_to_newest():
     assert periods == ["2024", "2025", "2026"]
 
 
+def test_forecast_annual_timeline_continuity():
+    """annual_timeline is ONE GAPLESS yearly series: historical actuals
+    (is_forecast=False) then ALL forward estimates after the last reported year
+    (is_forecast=True) — including the 2026 the curated `projections` window
+    skips. Sorted oldest→newest, scaled by one shared divisor."""
+    estimates = [  # forward incl. 2026 (which the curated projections may skip)
+        {"date": "2026-12-31", "estimatedRevenueAvg": 65_000_000_000, "estimatedEpsAvg": 5.0},
+        {"date": "2027-12-31", "estimatedRevenueAvg": 88_000_000_000, "estimatedEpsAvg": 6.0},
+        {"date": "2028-12-31", "estimatedRevenueAvg": 130_000_000_000, "estimatedEpsAvg": 8.0},
+    ]
+    income = [  # newest-first like FMP; reported through 2025
+        {"date": "2025-12-31", "revenue": 57_000_000_000, "epsDiluted": 4.3},
+        {"date": "2024-12-31", "revenue": 53_000_000_000, "epsDiluted": 3.7},
+        {"date": "2023-12-31", "revenue": 50_000_000_000, "epsDiluted": 3.0},
+    ]
+    result = _build_revenue_forecast_partial(estimates, 10.0, 9.5, income)
+    tl = result["annual_timeline"]
+    # Gapless 2023..2028 — actuals then forecast, NO missing 2026.
+    assert [t["period"] for t in tl] == ["2023", "2024", "2025", "2026", "2027", "2028"]
+    assert [t["is_forecast"] for t in tl] == [False, False, False, True, True, True]
+    # One shared 1e9 divisor across actuals + forecast → comparable billions.
+    assert [t["revenue"] for t in tl] == [50.0, 53.0, 57.0, 65.0, 88.0, 130.0]
+    assert tl[0]["revenue_yoy_pct"] is None     # oldest, no prior
+    assert tl[3]["revenue_yoy_pct"] == 14.0     # 2026 vs 2025: (65-57)/57*100
+    # The curated module `projections` are independent + unchanged (all forecast).
+    assert all(p["is_forecast"] is True for p in result["projections"])
+
+
+def test_forecast_annual_timeline_edge_cases():
+    """Estimates-only → all-forecast timeline; nothing → empty."""
+    estimates = [
+        {"date": "2026-12-31", "estimatedRevenueAvg": 65_000_000_000, "estimatedEpsAvg": 5.0},
+        {"date": "2027-12-31", "estimatedRevenueAvg": 88_000_000_000, "estimatedEpsAvg": 6.0},
+    ]
+    res1 = _build_revenue_forecast_partial(estimates, 10.0, 9.5)  # no income
+    assert [t["is_forecast"] for t in res1["annual_timeline"]] == [True, True]
+    res2 = _build_revenue_forecast_partial([], 10.0, 9.5)  # nothing
+    assert res2["annual_timeline"] == []
+
+
 # ── Valuation vital with snapshot fallback ────────────────────────────
 
 

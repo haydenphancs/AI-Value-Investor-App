@@ -265,6 +265,8 @@ struct ReportRevenueForecast {
     // ONE gapless yearly series (historical actuals → all forward estimates)
     // for the Earnings Timeline sheet. Empty on older cached reports.
     var annualTimeline: [RevenueProjection] = []
+    // Analysts behind the nearest forecast year — forecast attribution.
+    var forecastAnalystCount: Int? = nil
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"

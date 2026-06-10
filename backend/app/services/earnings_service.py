@@ -304,14 +304,19 @@ class EarningsService:
 
     async def _build_earnings(self, ticker: str) -> EarningsResponse:
         today = date.today()
-        four_years_ago = (today - timedelta(days=4 * 365)).strftime("%Y-%m-%d")
+        # 6 years (was 4) so the Earnings Timeline's oldest actual year (annual
+        # income reaches back ~5 yrs) gets price coverage. The daily series is
+        # still clipped to the oldest income date below, and the TickerDetail
+        # earnings chart clips to its displayed quarters, so the extra history
+        # is unused there.
+        six_years_ago = (today - timedelta(days=6 * 365)).strftime("%Y-%m-%d")
         today_str = today.strftime("%Y-%m-%d")
 
         # Phase 1: Fetch income statements, analyst estimates, and prices in parallel
         income_raw, estimates_raw, prices_raw = await asyncio.gather(
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
             self.fmp.get_analyst_estimates(ticker, period="quarter", limit=20),
-            self.fmp.get_historical_prices(ticker, from_date=four_years_ago, to_date=today_str),
+            self.fmp.get_historical_prices(ticker, from_date=six_years_ago, to_date=today_str),
             return_exceptions=True,
         )
 

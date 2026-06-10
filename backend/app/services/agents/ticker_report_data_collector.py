@@ -3326,6 +3326,45 @@ def _build_annual_timeline(
     return series
 
 
+def _forecast_analyst_count(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+) -> Optional[int]:
+    """How many analysts back the NEAREST forecast year — the max of FMP's
+    `numAnalystsRevenue` / `numAnalystsEps` for the first year past the last
+    reported one. Shown as forecast attribution ("consensus of N analysts").
+    None when unavailable."""
+    def _year(rec: Dict[str, Any]) -> Optional[int]:
+        ds = rec.get("date") or ""
+        try:
+            return int(ds[:4]) if len(ds) >= 4 else None
+        except ValueError:
+            return None
+
+    last_actual = max(
+        (y for y in (_year(r) for r in (income or [])) if y is not None),
+        default=None,
+    )
+    forecast = sorted(
+        (
+            (y, e)
+            for e in (estimates or [])
+            if (y := _year(e)) is not None
+            and (last_actual is None or y > last_actual)
+        ),
+        key=lambda t: t[0],
+    )
+    if not forecast:
+        return None
+    nearest = forecast[0][1]
+    nums = [
+        int(c)
+        for c in (nearest.get("numAnalystsRevenue"), nearest.get("numAnalystsEps"))
+        if isinstance(c, (int, float)) and c
+    ]
+    return max(nums) if nums else None
+
+
 def _build_revenue_forecast_partial(
     estimates: List[Dict[str, Any]],
     revenue_cagr: Optional[float],
@@ -3394,6 +3433,7 @@ def _build_revenue_forecast_partial(
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
         "annual_timeline": _build_annual_timeline(income, estimates),
+        "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
         "guidance_period": None,        # AI fills via Stage A (PR 6)

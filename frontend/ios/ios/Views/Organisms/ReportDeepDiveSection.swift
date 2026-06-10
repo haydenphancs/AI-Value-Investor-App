@@ -44,7 +44,25 @@ struct ReportDeepDiveSection<Content: View>: View {
             if isExpanded {
                 content()
                     .padding(.horizontal, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.md)
+
+                // Second collapse affordance: a "^" at the bottom-right that
+                // closes the card, mirroring the header chevron. These modules
+                // can be long, so this lets the user dismiss one without
+                // scrolling back up to the header.
+                Button(action: { isExpanded = false }) {
+                    HStack(spacing: 0) {
+                        Spacer()
+                        Image(systemName: "chevron.up")
+                            .font(AppTypography.iconXS)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.lg)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
             }
 
             Divider()

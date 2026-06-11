@@ -240,8 +240,13 @@ struct ReportOverallAssessment {
 struct EarningsTrackRecordPoint: Identifiable {
     let id = UUID()
     let period: String            // "Q1 '24"
-    let surprisePercent: Double   // signed beat (+) / miss (−), %
+    let surprisePercent: Double   // EPS surprise: signed beat (+) / miss (−), %
     let beat: Bool
+
+    /// Signed EPS surprise for the cell, e.g. "+5.2%" / "-3.0%".
+    var surpriseText: String {
+        String(format: "%+.1f%%", surprisePercent)
+    }
 }
 
 struct ReportRevenueForecast {
@@ -1351,6 +1356,19 @@ extension TickerReportData {
             guidanceSpeaker: "CFO",
             guidancePeriod: "Q3 2026",
             insight: "Revenue is projected to compound ~15% to $179B by 2029 as cloud demand outruns the maturing license base, with EPS growing faster (+18% CAGR) on operating leverage. Management raising guidance signals real confidence the backlog converts. The steepening 2028 ramp is the swing factor — execution risk concentrates there.",
+            earningsTrackRecord: [
+                EarningsTrackRecordPoint(period: "Q2 '24", surprisePercent: -1.8, beat: false),
+                EarningsTrackRecordPoint(period: "Q3 '24", surprisePercent: 2.4, beat: true),
+                EarningsTrackRecordPoint(period: "Q4 '24", surprisePercent: 5.1, beat: true),
+                EarningsTrackRecordPoint(period: "Q1 '25", surprisePercent: -3.2, beat: false),
+                EarningsTrackRecordPoint(period: "Q2 '25", surprisePercent: 1.2, beat: true),
+                EarningsTrackRecordPoint(period: "Q3 '25", surprisePercent: 4.6, beat: true),
+                EarningsTrackRecordPoint(period: "Q4 '25", surprisePercent: 3.0, beat: true),
+                EarningsTrackRecordPoint(period: "Q1 '26", surprisePercent: -0.7, beat: false),
+                EarningsTrackRecordPoint(period: "Q2 '26", surprisePercent: 6.3, beat: true),
+                EarningsTrackRecordPoint(period: "Q3 '26", surprisePercent: 2.9, beat: true)
+            ],
+            beatSummary: "Beat 7 of 10",
             annualTimeline: [
                 RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
                 RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),

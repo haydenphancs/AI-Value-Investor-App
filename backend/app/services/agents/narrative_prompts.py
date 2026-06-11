@@ -742,6 +742,29 @@ def _revenue_forecast_insight_prompt(
 
     cagr_str = f"{cagr:+.0f}%" if isinstance(cagr, (int, float)) else "n/a"
     eps_str = f"{eps_growth:+.0f}%" if isinstance(eps_growth, (int, float)) else "n/a"
+
+    # EPS beat/miss history (the EPS Track Record) → lets the read weigh the
+    # forecast's CREDIBILITY, not just its shape: steady beats back an
+    # accelerating curve, chronic misses undercut it.
+    track = rf.get("earnings_track_record") or []
+    if track:
+        avg_surprise = sum(q.get("surprise_percent", 0.0) for q in track) / len(track)
+        track_str = (
+            f"{rf.get('beat_summary') or 'mixed'}, "
+            f"avg EPS surprise {avg_surprise:+.1f}% over the last {len(track)} quarters"
+        )
+    else:
+        track_str = "no reported beat/miss history"
+
+    # Recent ACTUAL revenue YoY (the timeline's historical years) so the read can
+    # frame the forecast as a step-up or a fade vs the real, recent trend.
+    actuals = [t for t in (rf.get("annual_timeline") or []) if not t.get("is_forecast")]
+    hist_yoys = [t.get("revenue_yoy_pct") for t in actuals if t.get("revenue_yoy_pct") is not None]
+    hist_str = (
+        "recent actual revenue YoY " + ", ".join(f"{y:+.0f}%" for y in hist_yoys[-3:])
+        if hist_yoys else "recent actual history unavailable"
+    )
+
     quote_line = (
         f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"' if guidance_quote else ""
     )
@@ -757,19 +780,21 @@ def _revenue_forecast_insight_prompt(
 
 PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
 MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)
+EPS BEAT/MISS TRACK RECORD: {track_str}
+HISTORICAL TREND (for contrast): {hist_str}
 FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
 {related}
 EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-LENGTH: Write 3-4 sentences, total under 70 words.
+LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every clause must earn its place; do not pad to hit the count.
 
-Focus on the WHY, not just the numbers:
+Focus on the WHY and on whether to BELIEVE it, not just the numbers:
 - What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, tie the forward curve to it (e.g. "cloud, already +33% YoY, carries the forward curve"). Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
-- Whether growth is accelerating or decelerating across the forward years, and what that implies.
-- What the guidance stance ({guidance}) signals about management's own confidence.
-Cite ONE concrete projected number from the projections above to anchor the read. Do NOT just list the projections back."""
+- Whether the forward curve accelerates or decelerates — and how that reads against the recent ACTUAL trend (a sharp step-up vs history is a bolder claim than more of the same).
+- How much to TRUST the curve: read the guidance stance ({guidance}) together with the EPS beat/miss track record — a raise backed by steady beats is credible; an ambitious forecast from a chronic misser is suspect.
+Anchor on ONE concrete projected number; you may sharpen it against the track record or the historical trend. Do NOT just list the projections back."""
 
 
 def _hidden_market_signals_insight_prompt(

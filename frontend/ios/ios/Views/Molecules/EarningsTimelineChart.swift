@@ -39,8 +39,14 @@ struct EarningsTimelineChart: View {
     // Stable id for the boundary anchor we scroll to on open.
     private let boundaryAnchorID = "earningsForecastBoundary"
     @State private var didCenter = false
-    /// Column the user tapped → drives the inspect popup. nil = hidden.
-    @State private var selectedIndex: Int?
+    /// Column the user tapped → drives the inspect popup. nil = hidden. Owned by
+    /// the section (ReportFutureForecastSection) via a binding, so a tap anywhere
+    /// outside the chart can clear it — see that section's `.onTapGesture`.
+    @Binding var selectedIndex: Int?
+    /// Daily price series parsed into column space ONCE (see computePriceColumns).
+    /// Held in @State so toggling Price / opening the popup / scrolling never
+    /// re-parses the ~1500 date strings on the render path.
+    @State private var priceColumns: [(colX: Double, price: Double)] = []
 
     private struct YP {
         let year: Int
@@ -124,7 +130,13 @@ struct EarningsTimelineChart: View {
     /// (so a price flows left→right across each year's column). Only the years
     /// that exist on the chart and have price data — the line naturally stops
     /// at "now", left of the forecast.
-    private var pricesInColumnSpace: [(colX: Double, price: Double)] {
+    ///
+    /// Parsing the ~1500 daily date strings is EXPENSIVE, so this runs ONCE into
+    /// `priceColumns` (on load / when the series arrives) — NOT on every render.
+    /// The old per-render computed-property version, re-evaluated per point via a
+    /// `priceBounds` lookup, was O(n²) over the series and made the chart take
+    /// seconds to draw on every toggle/tap.
+    private func computePriceColumns() -> [(colX: Double, price: Double)] {
         guard !dailyPrices.isEmpty, !points.isEmpty else { return [] }
         let yearToIndex = Dictionary(
             uniqueKeysWithValues: points.enumerated().map { ($0.element.year, $0.offset) }
@@ -138,11 +150,6 @@ struct EarningsTimelineChart: View {
             let frac = (Double(m - 1) * 30.4 + Double(d)) / 365.0
             return (Double(idx) + frac, dp.price)
         }
-    }
-    private var priceBounds: (min: Double, max: Double)? {
-        let ps = pricesInColumnSpace.map(\.price)
-        guard let lo = ps.min(), let hi = ps.max(), hi > lo else { return nil }
-        return (lo, hi)
     }
 
     private var chartWidth: CGFloat {
@@ -173,8 +180,16 @@ struct EarningsTimelineChart: View {
                     let epsY: (Double) -> CGFloat = { e in
                         min(max(yFor(e * epsFactor), topPad + 2), plotBottom - 2)
                     }
+                    // Price min/max derived ONCE per render from the pre-parsed
+                    // columns (a cheap float pass, no strings) and captured by
+                    // `priceY` — instead of being re-fetched for every point.
+                    let pBounds: (min: Double, max: Double)? = {
+                        let ps = priceColumns.map(\.price)
+                        guard let lo = ps.min(), let hi = ps.max(), hi > lo else { return nil }
+                        return (lo, hi)
+                    }()
                     let priceY: (Double) -> CGFloat = { p in
-                        guard let b = priceBounds else { return plotBottom }
+                        guard let b = pBounds else { return plotBottom }
                         let norm = (p - b.min) / (b.max - b.min)
                         return plotBottom - (0.08 + 0.84 * CGFloat(norm)) * plotHeight
                     }
@@ -255,10 +270,12 @@ struct EarningsTimelineChart: View {
                                 .position(x: centerX(i), y: epsY(pt.eps))
                         }
 
-                        // Smooth DAILY price line (normalized into its own band)
-                        if showPrice, priceBounds != nil {
+                        // Smooth DAILY price line (normalized into its own band).
+                        // Iterates the pre-parsed `priceColumns` with the captured
+                        // `pBounds` — O(n) float math, no per-point re-parse.
+                        if showPrice, pBounds != nil {
                             Path { p in
-                                for (j, pt) in pricesInColumnSpace.enumerated() {
+                                for (j, pt) in priceColumns.enumerated() {
                                     let pos = CGPoint(x: sidePad + CGFloat(pt.colX) * colW,
                                                       y: priceY(pt.price))
                                     if j == 0 { p.move(to: pos) } else { p.addLine(to: pos) }
@@ -325,6 +342,11 @@ struct EarningsTimelineChart: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: selectedIndex)
             }
             .onAppear {
+                // Parse the price series once (it may already be present from a
+                // cached load); the .onChange below covers async arrival.
+                if priceColumns.isEmpty {
+                    priceColumns = computePriceColumns()
+                }
                 guard !didCenter else { return }
                 didCenter = true
                 // Center the boundary on open. The synchronous call positions
@@ -334,6 +356,11 @@ struct EarningsTimelineChart: View {
                 DispatchQueue.main.async {
                     proxy.scrollTo(boundaryAnchorID, anchor: .center)
                 }
+            }
+            .onChange(of: dailyPrices.count) { _, _ in
+                // Price arrived (async) or changed — re-parse ONCE here, off the
+                // render path, so the body never parses date strings while drawing.
+                priceColumns = computePriceColumns()
             }
         }
     }

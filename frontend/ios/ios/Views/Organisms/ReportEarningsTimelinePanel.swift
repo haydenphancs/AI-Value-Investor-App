@@ -19,6 +19,9 @@ struct ReportEarningsTimelinePanel: View {
     let ticker: String
     let timeline: [RevenueProjection]   // gapless actuals -> forecast
     let analystCount: Int?              // analysts behind the nearest forecast year
+    /// Tapped column for the chart's inspect popup — owned by the section so a
+    /// tap outside the chart can dismiss it.
+    @Binding var selectedIndex: Int?
 
     @State private var showPrice = true
     @State private var dailyPrices: [EarningsDailyPricePoint] = []
@@ -34,7 +37,8 @@ struct ReportEarningsTimelinePanel: View {
             EarningsTimelineChart(
                 timeline: timeline,
                 dailyPrices: dailyPrices,
-                showPrice: showPrice
+                showPrice: showPrice,
+                selectedIndex: $selectedIndex
             )
 
             legend
@@ -91,7 +95,8 @@ struct ReportEarningsTimelinePanel: View {
     ReportEarningsTimelinePanel(
         ticker: "ORCL",
         timeline: TickerReportData.sampleOracle.revenueForecast.annualTimeline,
-        analystCount: 31
+        analystCount: 31,
+        selectedIndex: .constant(nil)
     )
     .padding()
     .background(AppColors.cardBackground)

@@ -2485,9 +2485,10 @@ def _attach_earnings_track_record(
     revenue_forecast: Dict[str, Any],
     earnings: Optional[EarningsResponse],
 ) -> None:
-    """Add `earnings_track_record` (last ~6 REPORTED quarters' beat/miss vs
+    """Add `earnings_track_record` (last ~10 REPORTED quarters' beat/miss vs
     estimate) + a `beat_summary` to the forecast dict. Safe no-op: emits an
-    empty list + None summary when earnings are unavailable."""
+    empty list + None summary when earnings are unavailable. The surprise is
+    EPS-based (reported vs estimated EPS from `eps_quarters`)."""
     record: List[Dict[str, Any]] = []
     if earnings is not None:
         reported = [
@@ -2495,7 +2496,7 @@ def _attach_earnings_track_record(
             if q.actual_value is not None and q.surprise_percent is not None
         ]
         reported.sort(key=lambda q: q.fiscal_date or "")  # oldest → newest
-        for q in reported[-6:]:
+        for q in reported[-10:]:
             record.append({
                 "period": q.quarter,
                 "surprise_percent": round(q.surprise_percent, 1),

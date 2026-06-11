@@ -12,6 +12,9 @@ struct ReportFutureForecastSection: View {
     /// Ticker — the inline Earnings Timeline panel uses it to lazily fetch the
     /// share-price overlay from the /earnings endpoint.
     let ticker: String
+    /// Selected timeline column for the chart's inspect popup. Owned here so a
+    /// tap anywhere in this module outside the chart dismisses it.
+    @State private var selectedTimelineIndex: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -24,7 +27,8 @@ struct ReportFutureForecastSection: View {
                 ReportEarningsTimelinePanel(
                     ticker: ticker,
                     timeline: forecast.annualTimeline,
-                    analystCount: forecast.forecastAnalystCount
+                    analystCount: forecast.forecastAnalystCount,
+                    selectedIndex: $selectedTimelineIndex
                 )
             } else {
                 ReportForecastChart(forecast: forecast)
@@ -71,6 +75,12 @@ struct ReportFutureForecastSection: View {
                 .padding(AppSpacing.md)
             }
         }
+        // Tap anywhere in this module OUTSIDE the chart dismisses the inspect
+        // popup. A discrete tap → coexists with vertical/horizontal scrolling
+        // (scroll never triggers it); taps on the chart hit its own gesture
+        // first, so they still drive selection. Mirrors ReportInsiderSection.
+        .contentShape(Rectangle())
+        .onTapGesture { selectedTimelineIndex = nil }
     }
 
     // MARK: - Company Guidance
@@ -112,51 +122,72 @@ struct ReportFutureForecastSection: View {
 
     private var beatMissStrip: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack {
-                Text("Earnings Track Record")
-                    .font(AppTypography.label)
-                    .fontWeight(.semibold)
-                    .foregroundColor(AppColors.textPrimary)
-                Spacer()
-                if let summary = forecast.beatSummary {
-                    Text(summary)
-                        .font(AppTypography.labelSmall)
-                        .fontWeight(.semibold)
-                        .foregroundColor(AppColors.bullish)
-                        .padding(.horizontal, AppSpacing.sm)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(AppColors.bullish.opacity(0.15)))
-                }
-            }
+            // Title OUTSIDE the card — same style as Company Guidance.
+            Text("EPS Track Record")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textSecondary)
 
-            HStack(spacing: AppSpacing.xs) {
-                ForEach(forecast.earningsTrackRecord) { q in
-                    VStack(spacing: 3) {
-                        Image(systemName: q.beat ? "arrow.up" : "arrow.down")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
-                            .frame(width: 22, height: 22)
-                            .background(
-                                Circle().fill(
-                                    (q.beat ? AppColors.bullish : AppColors.bearish).opacity(0.15)
-                                )
-                            )
-                        Text(q.period)
-                            .font(.system(size: 9))
-                            .foregroundColor(AppColors.textMuted)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
+            // Gray card: a header row (label + Beat summary) above the
+            // horizontally-scrolling quarter cells.
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack {
+                    // Clarifies the per-quarter % is the beat/miss vs estimate,
+                    // not a YoY increase/decrease.
+                    Text("Beat/Miss %")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                    Spacer()
+                    if let summary = forecast.beatSummary {
+                        Text(summary)
+                            .font(AppTypography.labelSmall)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppColors.bullish)
+                            .padding(.horizontal, AppSpacing.sm)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(AppColors.bullish.opacity(0.15)))
                     }
-                    .frame(maxWidth: .infinity)
+                }
+
+                // Up to 10 reported quarters — scrolls horizontally so the full
+                // streak fits. Each cell shows the beat/miss arrow, the signed EPS
+                // surprise %, and the fiscal quarter.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: AppSpacing.sm) {
+                        ForEach(forecast.earningsTrackRecord) { q in
+                            VStack(spacing: 3) {
+                                Image(systemName: q.beat ? "arrow.up" : "arrow.down")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
+                                    .frame(width: 22, height: 22)
+                                    .background(
+                                        Circle().fill(
+                                            (q.beat ? AppColors.bullish : AppColors.bearish).opacity(0.15)
+                                        )
+                                    )
+                                Text(q.surpriseText)
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                                Text(q.period)
+                                    .font(.system(size: 9))
+                                    .foregroundColor(AppColors.textMuted)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                            }
+                            .frame(width: 50)
+                        }
+                    }
                 }
             }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+            )
         }
-        .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
-        )
     }
 }
 

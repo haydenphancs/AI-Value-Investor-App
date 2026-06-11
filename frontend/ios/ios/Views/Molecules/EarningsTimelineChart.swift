@@ -141,7 +141,7 @@ struct EarningsTimelineChart: View {
         let yearToIndex = Dictionary(
             uniqueKeysWithValues: points.enumerated().map { ($0.element.year, $0.offset) }
         )
-        return dailyPrices.compactMap { dp in
+        let cols: [(colX: Double, price: Double)] = dailyPrices.compactMap { dp in
             guard dp.date.count >= 10,
                   let y = Int(dp.date.prefix(4)),
                   let m = Int(dp.date.dropFirst(5).prefix(2)),
@@ -150,6 +150,15 @@ struct EarningsTimelineChart: View {
             let frac = (Double(m - 1) * 30.4 + Double(d)) / 365.0
             return (Double(idx) + frac, dp.price)
         }
+        // Start the line at the CENTER of its leftmost data column, not that
+        // column's left edge — so the tail sits over the first bar instead of
+        // overshooting ~half a column to its left. A price's natural early-year
+        // (Jan) start maps to colX ≈ idx (the left edge); we trim that lead-in up
+        // to idx + 0.5 (the bar center). Only ever pulls the tail rightward.
+        guard let minColX = cols.map(\.colX).min() else { return cols }
+        let firstCenter = minColX.rounded(.down) + 0.5
+        let clipped = cols.filter { $0.colX >= firstCenter }
+        return clipped.isEmpty ? cols : clipped
     }
 
     private var chartWidth: CGFloat {
@@ -367,25 +376,24 @@ struct EarningsTimelineChart: View {
 
     // MARK: - Inspect popup
 
-    private let popupHalfWidth: CGFloat = 95   // ~half the popup, for edge clamping
-    private let popupCenterY: CGFloat = 52     // fixed near the top; rule line connects down
+    private let popupHalfWidth: CGFloat = 84   // ~half the (2-column) popup, for edge clamping
+    private let popupCenterY: CGFloat = 64     // pushed down so the tighter toggle-chart gap doesn't crowd the button
 
-    /// Detail card for the tapped column: year, revenue + YoY, EPS + YoY, and the
-    /// analyst counts behind a forecast year (hidden on actuals). Styled like the
-    /// Capital Allocation popup (card fill + shadow + hairline border).
+    /// Detail card for the tapped column: a year header, then TWO columns
+    /// (Revenue | EPS), each stacking its dot+label, YoY %, value, and analyst
+    /// count. Styled like the Capital Allocation popup (card + shadow + border).
     private func inspectPopup(_ pt: YP) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(String(pt.year))
                 .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-            popupRow(color: AppColors.primaryBlue, label: "Revenue",
-                     value: pt.revenueLabel, yoy: pt.revenueYoYText, yoyColor: pt.revenueYoYColor)
-            popupRow(color: AppColors.accentYellow, label: "EPS",
-                     value: pt.epsLabel, yoy: pt.epsYoYText, yoyColor: pt.epsYoYColor)
-            if let analysts = analystLine(pt) {
-                Text(analysts)
-                    .font(.system(size: 9))
-                    .foregroundColor(AppColors.textMuted)
+            HStack(alignment: .top, spacing: AppSpacing.lg) {
+                popupColumn(color: AppColors.primaryBlue, label: "Revenue",
+                            yoy: pt.revenueYoYText, yoyColor: pt.revenueYoYColor,
+                            value: pt.revenueLabel, analysts: pt.revenueAnalystCount)
+                popupColumn(color: AppColors.accentYellow, label: "EPS",
+                            yoy: pt.epsYoYText, yoyColor: pt.epsYoYColor,
+                            value: pt.epsLabel, analysts: pt.epsAnalystCount)
             }
         }
         .padding(.horizontal, AppSpacing.sm)
@@ -402,31 +410,33 @@ struct EarningsTimelineChart: View {
         .fixedSize()
     }
 
-    private func popupRow(color: Color, label: String, value: String,
-                          yoy: String?, yoyColor: Color) -> some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(AppColors.textMuted)
-            Text(value)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(AppColors.textPrimary)
+    /// One side of the popup — a colored dot + series label, then the YoY %, the
+    /// value, and the analyst count stacked beneath. YoY hidden when there's no
+    /// anchor; analyst count hidden on actuals (and older reports).
+    private func popupColumn(color: Color, label: String,
+                             yoy: String?, yoyColor: Color,
+                             value: String, analysts: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Circle().fill(color).frame(width: 6, height: 6)
+                Text(label)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+            }
             if let yoy {
                 Text(yoy)
-                    .font(.system(size: 10))
+                    .font(AppTypography.caption)
                     .foregroundColor(yoyColor)
             }
+            Text(value)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textPrimary)
+            if let analysts {
+                Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
-    }
-
-    /// "Analysts · Rev 31 · EPS 30" — only the parts we have (forecast years);
-    /// nil on actuals (and older reports), so the row is hidden entirely.
-    private func analystLine(_ pt: YP) -> String? {
-        var parts: [String] = []
-        if let r = pt.revenueAnalystCount { parts.append("Rev \(r)") }
-        if let e = pt.epsAnalystCount { parts.append("EPS \(e)") }
-        guard !parts.isEmpty else { return nil }
-        return "Analysts · " + parts.joined(separator: " · ")
+        .frame(minWidth: 58, alignment: .leading)
     }
 }

@@ -27,7 +27,6 @@ struct ReportFutureForecastSection: View {
                 ReportEarningsTimelinePanel(
                     ticker: ticker,
                     timeline: forecast.annualTimeline,
-                    analystCount: forecast.forecastAnalystCount,
                     selectedIndex: $selectedTimelineIndex
                 )
             } else {
@@ -130,7 +129,7 @@ struct ReportFutureForecastSection: View {
             // Gray card: a header row (label + Beat summary) above the
             // horizontally-scrolling quarter cells.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                HStack {
+                HStack(alignment: .firstTextBaseline) {
                     // Clarifies the per-quarter % is the beat/miss vs estimate,
                     // not a YoY increase/decrease.
                     Text("Beat/Miss %")
@@ -140,7 +139,6 @@ struct ReportFutureForecastSection: View {
                     if let summary = forecast.beatSummary {
                         Text(summary)
                             .font(AppTypography.labelSmall)
-                            .fontWeight(.semibold)
                             .foregroundColor(AppColors.bullish)
                             .padding(.horizontal, AppSpacing.sm)
                             .padding(.vertical, 2)
@@ -179,6 +177,7 @@ struct ReportFutureForecastSection: View {
                         }
                     }
                 }
+                .defaultScrollAnchor(.trailing)
             }
             .padding(AppSpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)

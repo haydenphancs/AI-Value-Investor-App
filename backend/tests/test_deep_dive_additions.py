@@ -105,10 +105,11 @@ def test_earnings_track_record_beat_summary():
     assert rf["earnings_track_record"][1]["beat"] is False
 
 
-def test_earnings_track_record_caps_at_six_most_recent():
+def test_earnings_track_record_caps_at_ten_most_recent():
     rf: dict = {}
-    _attach_earnings_track_record(rf, _earnings([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))
-    assert len(rf["earnings_track_record"]) == 6  # last 6 reported
+    _attach_earnings_track_record(rf, _earnings([float(n) for n in range(1, 13)]))  # 12 qtrs
+    assert len(rf["earnings_track_record"]) == 10  # last 10 reported
+    assert rf["beat_summary"] == "Beat 10 of 10"   # all 12 surprises positive
 
 
 def test_earnings_track_record_empty_when_none():

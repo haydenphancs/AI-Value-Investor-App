@@ -18,7 +18,6 @@ import SwiftUI
 struct ReportEarningsTimelinePanel: View {
     let ticker: String
     let timeline: [RevenueProjection]   // gapless actuals -> forecast
-    let analystCount: Int?              // analysts behind the nearest forecast year
     /// Tapped column for the chart's inspect popup — owned by the section so a
     /// tap outside the chart can dismiss it.
     @Binding var selectedIndex: Int?
@@ -28,27 +27,25 @@ struct ReportEarningsTimelinePanel: View {
     @State private var didLoad = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Spacer()
                 EarningsPriceToggle(isEnabled: $showPrice)
             }
 
+            // Tight gap below the Price toggle. The chart's top headroom + the
+            // inspect popup (pushed down via popupCenterY) keep the popup from
+            // crowding the button despite the smaller gap.
             EarningsTimelineChart(
                 timeline: timeline,
                 dailyPrices: dailyPrices,
                 showPrice: showPrice,
                 selectedIndex: $selectedIndex
             )
+            .padding(.top, AppSpacing.xs)
 
             legend
-
-            if let n = analystCount {
-                Text("Forecast: consensus of \(n) analyst\(n == 1 ? "" : "s").")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
+                .padding(.top, AppSpacing.md)
         }
         .task {
             guard !didLoad else { return }
@@ -95,7 +92,6 @@ struct ReportEarningsTimelinePanel: View {
     ReportEarningsTimelinePanel(
         ticker: "ORCL",
         timeline: TickerReportData.sampleOracle.revenueForecast.annualTimeline,
-        analystCount: 31,
         selectedIndex: .constant(nil)
     )
     .padding()

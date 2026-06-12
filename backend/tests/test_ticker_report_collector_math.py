@@ -23,6 +23,7 @@ from app.services.agents.ticker_report_data_collector import (
     _absolute_peer_score,
     _absolute_threshold_fallback,
     _apply_tam_source,
+    _normalize_ai_tam_billions,
     _build_competitors,
     _directness_from_rank,
     _moat_multiplier,
@@ -1848,11 +1849,48 @@ def test_apply_tam_ai_quote_wins_when_provided():
         "future_year": "2030",
         "tam_source_quote": "We see a $150B addressable market today expanding to $300B by 2030.",
     }, None)
-    assert md["current_tam"] == 150_000_000_000
-    assert md["future_tam"] == 300_000_000_000
+    # Normalized to BILLIONS (raw USD ÷ 1e9) — the unit the schema + iOS expect.
+    # (Storing raw dollars is what produced "$100000000000.0T" on iOS.)
+    assert md["current_tam"] == 150.0
+    assert md["future_tam"] == 300.0
     assert md["future_year"] == "2030"
     assert "150B addressable market" in md["tam_source_quote"]
     assert md["tam_source_label"] == "Earnings call quote"
+
+
+def test_normalize_ai_tam_billions_converts_and_clamps():
+    """The AI returns TAM as raw USD (per the Stage-A prompt); the schema +
+    iOS expect BILLIONS. Convert, tolerate an AI that already answered in
+    billions, and drop implausible magnitudes so a hallucinated $100T never
+    renders as "$100000000000.0T"."""
+    # Raw USD → billions.
+    assert _normalize_ai_tam_billions(150_000_000_000) == 150.0      # $150B
+    assert _normalize_ai_tam_billions(1_500_000_000_000) == 1500.0   # $1.5T
+    assert _normalize_ai_tam_billions("75000000000") == 75.0         # string coerced
+    # Already in billions (AI deviating from the raw-USD contract) → kept as-is.
+    assert _normalize_ai_tam_billions(150) == 150.0
+    # Implausible: a hallucinated $100T (the real ORCL Moat bug) → dropped.
+    assert _normalize_ai_tam_billions(100_000_000_000_000) is None
+    # Non-positive / non-numeric → dropped.
+    assert _normalize_ai_tam_billions(0) is None
+    assert _normalize_ai_tam_billions(-5) is None
+    assert _normalize_ai_tam_billions("abc") is None
+    assert _normalize_ai_tam_billions(None) is None
+
+
+def test_apply_tam_drops_implausible_ai_value():
+    """The ORCL Moat bug: a hallucinated $100T future_tam (with a quote) must
+    NOT overlay an absurd number — it's dropped so iOS hides the TAM cell
+    rather than showing "$100000000000.0T"."""
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {
+        "current_tam": 0,
+        "future_tam": 100_000_000_000_000,   # $100T — implausible
+        "tam_source_quote": "A hundred-trillion-dollar opportunity.",
+    }, None)
+    assert md["current_tam"] == 0.0
+    assert md["future_tam"] == 0.0            # dropped, not 100000.0
+    assert md["tam_source_label"] is None     # no overlay happened
 
 
 def test_apply_tam_rejects_number_without_source_quote():
@@ -1892,8 +1930,9 @@ def test_apply_tam_handles_string_numbers():
         "future_tam": "120000000000",
         "tam_source_quote": "$75B today, growing to $120B.",
     }, None)
-    assert md["current_tam"] == 75_000_000_000
-    assert md["future_tam"] == 120_000_000_000
+    # Coerced from string AND normalized to billions: "$75B" / "$120B".
+    assert md["current_tam"] == 75.0
+    assert md["future_tam"] == 120.0
 
 
 def test_apply_tam_ignores_invalid_future_year():

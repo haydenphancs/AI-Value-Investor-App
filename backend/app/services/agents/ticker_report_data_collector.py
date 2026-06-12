@@ -4409,6 +4409,34 @@ def _aggregates_from_peers(
     }
 
 
+def _normalize_ai_tam_billions(v: Any) -> Optional[float]:
+    """Normalize an AI-extracted TAM to BILLIONS (the unit the schema, the
+    industry-proxy path, and iOS all expect).
+
+    The Stage-A prompt asks Gemini for TAM as a raw USD number
+    ("150000000000 for $150B"), but the value was previously stored as-is — so
+    a raw $100T figure rendered as "$100000000000.0T" on iOS (which treats this
+    field as billions). Convert raw USD → billions, tolerate an AI that already
+    answered in billions, and drop implausible magnitudes (a hallucinated
+    > $50T market) so a bad extraction becomes "no figure" — iOS then hides the
+    TAM cell instead of showing an absurd number.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    # >= $1M ⇒ a raw-USD figure → convert to billions. A smaller number is
+    # assumed to be already-in-billions (AI deviating from the raw-USD contract).
+    billions = f / 1e9 if f >= 1e6 else f
+    # Industry TAMs run ~$1B–$20T; above ~$50T (≈ half of world GDP) or below
+    # ~$100M is a hallucination / unit error → treat as no figure.
+    if billions < 0.1 or billions > 50_000:
+        return None
+    return round(billions, 1)
+
+
 def _apply_tam_source(
     market_dynamics: Dict[str, Any],
     ai_md: Optional[Dict[str, Any]],
@@ -4440,21 +4468,16 @@ def _apply_tam_source(
         quote_raw = ai_md.get("tam_source_quote")
         quote = quote_raw.strip() if isinstance(quote_raw, str) else ""
         if quote:
-            def _safe_positive(v: Any) -> Optional[float]:
-                try:
-                    f = float(v)
-                except (TypeError, ValueError):
-                    return None
-                return f if f > 0 else None
-
-            current = _safe_positive(ai_md.get("current_tam"))
-            future = _safe_positive(ai_md.get("future_tam"))
+            # Normalize to BILLIONS + drop implausible magnitudes. (Was stored
+            # as raw USD, so a $100T figure rendered as "$100000000000.0T".)
+            current = _normalize_ai_tam_billions(ai_md.get("current_tam"))
+            future = _normalize_ai_tam_billions(ai_md.get("future_tam"))
 
             if current is not None or future is not None:
                 if current is not None:
-                    market_dynamics["current_tam"] = round(current, 0)
+                    market_dynamics["current_tam"] = current
                 if future is not None:
-                    market_dynamics["future_tam"] = round(future, 0)
+                    market_dynamics["future_tam"] = future
                 market_dynamics["tam_source_quote"] = quote[:200]
                 market_dynamics["tam_source_label"] = "Earnings call quote"
 

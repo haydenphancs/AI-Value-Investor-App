@@ -11,6 +11,11 @@ struct ReportInsiderActivityTable: View {
     let insiderData: ReportInsiderData
     @State private var showAllTransactions = false
 
+    // When expanded, the recent-transactions list scrolls INSIDE this bounded
+    // height instead of stretching the whole report (mirrors the Holders tab's
+    // RecentActivitiesSection, which caps its expanded list and scrolls in place).
+    private let expandedListHeight: CGFloat = 420
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header with sentiment badge
@@ -90,13 +95,16 @@ struct ReportInsiderActivityTable: View {
             // holder's stake instead of restating the table.
 
             // Insider trend (12-mo buy/sell) + recent transactions — reused from
-            // the Holders tab (same numbers), compact: no price line, top-3 + more.
+            // the Holders tab (same numbers). Price line overlaid on the bars
+            // (like the Holders tab) so you can read whether insiders sold into
+            // strength or weakness; the backend windows the daily price to the
+            // bars' 365-day span so the line and bars share one timeline.
             if let flow = insiderData.insiderFlow, !flow.flowData.isEmpty {
                 SmartMoneyFlowChart(
-                    priceData: [],
-                    dailyPrices: [],
+                    priceData: flow.priceData,
+                    dailyPrices: flow.dailyPrices,
                     flowData: flow.flowData,
-                    showPriceChart: false,
+                    showPriceChart: true,
                     showVolumeYAxis: true
                 )
                 SmartMoneyFlowLegend(buyLabel: "Bought", sellLabel: "Sold")
@@ -109,21 +117,25 @@ struct ReportInsiderActivityTable: View {
                     .foregroundColor(AppColors.textMuted)
                     .padding(.top, AppSpacing.xs)
 
-                ForEach(showAllTransactions
-                        ? insiderData.recentTransactions
-                        : Array(insiderData.recentTransactions.prefix(3))) { tx in
-                    ReportListRow(
-                        leftPrimary: tx.name,
-                        leftLines: [
-                            ReportRowText(text: tx.title),
-                            ReportRowText(text: tx.formattedDate),
-                        ],
-                        rightLines: [
-                            ReportRowText(text: tx.formattedChange, color: tx.changeColor, isPrimary: true),
-                            ReportRowText(text: tx.transactionType.rawValue, color: tx.transactionType.color),
-                            ReportRowText(text: tx.formattedPrice),
-                        ]
-                    )
+                // Expanded → the full list scrolls inside a bounded box (mirrors
+                // the Holders tab) so "Show more" doesn't lengthen the whole
+                // report. Collapsed → top 3 inline.
+                if showAllTransactions {
+                    ScrollView {
+                        LazyVStack(spacing: AppSpacing.md) {
+                            ForEach(insiderData.recentTransactions) { tx in
+                                transactionRow(tx)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.visible)
+                    .frame(maxHeight: expandedListHeight)
+                } else {
+                    VStack(spacing: AppSpacing.md) {
+                        ForEach(Array(insiderData.recentTransactions.prefix(3))) { tx in
+                            transactionRow(tx)
+                        }
+                    }
                 }
 
                 if insiderData.recentTransactions.count > 3 {
@@ -145,6 +157,24 @@ struct ReportInsiderActivityTable: View {
                 }
             }
         }
+    }
+
+    // One recent-transaction row — shared by the collapsed (top-3) and the
+    // expanded scrollable list so they render identically.
+    @ViewBuilder
+    private func transactionRow(_ tx: InsiderActivity) -> some View {
+        ReportListRow(
+            leftPrimary: tx.name,
+            leftLines: [
+                ReportRowText(text: tx.title),
+                ReportRowText(text: tx.formattedDate),
+            ],
+            rightLines: [
+                ReportRowText(text: tx.formattedChange, color: tx.changeColor, isPrimary: true),
+                ReportRowText(text: tx.transactionType.rawValue, color: tx.transactionType.color),
+                ReportRowText(text: tx.formattedPrice),
+            ]
+        )
     }
 }
 

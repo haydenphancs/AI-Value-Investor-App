@@ -535,6 +535,14 @@ class TickerReportDataCollector:
         analyst_service = AnalystService()
         holders_service = HoldersService()
 
+        # 365-day insider window — matches `_build_insider_sections`' cutoff so
+        # the report's buy/sell totals cover a full 12 months. Page the insider
+        # fetch back to here instead of grabbing only the most-recent 200 rows,
+        # which truncates the window on active tickers.
+        insider_since = (
+            datetime.now(timezone.utc) - timedelta(days=365)
+        ).strftime("%Y-%m-%d")
+
         # Each entry: (attribute_name, awaitable, default_on_failure)
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
@@ -553,7 +561,7 @@ class TickerReportDataCollector:
             ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 10), []),
             ("historical", self.fmp.get_historical_prices(ticker), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
-            ("insider_trades", self.fmp.get_insider_trading(ticker, limit=200), []),
+            ("insider_trades", self.fmp.get_insider_trading(ticker, since_date=insider_since), []),
             ("insider_roster", self.fmp.get_insider_roster(ticker), []),
             ("beneficial_owners", self.fmp.get_beneficial_ownership(ticker), []),
             (
@@ -1437,16 +1445,18 @@ class TickerReportDataCollector:
 
         # Insider trend chart + recent transactions — reused from
         # holders_response (same numbers as the Holders tab; NO extra fetch).
-        # insider_flow drops the price arrays (the report chart hides the price
-        # line); recent transactions are capped (iOS shows 3 + "Show more").
-        # Left None when there's no data → iOS hides the blocks.
+        # insider_flow KEEPS the price line so the report chart overlays price
+        # on the buy/sell bars (like the Holders tab — the paid report shouldn't
+        # be poorer than the free tab). The daily price series is already windowed
+        # to the trailing 365 days at the source (holders_service
+        # ._build_insider_smart_money), matching the bars, so it ships as-is.
+        # Recent transactions are capped (iOS shows 3 + "Show more"). Left None
+        # when there's no data → iOS hides the blocks.
         hr = out.holders_response
         if hr is not None:
             sm = hr.insider_data
             if sm.flow_data:
-                insider_data["insider_flow"] = sm.model_copy(
-                    update={"price_data": [], "daily_prices": []}
-                ).model_dump()
+                insider_data["insider_flow"] = sm.model_dump()
             recent = hr.recent_activities.insider_activities
             # Informative trades only (open-market P/S) — drops RSU vesting,
             # option exercises, gifts. Matches the aggregate table above, which

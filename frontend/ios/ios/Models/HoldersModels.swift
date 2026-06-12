@@ -314,6 +314,25 @@ extension SmartMoneyFlowDataPoint {
         SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 16.2, sellVolume: 7.9)
     ]
 
+    /// One dominant month dwarfing the rest — models the real ORCL case
+    /// (Safra Catz's ~8.7M-share June-2025 sale, ~96% of the 12-mo total,
+    /// among otherwise sub-150K months). Exercises the chart's outlier clip
+    /// + value-label path. Values are millions of shares.
+    static let insiderOutlierSampleData: [SmartMoneyFlowDataPoint] = [
+        SmartMoneyFlowDataPoint(month: "06/2025", buyVolume: 0.0, sellVolume: 8.72),
+        SmartMoneyFlowDataPoint(month: "07/2025", buyVolume: 0.0005, sellVolume: 0.013),
+        SmartMoneyFlowDataPoint(month: "08/2025", buyVolume: 0.0, sellVolume: 0.016),
+        SmartMoneyFlowDataPoint(month: "09/2025", buyVolume: 0.0, sellVolume: 0.085),
+        SmartMoneyFlowDataPoint(month: "10/2025", buyVolume: 0.0, sellVolume: 0.119),
+        SmartMoneyFlowDataPoint(month: "11/2025", buyVolume: 0.0, sellVolume: 0.0),
+        SmartMoneyFlowDataPoint(month: "12/2025", buyVolume: 0.0, sellVolume: 0.027),
+        SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 0.0, sellVolume: 0.035),
+        SmartMoneyFlowDataPoint(month: "02/2026", buyVolume: 0.0, sellVolume: 0.010),
+        SmartMoneyFlowDataPoint(month: "03/2026", buyVolume: 0.0, sellVolume: 0.0),
+        SmartMoneyFlowDataPoint(month: "04/2026", buyVolume: 0.0, sellVolume: 0.015),
+        SmartMoneyFlowDataPoint(month: "05/2026", buyVolume: 0.0, sellVolume: 0.0)
+    ]
+
     static let hedgeFundsSampleData: [SmartMoneyFlowDataPoint] = [
         SmartMoneyFlowDataPoint(month: "Q2\n'24", buyVolume: 4200, sellVolume: 3520),
         SmartMoneyFlowDataPoint(month: "Q3\n'24", buyVolume: 3850, sellVolume: 4210),

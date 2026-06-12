@@ -135,6 +135,7 @@ struct ReportFutureForecastSection: View {
                     Text("Beat/Miss %")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
+                        .offset(y: -2)
                     Spacer()
                     if let summary = forecast.beatSummary {
                         Text(summary)

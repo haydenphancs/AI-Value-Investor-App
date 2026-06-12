@@ -1206,25 +1206,89 @@ class FMPClient:
     # ── Per-ticker insider trading (stable API) ────────────────────
 
     async def get_insider_trading(
-        self, ticker: str, limit: int = 100
+        self,
+        ticker: str,
+        limit: int = 100,
+        since_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get insider trading history for a stock ticker (stable API path)."""
-        try:
-            data = await self._make_request(
-                "insider-trading/search",
-                params={"symbol": ticker.upper(), "limit": limit, "page": 0},
-            )
-            return data if isinstance(data, list) else []
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (403, 404):
-                logger.warning(
-                    f"Insider trading search unavailable for {ticker}"
+        """Get insider trading history for a stock ticker (stable API path).
+
+        FMP returns rows newest-first. A single page (``limit`` rows, default
+        100) can stop short of a caller's 365-day window for actively-traded
+        names, silently truncating "last 12 months" totals. When ``since_date``
+        (ISO ``YYYY-MM-DD``) is supplied, page back until the oldest row on a
+        page predates it, so the window is fully covered. Without it, the
+        original single-page behavior is preserved (used by callers that just
+        want the most-recent N, e.g. ``get_insider_roster``).
+
+        The 365-day decision stays in the service layer — this method only
+        pages until rows predate the supplied date bound.
+        """
+        if since_date is None:
+            try:
+                data = await self._make_request(
+                    "insider-trading/search",
+                    params={"symbol": ticker.upper(), "limit": limit, "page": 0},
                 )
+                return data if isinstance(data, list) else []
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (403, 404):
+                    logger.warning(
+                        f"Insider trading search unavailable for {ticker}"
+                    )
+                    return []
+                raise
+            except Exception as e:
+                logger.warning(f"Insider trading search failed for {ticker}: {e}")
                 return []
-            raise
-        except Exception as e:
-            logger.warning(f"Insider trading search failed for {ticker}: {e}")
-            return []
+
+        # Paginated path: cover the full window back to `since_date`.
+        PAGE_SIZE = 100
+        MAX_PAGES = 15  # safety cap (~1,500 rows) for hyper-active tickers
+        all_trades: List[Dict[str, Any]] = []
+        for page in range(MAX_PAGES):
+            try:
+                rows = await self._make_request(
+                    "insider-trading/search",
+                    params={
+                        "symbol": ticker.upper(),
+                        "limit": PAGE_SIZE,
+                        "page": page,
+                    },
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (403, 404):
+                    logger.warning(
+                        f"Insider trading search unavailable for {ticker}"
+                    )
+                else:
+                    logger.warning(
+                        f"Insider trading page {page} failed for {ticker}: {e}"
+                    )
+                break  # return whatever pages already succeeded
+            except Exception as e:
+                logger.warning(
+                    f"Insider trading page {page} failed for {ticker}: {e}"
+                )
+                break
+
+            if not isinstance(rows, list) or not rows:
+                break
+            all_trades.extend(rows)
+
+            # ISO dates sort lexicographically; the last row is the oldest on
+            # the page. Once it predates the cutoff, the window is covered.
+            oldest = (
+                rows[-1].get("transactionDate")
+                or rows[-1].get("filingDate")
+                or ""
+            )[:10]
+            if oldest and oldest < since_date:
+                break
+            if len(rows) < PAGE_SIZE:
+                break  # short page → no more data upstream
+
+        return all_trades
 
     async def get_beneficial_ownership(
         self, ticker: str

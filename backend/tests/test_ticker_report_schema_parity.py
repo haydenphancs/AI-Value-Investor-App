@@ -467,8 +467,11 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
     """The Insider section carries the insider flow series + a recent-trade list,
     reused from holders_response (same source as the Holders tab). assemble_report
     forwards them with the keys iOS decodes (SmartMoneyDataDTO / InsiderActivityDTO),
-    trims the price arrays, WINDOWS the trades to the trailing 365 days (the same
-    cutoff as the Insider table + flow chart), keeps ALL in-window informative
+    KEEPS the price line and forwards the daily series AS-IS — windowing it to the
+    trailing 365 days is the source's job (holders_service._build_insider_smart_money,
+    covered by test_build_insider_smart_money_windows_daily_prices), so the report
+    path is a pure forwarder and must NOT re-trim. It still WINDOWS the trades to the
+    365-day cutoff (the Insider table + flow chart), keeps ALL in-window informative
     trades newest-first (no cap, so a counted buy is never hidden), and stays
     Pydantic-valid. None-safe when holders are absent."""
     from datetime import datetime, timezone, timedelta
@@ -476,6 +479,8 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
         HoldersResponse,
         SmartMoneyDataSchema,
         SmartMoneyFlowDataPointSchema,
+        StockPriceDataPointSchema,
+        DailyPricePointSchema,
         RecentActivitiesSchema,
         InsiderActivitiesDataSchema,
         InsiderActivitySchema,
@@ -516,6 +521,18 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
         symbol="AAPL",
         insider_data=SmartMoneyDataSchema(
             tab="Insider",
+            price_data=[
+                StockPriceDataPointSchema(month="12/2025", price=160.0),
+                StockPriceDataPointSchema(month="01/2026", price=165.0),
+            ],
+            daily_prices=[
+                # In production the source (_build_insider_smart_money) already
+                # windows these to 365d; this out-of-window 400-day point is here
+                # only to prove the report path forwards as-is and does NOT re-trim.
+                DailyPricePointSchema(date=_d(400), price=120.0),
+                DailyPricePointSchema(date=_d(200), price=150.0),
+                DailyPricePointSchema(date=_d(5), price=165.0),
+            ],
             flow_data=[
                 SmartMoneyFlowDataPointSchema(month="12/2025", buy_volume=0.0, sell_volume=0.015),
                 SmartMoneyFlowDataPointSchema(month="01/2026", buy_volume=0.5, sell_volume=0.0),
@@ -529,11 +546,17 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
     report = coll.assemble_report(out, stage_a_fallback())
     insider = report["insider_data"]
 
-    # Flow series forwarded with the iOS-decoded keys; price arrays trimmed.
+    # Flow series forwarded with the iOS-decoded keys. The price line is KEPT
+    # (the report overlays price on the bars, like the Holders tab) and the daily
+    # series is forwarded AS-IS — the report path adds no windowing of its own
+    # (that's the source's job; see test_build_insider_smart_money_windows_daily_
+    # prices). All three input points survive, including the out-of-window one.
     flow = insider["insider_flow"]
     assert flow is not None
     assert {"month", "buy_volume", "sell_volume"} <= set(flow["flow_data"][0].keys())
-    assert flow["price_data"] == [] and flow["daily_prices"] == []
+    assert flow["price_data"], "monthly price line forwarded (was stripped before)"
+    assert len(flow["daily_prices"]) == 3  # all points forwarded, none re-trimmed
+    assert any(p["date"] == _d(400) for p in flow["daily_prices"])  # not windowed here
 
     # Recent trades: windowed to 365d (the 400-day trade dropped), uncapped,
     # newest-first, and the in-window BUY survives (never hidden by a cap).
@@ -559,6 +582,47 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
     bare = coll.assemble_report(_make_collected_data(), stage_a_fallback())
     assert bare["insider_data"].get("insider_flow") is None
     assert bare["insider_data"].get("recent_transactions") is None
+
+
+def test_build_insider_smart_money_windows_daily_prices():
+    """The Holders Insider chart overlays a price line on buy/sell bars that span
+    the trailing 365 days. The raw daily series spans ~2 years (sized for the
+    hedge-fund chart), so _build_insider_smart_money must window the daily series
+    to the SAME 365-day cutoff as the bars — otherwise the 2-year line stretched
+    over 13-month bars sits each bar under the wrong date (misreading "did insiders
+    sell into strength or weakness?"). The price line's left edge must land ~12
+    months ago, not ~2 years."""
+    from datetime import datetime, timezone, timedelta
+    from app.services.holders_service import HoldersService
+    from app.schemas.holders import DailyPricePointSchema
+
+    now = datetime.now(timezone.utc)
+
+    def _d(days_ago: int) -> str:
+        return (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    # Bypass __init__ (which wires the FMP + Supabase clients) — the method under
+    # test is a pure transform that touches neither.
+    svc = HoldersService.__new__(HoldersService)
+
+    daily = [
+        DailyPricePointSchema(date=_d(740), price=90.0),   # ~2yr — must be trimmed
+        DailyPricePointSchema(date=_d(400), price=120.0),  # >365d — must be trimmed
+        DailyPricePointSchema(date=_d(360), price=150.0),  # inside window — kept
+        DailyPricePointSchema(date=_d(5), price=165.0),    # recent — kept
+    ]
+
+    sm = svc._build_insider_smart_money(
+        insider_trades=[], monthly_prices={}, daily_prices=daily,
+    )
+
+    cutoff = _d(365)
+    assert sm.daily_prices, "in-window daily points survive"
+    assert all(dp.date >= cutoff for dp in sm.daily_prices)
+    assert len(sm.daily_prices) == 2  # the 740- and 400-day points trimmed
+    # Left edge of the price line ≈ 12 months ago (matching the leftmost bar),
+    # not ~2 years — the whole point of the fix.
+    assert min(dp.date for dp in sm.daily_prices) == _d(360)
 
 
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))

@@ -16,9 +16,9 @@ struct SmartMoneyFlowChart: View {
     let dailyPrices: [DailyPricePoint]
     let flowData: [SmartMoneyFlowDataPoint]
     /// When false, only the buy/sell volume bars render (no price line on
-    /// top). Used by the Ticker Report's merged chart, where the price line
-    /// already lives in the Analyst Price Target chart above. Defaults true
-    /// so the Holders tab is unaffected.
+    /// top) — for a caller that already shows the price right alongside.
+    /// Defaults true; the Holders tab and the Ticker Report's insider chart
+    /// both overlay the price line on the bars.
     var showPriceChart: Bool = true
     /// When false, the volume bars hide their trailing magnitude y-axis (the
     /// net-flow badge conveys the totals instead). Lets the report align the
@@ -219,6 +219,9 @@ struct SmartMoneyFlowChart: View {
                 )
                 .foregroundStyle(HoldersColors.buyVolume)
                 .cornerRadius(2)
+                .annotation(position: .overlay, alignment: .top) {
+                    clippedBarLabel(point.buyVolume, arrow: "↑")
+                }
             }
 
             // Sell volume bars (negative, red) - below zero line
@@ -230,6 +233,9 @@ struct SmartMoneyFlowChart: View {
                 )
                 .foregroundStyle(HoldersColors.sellVolume)
                 .cornerRadius(2)
+                .annotation(position: .overlay, alignment: .bottom) {
+                    clippedBarLabel(point.sellVolume, arrow: "↓")
+                }
             }
 
             // Zero line
@@ -279,7 +285,7 @@ struct SmartMoneyFlowChart: View {
                 }
             }
         }
-        .chartYScale(domain: -maxVolume...maxVolume)
+        .chartYScale(domain: -axisMax...axisMax)
         .chartPlotStyle { plotArea in
             plotArea.background(Color.clear)
         }
@@ -304,26 +310,57 @@ struct SmartMoneyFlowChart: View {
         return (minPrice - padding, maxPrice + padding)
     }
 
-    private var maxVolume: Double {
-        let maxBuy = flowData.map { $0.buyVolume }.max() ?? 1
-        let maxSell = flowData.map { $0.sellVolume }.max() ?? 1
-        return max(maxBuy, maxSell) * 1.15
+    // One month can dwarf the other 11 — e.g. an executive's planned
+    // multi-million-share sale among otherwise sub-150K months. Scaling the
+    // axis to that single outlier squashes every normal month onto the floor,
+    // so they all read as identical slivers (the bug this chart "looked like").
+    // Fix: when the largest magnitude exceeds `outlierFactor`× the next, scale
+    // the axis to the SECOND-largest. The outlier then overflows the axis,
+    // renders clipped at the edge, and carries a value label — while the normal
+    // months reclaim the full chart height and become legible.
+    private static let outlierFactor: Double = 4
+
+    /// Y-axis half-extent (±). Outlier-aware: drops the one dominant bar from
+    /// the scale so the rest are readable. Falls back to the old
+    /// `largest × 1.15` when there is no dominant outlier, so normal tickers
+    /// render exactly as before.
+    private var axisMax: Double {
+        let mags = flowData
+            .flatMap { [$0.buyVolume, $0.sellVolume] }
+            .filter { $0 > 0 }
+            .sorted(by: >)
+        guard let largest = mags.first else { return 1 }
+        if mags.count >= 2 {
+            let second = mags[1]
+            if second > 0 && largest > Self.outlierFactor * second {
+                return second * 1.30   // fit the rest; let the outlier clip
+            }
+        }
+        return largest * 1.15
+    }
+
+    /// True when a bar's real magnitude overflows the (outlier-capped) axis —
+    /// it draws clipped at the edge and shows its true value as a label.
+    private func isClipped(_ value: Double) -> Bool {
+        value > axisMax
     }
 
     // A month with real but tiny volume — e.g. a single 480-share insider buy
     // among millions of shares of selling — would round to a 0-height bar and
     // vanish. Floor every NON-ZERO bar to this fraction of the axis so "activity
     // happened" is always visible. Magnitudes below the floor all render at the
-    // SAME minimal height (a presence marker, not a true-to-scale bar) — an
-    // intentional trade-off for the huge dynamic range when one month dwarfs the
-    // rest. Truly-empty months stay at 0 and get the gray no-activity dash.
+    // SAME minimal height (a presence marker, not a true-to-scale bar). Truly-
+    // empty months stay at 0 and get the gray no-activity dash.
     private static let minBarHeightRatio: Double = 0.04
 
-    /// Plotted bar height: the true value, but never a sliver thinner than the
-    /// visible floor when non-zero. Zero stays zero.
+    /// Plotted bar height: the true value, floored to a visible minimum when
+    /// non-zero, and capped at the axis so a dominant outlier clips cleanly at
+    /// the edge (its true magnitude is shown via the clipped-bar label). Zero
+    /// stays zero.
     private func displayVolume(_ value: Double) -> Double {
         guard value > 0 else { return 0 }
-        return max(value, maxVolume * Self.minBarHeightRatio)
+        let floored = max(value, axisMax * Self.minBarHeightRatio)
+        return min(floored, axisMax)
     }
 
     // MARK: - Formatting
@@ -351,6 +388,34 @@ struct SmartMoneyFlowChart: View {
         }
         return "0"
     }
+
+    /// One-decimal magnitude for the clipped-bar label so a dominant outlier
+    /// reads "8.7M" rather than `formatVolumeValue`'s rounded "9M".
+    private func formatVolumeLabel(_ value: Double) -> String {
+        let absValue = abs(value)
+        if absValue >= 1000 {
+            return String(format: "%.1fB", value / 1000)
+        } else if absValue >= 1 {
+            return String(format: "%.1fM", value)
+        } else if absValue >= 0.01 {
+            return String(format: "%.0fK", value * 1000)
+        }
+        return formatVolumeValue(value)
+    }
+
+    /// Label drawn only on a bar that overflows the outlier-capped axis: its
+    /// TRUE magnitude plus an arrow toward the clipped edge (e.g. "8.7M↓").
+    /// White for contrast against the colored bar; empty for normal bars so
+    /// every other month renders unchanged.
+    @ViewBuilder
+    private func clippedBarLabel(_ value: Double, arrow: String) -> some View {
+        if isClipped(value) {
+            Text("\(formatVolumeLabel(value))\(arrow)")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .fixedSize()
+        }
+    }
 }
 
 #Preview {
@@ -359,6 +424,20 @@ struct SmartMoneyFlowChart: View {
             .ignoresSafeArea()
 
         VStack(spacing: AppSpacing.xl) {
+            // Outlier case (ORCL): one ~8.7M month clips at the edge with a
+            // value label; the 11 normal months stay legible.
+            Text("Dominant-outlier month")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            SmartMoneyFlowChart(
+                priceData: [],
+                dailyPrices: [],
+                flowData: SmartMoneyFlowDataPoint.insiderOutlierSampleData,
+                showPriceChart: false
+            )
+
+            // Normal case: no outlier → renders exactly as before.
             Text("Smart Money vs Price")
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)

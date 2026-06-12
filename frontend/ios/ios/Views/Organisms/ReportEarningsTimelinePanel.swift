@@ -42,7 +42,7 @@ struct ReportEarningsTimelinePanel: View {
                 showPrice: showPrice,
                 selectedIndex: $selectedIndex
             )
-            .padding(.top, AppSpacing.xs)
+            .padding(.top, AppSpacing.xxs)
 
             legend
                 .padding(.top, AppSpacing.md)

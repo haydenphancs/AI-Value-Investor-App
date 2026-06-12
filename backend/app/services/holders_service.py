@@ -265,6 +265,11 @@ class HoldersService:
         # Phase 1: Core data (all in parallel)
         now = datetime.now(timezone.utc)
         from_date = (now - timedelta(days=760)).strftime("%Y-%m-%d")  # ~2 years for hedge fund chart
+        # 365-day window for the insider chart/table/list — page the insider
+        # fetch back to here so an active ticker's "last 12 months" isn't
+        # truncated by a single 200-row page. Business cutoff lives here, not
+        # in fmp.py.
+        insider_since = (now - timedelta(days=365)).strftime("%Y-%m-%d")
 
         # Determine data quarter for aggregate institutional fetch
         month = now.month
@@ -296,7 +301,7 @@ class HoldersService:
             self.fmp.get_institutional_holder(ticker, limit=20),
             self.fmp.get_institutional_ownership_summary(ticker),
             self.fmp.get_institutional_ownership_for_quarter(ticker, data_year, data_quarter),
-            self.fmp.get_insider_trading(ticker, limit=200),
+            self.fmp.get_insider_trading(ticker, since_date=insider_since),
             self.fmp.get_insider_roster(ticker),
             self.fmp.get_historical_prices(ticker, from_date=from_date),
             self.fmp.get_senate_latest(limit=1000),
@@ -1177,10 +1182,21 @@ class HoldersService:
             for m in month_keys
         ]
 
+        # Window the daily price line to the SAME trailing-365-day cutoff as the
+        # bars. The raw daily series spans ~2 years (sized for the hedge-fund
+        # chart, which keeps the full series); stretched over 13-month bars it
+        # would sit each bar under the wrong date — misreading "did insiders sell
+        # into strength or weakness?". Monthly price_data is already windowed via
+        # _build_price_data(month_keys), so it's left as-is.
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+        windowed_daily = [
+            dp for dp in (daily_prices or []) if dp.date >= cutoff_str
+        ]
+
         return SmartMoneyDataSchema(
             tab="Insider",
             price_data=self._build_price_data(monthly_prices, month_keys),
-            daily_prices=daily_prices or [],
+            daily_prices=windowed_daily,
             flow_data=flow_data,
             summary=self._build_summary(flow_data),
         )

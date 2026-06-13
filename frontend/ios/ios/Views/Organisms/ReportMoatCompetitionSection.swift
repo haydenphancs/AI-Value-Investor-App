@@ -308,8 +308,11 @@ struct ReportMoatCompetitionSection: View {
     private var peerComparisonSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Competitors")
+                // Match the "Software - Infrastructure" industry subtitle: same
+                // font/size (bodySmallEmphasis) AND the same secondary (gray)
+                // color, so the two section labels read identically.
                 .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(AppColors.textSecondary)
 
             if data.competitors.isEmpty {
                 Text("No competitor data available")

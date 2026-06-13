@@ -10,28 +10,26 @@ import SwiftUI
 struct LessonStatusBadge: View {
     let status: LessonStatus
 
-    private var showBadge: Bool {
-        status != .notStarted
-    }
-
     var body: some View {
-        if showBadge {
-            HStack(spacing: AppSpacing.xs) {
-                if status == .completed {
-                    Image(systemName: "checkmark")
-                        .font(AppTypography.iconTiny).fontWeight(.bold)
-                }
+        switch status {
+        case .completed:
+            // Just a green check — the full "Completed" label was too long and got clipped
+            // on the lesson card. The checkmark alone reads clearly as done.
+            Image(systemName: "checkmark.circle.fill")
+                .font(AppTypography.iconSmall)
+                .foregroundColor(status.color)
 
-                Text(status.rawValue)
-                    .font(AppTypography.caption)
-                    .fontWeight(.medium)
-            }
-            .foregroundColor(status.color)
-            .padding(.horizontal, AppSpacing.sm)
-            .padding(.vertical, AppSpacing.xs)
-            .background(status.backgroundColor)
-            .cornerRadius(AppCornerRadius.small)
-        } else {
+        case .upNext:
+            Text(status.rawValue)
+                .font(AppTypography.caption)
+                .fontWeight(.medium)
+                .foregroundColor(status.color)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(status.backgroundColor)
+                .cornerRadius(AppCornerRadius.small)
+
+        case .notStarted:
             Text(status.rawValue)
                 .font(AppTypography.caption)
                 .foregroundColor(status.color)

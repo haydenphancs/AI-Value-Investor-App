@@ -13,11 +13,14 @@ struct LessonTopicCardView: View {
     let storyContent: LessonStoryContent
     var onDismiss: (() -> Void)?
     var onCTATapped: ((LessonCTADestination) -> Void)?
+    /// Fired once when the learner reaches the lesson's completion card.
+    var onLessonCompleted: (() -> Void)?
 
     @StateObject private var voiceManager = AIVoiceManager.shared
     @State private var currentIndex: Int = 0
     @State private var cardProgress: CGFloat = 0
     @State private var dragOffset: CGFloat = 0
+    @State private var didMarkCompleted = false
 
     // Timer for auto-advance after voice finishes
     @State private var autoAdvanceTimer: Timer?
@@ -242,8 +245,12 @@ struct LessonTopicCardView: View {
         stopAutoAdvanceTimer()
 
         guard !isCompletionCard else {
-            // No voice for completion card
+            // No voice for completion card. Reaching it means the lesson is finished.
             cardProgress = 1.0
+            if !didMarkCompleted {
+                didMarkCompleted = true
+                onLessonCompleted?()
+            }
             return
         }
 

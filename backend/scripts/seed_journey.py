@@ -39,6 +39,7 @@ NS = uuid.UUID("a1b2c3d4-0000-4000-8000-000000000000")
 DRY = "--dry-run" in sys.argv
 
 _LEVEL_TOTALS: dict[str, int] = {}
+_EXISTING_AUDIO: set[str] = set()   # objects already in journey-media/audio/ — skip re-upload
 
 
 def lesson_key(cards: list[dict]) -> str:
@@ -51,18 +52,23 @@ def lesson_key(cards: list[dict]) -> str:
 
 
 def upload_audio(sb, clip: str) -> str | None:
-    """Upload <clip>.m4a to journey-media/audio/ and return its public URL."""
+    """Upload <clip>.m4a to journey-media/audio/ (skipping if already there) and return its public URL."""
     path = f"audio/{clip}.m4a"
     local = AUDIO_DIR / f"{clip}.m4a"
     if not local.exists():
-        print(f"    ! missing audio {local.name} — skipping upload (audioUrl will be null)")
+        print(f"    ! missing audio {local.name} — skipping (audioUrl will be null)")
         return None
+    if f"{clip}.m4a" in _EXISTING_AUDIO:
+        # Already uploaded on a prior run — just reuse the URL.
+        return sb.storage.from_(BUCKET).get_public_url(path)
     if not DRY:
         sb.storage.from_(BUCKET).upload(
             path,
             local.read_bytes(),
             {"content-type": "audio/mp4", "upsert": "true"},
         )
+        _EXISTING_AUDIO.add(f"{clip}.m4a")
+        print(f"    + uploaded {clip}.m4a")
     return sb.storage.from_(BUCKET).get_public_url(path)
 
 
@@ -99,6 +105,15 @@ def main():
         _LEVEL_TOTALS[l["level"]] = _LEVEL_TOTALS.get(l["level"], 0) + 1
 
     sb = get_supabase()
+
+    # Learn which audio objects already exist so we only upload new ones.
+    try:
+        listed = sb.storage.from_(BUCKET).list("audio", {"limit": 2000})
+        _EXISTING_AUDIO.update(item["name"] for item in listed)
+        print(f"{len(_EXISTING_AUDIO)} audio file(s) already in Storage — will skip those.\n")
+    except Exception as exc:  # noqa: BLE001
+        print(f"(could not list existing audio: {exc})\n")
+
     rows = []
     for lesson in lessons:
         key = lesson_key(lesson["cards"])

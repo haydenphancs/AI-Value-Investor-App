@@ -19,6 +19,12 @@ class InvestorJourneyViewModel: ObservableObject {
     @Published var selectedLesson: Lesson?
     @Published var showLessonStory: Bool = false
 
+    // MARK: - Progress State
+    /// Completion is owned by the shared `JourneyProgressStore` (single source of truth shared
+    /// with the Learn-tab card). This VM reads it at its explicit rebuild points; it does not
+    /// observe the store, so an open lesson story is never disturbed mid-lesson.
+    private var progress: JourneyProgressStore { .shared }
+
     // MARK: - Computed Properties
     var totalLessonsCompleted: Int {
         journeyData?.totalLessonsCompleted ?? 0
@@ -61,21 +67,24 @@ class InvestorJourneyViewModel: ObservableObject {
     func loadData() {
         isLoading = true
 
-        // Fetch authored lesson content (cards + media URLs) from the backend so it's
-        // ready by the time a lesson is opened; falls back to bundled content on failure.
-        Task { await JourneyContentStore.shared.prefetch() }
+        // Bundled lesson content is present synchronously, so build the journey immediately —
+        // correct durations + progress on first paint, no network blocking the screen.
+        rebuildJourney()
+        isLoading = false
 
-        // Simulate network delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.journeyData = InvestorJourneyData.sampleData
-            self?.isLoading = false
+        // Refresh authored content (cards + media URLs) from the backend in the background so
+        // it's ready when a lesson is opened; rebuild once it lands in case durations refine.
+        Task { [weak self] in
+            await JourneyContentStore.shared.prefetch()
+            self?.rebuildJourney()
         }
     }
 
     func refresh() async {
         isLoading = true
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        loadData()
+        await JourneyContentStore.shared.prefetch()
+        rebuildJourney()
+        isLoading = false
     }
 
     // MARK: - Actions
@@ -87,6 +96,8 @@ class InvestorJourneyViewModel: ObservableObject {
     func dismissLessonStory() {
         showLessonStory = false
         selectedLesson = nil
+        // A lesson may have just been completed inside the story; refresh the grid + progress.
+        rebuildJourney()
     }
 
     /// Generate story content for a lesson
@@ -109,8 +120,9 @@ class InvestorJourneyViewModel: ObservableObject {
     }
 
     private func findLevelForLesson(_ lesson: Lesson) -> (level: JourneyLevel, lessonIndex: Int, totalInLevel: Int) {
+        // Match by title: Lesson.id is regenerated on every rebuild, title is the stable key.
         for levelProgress in levels {
-            if let index = levelProgress.lessons.firstIndex(where: { $0.id == lesson.id }) {
+            if let index = levelProgress.lessons.firstIndex(where: { $0.title == lesson.title }) {
                 return (levelProgress.level, index, levelProgress.lessons.count)
             }
         }
@@ -287,8 +299,56 @@ class InvestorJourneyViewModel: ObservableObject {
     }
 
     // MARK: - Progress Tracking
-    func markLessonCompleted(_ lesson: Lesson, in level: JourneyLevel) {
-        // In a real app, this would update the backend and local state
-        print("Marked lesson '\(lesson.title)' as completed in \(level.title)")
+
+    /// Record that the learner finished the currently-open lesson. Persists immediately so
+    /// progress survives restarts; the visible grid + progress refresh on dismiss (so we don't
+    /// disturb the lesson view that's still on screen).
+    func markSelectedLessonCompleted() {
+        guard let title = selectedLesson?.title else { return }
+        progress.markCompleted(title)
+    }
+
+    // MARK: - Journey Assembly
+
+    private func rebuildJourney() {
+        journeyData = buildJourneyData()
+    }
+
+    /// Single source of truth for the screen: the static lesson catalog overlaid with real
+    /// per-lesson durations (computed from content) and completion status (from persistence).
+    /// Exactly one not-yet-completed lesson is flagged `.upNext` — the global next lesson.
+    private func buildJourneyData() -> InvestorJourneyData {
+        var assignedUpNext = false
+        let completedSet = progress.completedTitles
+        let builtLevels: [LevelProgress] = InvestorJourneyData.sampleData.levels.map { base in
+            let lessons: [Lesson] = base.lessons.map { lesson in
+                let status: LessonStatus
+                if completedSet.contains(lesson.title) {
+                    status = .completed
+                } else if !assignedUpNext {
+                    status = .upNext
+                    assignedUpNext = true
+                } else {
+                    status = .notStarted
+                }
+                let minutes = JourneyContentStore.shared.estimatedMinutes(forLessonTitled: lesson.title)
+                    ?? lesson.durationMinutes
+                return Lesson(
+                    title: lesson.title,
+                    description: lesson.description,
+                    durationMinutes: minutes,
+                    status: status,
+                    category: lesson.category
+                )
+            }
+            return LevelProgress(level: base.level, lessons: lessons)
+        }
+        let completed = builtLevels.reduce(0) { $0 + $1.completedCount }
+        let total = builtLevels.reduce(0) { $0 + $1.totalCount }
+        return InvestorJourneyData(
+            levels: builtLevels,
+            totalLessonsCompleted: completed,
+            totalLessons: total
+        )
     }
 }

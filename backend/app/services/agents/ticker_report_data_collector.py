@@ -1279,7 +1279,14 @@ class TickerReportDataCollector:
         out.meta = {
             "symbol": out.ticker,
             "company_name": profile.get("companyName") or out.ticker,
-            "exchange": profile.get("exchangeShortName") or "",
+            # Mirror endpoints/stocks.py: FMP's `/stable/profile` often returns
+            # only the generic `exchange` (e.g. "NYSE") and leaves
+            # `exchangeShortName` empty — fall back so the header isn't blank.
+            "exchange": (
+                profile.get("exchangeShortName")
+                or profile.get("exchange")
+                or ""
+            ),
             "logo_url": profile.get("image"),
             "live_date": _format_live_date(now),
             "agent": _AGENT_MAP.get(out.persona_key, "buffett"),
@@ -1814,15 +1821,13 @@ class TickerReportDataCollector:
         risk_factors = [_strip_risk_group(rf) for rf in risk_factors_internal]
         macro_data = {
             "overall_threat_level": threat_level,
-            "headline": ai_macro.get("headline") or (
-                "Benign macro backdrop — no indicators tripping risk thresholds."
-                if not risk_factors
-                else "Macro overview unavailable."
+            "headline": ai_macro.get("headline") or _fallback_macro_headline(
+                threat_level, risk_factors
             ),
             "risk_factors": risk_factors,
             "intelligence_brief": (
                 ai_macro.get("intelligence_brief")
-                or "Data unavailable for this ticker."
+                or _fallback_macro_brief(threat_level, risk_factors)
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
@@ -5568,18 +5573,19 @@ def _overlay_ai_guidance(
 def _classify_concentration(
     top1_share_pct: float, top2_share_pct: float, hhi: float,
 ) -> str:
-    """Map structural concentration metrics to the iOS enum value.
+    """Map MARKET-CAP concentration to the iOS enum value.
 
-    Prioritizes top-N share thresholds (which capture market shape —
-    one dominant firm vs. duopoly — better than HHI alone). HHI is the
-    tiebreaker for sectors where no firm dominates but the upper few
-    still account for most of the value.
+    IMPORTANT: callers pass market-CAP shares (HHI / top-N of sector market
+    cap), NOT revenue/market share. "monopoly"/"duopoly" are market-SHARE
+    structures, so we never infer them from cap dominance — one mega-cap
+    holding >50% of a sector's market cap (e.g. MSFT in Software-Infrastructure)
+    does NOT make the sector a monopoly, and stamping that on a smaller
+    constituent's report (Oracle) is misleading. Cap-derived concentration
+    therefore tops out at "oligopoly". (Both this and the industry_dossier
+    mirror derive from market cap, so neither emits monopoly/duopoly today;
+    those enum values are reserved for a future real market-share source.)
     """
-    if top1_share_pct > 50.0:
-        return "monopoly"
-    if top2_share_pct > 70.0:
-        return "duopoly"
-    if hhi >= 1500.0:
+    if top1_share_pct > 50.0 or top2_share_pct > 70.0 or hhi >= 1500.0:
         return "oligopoly"
     return "fragmented"
 
@@ -6490,6 +6496,50 @@ def _strip_risk_group(rf: Dict[str, Any]) -> Dict[str, Any]:
     minimal (extra fields are ignored by the schema anyway, but we
     strip explicitly to avoid surprises in downstream consumers)."""
     return {k: v for k, v in rf.items() if not k.startswith("_")}
+
+
+_THREAT_PHRASE = {
+    "low": "Low macro risk",
+    "elevated": "Elevated macro risk",
+    "high": "High macro risk",
+    "severe": "Severe macro risk",
+    "critical": "Critical macro risk",
+}
+
+
+def _fallback_macro_headline(
+    threat_level: str, risk_factors: List[Dict[str, Any]]
+) -> str:
+    """Deterministic macro headline for when the AI narrative is absent.
+
+    Never claims "unavailable" while factors exist — it summarizes the
+    DETERMINISTIC tier + the top (most-severe-first) factor instead, so the
+    headline can't contradict the threat badge + factor list shown beneath it.
+    """
+    if not risk_factors:
+        return "Benign macro backdrop — no indicators tripping risk thresholds."
+    phrase = _THREAT_PHRASE.get((threat_level or "elevated").lower(), "Elevated macro risk")
+    top = (risk_factors[0].get("title") or "").strip()
+    n = len(risk_factors)
+    suffix = f"{n} active factor{'s' if n != 1 else ''}"
+    return f"{phrase} — led by {top} ({suffix})." if top else f"{phrase} — {suffix}."
+
+
+def _fallback_macro_brief(
+    threat_level: str, risk_factors: List[Dict[str, Any]]
+) -> str:
+    """Deterministic intelligence brief when the AI narrative is absent — a
+    one-liner grounded in the computed tier + the top factors, so the brief
+    doesn't read "Data unavailable" while factors are displayed above it."""
+    if not risk_factors:
+        return "No macro indicators are currently tripping risk thresholds for this name."
+    titles = [(rf.get("title") or "").strip() for rf in risk_factors[:3] if rf.get("title")]
+    lead = ", ".join(titles) if titles else "multiple fronts"
+    return (
+        f"The macro backdrop reads {(threat_level or 'elevated').lower()} on "
+        f"{len(risk_factors)} active factor(s) — chiefly {lead}. Monitor these "
+        f"for shifts that could re-rate the name."
+    )
 
 
 def _derive_macro_vital(

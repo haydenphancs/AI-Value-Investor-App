@@ -52,10 +52,21 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optional[float]:
-    """Compute YoY growth %. Returns None on division by zero or missing data."""
-    if current is None or previous is None or previous == 0:
+    """Compute YoY growth %. Returns None ("not meaningful") whenever a
+    percentage would mislead rather than inform:
+      - missing data,
+      - a non-positive base (previous <= 0 — there is no meaningful growth rate
+        off zero or a loss), or
+      - a sign change into negative (e.g. FCF swinging from +$0.4B to -$23.7B
+        computes a real but absurd -5911%; downstream renders "—" instead).
+    The growth-rate domain is positive→positive; outside it we report n/m so a
+    sign-flip can't surface a nonsense figure in the report or Financials tab.
+    """
+    if current is None or previous is None:
         return None
-    return round((current - previous) / abs(previous) * 100, 2)
+    if previous <= 0 or current < 0:
+        return None
+    return round((current - previous) / previous * 100, 2)
 
 
 def _extract_year(record: Dict[str, Any]) -> str:

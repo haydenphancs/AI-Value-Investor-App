@@ -88,6 +88,38 @@ final class JourneyContentStore {
         remoteByTitle[title] != nil || bundledByTitle[title] != nil
     }
 
+    // MARK: - Duration estimate
+
+    /// Estimated minutes to complete a lesson, derived from the lesson's actual narration
+    /// content instead of a hand-entered number — so the "X min" the UI shows reflects the
+    /// real lesson. Returns nil when no content is available for the title.
+    func estimatedMinutes(forLessonTitled title: String) -> Int? {
+        guard let cards = cards(forLessonTitled: title) else { return nil }
+        return Self.estimatedMinutes(for: cards)
+    }
+
+    /// Words narrated at ~150 WPM (the ~170 WPM clips, eased for comprehension and pauses)
+    /// plus a short per-card transition, rounded up with a 2-minute floor.
+    static func estimatedMinutes(for cards: [LessonTopicCard]) -> Int {
+        let words = cards.reduce(0) { $0 + wordCount(of: $1) }
+        let listeningWPM = 150.0
+        let perCardSeconds = 2.0
+        let seconds = Double(words) / listeningWPM * 60.0 + Double(cards.count) * perCardSeconds
+        return max(2, Int((seconds / 60.0).rounded(.up)))
+    }
+
+    private static func wordCount(of card: LessonTopicCard) -> Int {
+        let text: String
+        if let audio = card.audioText, !audio.isEmpty {
+            text = audio
+        } else {
+            let segments = (card.subtitleSegments ?? []) + (card.contentSegments ?? [])
+            let joined = segments.map(\.text).joined(separator: " ")
+            text = joined.isEmpty ? (card.completionSubtitle ?? "") : joined
+        }
+        return text.split { !$0.isLetter && !$0.isNumber }.count
+    }
+
     /// Fetch lesson content + media URLs from the backend once per session.
     func prefetch() async {
         guard !didPrefetch else { return }

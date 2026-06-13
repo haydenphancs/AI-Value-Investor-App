@@ -151,6 +151,9 @@ enum APIEndpoint: Sendable {
     // MARK: - Learn / Investor Journey
     case getJourney
 
+    // MARK: - Learn / Money Moves
+    case getMoneyMoves
+
     // MARK: - Personas
     case getPersonas
 
@@ -354,6 +357,10 @@ enum APIEndpoint: Sendable {
         // Learn / Investor Journey
         case .getJourney:
             return "/api/v1/learn/journey"
+
+        // Learn / Money Moves
+        case .getMoneyMoves:
+            return "/api/v1/learn/money-moves"
 
         // Personas
         case .getPersonas:
@@ -567,6 +574,9 @@ enum APIEndpoint: Sendable {
             return false
         // Journey lesson content is public
         case .getJourney:
+            return false
+        // Money Moves article content is public
+        case .getMoneyMoves:
             return false
         // Personas are public
         case .getPersonas:

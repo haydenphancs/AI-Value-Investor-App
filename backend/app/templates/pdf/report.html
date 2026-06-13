@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<style>
+  :root { --accent:#1E40AF; --ink:#0F172A; --muted:#64748B; --grid:#E2E8F0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  @page { size: Letter; margin: 0; }
+  html, body {
+    font-family: "Helvetica Neue", Helvetica, Arial, "DejaVu Sans", sans-serif;
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.4;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { position: relative; padding: 22px 40px 24px; }
+  .clear { clear: both; }
+  /* Never split a card across a page boundary — push the whole block instead. */
+  .hero, .summary, table.vitals, .two-col, .legend, .thesis { break-inside: avoid; page-break-inside: avoid; }
+  .section-bar { break-after: avoid; page-break-after: avoid; }
+
+  /* ── Topbar ── */
+  .topbar { border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+  .topbar .brand { float: left; }
+  .brand .mark { font-size: 16px; font-weight: 800; letter-spacing: 1.5px; color: var(--accent); }
+  .brand .sub { font-size: 9.5px; font-weight: 600; color: var(--muted); letter-spacing: .5px; }
+  .topbar .meta { float: right; text-align: right; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
+  .topbar .meta b { color: var(--ink); }
+
+  /* ── Title ── */
+  .title { margin-top: 12px; }
+  .title .name { float: left; }
+  .title .name h1 { font-size: 25px; font-weight: 800; letter-spacing: -.4px; }
+  .title .name .subline { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .persona-chip {
+    float: right; margin-top: 4px;
+    background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE;
+    border-radius: 999px; padding: 5px 13px; font-size: 10px; font-weight: 700;
+  }
+  .persona-chip .lens { font-weight: 500; opacity: .8; }
+
+  /* ── Hero (gauge + fair value) ── */
+  .hero { width: 100%; border-collapse: collapse; margin-top: 14px;
+          border: 1px solid var(--grid); border-radius: 8px; }
+  .hero td { vertical-align: middle; padding: 11px; }
+  .hero .gauge-cell { width: 168px; text-align: center; border-right: 1px solid var(--grid); }
+  .hero .quality-label { font-size: 13px; font-weight: 800; margin-top: 6px; }
+  .hero .quality-sub { font-size: 9.5px; color: var(--muted); letter-spacing: 1px;
+                       text-transform: uppercase; margin-top: 2px; }
+  .stats { width: 100%; border-collapse: collapse; }
+  .stats td { width: 33.33%; padding: 4px 10px; vertical-align: top; }
+  .stats td + td { border-left: 1px solid var(--grid); }
+  .stat .k { color: var(--muted); font-size: 9.5px; text-transform: uppercase;
+             letter-spacing: .6px; font-weight: 700; }
+  .stat .v { font-size: 23px; font-weight: 800; margin-top: 3px; letter-spacing: -.5px; }
+  .stat .note { font-size: 10px; font-weight: 700; margin-top: 2px; }
+  .stat .range { font-size: 9.5px; color: var(--muted); margin-top: 4px; }
+
+  /* ── Section bar ── */
+  .section-bar {
+    background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700;
+    letter-spacing: 1.2px; text-transform: uppercase;
+    padding: 6px 11px; border-radius: 3px; margin: 14px 0 9px;
+  }
+  .section-bar .hint { float: right; font-weight: 500; opacity: .85; letter-spacing: .5px; }
+
+  /* ── Vitals scorecard ── */
+  .vitals { width: 100%; border-collapse: collapse; }
+  .vitals > td { width: 50%; vertical-align: top; }
+  .vitals .col-l { padding-right: 22px; }
+  .vital { margin-bottom: 8px; }
+  .vital .lbl { float: left; font-size: 11px; font-weight: 600; color: #334155; }
+  .vital .val { float: right; font-size: 11px; font-weight: 800; }
+  .vital .track { clear: both; height: 7px; background: #EEF2F6; border-radius: 4px;
+                  margin-top: 4px; overflow: hidden; }
+  .vital .fill { height: 100%; border-radius: 4px; }
+  .caption-note { font-size: 9.5px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Exec summary ── */
+  .summary { margin-top: 12px; border-left: 3px solid var(--accent);
+             background: #F8FAFC; padding: 10px 14px; border-radius: 0 6px 6px 0; }
+  .summary .h { font-size: 9.5px; font-weight: 800; text-transform: uppercase;
+                letter-spacing: 1px; color: var(--accent); margin-bottom: 5px; }
+  .summary p { font-size: 10.5px; line-height: 1.5; color: #334155; }
+
+  /* ── Bull vs Bear thesis ── */
+  .thesis { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .thesis > td { width: 50%; vertical-align: top; }
+  .thesis .col-l { padding-right: 14px; }
+  .thesis .col-r { padding-left: 14px; }
+  .thesis-head { font-size: 11px; font-weight: 800; text-transform: uppercase;
+                 letter-spacing: .6px; padding-bottom: 5px; margin-bottom: 8px;
+                 border-bottom: 2px solid; }
+  .bull .thesis-head { color: #1E40AF; border-color: #1E40AF; }
+  .bear .thesis-head { color: #B91C1C; border-color: #B91C1C; }
+  .thesis ul { list-style: none; }
+  .thesis li { font-size: 10.5px; line-height: 1.45; color: #334155;
+               border-left: 3px solid; padding: 1px 0 1px 9px; margin-bottom: 7px; }
+  .bull li { border-color: #1E40AF; }
+  .bear li { border-color: #B91C1C; }
+
+  /* ── Charts (used by later deep-dive sections) ── */
+  .chart-wrap { text-align: center; }
+  .chart-cap { float: left; font-size: 11px; font-weight: 700; }
+  .chart-chg { float: right; font-size: 11px; font-weight: 800; }
+  .two-col { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .two-col > td { width: 50%; vertical-align: top; padding-top: 4px; }
+  .two-col .col-l { padding-right: 18px; border-right: 1px solid var(--grid); }
+  .two-col .col-r { padding-left: 18px; }
+  .sub-h { font-size: 10.5px; font-weight: 800; text-transform: uppercase;
+           letter-spacing: .8px; color: #334155; margin-bottom: 8px; }
+
+  /* ── Footer ── */
+  .footer { margin-top: 14px; border-top: 1px solid var(--grid); padding-top: 6px;
+            color: #94A3B8; font-size: 8px; }
+  .footer .pg { float: right; }
+  .no-data { color: var(--muted); font-size: 10px; font-style: italic; padding: 14px 0; text-align:center; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark">CAYDEX</div>
+      <div class="sub">AI VALUE INVESTOR · DETAILED ANALYSIS</div>
+    </div>
+    <div class="meta">
+      Report Date <b>{{ live_date or "—" }}</b><br/>
+      Analysis by <b>{{ persona_name }}</b>
+    </div>
+    <div class="clear"></div>
+  </div>
+
+  <!-- Title -->
+  <div class="title">
+    <div class="name">
+      <h1>{{ company_name }}</h1>
+      <div class="subline">{{ symbol }}{% if exchange %} · {{ exchange }}{% endif %}{% if sector %} · {{ sector }}{% endif %}</div>
+    </div>
+    <div class="persona-chip">{{ persona_name }}{% if persona_lens %} <span class="lens">· {{ persona_lens }}</span>{% endif %}</div>
+    <div class="clear"></div>
+  </div>
+
+  <!-- Hero: gauge + fair value -->
+  <table class="hero">
+    <tr>
+      <td class="gauge-cell">
+        {{ charts.gauge | safe }}
+        <div class="quality-label">{{ quality_label }}</div>
+        <div class="quality-sub">Per {{ persona_name }}</div>
+      </td>
+      <td>
+        <table class="stats">
+          <tr>
+            <td>
+              <div class="stat">
+                <div class="k">Fair Value</div>
+                <div class="v">{% if fair_value %}${{ "{:,.2f}".format(fair_value) }}{% else %}—{% endif %}</div>
+                <div class="range">Per Wall Street consensus</div>
+              </div>
+            </td>
+            <td>
+              <div class="stat">
+                <div class="k">Margin of Safety</div>
+                <div class="v" style="color:{{ valuation_color }}">{% if margin_of_safety_pct is not none %}{{ "%+.1f"|format(margin_of_safety_pct) }}%{% else %}—{% endif %}</div>
+                <div class="note" style="color:{{ valuation_color }}">{{ valuation_word }}</div>
+              </div>
+            </td>
+            <td>
+              <div class="stat">
+                <div class="k">Current Price</div>
+                <div class="v">{% if current_price %}${{ "{:,.2f}".format(current_price) }}{% else %}—{% endif %}</div>
+                {% if target_price %}<div class="range">Analyst target ${{ "{:,.0f}".format(target_price) }}</div>{% endif %}
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Quantitative Scorecard -->
+  <div class="section-bar">Quantitative Scorecard<span class="hint">8 vitals · 0–100 scale</span></div>
+  {% if vitals %}
+  <table class="vitals">
+    <td class="col-l">
+      {% for v in vitals[:4] %}
+      <div class="vital">
+        <span class="lbl">{{ v.label }}</span><span class="val" style="color:{{ v.color }}">{{ v.score }}</span>
+        <div class="track"><div class="fill" style="width:{{ v.score }}%;background:{{ v.color }}"></div></div>
+      </div>
+      {% endfor %}
+    </td>
+    <td class="col-r">
+      {% for v in vitals[4:] %}
+      <div class="vital">
+        <span class="lbl">{{ v.label }}</span><span class="val" style="color:{{ v.color }}">{{ v.score }}</span>
+        <div class="track"><div class="fill" style="width:{{ v.score }}%;background:{{ v.color }}"></div></div>
+      </div>
+      {% endfor %}
+    </td>
+  </table>
+  <div class="caption-note">These eight vitals are the inputs {{ persona_name }} weighs to compute the headline Quality Score — shown here as proof behind the rating.</div>
+  {% else %}
+  <div class="no-data">Vital scores unavailable for this report.</div>
+  {% endif %}
+
+  <!-- Executive Summary -->
+  {% if exec_summary %}
+  <div class="summary">
+    <div class="h">Executive Summary</div>
+    <p>{{ exec_summary }}</p>
+  </div>
+  {% endif %}
+
+  <!-- Bull vs Bear Thesis -->
+  <div class="section-bar">Bull vs Bear Thesis</div>
+  {% if bull_case or bear_case %}
+  <table class="thesis">
+    <td class="col-l bull">
+      <div class="thesis-head">▲ Bull Case</div>
+      <ul>
+        {% for point in bull_case %}<li>{{ point }}</li>{% endfor %}
+      </ul>
+    </td>
+    <td class="col-r bear">
+      <div class="thesis-head">▼ Bear Case</div>
+      <ul>
+        {% for point in bear_case %}<li>{{ point }}</li>{% endfor %}
+      </ul>
+    </td>
+  </table>
+  {% else %}
+  <div class="no-data">Thesis unavailable.</div>
+  {% endif %}
+
+  <!-- Footer -->
+  <div class="footer">
+    {{ disclaimer }}
+    <span class="pg">Caydex · Page 1</span>
+  </div>
+
+</div>
+</body>
+</html>

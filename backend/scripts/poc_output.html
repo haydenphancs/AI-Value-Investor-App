@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<style>
+  :root { --accent:#1E40AF; --ink:#0F172A; --muted:#64748B; --grid:#E2E8F0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  @page { size: Letter; margin: 0; }
+  html, body {
+    font-family: "Helvetica Neue", Helvetica, Arial, "DejaVu Sans", sans-serif;
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.4;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { position: relative; padding: 20px 40px 24px; }
+  .clear { clear: both; }
+  /* Never split a card across a page boundary — push the whole block instead. */
+  .hero, .summary, table.vitals, .two-col, .legend { break-inside: avoid; page-break-inside: avoid; }
+  .section-bar { break-after: avoid; page-break-after: avoid; }
+
+  /* ── Topbar ── */
+  .topbar { border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+  .topbar .brand { float: left; }
+  .brand .mark { font-size: 16px; font-weight: 800; letter-spacing: 1.5px; color: var(--accent); }
+  .brand .sub { font-size: 9.5px; font-weight: 600; color: var(--muted); letter-spacing: .5px; }
+  .topbar .meta { float: right; text-align: right; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
+  .topbar .meta b { color: var(--ink); }
+
+  /* ── Title ── */
+  .title { margin-top: 12px; }
+  .title .name { float: left; }
+  .title .name h1 { font-size: 25px; font-weight: 800; letter-spacing: -.4px; }
+  .title .name .subline { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .persona-chip {
+    float: right; margin-top: 4px;
+    background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE;
+    border-radius: 999px; padding: 5px 13px; font-size: 10px; font-weight: 700;
+  }
+  .persona-chip .lens { font-weight: 500; opacity: .8; }
+
+  /* ── Hero (gauge + fair value) ── */
+  .hero { width: 100%; border-collapse: collapse; margin-top: 14px;
+          border: 1px solid var(--grid); border-radius: 8px; }
+  .hero td { vertical-align: middle; padding: 11px; }
+  .hero .gauge-cell { width: 168px; text-align: center; border-right: 1px solid var(--grid); }
+  .hero .quality-label { font-size: 13px; font-weight: 800; margin-top: 6px; }
+  .hero .quality-sub { font-size: 9.5px; color: var(--muted); letter-spacing: 1px;
+                       text-transform: uppercase; margin-top: 2px; }
+  .stats { width: 100%; border-collapse: collapse; }
+  .stats td { width: 33.33%; padding: 4px 10px; vertical-align: top; }
+  .stats td + td { border-left: 1px solid var(--grid); }
+  .stat .k { color: var(--muted); font-size: 9.5px; text-transform: uppercase;
+             letter-spacing: .6px; font-weight: 700; }
+  .stat .v { font-size: 23px; font-weight: 800; margin-top: 3px; letter-spacing: -.5px; }
+  .stat .note { font-size: 10px; font-weight: 700; margin-top: 2px; }
+  .stat .range { font-size: 9.5px; color: var(--muted); margin-top: 4px; }
+
+  /* ── Section bar ── */
+  .section-bar {
+    background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700;
+    letter-spacing: 1.2px; text-transform: uppercase;
+    padding: 6px 11px; border-radius: 3px; margin: 11px 0 8px;
+  }
+  .section-bar .hint { float: right; font-weight: 500; opacity: .85; letter-spacing: .5px; }
+
+  /* ── Vitals ── */
+  .vitals { width: 100%; border-collapse: collapse; }
+  .vitals > td { width: 50%; vertical-align: top; }
+  .vitals .col-l { padding-right: 22px; }
+  .vital { margin-bottom: 7px; }
+  .vital .lbl { float: left; font-size: 11px; font-weight: 600; color: #334155; }
+  .vital .val { float: right; font-size: 11px; font-weight: 800; }
+  .vital .track { clear: both; height: 7px; background: #EEF2F6; border-radius: 4px;
+                  margin-top: 4px; overflow: hidden; }
+  .vital .fill { height: 100%; border-radius: 4px; }
+  .caption-note { font-size: 9.5px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Charts ── */
+  .chart-wrap { text-align: center; }
+  .chart-cap { float: left; font-size: 11px; font-weight: 700; }
+  .chart-chg { float: right; font-size: 11px; font-weight: 800; }
+  .two-col { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .two-col > td { width: 50%; vertical-align: top; padding-top: 4px; }
+  .two-col .col-l { padding-right: 18px; border-right: 1px solid var(--grid); }
+  .two-col .col-r { padding-left: 18px; }
+  .sub-h { font-size: 10.5px; font-weight: 800; text-transform: uppercase;
+           letter-spacing: .8px; color: #334155; margin-bottom: 8px; }
+  .legend { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  .legend td { padding: 3px 0; font-size: 10.5px; }
+  .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+                 margin-right: 7px; vertical-align: middle; }
+  .legend .ct { float: right; font-weight: 800; }
+  .rating-pill { display:inline-block; background:#EFF6FF; color:#1E40AF;
+                 border:1px solid #BFDBFE; border-radius:6px; padding:3px 9px;
+                 font-size:10px; font-weight:800; margin-top:10px; }
+
+  /* ── Exec summary ── */
+  .summary { margin-top: 10px; border-left: 3px solid var(--accent);
+             background: #F8FAFC; padding: 10px 14px; border-radius: 0 6px 6px 0; }
+  .summary .h { font-size: 9.5px; font-weight: 800; text-transform: uppercase;
+                letter-spacing: 1px; color: var(--accent); margin-bottom: 5px; }
+  .summary p { font-size: 10.5px; line-height: 1.5; color: #334155; }
+
+  /* ── Footer ── */
+  /* POC: in-flow footer (single page). The full multi-page report will use a
+     WeasyPrint @page running footer instead. */
+  .footer { margin-top: 12px; border-top: 1px solid var(--grid); padding-top: 6px;
+            color: #94A3B8; font-size: 8px; }
+  .footer .pg { float: right; }
+  .no-data { color: var(--muted); font-size: 10px; font-style: italic; padding: 18px 0; text-align:center; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark">CAYDEX</div>
+      <div class="sub">AI VALUE INVESTOR · DETAILED ANALYSIS</div>
+    </div>
+    <div class="meta">
+      Report Date <b>Jun 13, 2026</b><br/>
+      Analysis by <b>Buffett Agent</b>
+    </div>
+    <div class="clear"></div>
+  </div>
+
+  <!-- Title -->
+  <div class="title">
+    <div class="name">
+      <h1>Oracle Corporation</h1>
+      <div class="subline">ORCL · NYSE · Technology · Software—Infrastructure</div>
+    </div>
+    <div class="persona-chip">Buffett Agent <span class="lens">· Value Lens</span></div>
+    <div class="clear"></div>
+  </div>
+
+  <!-- Hero: gauge + fair value -->
+  <table class="hero">
+    <tr>
+      <td class="gauge-cell">
+        <svg xmlns="http://www.w3.org/2000/svg" width="140" height="140" viewBox="0 0 140 140"><circle cx="70.0" cy="70.0" r="57.0" fill="none" stroke="#EEF2F6" stroke-width="13"/><circle cx="70.0" cy="70.0" r="57.0" fill="none" stroke="#2563EB" stroke-width="13" stroke-linecap="round" stroke-dasharray="257.9 358.1" transform="rotate(-90 70.0 70.0)"/><text x="70.0" y="68.0" text-anchor="middle" dominant-baseline="central" font-size="42" font-weight="800" fill="#0F172A" font-family="Helvetica, Arial, sans-serif">72</text><text x="70.0" y="98" text-anchor="middle" font-size="12" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif" letter-spacing="1">OUT OF 100</text></svg>
+        <div class="quality-label">Fair Quality Business</div>
+        <div class="quality-sub">Per Buffett Agent</div>
+      </td>
+      <td>
+        <table class="stats">
+          <tr>
+            <td>
+              <div class="stat">
+                <div class="k">Fair Value</div>
+                <div class="v">$196.00</div>
+                <div class="range">Per Wall Street consensus</div>
+              </div>
+            </td>
+            <td>
+              <div class="stat">
+                <div class="k">Margin of Safety</div>
+                <div class="v" style="color:#2563EB">+13.7%</div>
+                <div class="note" style="color:#2563EB">Undervalued</div>
+              </div>
+            </td>
+            <td>
+              <div class="stat">
+                <div class="k">Current Price</div>
+                <div class="v">$172.40</div>
+<div class="range">Analyst target $205</div>              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Quantitative Scores -->
+  <div class="section-bar">Quantitative Scores<span class="hint">8 vitals · 0–100 scale</span></div>
+  <table class="vitals">
+    <td class="col-l">
+      <div class="vital">
+        <span class="lbl">Profitability</span><span class="val" style="color:#2563EB">84</span>
+        <div class="track"><div class="fill" style="width:84%;background:#2563EB"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Financial Health</span><span class="val" style="color:#F59E0B">58</span>
+        <div class="track"><div class="fill" style="width:58%;background:#F59E0B"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Growth</span><span class="val" style="color:#2563EB">76</span>
+        <div class="track"><div class="fill" style="width:76%;background:#2563EB"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Valuation</span><span class="val" style="color:#F59E0B">47</span>
+        <div class="track"><div class="fill" style="width:47%;background:#F59E0B"></div></div>
+      </div>
+    </td>
+    <td class="col-r">
+      <div class="vital">
+        <span class="lbl">Insider Activity</span><span class="val" style="color:#F59E0B">52</span>
+        <div class="track"><div class="fill" style="width:52%;background:#F59E0B"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Macro Resilience</span><span class="val" style="color:#F59E0B">63</span>
+        <div class="track"><div class="fill" style="width:63%;background:#F59E0B"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Analyst Sentiment</span><span class="val" style="color:#2563EB">81</span>
+        <div class="track"><div class="fill" style="width:81%;background:#2563EB"></div></div>
+      </div>
+      <div class="vital">
+        <span class="lbl">Price Momentum</span><span class="val" style="color:#2563EB">89</span>
+        <div class="track"><div class="fill" style="width:89%;background:#2563EB"></div></div>
+      </div>
+    </td>
+  </table>
+  <div class="caption-note">These eight vitals are the inputs Cay AI weighs (per investor lens) to compute the headline Quality Score.</div>
+
+  <!-- Price -->
+  <div class="section-bar">Price Action<span class="hint">Trailing 12M</span></div>
+  <div>
+    <span class="chart-cap">ORCL — Trailing 12M Close</span>
+<span class="chart-chg" style="color:#2563EB">+41.2%</span>    <div class="clear"></div>
+  </div>
+  <div class="chart-wrap"><svg xmlns="http://www.w3.org/2000/svg" width="700" height="94" viewBox="0 0 700 94"><defs><linearGradient id="sparkfill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E40AF" stop-opacity="0.22"/><stop offset="100%" stop-color="#1E40AF" stop-opacity="0.02"/></linearGradient></defs><line x1="4" y1="10.0" x2="696" y2="10.0" stroke="#E2E8F0" stroke-width="1"/><line x1="4" y1="44.0" x2="696" y2="44.0" stroke="#E2E8F0" stroke-width="1"/><line x1="4" y1="78.0" x2="696" y2="78.0" stroke="#E2E8F0" stroke-width="1"/><path d="M4.0,78.0 L4.0,78.0 L61.7,70.8 L119.3,74.7 L177.0,58.7 L234.7,47.1 L292.3,53.1 L350.0,36.3 L407.7,39.5 L465.3,27.1 L523.0,20.2 L580.7,25.5 L638.3,13.4 L696.0,10.0 L696.0,78.0 Z" fill="url(#sparkfill)"/><path d="M4.0,78.0 L61.7,70.8 L119.3,74.7 L177.0,58.7 L234.7,47.1 L292.3,53.1 L350.0,36.3 L407.7,39.5 L465.3,27.1 L523.0,20.2 L580.7,25.5 L638.3,13.4 L696.0,10.0" fill="none" stroke="#1E40AF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="696.0" cy="10.0" r="3.4" fill="#2563EB"/></svg></div>
+
+  <!-- Consensus + Moat -->
+  <table class="two-col">
+    <td class="col-l">
+      <div class="sub-h">Wall Street Consensus</div>
+      <svg xmlns="http://www.w3.org/2000/svg" width="320" height="22" viewBox="0 0 320 22"><defs><clipPath id="consclip"><rect x="0" y="0" width="320" height="22" rx="6" ry="6"/></clipPath></defs><g clip-path="url(#consclip)"><rect x="0.0" y="0" width="56.89" height="22" fill="#1E3A8A"/><rect x="56.9" y="0" width="156.44" height="22" fill="#60A5FA"/><rect x="213.3" y="0" width="85.33" height="22" fill="#F59E0B"/><rect x="298.7" y="0" width="14.22" height="22" fill="#F87171"/><rect x="312.9" y="0" width="7.11" height="22" fill="#B91C1C"/></g></svg>
+      <table class="legend">
+        <tr><td><span class="dot" style="background:#1E3A8A"></span>Strong Buy<span class="ct">8</span></td></tr>
+        <tr><td><span class="dot" style="background:#60A5FA"></span>Buy<span class="ct">22</span></td></tr>
+        <tr><td><span class="dot" style="background:#F59E0B"></span>Hold<span class="ct">12</span></td></tr>
+        <tr><td><span class="dot" style="background:#F87171"></span>Sell<span class="ct">2</span></td></tr>
+        <tr><td><span class="dot" style="background:#B91C1C"></span>Strong Sell<span class="ct">1</span></td></tr>
+      </table>
+      <span class="rating-pill">45 analysts covering</span>
+    </td>
+    <td class="col-r">
+      <div class="sub-h">Competitive Moat <span style="font-weight:500;color:#94A3B8;text-transform:none;letter-spacing:0">(vs. industry — dashed)</span></div>
+      <div class="chart-wrap"><svg xmlns="http://www.w3.org/2000/svg" width="196" height="196" viewBox="0 0 196 196"><polygon points="98.0,86.5 108.0,92.2 108.0,103.8 98.0,109.5 88.0,103.8 88.0,92.2" fill="none" stroke="#E2E8F0" stroke-width="1"/><polygon points="98.0,75.0 117.9,86.5 117.9,109.5 98.0,121.0 78.1,109.5 78.1,86.5" fill="none" stroke="#E2E8F0" stroke-width="1"/><polygon points="98.0,63.5 127.9,80.8 127.9,115.2 98.0,132.5 68.1,115.3 68.1,80.8" fill="none" stroke="#E2E8F0" stroke-width="1"/><polygon points="98.0,52.0 137.8,75.0 137.8,121.0 98.0,144.0 58.2,121.0 58.2,75.0" fill="none" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="98.0" y2="52.0" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="137.8" y2="75.0" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="137.8" y2="121.0" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="98.0" y2="144.0" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="58.2" y2="121.0" stroke="#E2E8F0" stroke-width="1"/><line x1="98.0" y1="98.0" x2="58.2" y2="75.0" stroke="#E2E8F0" stroke-width="1"/><polygon points="98.0,65.8 126.7,81.4 121.9,111.8 98.0,127.9 66.9,115.9 70.9,82.4" fill="none" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="98.0,57.5 123.5,83.3 119.9,110.6 98.0,125.6 65.3,116.9 66.5,79.8" fill="#1E40AF" fill-opacity="0.18" stroke="#1E40AF" stroke-width="2"/><circle cx="98.0" cy="57.5" r="2.6" fill="#1E40AF"/><circle cx="123.5" cy="83.3" r="2.6" fill="#1E40AF"/><circle cx="119.9" cy="110.6" r="2.6" fill="#1E40AF"/><circle cx="98.0" cy="125.6" r="2.6" fill="#1E40AF"/><circle cx="65.3" cy="116.9" r="2.6" fill="#1E40AF"/><circle cx="66.5" cy="79.8" r="2.6" fill="#1E40AF"/><text x="98.0" y="36.0" text-anchor="middle" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Switching</text><text x="151.7" y="67.0" text-anchor="start" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Brand</text><text x="151.7" y="129.0" text-anchor="start" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Network</text><text x="98.0" y="160.0" text-anchor="middle" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Cost Adv.</text><text x="44.3" y="129.0" text-anchor="end" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Scale</text><text x="44.3" y="67.0" text-anchor="end" dominant-baseline="central" font-size="9.5" font-weight="600" fill="#64748B" font-family="Helvetica, Arial, sans-serif">Intangibles</text></svg></div>
+    </td>
+  </table>
+
+  <!-- Exec summary -->
+  <div class="summary">
+    <div class="h">Executive Summary</div>
+    <p>Oracle has transformed from a legacy database vendor into a credible hyperscale cloud contender, with OCI and a fast-growing RPO backlog underwriting multi-year revenue visibility. Through a value lens it screens as a fair-quality compounder — deep switching costs and scale support durable margins, while elevated leverage and a full valuation temper the margin of safety.</p>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    Generated by Cay AI for informational purposes only. Not investment advice. Figures reflect a point-in-time snapshot at report date.
+    <span class="pg">Caydex · Page 1</span>
+  </div>
+
+</div>
+</body>
+</html>

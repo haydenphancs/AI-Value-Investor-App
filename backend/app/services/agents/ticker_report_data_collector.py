@@ -1516,6 +1516,12 @@ class TickerReportDataCollector:
         # This matches the Stage A prompt rule that requires a quote
         # for any non-default status.
         revenue_forecast = dict(out.revenue_forecast_partial)
+        # Embed a FROZEN monthly price series for the Earnings Timeline overlay so
+        # the panel renders from the report (no live /earnings fetch → no
+        # point-in-time leak showing today's prices on an old report).
+        revenue_forecast["timeline_prices"] = _build_timeline_prices(
+            out.historical, revenue_forecast.get("annual_timeline") or []
+        )
         ai_rf = ai.get("revenue_forecast") or {}
         _overlay_ai_guidance(revenue_forecast, ai_rf)
         # Earnings beat/miss track record (last ~6 reported quarters).
@@ -3347,6 +3353,50 @@ def _build_annual_timeline(
             "is_forecast": is_fc,
         })
     return series
+
+
+def _build_timeline_prices(
+    historical: Any, annual_timeline: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Monthly close series (last trading day per month) spanning the Earnings
+    Timeline's ACTUAL years, for its price overlay.
+
+    EMBEDDED in the report so it's FROZEN at generation: the iOS panel used to
+    fetch /earnings live for this line, which surfaced TODAY's prices (and newer
+    quarters) on an OLD report — a point-in-time leak. Monthly (~12 pts/yr) is
+    plenty for an annual chart and ~20x cheaper than the daily series, and reuses
+    `historical` the collector already fetched (no new FMP call). [] when no data.
+    """
+    actual_years = [
+        int(p["period"])
+        for p in (annual_timeline or [])
+        if not p.get("is_forecast") and str(p.get("period", "")).isdigit()
+    ]
+    if not actual_years:
+        return []
+    year_min = min(actual_years)
+
+    monthly: Dict[str, Tuple[str, float]] = {}  # "YYYY-MM" -> (date, close)
+    for rec in _hist_list(historical):
+        ds = (rec.get("date") or "")[:10]
+        if len(ds) < 7:
+            continue
+        try:
+            if int(ds[:4]) < year_min:
+                continue
+        except ValueError:
+            continue
+        close = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
+        if close <= 0:
+            continue
+        mkey = ds[:7]
+        prev = monthly.get(mkey)
+        if prev is None or ds > prev[0]:  # keep the latest close within the month
+            monthly[mkey] = (ds, close)
+
+    return [
+        {"date": d, "price": round(c, 2)} for d, c in sorted(monthly.values())
+    ]
 
 
 def _forecast_analyst_count(

@@ -237,6 +237,11 @@ struct EarningsTrackRecordPointDTO: Codable {
     }
 }
 
+struct TimelinePricePointDTO: Codable {
+    let date: String
+    let price: Double
+}
+
 struct RevenueForecastDTO: Codable {
     let cagr: Double
     let epsGrowth: Double
@@ -249,6 +254,7 @@ struct RevenueForecastDTO: Codable {
     let earningsTrackRecord: [EarningsTrackRecordPointDTO]?
     let beatSummary: String?
     let annualTimeline: [RevenueProjectionDTO]?
+    let timelinePrices: [TimelinePricePointDTO]?
     let forecastAnalystCount: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -263,6 +269,7 @@ struct RevenueForecastDTO: Codable {
         case earningsTrackRecord = "earnings_track_record"
         case beatSummary = "beat_summary"
         case annualTimeline = "annual_timeline"
+        case timelinePrices = "timeline_prices"
         case forecastAnalystCount = "forecast_analyst_count"
     }
 }
@@ -813,7 +820,10 @@ extension TickerReportAPIResponse {
                     isForecast: $0.isForecast
                 )
             },
-            forecastAnalystCount: revenueForecast.forecastAnalystCount
+            forecastAnalystCount: revenueForecast.forecastAnalystCount,
+            timelinePrices: (revenueForecast.timelinePrices ?? []).map {
+                EarningsDailyPricePoint(date: $0.date, price: $0.price)
+            }
         )
 
         // Insider Data

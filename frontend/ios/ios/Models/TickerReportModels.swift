@@ -272,6 +272,10 @@ struct ReportRevenueForecast {
     var annualTimeline: [RevenueProjection] = []
     // Analysts behind the nearest forecast year — forecast attribution.
     var forecastAnalystCount: Int? = nil
+    // Monthly close series (FROZEN at generation) for the Earnings Timeline
+    // PRICE overlay — embedded in the report so the panel never fetches
+    // /earnings live (which would show today's prices on an old report).
+    var timelinePrices: [EarningsDailyPricePoint] = []
 
     var formattedCAGR: String {
         "+\(String(format: "%.0f", cagr))% CAGR"
@@ -1377,7 +1381,15 @@ extension TickerReportData {
                 RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true),
                 RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true)
             ],
-            forecastAnalystCount: 31
+            forecastAnalystCount: 31,
+            timelinePrices: [
+                EarningsDailyPricePoint(date: "2023-06-30", price: 118.0),
+                EarningsDailyPricePoint(date: "2023-12-29", price: 105.0),
+                EarningsDailyPricePoint(date: "2024-06-28", price: 140.0),
+                EarningsDailyPricePoint(date: "2024-12-31", price: 166.0),
+                EarningsDailyPricePoint(date: "2025-06-30", price: 210.0),
+                EarningsDailyPricePoint(date: "2025-12-31", price: 195.0)
+            ]
         ),
         insiderData: ReportInsiderData(
             sentiment: .negative,

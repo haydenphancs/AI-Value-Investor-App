@@ -248,20 +248,58 @@ def test_lehman_lands_severe_or_critical_for_both_sectors():
     assert fin_vital["score"]["status"] == "critical"
 
 
+# ── D2. Busy-but-moderate macro (the over-eager-SEVERE regression) ──────
+
+
+def test_broad_high_stack_without_severe_fronts_caps_at_high():
+    """Several HIGH-severity macro risks at once — sticky (not spiking)
+    inflation, a notable oil move, a HIGH credit reading, elevated vol — but
+    NONE individually SEVERE. This must read HIGH, not SEVERE, even for an
+    Energy ticker whose oil β=1.5 inflates the composite tail past the >3.5
+    severe cutoff. SEVERE is reserved for a genuine multi-front crisis (≥2
+    deterministic SEVERE fronts: 2008 / COVID), not a pile of "high" readings.
+
+    Regression for the user-reported over-estimate ("Severe" where it should be
+    "High"): before the severity gate this stack read SEVERE because β-amplified
+    HIGH factors cleared the cutoff and there were ≥2 HIGH (not severe) fronts.
+    """
+    fred_rows = [
+        _fred("CPIAUCSL", latest=305.0, yoy_pct=3.8),    # HIGH (3-5), not severe
+        _fred("BAMLH0A0HYM2", latest=4.8),                # HIGH credit (4-6)
+        _fred("DGS10", latest=4.7),                        # HIGH (4.5-5.5)
+    ]
+    fmp_rows = [
+        _fmp("CLUSD", change_3m_pct=-24.0, change_1m_pct=-9.0),  # HIGH oil move (|24|)
+        _fmp("^VIX", level=24.0, change_1m_pct=10.0),             # ELEV (22-30)
+    ]
+    # Energy: oil β=1.5 is the case most likely to over-read the tail into severe.
+    _, tier, comp, _ = _run(fred_rows, fmp_rows, "Energy")
+    assert tier == "high", (
+        f"a broad HIGH stack (no severe fronts) must cap at high, got {tier} ({comp})"
+    )
+    # The composite reached the severe band and the gate is what held it at
+    # "high" (capped to 3.5) — proves the gate fired, not a trivially low score.
+    assert comp == 3.5, f"expected gate to cap composite at 3.5, got {comp}"
+
+
 # ── E. Sector mediation sanity check ─────────────────────────────────
 
 
 def test_sector_beta_makes_a_difference():
-    """A REIT and a software company looking at the SAME mid-tier
-    macro stack should not produce identical composites — Real Estate
-    weights rates and credit more heavily, so its composite should
-    exceed the Tech reading.
+    """A REIT and a software company looking at the SAME ELEVATED macro stack
+    should not produce identical composites — Real Estate weights rates and
+    credit more heavily, so its composite should exceed the Tech reading.
+
+    Kept in the ELEVATED band (below the severe gate) on purpose: once a stack
+    is severe enough to trip the gate, both sectors cap at the high-band ceiling
+    (composite 3.5) by design — β differentiation lives in the sub-severe range,
+    which is what this exercises.
     """
     fred_rows = [
-        _fred("FEDFUNDS", latest=5.0, change_6mo_pct=0.6),    # HIGH level + ELEV Δ
-        _fred("DGS10", latest=4.6),                             # HIGH (4.5-5.5)
-        _fred("BAMLH0A0HYM2", latest=4.5),                     # HIGH (4-6)
-        _fred("CPIAUCSL", latest=300.0, yoy_pct=3.2),          # HIGH (3-5)
+        _fred("FEDFUNDS", latest=2.5, change_6mo_pct=0.4),    # ELEV level + ELEV Δ
+        _fred("DGS10", latest=3.2),                             # ELEV (3-4.5)
+        _fred("BAMLH0A0HYM2", latest=3.4),                     # ELEV (3-4)
+        _fred("CPIAUCSL", latest=300.0, yoy_pct=2.4),          # ELEV (2-3)
     ]
     fmp_rows: List[Dict[str, Any]] = []
     _, _, tech_comp, _ = _run(fred_rows, fmp_rows, "Technology")
@@ -278,7 +316,7 @@ def test_sector_beta_makes_a_difference():
 def test_ai_factor_alone_caps_at_high_not_severe():
     """A lone AI-emitted factor can NEVER drive the tier to severe/critical.
     Gemini severities are capped at "high", and severe/critical require ≥2
-    sourced (non-AI) high fronts — so a single high geopolitical signal lands
+    sourced (non-AI) SEVERE fronts — so a single high geopolitical signal lands
     "high" for BOTH Tech and Utilities. Sector β still nudges the composite
     (Tech geopolitical β=1.3 > Utilities 1.0), but the breadth gate holds the
     tier at "high".

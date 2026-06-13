@@ -60,18 +60,21 @@ struct ReportScoreGauge: View {
         }
     }
 
+    /// Integer actually displayed — rounded ONCE so the number, the arc color,
+    /// and the caller-passed label all key off the same value. Mirrors
+    /// `ReportQualityRating.displayScore`.
+    private var displayScore: Int { Int(score.rounded()) }
+
     private var progress: Double {
-        score / maxScore
+        guard maxScore > 0 else { return 0 }
+        return min(1.0, max(0.0, score / maxScore))
     }
 
+    /// Color comes from `QualityBand` (the SAME source the label uses), keyed
+    /// off `displayScore` — so a rounded "50" can never render under a
+    /// "Weak"/orange arc.
     private var scoreColor: Color {
-        switch score {
-        case 90...100: return AppColors.bullish          // Excellent Quality Business
-        case 75..<90: return AppColors.bullish           // Strong Quality Business
-        case 50..<75: return AppColors.neutral           // Fair Quality Business
-        case 30..<50: return AppColors.alertOrange       // Weak Quality Business
-        default: return AppColors.bearish                // Distressed Quality Business
-        }
+        QualityBand.forScore(displayScore).color
     }
 
     var body: some View {
@@ -92,8 +95,8 @@ struct ReportScoreGauge: View {
                     .frame(width: size.circleSize, height: size.circleSize)
                     .rotationEffect(.degrees(-90))
 
-                // Score text
-                Text(String(format: "%.0f", score))
+                // Score text — integer, matching the band that colors the arc.
+                Text("\(displayScore)")
                     .font(.system(size: size.scoreFontSize, weight: .bold, design: .rounded))
                     .foregroundColor(AppColors.textPrimary)
             }

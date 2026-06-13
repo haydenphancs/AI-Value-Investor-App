@@ -61,6 +61,10 @@ class InvestorJourneyViewModel: ObservableObject {
     func loadData() {
         isLoading = true
 
+        // Fetch authored lesson content (cards + media URLs) from the backend so it's
+        // ready by the time a lesson is opened; falls back to bundled content on failure.
+        Task { await JourneyContentStore.shared.prefetch() }
+
         // Simulate network delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.journeyData = InvestorJourneyData.sampleData
@@ -90,14 +94,17 @@ class InvestorJourneyViewModel: ObservableObject {
         // Find the level containing this lesson
         let levelInfo = findLevelForLesson(lesson)
 
-        // For now, return sample content based on the lesson title
-        // In a real app, this would fetch from a backend or local storage
+        // Prefer authored content (bundled cards + pre-recorded AI narration) when available;
+        // otherwise fall back to the generated sample cards for not-yet-authored lessons.
+        let cards = JourneyContentStore.shared.cards(forLessonTitled: lesson.title)
+            ?? generateCardsForLesson(lesson)
+
         return LessonStoryContent(
             lessonLabel: "LESSON \(levelInfo.lessonIndex + 1): \(lesson.title.uppercased())",
             lessonNumber: levelInfo.lessonIndex + 1,
             totalLessonsInLevel: levelInfo.totalInLevel,
             estimatedMinutes: lesson.durationMinutes,
-            cards: generateCardsForLesson(lesson)
+            cards: cards
         )
     }
 

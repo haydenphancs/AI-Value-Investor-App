@@ -64,7 +64,7 @@ struct ReportMoatCompetitionSection: View {
                     valueColor: data.marketDynamics.cagrColor,
                     subtitle: nil
                 )
-                .frame(maxWidth: 75)
+                .frame(maxWidth: 70)
 
                 Divider()
                     .frame(height: 40)
@@ -79,9 +79,16 @@ struct ReportMoatCompetitionSection: View {
                 // TickerReportModels.swift) so stale Census source years
                 // don't show on a report opened years later.
                 VStack(alignment: .center, spacing: AppSpacing.xxs) {
-                    Text("Market Size (TAM)")
+                    // Scope-prefixed header: "US - Market Size (TAM)" /
+                    // "Global - Market Size (TAM)" so the market size is never
+                    // ambiguous. lineLimit + minimumScaleFactor keep the longer
+                    // "Global" variant on one line; the side columns are trimmed
+                    // a little to give this middle column room.
+                    Text(data.marketDynamics.tamHeaderLabel)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
 
                     if data.marketDynamics.tamIsAvailable {
                         HStack(spacing: AppSpacing.xxs) {
@@ -110,22 +117,6 @@ struct ReportMoatCompetitionSection: View {
                                 .font(AppTypography.captionTiny)
                                 .foregroundColor(AppColors.textMuted)
                         }
-
-                        // Explicit US vs Global scope. The TAM is US-domestic
-                        // (Census/FRED) for most industries but Global for
-                        // globally-competitive ones, so label it unambiguously.
-                        if let scope = data.marketDynamics.scopeLabel {
-                            ReportSentimentBadge(
-                                text: scope,
-                                textColor: data.marketDynamics.scopeIsGlobal
-                                    ? AppColors.primaryBlue : AppColors.textSecondary,
-                                backgroundColor: (data.marketDynamics.scopeIsGlobal
-                                    ? AppColors.primaryBlue : AppColors.textSecondary)
-                                    .opacity(0.15),
-                                fontSize: AppTypography.captionTiny
-                            )
-                            .padding(.top, 1)
-                        }
                     } else {
                         Text("—")
                             .font(AppTypography.labelSmall).fontWeight(.bold)
@@ -150,7 +141,7 @@ struct ReportMoatCompetitionSection: View {
                     valueColor: AppColors.textPrimary,
                     subtitle: nil
                 )
-                .frame(maxWidth: 105)
+                .frame(maxWidth: 92)
             }
             .padding(.top, AppSpacing.sm)
 

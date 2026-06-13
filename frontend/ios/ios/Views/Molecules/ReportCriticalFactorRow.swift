@@ -11,37 +11,38 @@ struct ReportCriticalFactorRow: View {
     let factor: CriticalFactor
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            // Severity icon
-            Image(systemName: factor.severity.iconName)
-                .font(AppTypography.iconDefault)
-                .foregroundColor(factor.severity.color)
-                .frame(width: 24, height: 24)
-
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            // Icon + title share ONE row (mirrors the "Insight" header), so the
+            // description and Watch line below span the FULL card width with no
+            // left gutter — instead of being indented past a tall icon column.
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: factor.severity.iconName)
+                    .font(AppTypography.iconDefault)
+                    .foregroundColor(factor.severity.color)
                 Text(factor.title)
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
+            }
 
-                Text(factor.description)
+            Text(factor.description)
+                .font(AppTypography.label)
+                .foregroundColor(AppColors.textSecondary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Forward-looking action — what to monitor next. Hidden when the
+            // backend didn't produce one (older cached reports / fallback).
+            if let watch = factor.watch, !watch.isEmpty {
+                let watchLabel = Text("Watch: ")
+                    .font(AppTypography.label).fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryBlue)
+                let watchText = Text(watch)
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
-                    .lineSpacing(2)
-
-                // Forward-looking action — what to monitor next. Hidden when the
-                // backend didn't produce one (older cached reports / fallback).
-                if let watch = factor.watch, !watch.isEmpty {
-                    let watchLabel = Text("Watch: ")
-                        .font(AppTypography.label).fontWeight(.semibold)
-                        .foregroundColor(AppColors.primaryBlue)
-                    let watchText = Text(watch)
-                        .font(AppTypography.label)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("\(watchLabel)\(watchText)")
-                        .lineSpacing(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, AppSpacing.xxs)
-                }
+                Text("\(watchLabel)\(watchText)")
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, AppSpacing.xxs)
             }
         }
         .padding(AppSpacing.md)

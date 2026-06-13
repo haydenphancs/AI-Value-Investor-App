@@ -461,6 +461,7 @@ struct LessonTopicCard: Identifiable {
 
     // Common properties
     var audioText: String?  // Text for AI voice to read
+    var audioClip: String?  // Optional pre-recorded narration resource name (bundled .m4a). When set, played instead of on-device TTS.
 }
 
 /// Destination for the CTA button on completion card
@@ -499,17 +500,21 @@ struct LessonStoryContent: Identifiable {
 // MARK: - Lesson Topic Card Builders
 
 extension LessonTopicCard {
-    /// Create a title card
+    /// Create a title card. `imageName` reserves a hero-image slot (first card); `audioClip` plays pre-recorded narration.
     static func titleCard(
         title: String,
         subtitle: [HighlightedTextSegment],
-        audioText: String? = nil
+        audioText: String? = nil,
+        audioClip: String? = nil,
+        imageName: String? = nil
     ) -> LessonTopicCard {
         LessonTopicCard(
             cardType: .title,
             title: title,
             subtitleSegments: subtitle,
-            audioText: audioText
+            imageName: imageName,
+            audioText: audioText,
+            audioClip: audioClip
         )
     }
 
@@ -517,25 +522,29 @@ extension LessonTopicCard {
     static func contentCard(
         imageName: String? = nil,
         content: [HighlightedTextSegment],
-        audioText: String? = nil
+        audioText: String? = nil,
+        audioClip: String? = nil
     ) -> LessonTopicCard {
         LessonTopicCard(
             cardType: .content,
             imageName: imageName,
             contentSegments: content,
-            audioText: audioText
+            audioText: audioText,
+            audioClip: audioClip
         )
     }
 
-    /// Create a completion card
+    /// Create a completion card. `imageName` reserves an image slot (last card).
     static func completionCard(
         title: String = "You're ready.",
         subtitle: String = "You've learned the core idea. Practice with a real stock to reinforce it.",
         ctaTitle: String? = nil,
-        ctaDestination: LessonCTADestination = .analyzeStock
+        ctaDestination: LessonCTADestination = .analyzeStock,
+        imageName: String? = nil
     ) -> LessonTopicCard {
         LessonTopicCard(
             cardType: .completion,
+            imageName: imageName,
             completionTitle: title,
             completionSubtitle: subtitle,
             ctaButtonTitle: ctaTitle ?? ctaDestination.defaultTitle,

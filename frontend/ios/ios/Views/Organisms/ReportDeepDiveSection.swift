@@ -9,6 +9,9 @@ import SwiftUI
 
 struct ReportDeepDiveSection<Content: View>: View {
     let module: DeepDiveModule
+    /// Suppresses the bottom hairline divider for the LAST module so the parent's
+    /// rounded card ends cleanly at its curved bottom corners.
+    var isLast: Bool = false
     @ViewBuilder let content: () -> Content
 
     @State private var isExpanded: Bool = false
@@ -65,8 +68,10 @@ struct ReportDeepDiveSection<Content: View>: View {
                 .buttonStyle(PlainButtonStyle())
             }
 
-            Divider()
-                .background(AppColors.textMuted.opacity(0.15))
+            if !isLast {
+                Divider()
+                    .background(AppColors.textMuted.opacity(0.15))
+            }
         }
         .background(AppColors.cardBackground)
     }

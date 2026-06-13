@@ -13,6 +13,7 @@ struct LessonTitleCard: View {
     let subtitleSegments: [HighlightedTextSegment]
     let currentWordRange: NSRange
     let isReading: Bool
+    var imageName: String? = nil
 
     // Computed full subtitle text for reading
     var subtitleText: String {
@@ -22,7 +23,12 @@ struct LessonTitleCard: View {
     var body: some View {
         VStack(spacing: AppSpacing.xl) {
             Spacer()
-                .frame(height: 60)
+                .frame(height: 40)
+
+            // Optional hero-image slot (first card of the lesson)
+            if let imageName = imageName, !imageName.isEmpty {
+                LessonImageSlot(imageName: imageName, height: 180)
+            }
 
             // Main title
             Text(title)

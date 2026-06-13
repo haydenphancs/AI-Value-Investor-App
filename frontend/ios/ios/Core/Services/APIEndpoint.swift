@@ -148,6 +148,9 @@ enum APIEndpoint: Sendable {
     // MARK: - Home
     case getHomeFeed
 
+    // MARK: - Learn / Investor Journey
+    case getJourney
+
     // MARK: - Personas
     case getPersonas
 
@@ -347,6 +350,10 @@ enum APIEndpoint: Sendable {
         // Home
         case .getHomeFeed:
             return "/api/v1/home/feed"
+
+        // Learn / Investor Journey
+        case .getJourney:
+            return "/api/v1/learn/journey"
 
         // Personas
         case .getPersonas:
@@ -557,6 +564,9 @@ enum APIEndpoint: Sendable {
             return false
         // Home feed uses optional auth on the backend
         case .getHomeFeed:
+            return false
+        // Journey lesson content is public
+        case .getJourney:
             return false
         // Personas are public
         case .getPersonas:

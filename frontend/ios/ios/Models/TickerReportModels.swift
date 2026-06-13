@@ -35,47 +35,68 @@ enum ReportAgentPersona: String, CaseIterable {
 
 // MARK: - Report Quality Rating
 
-struct ReportQualityRating {
-    let score: Double       // 0-100
-    let maxScore: Double    // 100
-    let label: String       // Auto-generated based on score
+/// The five headline quality tiers. SINGLE SOURCE OF TRUTH for the label, the
+/// gauge color, AND the band boundaries — all keyed off the SAME rounded
+/// integer the gauge displays, so the number, label, and color can never
+/// disagree. (Before this, the gauge printed `%.0f` (49.6 → "50") while the
+/// label/color switched on the raw Double (49.6 → 30..<50 → "Weak"/orange),
+/// producing the "50 shown under a Weak/orange arc" boundary bug at every cut
+/// point.) Bands are integer ranges because the displayed score is an integer.
+enum QualityBand {
+    case excellent, strong, fair, weak, distressed
 
-    var formattedScore: String {
-        String(format: "%.0f", score)
-    }
-
-    var formattedMax: String {
-        "/ \(Int(maxScore))"
-    }
-
-    // Helper to generate label from score
-    static func labelForScore(_ score: Double) -> String {
+    /// Map an already-rounded 0–100 score to its band.
+    static func forScore(_ score: Int) -> QualityBand {
         switch score {
-        case 90...100:
-            return "Excellent Quality Business"
-        case 75..<90:
-            return "Strong Quality Business"
-        case 50..<75:
-            return "Fair Quality Business"
-        case 30..<50:
-            return "Weak Quality Business"
-        default:
-            return "Distressed Quality Business"
+        case 90...:   return .excellent
+        case 75...89: return .strong
+        case 50...74: return .fair
+        case 30...49: return .weak
+        default:      return .distressed   // < 30
         }
     }
 
-    // Convenience initializer that auto-generates label
+    var label: String {
+        switch self {
+        case .excellent:  return "Excellent Quality Business"
+        case .strong:     return "Strong Quality Business"
+        case .fair:       return "Fair Quality Business"
+        case .weak:       return "Weak Quality Business"
+        case .distressed: return "Distressed Quality Business"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .excellent, .strong: return AppColors.bullish
+        case .fair:               return AppColors.neutral
+        case .weak:               return AppColors.alertOrange
+        case .distressed:         return AppColors.bearish
+        }
+    }
+}
+
+struct ReportQualityRating {
+    let score: Double       // raw 0-100 (continuous; drives the gauge arc fill)
+    let maxScore: Double    // 100
+
+    /// The integer actually shown in the gauge. Rounded ONCE here so the
+    /// displayed number, the label, and the color all derive from this single
+    /// value and stay mutually consistent.
+    var displayScore: Int { Int(score.rounded()) }
+
+    /// Band of the *displayed* (rounded) score — not the raw Double.
+    var band: QualityBand { QualityBand.forScore(displayScore) }
+
+    /// Auto-generated from `band`, so it always agrees with the shown number.
+    var label: String { band.label }
+
+    var formattedScore: String { "\(displayScore)" }
+    var formattedMax: String { "/ \(Int(maxScore))" }
+
     init(score: Double, maxScore: Double = 100) {
         self.score = score
         self.maxScore = maxScore
-        self.label = ReportQualityRating.labelForScore(score)
-    }
-
-    // Full initializer for custom labels
-    init(score: Double, maxScore: Double, label: String) {
-        self.score = score
-        self.maxScore = maxScore
-        self.label = label
     }
 }
 
@@ -839,7 +860,7 @@ struct MarketDynamics {
     // (older cached reports / no source) → no pill shown.
     let tamScope: String?
 
-    /// "Global" / "US" pill label, or nil when scope is unknown (no pill).
+    /// "Global" / "US" scope label, or nil when scope is unknown.
     var scopeLabel: String? {
         switch tamScope?.lowercased() {
         case "global": return "Global"
@@ -848,8 +869,11 @@ struct MarketDynamics {
         }
     }
 
-    /// True for global scope — drives the pill's accent color.
-    var scopeIsGlobal: Bool { tamScope?.lowercased() == "global" }
+    /// Market-size column header, scope-prefixed when known:
+    /// "US - Market Size (TAM)" / "Global - Market Size (TAM)".
+    var tamHeaderLabel: String {
+        scopeLabel.map { "\($0) - Market Size (TAM)" } ?? "Market Size (TAM)"
+    }
 
     var formattedCAGR: String {
         guard let cagr = cagr5Yr else { return "—" }

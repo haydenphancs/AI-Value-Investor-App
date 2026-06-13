@@ -264,9 +264,13 @@ class IndustryOverrideService:
         )
 
         for industry, sector in CURATED_OVERRIDE_INDUSTRIES:
-            phase_a_tam = phase_a_tams.get(industry)
+            pa = phase_a_tams.get(industry) or {}
+            phase_a_tam = pa.get("tam")
+            phase_a_label = pa.get("source_label")
             try:
-                result = await self._research_one(industry, sector, phase_a_tam)
+                result = await self._research_one(
+                    industry, sector, phase_a_tam, phase_a_label,
+                )
             except Exception as exc:
                 logger.error(
                     "industry_override: research_one threw for industry=%r: %s",
@@ -294,6 +298,16 @@ class IndustryOverrideService:
                     )
 
         if not dry_run:
+            # Self-heal the US/Global scope label: a curated industry whose row
+            # holds a global figure (research-sourced) must be tam_scope='global'
+            # even when a re-run KEPT an existing better value (rejected) or the
+            # row predates the tam_scope column. Idempotent.
+            backfilled = self._backfill_global_scope()
+            if backfilled:
+                logger.info(
+                    "industry_override: backfilled tam_scope='global' on %d row(s)",
+                    backfilled,
+                )
             self._write_audit_log(run_id, results)
 
         return self._summarize(run_id, results, started, dry_run=dry_run)
@@ -303,6 +317,7 @@ class IndustryOverrideService:
         industry: str,
         sector: str,
         phase_a_tam: Optional[float],
+        phase_a_label: Optional[str] = None,
     ) -> OverrideResult:
         """One industry: call Gemini with Google Search grounding, parse,
         validate, return result. The real source URLs come from the
@@ -367,7 +382,7 @@ class IndustryOverrideService:
         payload["_grounding_sources"] = grounding_sources
         payload["_search_queries"] = search_queries
 
-        validation = self._validate_response(payload, phase_a_tam)
+        validation = self._validate_response(payload, phase_a_tam, phase_a_label)
         if validation["status"] != "ok":
             return OverrideResult(
                 industry=industry, sector=sector,
@@ -404,6 +419,7 @@ class IndustryOverrideService:
         self,
         payload: Dict[str, Any],
         phase_a_tam: Optional[float],
+        phase_a_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run numeric/structural validation. Returns {status, reason}.
 
@@ -453,19 +469,27 @@ class IndustryOverrideService:
             return {"status": "rejected_validation",
                     "reason": f"future_year {future_year} <= current_year {current_year}"}
 
-        # 3. Phase-A floor — the override exists to FIX Census/FRED
-        # US-domestic undercounting of GLOBAL TAM. If Gemini comes back
-        # LOWER than Phase A, the search either narrowed the industry
-        # definition (e.g. only the ad market, not all internet content)
-        # or hallucinated low — reject and keep Phase A's value.
-        if phase_a_tam and phase_a_tam > 0:
+        # 3. Phase-A floor — protect a TRUSTWORTHY existing value from a noisy
+        # low re-estimate, but ONLY when "lower" is actually wrong:
+        #   * US Census → a precise US figure, a hard LOWER BOUND for the global
+        #     market (global ≥ US), so a below-Census Gemini number is
+        #     under-researched → reject, keep Census.
+        #   * prior research/global override → don't let one bad run lower a
+        #     good global number → reject, keep it.
+        #   * BROAD FRED GDP proxy (USMANNGSP all-manufacturing, USINFONGSP
+        #     all-information, ...) → whole-sector GDP that OVERCOUNTS the
+        #     industry. The floor must NOT block the accurate, smaller global
+        #     figure here → SKIP the floor so Gemini's industry number wins.
+        label = (phase_a_label or "").lower()
+        phase_a_is_broad_fred = ("via fred" in label) or label.startswith("bea ")
+        if phase_a_tam and phase_a_tam > 0 and not phase_a_is_broad_fred:
             if current_tam < phase_a_tam:
                 return {
                     "status": "rejected_below_phase_a",
                     "reason": (
                         f"Gemini TAM ${current_tam:,.1f}B < Phase A "
-                        f"${phase_a_tam:,.1f}B; override only raises, "
-                        f"never lowers"
+                        f"${phase_a_tam:,.1f}B ({phase_a_label or '?'}); a "
+                        f"Census/research baseline only raises, never lowers"
                     ),
                 }
             ratio = current_tam / phase_a_tam
@@ -481,30 +505,36 @@ class IndustryOverrideService:
 
     # ── Supabase I/O ──
 
-    def _load_phase_a_tams(self, industries: List[str]) -> Dict[str, float]:
-        """Snapshot the current Phase A TAMs for the curated industries.
+    def _load_phase_a_tams(self, industries: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Snapshot the current Phase A TAM + source_label per curated industry.
 
-        Used as the baseline for divergence sanity checks. If Phase A
-        hasn't run yet for some reason (first deploy), the dict simply
-        doesn't have that industry → divergence check is skipped.
+        Baseline for the floor check. `source_label` lets the floor tell apart a
+        PRECISE US Census number (a true lower bound for the global market) and a
+        prior research/global override (protect from a noisy low re-estimate)
+        from a BROAD FRED GDP proxy (whole-sector GDP that OVERCOUNTS the
+        industry → the floor must NOT block the accurate, smaller global figure).
+        Missing industry → no baseline → floor skipped.
         """
         try:
             sb = get_supabase()
             res = (
                 sb.table("industry_dossier")
-                .select("industry,current_tam_b")
+                .select("industry,current_tam_b,source_label")
                 .in_("industry", industries)
                 .execute()
             )
         except Exception as exc:
             logger.warning("industry_override: failed to load Phase A TAMs: %s", exc)
             return {}
-        out: Dict[str, float] = {}
+        out: Dict[str, Dict[str, Any]] = {}
         for row in res.data or []:
             ind = row.get("industry")
             tam = row.get("current_tam_b")
             if ind and isinstance(tam, (int, float)):
-                out[ind] = float(tam)
+                out[ind] = {
+                    "tam": float(tam),
+                    "source_label": row.get("source_label") or "",
+                }
         return out
 
     def _apply_to_dossier(
@@ -573,6 +603,50 @@ class IndustryOverrideService:
         # Bust the dossier service's in-memory cache so the new row is
         # picked up on the next read.
         get_industry_dossier_service().reset_cache()
+
+    def _backfill_global_scope(self) -> int:
+        """Ensure every curated industry whose dossier row holds a GLOBAL figure
+        is labeled `tam_scope='global'`. A research-sourced row (source_label is
+        neither US Census nor 'via FRED') is by definition a global override, so
+        it must read 'global' — including rows a re-run KEPT (rejected_below_
+        phase_a) and rows written before the tam_scope column existed. Census/
+        FRED rows are left as 'us'. Idempotent; safe to run every Phase B.
+        """
+        try:
+            sb = get_supabase()
+            res = (
+                sb.table("industry_dossier")
+                .select("industry,source_label,tam_scope")
+                .in_("industry", [ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES])
+                .execute()
+            )
+        except Exception as exc:
+            logger.warning("industry_override: backfill scope read failed: %s", exc)
+            return 0
+
+        updated = 0
+        for row in res.data or []:
+            label = (row.get("source_label") or "").lower()
+            is_us_source = (
+                "census" in label or "via fred" in label or label.startswith("bea ")
+            )
+            if not is_us_source and row.get("tam_scope") != "global":
+                try:
+                    (
+                        sb.table("industry_dossier")
+                        .update({"tam_scope": "global"})
+                        .eq("industry", row["industry"])
+                        .execute()
+                    )
+                    updated += 1
+                except Exception as exc:
+                    logger.warning(
+                        "industry_override: backfill scope update failed for %s: %s",
+                        row.get("industry"), exc,
+                    )
+        if updated:
+            get_industry_dossier_service().reset_cache()
+        return updated
 
     def _write_audit_log(self, run_id: str, results: List[OverrideResult]) -> None:
         """Bulk-insert audit rows."""

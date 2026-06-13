@@ -1852,14 +1852,18 @@ class TickerReportDataCollector:
 
         # Deterministic, persona-weighted headline score — the SINGLE source
         # of truth for BOTH entry paths (the report endpoint and the research
-        # agent both flow through assemble_report). Overrides the AI's Stage-A
-        # self-rating (`quality_score` above), keeping it only as the fallback
-        # when no vitals could be built. This is what makes the number
-        # reproducible and grounded in the modules rather than LLM variance.
-        if scoring_inputs:
-            quality_score = compute_quality_score(
-                out.persona_key, {"_scoring_inputs": scoring_inputs}
-            )
+        # agent both flow through assemble_report). It rolls up the MEASURED
+        # vitals and renormalizes the unmeasured ones out, which makes the
+        # number reproducible and grounded in the modules rather than LLM
+        # variance. Only in the pathological case where NOT ONE vital was
+        # measurable does it return 0.0 — there (and only there) we keep the
+        # AI's Stage-A self-rating from above rather than publish a misleading
+        # 0 / "Distressed".
+        computed = compute_quality_score(
+            out.persona_key, {"_scoring_inputs": scoring_inputs}
+        )
+        if computed > 0.0:
+            quality_score = computed
 
         # ── Top-level assembly ────────────────────────────────────────
         report: Dict[str, Any] = {
@@ -2254,15 +2258,43 @@ def _snapshot_to_valuation_status(rating: int) -> Tuple[str, float]:
     return "fair_value", 0.0  # rating=0 → unavailable, neutral default
 
 
+def _valuation_score_from_upside(upside: float) -> float:
+    """Continuous 0-10 valuation score from DCF/snapshot upside %.
+
+    Monotone in upside, anchored to the discrete `_VALUATION_SCALE` band
+    values so new (continuous) and legacy (string-fallback) reports stay
+    comparable: -40 -> 1.0, -10 -> 3.5 (overpriced edge), 0 -> 5.5 (fair),
+    +10 -> 7.5 (underpriced edge), +30 -> 9.5 (deep value), +50 -> 10. Unlike
+    the 4-bucket scale, a -50% overvaluation now scores strictly below a -12%
+    one (the bucket flattened both to 3.0).
+    """
+    pts = [(-40.0, 1.0), (-10.0, 3.5), (0.0, 5.5), (10.0, 7.5), (30.0, 9.5), (50.0, 10.0)]
+    if upside <= pts[0][0]:
+        return pts[0][1]
+    if upside >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= upside <= x1:
+            t = (upside - x0) / (x1 - x0)
+            return round(y0 + t * (y1 - y0), 1)
+    return 5.5
+
+
+def _valuation_score_status(score: float) -> str:
+    return "good" if score >= 6.5 else "critical" if score < 3.5 else "neutral"
+
+
 def _build_valuation_vital(
     current_price: float,
     fair_value: Optional[float],
     upside: Optional[float],
     valuation_snapshot: Optional[SnapshotItemResponse] = None,
 ) -> Dict[str, Any]:
-    """Sets status from real DCF upside, with multi-metric snapshot as
-    a tiebreaker. When DCF is missing, snapshot rating drives the
-    decision instead of defaulting to "fair_value" with 0% upside.
+    """Sets status from real DCF upside, with multi-metric snapshot as a
+    tiebreaker, plus a CONTINUOUS 0-10 `score.value` from the upside (was
+    quantized to 4 string buckets by the persona scorer). When DCF is missing,
+    snapshot rating drives the decision; when BOTH are missing the dimension
+    is UNMEASURED (score.value=None) so the scorer renormalizes it out.
     """
     snap_rating = int(valuation_snapshot.rating) if (
         valuation_snapshot is not None and valuation_snapshot.rating
@@ -2272,14 +2304,20 @@ def _build_valuation_vital(
         # No DCF — defer to the multi-metric snapshot when available.
         if snap_rating > 0:
             status, snap_upside = _snapshot_to_valuation_status(snap_rating)
+            score_value = _valuation_score_from_upside(snap_upside)
             return {
+                "score": {"value": score_value, "status": _valuation_score_status(score_value)},
                 "status": status,
                 "current_price": round(current_price, 2),
                 "fair_value": round(current_price, 2),
                 "upside_potential": snap_upside,
             }
-        # Neither DCF nor snapshot — keep the honest fair_value default.
+        # Neither DCF nor snapshot — UNMEASURED. Keep the honest fair_value
+        # default for the display-only status/fair_value consumers, but emit
+        # score.value=None so this dimension renormalizes OUT of the headline
+        # rather than voting a neutral 5.5 that drags the score toward 50.
         return {
+            "score": {"value": None, "status": "unmeasured"},
             "status": "fair_value",
             "current_price": round(current_price, 2),
             "fair_value": round(current_price, 2),
@@ -2310,7 +2348,9 @@ def _build_valuation_vital(
             adjusted = dcf_level + (1 if snap_level > dcf_level else -1)
             status = _LEVEL_TO_STATUS.get(adjusted, status)
 
+    score_value = _valuation_score_from_upside(upside)
     return {
+        "score": {"value": score_value, "status": _valuation_score_status(score_value)},
         "status": status,
         "current_price": round(current_price, 2),
         "fair_value": round(fair_value, 2),
@@ -2426,20 +2466,29 @@ def _build_revenue_vital(
 def _build_forecast_vital(
     revenue_cagr: Optional[float], eps_cagr: Optional[float]
 ) -> Dict[str, Any]:
+    # No forward estimates at all → the dimension is UNMEASURED, not neutral.
+    # Emit score.value=None so compute_quality_score renormalizes it out rather
+    # than voting a 5.0 that drags the headline toward 50.
+    measured = revenue_cagr is not None or eps_cagr is not None
     rev = revenue_cagr if revenue_cagr is not None else 0.0
     eps = eps_cagr if eps_cagr is not None else 0.0
-    if rev >= 15:
+    if not measured:
+        status, outlook = "neutral", "No Forward Estimates"
+    elif rev >= 15:
         status, outlook = "good", "Accelerating Growth"
     elif rev < 0:
         status, outlook = "warning", "Decelerating"
     else:
         status, outlook = "neutral", "Steady Growth"
 
-    # Responsive 0-10 (was hard-coded 7.0): revenue CAGR drives the base,
-    # EPS CAGR tilts it ±1. rev +40% → ~10, flat → 5, −30% → ~1.
-    base = 5.0 + max(-30.0, min(40.0, rev)) / 8.0
-    eps_tilt = max(-40.0, min(40.0, eps)) / 40.0
-    score_value = round(max(0.0, min(10.0, base + eps_tilt)), 1)
+    if measured:
+        # Responsive 0-10 (was hard-coded 7.0): revenue CAGR drives the base,
+        # EPS CAGR tilts it ±1. rev +40% → ~10, flat → 5, −30% → ~1.
+        base = 5.0 + max(-30.0, min(40.0, rev)) / 8.0
+        eps_tilt = max(-40.0, min(40.0, eps)) / 40.0
+        score_value = round(max(0.0, min(10.0, base + eps_tilt)), 1)
+    else:
+        score_value = None
 
     return {
         "score": {"value": score_value, "status": status},
@@ -2661,13 +2710,25 @@ def _build_wall_street_sections(
             elif d.label == "Strong Sell":
                 strong_sell = int(d.count or 0)
 
-    # ── Vital status ──────────────────────────────────────────────────
-    target_or_fair = target_price if target_price > 0 else (fair_value or 0.0)
-    ws_upside = (
-        round(((target_or_fair - current_price) / current_price) * 100, 1)
-        if current_price > 0 else 0.0
+    # ── Vital status & score — ANALYST sentiment only ────────────────
+    # This dimension reflects ANALYST conviction (price targets + consensus
+    # rating + 12-mo momentum), NOT the DCF fair-value upside — that belongs to
+    # the valuation dimension, and borrowing it here would double-count the
+    # same signal for personas that weight both. No analyst coverage at all
+    # (no targets, no grades, no rating actions) → UNMEASURED: score.value=None
+    # so compute_quality_score renormalizes it out instead of voting a neutral
+    # 5.0 that drags the headline toward 50.
+    analyst_signal = (
+        target_price > 0
+        or (strong_buy + buy + hold + sell + strong_sell) > 0
+        or (upgrades + downgrades + maintains) > 0
     )
-    if ws_upside > 20:
+    # Target upside only when a REAL analyst price target exists (never the DCF).
+    target_upside = (
+        round(((target_price - current_price) / current_price) * 100, 1)
+        if target_price > 0 and current_price > 0 else 0.0
+    )
+    if target_upside > 20:
         ws_status = "good"
     elif consensus_rating == "strong_sell":
         ws_status = "critical"
@@ -2676,17 +2737,18 @@ def _build_wall_street_sections(
     else:
         ws_status = "neutral"
 
-    # Responsive 0-10 (was hard-coded 7.0): analyst target upside drives the
-    # base, the consensus rating nudges it, and 12-mo momentum (upgrades minus
-    # downgrades) tilts ±1.5. No analyst coverage → ws_upside 0 → neutral ~5.0
-    # (honest default, never a fabricated bullish 7.0).
+    # Responsive 0-10: analyst target upside drives the base, the consensus
+    # rating nudges it, and 12-mo momentum (upgrades − downgrades) tilts ±1.5.
     _CONSENSUS_NUDGE = {
         "strong_buy": 1.0, "buy": 0.5, "hold": 0.0, "sell": -1.0, "strong_sell": -2.0,
     }
-    ws_base = 5.0 + max(-40.0, min(40.0, ws_upside)) / 8.0
-    ws_momentum = max(-1.5, min(1.5, (upgrades - downgrades) * 0.25))
-    ws_score_value = round(max(0.0, min(10.0,
-        ws_base + _CONSENSUS_NUDGE.get(consensus_rating, 0.0) + ws_momentum)), 1)
+    if not analyst_signal:
+        ws_score_value = None
+    else:
+        ws_base = 5.0 + max(-40.0, min(40.0, target_upside)) / 8.0
+        ws_momentum = max(-1.5, min(1.5, (upgrades - downgrades) * 0.25))
+        ws_score_value = round(max(0.0, min(10.0,
+            ws_base + _CONSENSUS_NUDGE.get(consensus_rating, 0.0) + ws_momentum)), 1)
 
     wall_street_vital = {
         "score": {"value": ws_score_value, "status": ws_status},
@@ -3620,11 +3682,14 @@ def _build_insider_sections(
     }
 
     # Vital score: 1 (heavy selling) → 10 (heavy buying), centered at 5.
+    # No informative insider transactions in the window → UNMEASURED: emit
+    # score.value=None so compute_quality_score renormalizes it out instead of
+    # voting a neutral 5.0 that drags the headline toward 50.
     if (buy_value + sell_value) > 0:
         ratio = (buy_value - sell_value) / (buy_value + sell_value)
         score = max(1.0, min(10.0, 5.0 + ratio * 5.0))
     else:
-        score = 5.0
+        score = None
 
     insider_vital_partial = {
         "score": {"value": score, "status": status},
@@ -6360,11 +6425,14 @@ def _compute_macro_threat(
          data can push the composite into the severe/critical band. (The
          "tier is computed deterministically, never delegated to Gemini"
          design promise — now actually enforced.)
-      2. REQUIRE BREADTH — "severe"/"critical" require ≥2 distinct
-         deterministic high-or-worse fronts (distinct `category` among
-         non-AI factors with severity ≥ "high"). A lone extreme indicator
-         (e.g. a deep yield-curve inversion) caps at "high"; correlated
-         rate metrics collapse to one front.
+      2. REQUIRE SEVERE BREADTH — "severe"/"critical" require ≥2 distinct
+         deterministic SEVERE-or-worse fronts (distinct `category` among
+         non-AI factors with severity ≥ "severe"). A pile of merely "high"
+         readings — even many, even amplified by sector β into a severe-
+         looking composite — is held at "high"; the top tiers mean a real
+         multi-front crisis (2008 / COVID), not a busy-but-moderate macro
+         backdrop. A lone extreme indicator caps at "high"; correlated rate
+         metrics collapse to one front.
 
     Empty risk-factor set → ("low", 1.0). No fabrication.
 
@@ -6376,8 +6444,9 @@ def _compute_macro_threat(
         return "low", 1.0
 
     _HIGH = _SEVERITY_INT["high"]
+    _SEVERE = _SEVERITY_INT["severe"]
     weighted: List[float] = []
-    deterministic_high_fronts = set()
+    deterministic_severe_fronts = set()
     for rf in risk_factors:
         sev_str = (rf.get("severity") or "low").lower()
         sev_int = _SEVERITY_INT.get(sev_str, 1)
@@ -6391,19 +6460,25 @@ def _compute_macro_threat(
         beta = _beta(sector, risk_group)
         w = min(5.0, max(0.5, sev_int * beta))
         weighted.append(w)
-        # A "front" = a distinct macro category flashing high+ from real
-        # (non-AI) data. Multiple rate metrics collapse to one front.
-        if not is_ai and sev_int >= _HIGH:
-            deterministic_high_fronts.add(rf.get("category") or risk_group)
+        # A severe "front" = a distinct macro category flashing SEVERE+ (not
+        # merely high) from real (non-AI) data. A pile of "high" readings — even
+        # β-amplified — does NOT count: the severe tier is reserved for a real
+        # multi-front crisis (2008 / COVID), where individual gauges (credit,
+        # recession, vol) hit their TOP bands. Correlated metrics collapse to
+        # one front.
+        if not is_ai and sev_int >= _SEVERE:
+            deterministic_severe_fronts.add(rf.get("category") or risk_group)
 
     breadth = sum(weighted) / len(weighted)
     tail = max(weighted)
     composite = 0.5 * breadth + 0.5 * tail
     tier = _composite_to_tier(composite)
 
-    # Breadth gate: severe/critical require ≥2 sourced high fronts. A lone
-    # extreme factor (or an AI-inflated tail) is held at "high".
-    if tier in ("severe", "critical") and len(deterministic_high_fronts) < 2:
+    # Severity gate: severe/critical require ≥2 sourced SEVERE+ fronts — a
+    # genuine multi-front crisis. A stack of "high" factors (however many, and
+    # even amplified by sector β into a severe-looking composite) is held at
+    # "high": threat tracks how IMPORTANT the events are, not how many there are.
+    if tier in ("severe", "critical") and len(deterministic_severe_fronts) < 2:
         tier = "high"
         composite = min(composite, 3.5)
 

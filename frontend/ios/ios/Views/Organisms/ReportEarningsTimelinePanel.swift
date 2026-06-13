@@ -6,8 +6,9 @@
 //  it replaced the old 4-bar ReportForecastChart. Reported actual revenue + EPS
 //  flowing GAPLESSLY into the analyst forecast, with a share-PRICE toggle,
 //  horizontal scroll, and a tap-to-inspect popup (all in EarningsTimelineChart).
-//  Price is fetched lazily from the /earnings endpoint (not carried in the
-//  report payload), so the panel owns that small bit of async state.
+//  The PRICE series is EMBEDDED in the report payload (frozen at generation),
+//  so the panel renders it directly — NO live /earnings fetch. That keeps an
+//  old report point-in-time accurate (price reflects the run date, not today).
 //
 //  This is the same content that used to live in the "View full timeline" sheet,
 //  minus the sheet chrome and the explanatory caption notes.
@@ -16,15 +17,15 @@
 import SwiftUI
 
 struct ReportEarningsTimelinePanel: View {
-    let ticker: String
     let timeline: [RevenueProjection]   // gapless actuals -> forecast
+    /// Frozen monthly price series embedded in the report (NOT fetched live), so
+    /// the overlay shows the price as of when the report was generated.
+    let dailyPrices: [EarningsDailyPricePoint]
     /// Tapped column for the chart's inspect popup — owned by the section so a
     /// tap outside the chart can dismiss it.
     @Binding var selectedIndex: Int?
 
     @State private var showPrice = true
-    @State private var dailyPrices: [EarningsDailyPricePoint] = []
-    @State private var didLoad = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -46,16 +47,6 @@ struct ReportEarningsTimelinePanel: View {
 
             legend
                 .padding(.top, AppSpacing.md)
-        }
-        .task {
-            guard !didLoad else { return }
-            didLoad = true
-            // Lazy, on-demand — price isn't in the report payload. Reuses the
-            // cached /earnings endpoint; silent on failure (chart just omits the
-            // price line).
-            if let dto = try? await StockRepository.shared.getEarnings(ticker: ticker) {
-                dailyPrices = dto.toDisplayModel().dailyPriceHistory
-            }
         }
     }
 
@@ -90,8 +81,8 @@ struct ReportEarningsTimelinePanel: View {
 
 #Preview {
     ReportEarningsTimelinePanel(
-        ticker: "ORCL",
         timeline: TickerReportData.sampleOracle.revenueForecast.annualTimeline,
+        dailyPrices: TickerReportData.sampleOracle.revenueForecast.timelinePrices,
         selectedIndex: .constant(nil)
     )
     .padding()

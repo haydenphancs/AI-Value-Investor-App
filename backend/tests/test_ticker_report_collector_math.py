@@ -24,6 +24,7 @@ from app.services.agents.ticker_report_data_collector import (
     _absolute_threshold_fallback,
     _apply_tam_source,
     _normalize_ai_tam_billions,
+    _build_timeline_prices,
     _build_competitors,
     _directness_from_rank,
     _moat_multiplier,
@@ -1891,6 +1892,32 @@ def test_apply_tam_drops_implausible_ai_value():
     assert md["current_tam"] == 0.0
     assert md["future_tam"] == 0.0            # dropped, not 100000.0
     assert md["tam_source_label"] is None     # no overlay happened
+
+
+def test_build_timeline_prices_monthly_frozen_series():
+    """The Earnings Timeline price overlay is EMBEDDED (frozen) at generation —
+    a monthly close series over the timeline's ACTUAL years, built from the
+    `historical` the collector already has. (The iOS panel previously fetched
+    /earnings live, leaking today's prices onto an old report.)"""
+    annual_timeline = [
+        {"period": "2024", "is_forecast": False},
+        {"period": "2025", "is_forecast": False},
+        {"period": "2026", "is_forecast": True},   # forecast year — no price
+    ]
+    historical = {"historical": [
+        {"date": "2023-12-29", "close": 100.0},   # before first actual year → dropped
+        {"date": "2024-01-31", "close": 110.0},
+        {"date": "2024-01-15", "close": 108.0},   # same month, earlier → not kept
+        {"date": "2024-02-29", "close": 120.0},
+        {"date": "2025-06-30", "close": 200.0},
+    ]}
+    pts = _build_timeline_prices(historical, annual_timeline)
+    # Oldest-first; pre-2024 dropped; one (latest) close per month.
+    assert [p["date"] for p in pts] == ["2024-01-31", "2024-02-29", "2025-06-30"]
+    assert [p["price"] for p in pts] == [110.0, 120.0, 200.0]
+    # No actual years (forecast-only) or no history → empty.
+    assert _build_timeline_prices(historical, [{"period": "2026", "is_forecast": True}]) == []
+    assert _build_timeline_prices({}, annual_timeline) == []
 
 
 def test_apply_tam_rejects_number_without_source_quote():

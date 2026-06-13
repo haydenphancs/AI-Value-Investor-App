@@ -90,6 +90,13 @@ class EarningsTrackRecordPointResponse(BaseModel):
     beat: bool
 
 
+class TimelinePricePointResponse(BaseModel):
+    """One monthly close for the Earnings Timeline price overlay."""
+
+    date: str  # "yyyy-MM-dd"
+    price: float
+
+
 class RevenueForecastResponse(BaseModel):
     cagr: float
     eps_growth: float
@@ -100,6 +107,11 @@ class RevenueForecastResponse(BaseModel):
     # sheet. Independent of the curated `projections` window above; the client
     # uses this directly. Empty on older cached reports / when no data.
     annual_timeline: List[RevenueProjectionResponse] = Field(default_factory=list)
+    # Monthly close series spanning the timeline's ACTUAL years, for the Earnings
+    # Timeline PRICE overlay. EMBEDDED at generation so the report stays frozen
+    # point-in-time — the panel no longer fetches /earnings live (that showed
+    # TODAY's prices on an old report). Empty on older cached reports / no data.
+    timeline_prices: List[TimelinePricePointResponse] = Field(default_factory=list)
     # Number of analysts behind the nearest forecast year (FMP numAnalysts*),
     # shown as forecast attribution. None when unavailable / older reports.
     forecast_analyst_count: Optional[int] = None

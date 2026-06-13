@@ -25,8 +25,8 @@ struct ReportFutureForecastSection: View {
             // reports that predate the annual_timeline payload.
             if !forecast.annualTimeline.isEmpty {
                 ReportEarningsTimelinePanel(
-                    ticker: ticker,
                     timeline: forecast.annualTimeline,
+                    dailyPrices: forecast.timelinePrices,
                     selectedIndex: $selectedTimelineIndex
                 )
             } else {

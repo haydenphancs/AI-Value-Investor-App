@@ -174,7 +174,12 @@ struct TickerReportView: View {
     // MARK: - Deep Dive Modules
 
     private func deepDiveModulesSection(_ report: TickerReportData) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Hide the Hidden Market Signals module when no congress / short-interest
+        // data is available for this ticker.
+        let modules = viewModel.deepDiveModules.filter { module in
+            module.type != .hiddenMarketSignals || report.hiddenMarketSignals != nil
+        }
+        return VStack(alignment: .leading, spacing: 0) {
             Text("Deep Dive Modules")
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
@@ -182,16 +187,24 @@ struct TickerReportView: View {
                 .padding(.bottom, AppSpacing.md)
 
             VStack(spacing: 0) {
-                ForEach(viewModel.deepDiveModules.filter { module in
-                    // Hide the Hidden Market Signals module when no congress /
-                    // short-interest data is available for this ticker.
-                    module.type != .hiddenMarketSignals || report.hiddenMarketSignals != nil
-                }) { module in
-                    ReportDeepDiveSection(module: module) {
+                ForEach(Array(modules.enumerated()), id: \.element.id) { index, module in
+                    ReportDeepDiveSection(
+                        module: module,
+                        isLast: index == modules.count - 1
+                    ) {
                         deepDiveContent(for: module.type, report: report)
                     }
                 }
             }
+            // One rounded card (top + bottom curves) wrapping the whole stack,
+            // matching the Bull/Bear case + Critical Factors cards. clipShape
+            // rounds the first module's top and the last module's bottom; the
+            // per-module dividers separate them inside.
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                    .fill(AppColors.cardBackground)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
             .padding(.horizontal, AppSpacing.lg)
         }
     }

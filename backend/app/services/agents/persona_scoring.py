@@ -153,6 +153,13 @@ def _vital_score(
         value = score_obj.get("value")
         if isinstance(value, (int, float)):
             return float(value)
+        # An explicit `score` dict whose value is None is a DELIBERATE
+        # "unmeasured" signal from the builder (no analyst coverage, no
+        # forward estimates, no insider trades, no DCF/snapshot). Return None
+        # so compute_quality_score renormalizes this dimension out — do NOT
+        # fall through to the legacy string scale (that bridge is only for old
+        # reports that carry no `score` dict at all).
+        return None
 
     # Back-compat: derive 0-10 from the status/label string fields.
     if vital_name == "valuation":
@@ -169,12 +176,15 @@ def compute_quality_score(
 ) -> float:
     """Persona-weighted overall score in [0, 100].
 
-    Rolls the 8 vital scores (each 0-10) into a single number using the
-    persona's weight vector, then RENORMALIZES over the vitals actually
-    present so missing data redistributes weight instead of capping the
-    score. A dimension we couldn't measure should drop out and let the
-    measured ones speak — not be scored as if the company FAILED it.
-    When nothing is measurable, returns 0.0.
+    Rolls the 9 vital scores into a single number using the persona's weight
+    vector, then RENORMALIZES over the vitals actually present so missing data
+    redistributes weight instead of capping the score. A dimension we couldn't
+    measure should drop out and let the measured ones speak — not be scored as
+    if the company FAILED it. When nothing is measurable, returns 0.0.
+
+    SHARED 0-10 ANCHOR: every builder emits its vital on the same scale —
+    5.0 = neutral/par, >=6.5 = good, <3.5 = weak. Keep that anchor when adding
+    or tuning a vital, otherwise the persona weights stop being comparable.
 
     Unknown persona keys fall back to equal weights across all 8 vitals,
     so calling this with a bad key never crashes and never silently

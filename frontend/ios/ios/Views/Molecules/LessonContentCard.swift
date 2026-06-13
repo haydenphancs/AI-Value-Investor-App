@@ -20,15 +20,14 @@ struct LessonContentCard: View {
     }
 
     var body: some View {
-        VStack(spacing: AppSpacing.xxxl) {
+        VStack(spacing: AppSpacing.xl) {
             Spacer()
-                .frame(height: 40)
 
-            // Image placeholder or actual image
-            imageSection
-
-            Spacer()
-                .frame(height: AppSpacing.xl)
+            // Optional image slot — content cards are text-focused, so only shown
+            // when an image is explicitly provided for this card.
+            if let imageName = imageName, !imageName.isEmpty {
+                LessonImageSlot(imageName: imageName)
+            }
 
             // Content text with reading highlight
             ReadingHighlightSegmentedText(
@@ -43,26 +42,6 @@ struct LessonContentCard: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    @ViewBuilder
-    private var imageSection: some View {
-        if let imageName = imageName, !imageName.isEmpty {
-            // Actual image from assets
-            Image(imageName)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .frame(height: 200)
-                .padding(.horizontal, AppSpacing.xxl)
-        } else {
-            // Placeholder text for image
-            Text("An image here")
-                .font(AppTypography.titleHero).fontWeight(.regular)
-                .foregroundColor(AppColors.textPrimary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 150)
-        }
     }
 }
 

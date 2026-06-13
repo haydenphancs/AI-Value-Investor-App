@@ -23,6 +23,7 @@ from app.api.v1.endpoints import (
     portfolios,
     whales,
     live_price,
+    learn,
 )
 
 api_router = APIRouter()
@@ -44,4 +45,5 @@ api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"]
 api_router.include_router(portfolios.router, prefix="/portfolios", tags=["Portfolios"])
 api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
+api_router.include_router(learn.router, prefix="/learn", tags=["Learn"])
 api_router.include_router(live_price.router, tags=["Live Price"])

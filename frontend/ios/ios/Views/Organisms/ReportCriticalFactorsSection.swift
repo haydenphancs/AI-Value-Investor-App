@@ -30,7 +30,7 @@ struct ReportCriticalFactorsSection: View {
                 }
             }
             .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                RoundedRectangle(cornerRadius: AppCornerRadius.large)
                     .fill(AppColors.cardBackground)
             )
         }

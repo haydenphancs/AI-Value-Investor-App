@@ -14,6 +14,7 @@ struct LessonCompletionCard: View {
     let totalLessons: Int
     let estimatedMinutes: Int
     let ctaButtonTitle: String
+    var imageName: String? = nil
     var onCTATapped: (() -> Void)?
     var onCloseTapped: (() -> Void)?
 
@@ -30,6 +31,11 @@ struct LessonCompletionCard: View {
 
             // Completion card container
             VStack(spacing: AppSpacing.xxl) {
+                // Optional closing-image slot (last card of the lesson)
+                if let imageName = imageName, !imageName.isEmpty {
+                    LessonImageSlot(imageName: imageName, height: 140, horizontalPadding: 0)
+                }
+
                 // Checkmark circle
                 checkmarkView
                     .scaleEffect(checkmarkScale)

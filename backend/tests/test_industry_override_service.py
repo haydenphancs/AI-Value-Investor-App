@@ -103,6 +103,34 @@ def test_validate_response_rejects_below_phase_a():
     assert "phase a" in v["reason"].lower()
 
 
+def test_validate_response_skips_floor_for_broad_fred_phase_a():
+    """A BROAD FRED GDP proxy (e.g. BEA all-manufacturing) OVERCOUNTS the
+    industry, so the floor must NOT block a smaller, accurate global figure.
+    Gemini TAM below Phase A is ACCEPTED when Phase A is FRED-sourced — this is
+    the Consumer Electronics / Beverages case (Phase A ≈ $2.9T all-manufacturing
+    GDP, real global ≈ $0.9T)."""
+    svc = IndustryOverrideService()
+    v = svc._validate_response(
+        _ok_payload(current_tam_b=887.0, future_tam_b=1200.0),
+        phase_a_tam=2896.0,
+        phase_a_label="BEA Manufacturing GDP (via FRED)",
+    )
+    assert v["status"] == "ok"
+
+
+def test_validate_response_keeps_floor_for_census_phase_a():
+    """A precise US Census Phase A is a LOWER BOUND for the global market, so a
+    below-Census Gemini figure is under-researched → keep the floor (reject).
+    This is the Software - Infrastructure case (Census $526B, Gemini $198B)."""
+    svc = IndustryOverrideService()
+    v = svc._validate_response(
+        _ok_payload(current_tam_b=198.0, future_tam_b=260.0),
+        phase_a_tam=525.9,
+        phase_a_label="US Census AIES — Software publishers (NAICS 5112)",
+    )
+    assert v["status"] == "rejected_below_phase_a"
+
+
 def test_validate_response_rejects_invalid_years():
     """Future year ≤ current year → reject."""
     svc = IndustryOverrideService()

@@ -88,23 +88,55 @@ def _extract_year(record: Dict[str, Any]) -> str:
     return ""
 
 
+def _is_off_calendar_fiscal(record: Dict[str, Any]) -> bool:
+    """True when the company's fiscal year does NOT end in December — i.e. its
+    fiscal quarters are offset from calendar quarters (Oracle FY ends May, Apple
+    Sep, Microsoft Jun). Such quarters get an "FY" marker so a fiscal "Q4 FY26"
+    can't be misread as a CALENDAR quarter — important because the Institutions
+    chart counts CALENDAR quarters (13F filings), which legitimately differ.
+
+    Derives the fiscal-year-end month from any quarter's period-end date: a Qn
+    ending in calendar month M implies an FY-end month of M + (4-n)·3 (wrapped
+    into 1-12). FY-end == December → calendar-aligned.
+    """
+    period = (record.get("period") or "").upper()
+    date_str = record.get("date") or ""
+    if not period.startswith("Q") or len(date_str) < 7:
+        return False
+    try:
+        q = int(period[1])
+        month = int(date_str[5:7])
+    except (ValueError, IndexError):
+        return False
+    if not (1 <= q <= 4) or not (1 <= month <= 12):
+        return False
+    fy_end_month = ((month + (4 - q) * 3 - 1) % 12) + 1
+    return fy_end_month != 12
+
+
 def _quarterly_period_label(
     record: Dict[str, Any], use_fiscal_year: bool = False
 ) -> str:
-    """Build period label like \"Q2 '24\" (with space before apostrophe)."""
+    """Build a quarter label.
+
+    Calendar-aligned fiscal years → \"Q2 '24\". Off-calendar fiscal years (Oracle
+    FY ends May, Apple Sep, ...) → \"Q2 FY24\": the FY marker stops a fiscal
+    quarter from being read as a CALENDAR quarter, so it's not confused with the
+    calendar-based 13F / Institutions chart (which counts quarters differently
+    and lags ~45 days). Pairing with FMP's `fiscalYear` (not the calendar year)
+    also keeps off-calendar labels monotonic — fiscal Q1 (Aug) shares a calendar
+    year with the prior fiscal Q4 (May), so a calendar-year label would sort
+    \"Q1 '25\" after \"Q4 '25\".
+    """
     period = record.get("period", "")  # "Q1", "Q2", etc.
-    # `period` is FMP's FISCAL quarter. For off-calendar fiscal years (e.g.
-    # Oracle, FY ends May 31) pairing it with the CALENDAR year is non-monotonic:
-    # fiscal Q1 (Aug) shares a calendar year with the prior fiscal Q4 (May), so
-    # "Q1 '25" sorts after "Q4 '25". use_fiscal_year pairs it with FMP's
-    # fiscalYear ("Q1 '26") — how the company reports it — keeping labels in order.
     if use_fiscal_year and record.get("fiscalYear"):
         year = str(record.get("fiscalYear"))
+        off_calendar = _is_off_calendar_fiscal(record)
     else:
         year = _extract_year(record)
-    if len(year) >= 4:
-        return f"{period} '{year[-2:]}"
-    return f"{period} '{year}"
+        off_calendar = False
+    yy = year[-2:] if len(year) >= 4 else year
+    return f"{period} FY{yy}" if off_calendar else f"{period} '{yy}"
 
 
 def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:

@@ -169,7 +169,8 @@ struct LessonTopicCardView: View {
                 title: currentCard.title ?? "",
                 subtitleSegments: currentCard.subtitleSegments ?? [],
                 currentWordRange: voiceManager.currentWordRange,
-                isReading: voiceManager.isPlaying
+                isReading: voiceManager.isPlaying,
+                imageName: currentCard.imageName
             )
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
 
@@ -190,6 +191,7 @@ struct LessonTopicCardView: View {
                 totalLessons: storyContent.totalLessonsInLevel,
                 estimatedMinutes: storyContent.estimatedMinutes,
                 ctaButtonTitle: currentCard.ctaButtonTitle ?? "Continue",
+                imageName: currentCard.imageName,
                 onCTATapped: {
                     if let destination = currentCard.ctaDestination {
                         onCTATapped?(destination)
@@ -254,10 +256,17 @@ struct LessonTopicCardView: View {
 
         cardProgress = 0
 
-        // Start speaking with completion handler
-        voiceManager.speak(textToRead) { [self] in
-            // Voice finished, wait a moment then auto-advance
-            scheduleAutoAdvance(delay: 1.5)
+        // Prefer pre-recorded AI narration (Achird) when this card has a bundled clip;
+        // otherwise fall back to on-device speech synthesis.
+        if let clip = currentCard.audioClip, !clip.isEmpty {
+            voiceManager.playClip(named: clip, text: textToRead) { [self] in
+                scheduleAutoAdvance(delay: 1.5)
+            }
+        } else {
+            voiceManager.speak(textToRead) { [self] in
+                // Voice finished, wait a moment then auto-advance
+                scheduleAutoAdvance(delay: 1.5)
+            }
         }
     }
 

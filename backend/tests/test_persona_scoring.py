@@ -27,6 +27,7 @@ from app.services.agents.ticker_report_data_collector import (
     _build_health_vital,
     _build_wall_street_sections,
     _derive_moat_vital,
+    _valuation_score_from_upside,
 )
 from app.services.agents.narrative_prompts import _thesis_target_counts
 
@@ -283,11 +284,75 @@ def test_forecast_vital_responsive_to_cagr():
     assert flat["score"]["value"] == 5.0  # neutral base
 
 
-def test_wall_street_vital_responsive_to_upside():
-    # Was hard-coded 7.0. analyst=None path: score driven by fair-value upside.
-    high, _ = _build_wall_street_sections(None, None, 100.0, 150.0, [])
-    low, _ = _build_wall_street_sections(None, None, 100.0, 90.0, [])
+def _fake_analyst(target, low, high, *, consensus=None, up=0, down=0, maint=0, dists=None):
+    """Minimal stand-in for the AnalystAnalysisResponse attributes that
+    _build_wall_street_sections reads — enough to exercise the vital score."""
+    import types
+    return types.SimpleNamespace(
+        consensus=consensus,
+        target_price=target,
+        price_target=types.SimpleNamespace(low_price=low, high_price=high),
+        actions_summary=types.SimpleNamespace(upgrades=up, downgrades=down, maintains=maint),
+        distributions=dists or [],
+    )
+
+
+def test_wall_street_vital_responsive_to_analyst_target_upside():
+    # The Wall Street dimension reflects ANALYST conviction (real price-target
+    # upside + consensus + momentum) — NOT the DCF fair value (that's the
+    # valuation dimension's job, and borrowing it double-counts). Same
+    # fair_value on both; only the analyst target differs, so a difference
+    # proves the score is target-driven, not fair-value-driven.
+    high, _ = _build_wall_street_sections(
+        _fake_analyst(150.0, 130.0, 170.0), None, 100.0, 120.0, []
+    )
+    low, _ = _build_wall_street_sections(
+        _fake_analyst(90.0, 80.0, 100.0), None, 100.0, 120.0, []
+    )
     assert high["score"]["value"] > low["score"]["value"]
+
+
+def test_wall_street_vital_unmeasured_without_analyst_coverage():
+    # No analyst coverage at all (no targets, grades, or rating actions) → the
+    # dimension is UNMEASURED (score.value=None) so compute_quality_score
+    # renormalizes it out instead of voting a neutral / DCF-borrowed score.
+    vital, _ = _build_wall_street_sections(None, None, 100.0, 150.0, [])
+    assert vital["score"]["value"] is None
+
+
+def test_forecast_vital_unmeasured_without_estimates():
+    # No forward revenue/EPS estimates → UNMEASURED (None), renormalized out.
+    assert _build_forecast_vital(None, None)["score"]["value"] is None
+    # Any estimate present → a real numeric score.
+    assert _build_forecast_vital(20.0, None)["score"]["value"] is not None
+
+
+def test_valuation_score_continuous_and_monotone():
+    # Continuous (not 4 buckets): a deeper overvaluation scores strictly lower
+    # than a mild one, and the scale rises monotonically through fair → under.
+    deep_over = _valuation_score_from_upside(-50.0)
+    mild_over = _valuation_score_from_upside(-12.0)
+    fair = _valuation_score_from_upside(0.0)
+    under = _valuation_score_from_upside(25.0)
+    assert deep_over < mild_over < fair < under
+    assert math.isclose(fair, 5.5, abs_tol=0.6)   # fair anchored near neutral
+
+
+def test_unmeasured_vital_renormalizes_out():
+    # A vital whose score.value is None must NOT drag the headline toward 50:
+    # the score equals what the MEASURED vitals alone produce.
+    measured_only = compute_quality_score("warren_buffett", {"_scoring_inputs": {
+        "moat": {"score": {"value": 9.0}},
+        "financial_health": {"score": {"value": 9.0}},
+    }})
+    with_unmeasured = compute_quality_score("warren_buffett", {"_scoring_inputs": {
+        "moat": {"score": {"value": 9.0}},
+        "financial_health": {"score": {"value": 9.0}},
+        "wall_street": {"score": {"value": None}},   # unmeasured → dropped
+        "insider": {"score": {"value": None}},       # unmeasured → dropped
+    }})
+    assert math.isclose(measured_only, with_unmeasured, abs_tol=1e-9)
+    assert measured_only == 90.0
 
 
 def test_moat_vital_rewards_breadth_not_just_max():

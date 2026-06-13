@@ -23,6 +23,12 @@ class AIVoiceManager: NSObject, ObservableObject {
     private var wordRanges: [NSRange] = []
     private var onComplete: (() -> Void)?
 
+    // Pre-recorded clip playback (used when a card has a bundled narration file)
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+    private var endObserver: NSObjectProtocol?
+    private var clipDuration: Double = 0
+
     // MARK: - Singleton
     static let shared = AIVoiceManager()
 
@@ -75,21 +81,77 @@ class AIVoiceManager: NSObject, ObservableObject {
         synthesizer.speak(utterance)
     }
 
-    /// Pause the current speech
+    /// Play a pre-recorded narration clip bundled with the app (e.g. an Achird voice .m4a),
+    /// driving the same word-highlight + progress as the synthesizer path via estimated timing.
+    /// Falls back to on-device speech if the clip is missing.
+    func playClip(named name: String, text: String, onComplete: (() -> Void)? = nil) {
+        // Stop anything currently playing
+        synthesizer?.stopSpeaking(at: .immediate)
+        teardownPlayer()
+
+        // `name` is either a remote Storage URL (http...) or a bundled resource basename.
+        let resolvedURL: URL?
+        if name.hasPrefix("http"), let remote = URL(string: name) {
+            resolvedURL = remote
+        } else {
+            resolvedURL = Bundle.main.url(forResource: name, withExtension: "m4a")
+        }
+        guard let url = resolvedURL else {
+            // Graceful fallback so a missing clip never leaves the lesson silent
+            speak(text, onComplete: onComplete)
+            return
+        }
+
+        currentText = text
+        self.onComplete = onComplete
+        wordRanges = calculateWordRanges(for: text)
+        currentWordIndex = 0
+        currentWordRange = NSRange(location: 0, length: 0)
+        progress = 0.0
+        clipDuration = 0
+
+        let item = AVPlayerItem(url: url)
+        let newPlayer = AVPlayer(playerItem: item)
+        player = newPlayer
+
+        let interval = CMTime(seconds: 0.05, preferredTimescale: 600)
+        timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.tickClip() }
+        }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleClipFinished() }
+        }
+
+        isPlaying = true
+        newPlayer.play()
+    }
+
+    /// Pause the current speech (synth or clip)
     func pause() {
-        synthesizer?.pauseSpeaking(at: .word)
+        if player != nil {
+            player?.pause()
+        } else {
+            synthesizer?.pauseSpeaking(at: .word)
+        }
         isPlaying = false
     }
 
-    /// Resume paused speech
+    /// Resume paused speech (synth or clip)
     func resume() {
-        synthesizer?.continueSpeaking()
+        if player != nil {
+            player?.play()
+        } else {
+            synthesizer?.continueSpeaking()
+        }
         isPlaying = true
     }
 
-    /// Stop speaking completely
+    /// Stop speaking completely (synth or clip)
     func stop() {
         synthesizer?.stopSpeaking(at: .immediate)
+        teardownPlayer()
         isPlaying = false
         currentWordIndex = 0
         currentWordRange = NSRange(location: 0, length: 0)
@@ -101,10 +163,60 @@ class AIVoiceManager: NSObject, ObservableObject {
         if isPlaying {
             pause()
         } else {
-            if synthesizer?.isPaused == true {
+            if player != nil || synthesizer?.isPaused == true {
                 resume()
             }
         }
+    }
+
+    // MARK: - Clip Playback Helpers
+
+    private func teardownPlayer() {
+        if let timeObserver = timeObserver {
+            player?.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        if let endObserver = endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        endObserver = nil
+        player?.pause()
+        player = nil
+        clipDuration = 0
+    }
+
+    /// Periodic tick: map elapsed time to a word index (estimated by character position).
+    private func tickClip() {
+        guard let player = player, let item = player.currentItem else { return }
+        if item.duration.isNumeric {
+            let seconds = CMTimeGetSeconds(item.duration)
+            if seconds.isFinite && seconds > 0 { clipDuration = seconds }
+        }
+        let totalChars = Double(currentText.count)
+        guard clipDuration > 0, totalChars > 0 else { return }
+
+        let elapsed = CMTimeGetSeconds(player.currentTime())
+        let fraction = min(1.0, max(0.0, elapsed / clipDuration))
+        progress = fraction
+
+        let targetChar = Int(fraction * totalChars)
+        var index = 0
+        for (i, range) in wordRanges.enumerated() {
+            if range.location <= targetChar { index = i } else { break }
+        }
+        currentWordIndex = index
+        if index >= 0 && index < wordRanges.count {
+            currentWordRange = wordRanges[index]
+        }
+    }
+
+    private func handleClipFinished() {
+        let completion = onComplete
+        if let last = wordRanges.last { currentWordRange = last }
+        teardownPlayer()
+        isPlaying = false
+        progress = 1.0
+        completion?()
     }
 
     // MARK: - Word Range Calculation

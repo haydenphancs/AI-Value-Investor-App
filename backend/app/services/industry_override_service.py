@@ -87,6 +87,21 @@ CURATED_OVERRIDE_INDUSTRIES: List[Tuple[str, str]] = [
     ("Auto - Manufacturers", "Consumer Cyclical"),
     ("Aerospace & Defense", "Industrials"),
     ("Internet Content & Information", "Communication Services"),
+    # Expanded 2026-06-13 (Global-vs-US TAM scope feature) — same criterion:
+    # these FMP industries' companies compete GLOBALLY, so the Census/FRED
+    # US-domestic figure under-represents the real addressable market. Each
+    # entry adds one Gemini grounded-research call per Phase B run.
+    ("Software - Infrastructure", "Technology"),
+    ("Software - Application", "Technology"),
+    ("Software - Services", "Technology"),
+    ("Information Technology Services", "Technology"),
+    ("Consumer Electronics", "Technology"),
+    ("Semiconductor Equipment & Materials", "Technology"),
+    ("Communication Equipment", "Technology"),
+    ("Internet Retail", "Consumer Cyclical"),
+    ("Beverages - Non-Alcoholic", "Consumer Defensive"),
+    ("Beverages - Alcoholic", "Consumer Defensive"),
+    ("Apparel - Footwear & Accessories", "Consumer Cyclical"),
 ]
 
 
@@ -522,6 +537,9 @@ class IndustryOverrideService:
             "lifecycle_phase": new_lifecycle,
             "source_grain": "industry",
             "source_label": result.applied_source_label or "Research synthesis",
+            # Phase B researches the GLOBAL market — mark it so the report can
+            # label this TAM "Global" (vs the Phase A Census/FRED 'us' default).
+            "tam_scope": "global",
             "computed_at": datetime.now(timezone.utc).isoformat(),
         }
 

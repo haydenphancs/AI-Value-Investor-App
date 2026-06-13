@@ -280,6 +280,11 @@ class MarketDynamicsResponse(BaseModel):
     # know the figure is a proxy. None when TAM came from an AI quote or
     # wasn't populated.
     source_grain: Optional[str] = None
+    # Scope of the TAM figure: "us" (Census/FRED US-domestic — the default for
+    # most industries) or "global" (Gemini grounded research for globally-
+    # competitive industries). iOS renders an explicit "US"/"Global" pill so the
+    # market size is never ambiguous. None when TAM wasn't populated.
+    tam_scope: Optional[str] = None
 
 
 class MoatDimensionResponse(BaseModel):

@@ -1769,10 +1769,24 @@ class HoldersService:
             for m in month_keys
         ]
 
+        # Window the daily price line to the SAME 12-month span as the bars. The
+        # raw daily series spans ~2 years (sized for the hedge-fund chart, which
+        # keeps the full series); stretched over 12-month bars it would sit each
+        # bar under the wrong date — misreading "did Congress buy into strength or
+        # weakness?". The precise left edge is the first day of the OLDEST of the
+        # 12 month_keys. Monthly price_data is already windowed via
+        # _build_price_data(month_keys), so it's left as-is. (Mirrors the insider
+        # fix in _build_insider_smart_money.)
+        o_month, o_year = month_keys[0].split("/")  # "MM/YYYY"
+        cutoff_str = f"{o_year}-{o_month}-01"
+        windowed_daily = [
+            dp for dp in (daily_prices or []) if dp.date >= cutoff_str
+        ]
+
         return SmartMoneyDataSchema(
             tab="Congress",
             price_data=self._build_price_data(monthly_prices, month_keys),
-            daily_prices=daily_prices or [],
+            daily_prices=windowed_daily,
             flow_data=flow_data,
             summary=self._build_summary(flow_data),
         )

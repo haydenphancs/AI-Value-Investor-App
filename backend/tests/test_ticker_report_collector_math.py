@@ -1835,6 +1835,7 @@ def _md_with_zero_tam() -> dict:
         "tam_source_quote": None,
         "tam_source_label": None,
         "source_grain": None,
+        "tam_scope": None,
     }
 
 
@@ -1857,6 +1858,111 @@ def test_apply_tam_ai_quote_wins_when_provided():
     assert md["future_year"] == "2030"
     assert "150B addressable market" in md["tam_source_quote"]
     assert md["tam_source_label"] == "Earnings call quote"
+
+
+def test_apply_tam_partial_ai_quote_falls_back_to_dossier():
+    """The reported Moat bug: AI extracts a future TAM ("$3T by 2030") but NO
+    current figure. Applied alone that renders "$0B → $3T" and the CAGR cell
+    goes "—" (the old early `return` skipped the dossier). A one-sided AI quote
+    must now fall through to the industry dossier, which supplies a COMPLETE
+    current+future pair AND the CAGR."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None        # sector_aggregates produced nothing
+    md["current_tam"] = 0.0
+    dossier = IndustryDossier(
+        current_tam=1700.0, future_tam=2100.0,
+        current_year="2024", future_year="2029",
+        source_label="BEA Information Sector GDP (via FRED)",
+        cagr_5y_pct=4.3,
+        industry="Software - Infrastructure", sector="Technology",
+        concentration_label="oligopoly", source_grain="sector",
+    )
+    _apply_tam_source(md, {
+        # Only a future figure + a quote — no current_tam (the bug input).
+        "future_tam": 3_000_000_000_000,
+        "future_year": "2030",
+        "tam_source_quote": "We see a $3 trillion TAM by 2030.",
+    }, dossier)
+    # The half AI quote is rejected; the dossier's complete pair wins.
+    assert md["current_tam"] == 1700.0      # not $0B
+    assert md["future_tam"] == 2100.0       # not the AI's lone $3T
+    assert md["cagr_5yr"] == 4.3            # not "—"
+    assert md["tam_source_label"] == "BEA Information Sector GDP (via FRED)"
+    assert md["tam_source_quote"] is None   # the one-sided AI quote was NOT used
+
+
+def test_apply_tam_dossier_cagr_applies_even_when_ai_tam_wins():
+    """A COMPLETE AI TAM quote wins the TAM PAIR, but the dossier's CAGR must
+    STILL fill the cagr cell — previously the AI path returned early and the
+    CAGR rendered "—" whenever AI quoted a TAM."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None        # sector_aggregates produced nothing
+    dossier = IndustryDossier(
+        current_tam=1700.0, future_tam=2100.0,
+        current_year="2024", future_year="2029",
+        source_label="BEA Information Sector GDP (via FRED)",
+        cagr_5y_pct=6.5,
+        industry="Software - Infrastructure", sector="Technology",
+        source_grain="sector",
+    )
+    _apply_tam_source(md, {
+        "current_tam": 150_000_000_000,
+        "future_tam": 300_000_000_000,
+        "tam_source_quote": "We see a $150B market today expanding to $300B.",
+    }, dossier)
+    assert md["current_tam"] == 150.0                       # AI pair won the TAM
+    assert md["future_tam"] == 300.0
+    assert md["tam_source_label"] == "Earnings call quote"
+    assert md["cagr_5yr"] == 6.5                            # dossier CAGR still applied
+
+
+def test_apply_tam_scope_from_dossier_us_and_global():
+    """The report must explicitly label TAM as US vs Global. Scope follows the
+    industry's resolved data source — Census/FRED dossiers are 'us', Phase B
+    global-research overrides are 'global' — and is applied regardless of
+    whether the proxy or a complete AI quote won the TAM pair."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    def _dossier(scope: str) -> IndustryDossier:
+        return IndustryDossier(
+            current_tam=1700.0, future_tam=2100.0,
+            current_year="2024", future_year="2029",
+            source_label="src", cagr_5y_pct=4.3,
+            industry="X", sector="Technology", tam_scope=scope,
+        )
+
+    # US dossier (proxy wins the pair) → "us".
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"tam_source_quote": ""}, _dossier("us"))
+    assert md["tam_scope"] == "us"
+
+    # Global dossier (proxy wins) → "global".
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"tam_source_quote": ""}, _dossier("global"))
+    assert md["tam_scope"] == "global"
+
+    # A complete AI quote wins the PAIR, but scope still follows the industry.
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {
+        "current_tam": 150_000_000_000,
+        "future_tam": 300_000_000_000,
+        "tam_source_quote": "$150B today to $300B.",
+    }, _dossier("global"))
+    assert md["current_tam"] == 150.0          # AI pair won
+    assert md["tam_scope"] == "global"         # ...but scope is the industry's
+
+    # No dossier → scope stays unset (iOS shows no pill).
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {
+        "current_tam": 150_000_000_000,
+        "future_tam": 300_000_000_000,
+        "tam_source_quote": "$150B to $300B.",
+    }, None)
+    assert md.get("tam_scope") is None
 
 
 def test_normalize_ai_tam_billions_converts_and_clamps():
@@ -1894,11 +2000,12 @@ def test_apply_tam_drops_implausible_ai_value():
     assert md["tam_source_label"] is None     # no overlay happened
 
 
-def test_build_timeline_prices_monthly_frozen_series():
+def test_build_timeline_prices_weekly_frozen_series():
     """The Earnings Timeline price overlay is EMBEDDED (frozen) at generation —
-    a monthly close series over the timeline's ACTUAL years, built from the
-    `historical` the collector already has. (The iOS panel previously fetched
-    /earnings live, leaking today's prices onto an old report.)"""
+    a WEEKLY close series (last trading day per ISO week) over the timeline's
+    ACTUAL years, built from the `historical` the collector already has. Weekly
+    (~52 pts/yr) is finer than the earlier monthly downsample for a smoother line.
+    (The iOS panel previously fetched /earnings live, leaking today's prices.)"""
     annual_timeline = [
         {"period": "2024", "is_forecast": False},
         {"period": "2025", "is_forecast": False},
@@ -1906,15 +2013,16 @@ def test_build_timeline_prices_monthly_frozen_series():
     ]
     historical = {"historical": [
         {"date": "2023-12-29", "close": 100.0},   # before first actual year → dropped
-        {"date": "2024-01-31", "close": 110.0},
-        {"date": "2024-01-15", "close": 108.0},   # same month, earlier → not kept
-        {"date": "2024-02-29", "close": 120.0},
+        # ISO week 2 of 2024 (Mon 2024-01-08 … Sun 2024-01-14): latest kept.
+        {"date": "2024-01-09", "close": 108.0},   # same ISO week, earlier → not kept
+        {"date": "2024-01-12", "close": 110.0},   # latest in its ISO week → kept
+        {"date": "2024-01-19", "close": 115.0},   # ISO week 3 → its own point
         {"date": "2025-06-30", "close": 200.0},
     ]}
     pts = _build_timeline_prices(historical, annual_timeline)
-    # Oldest-first; pre-2024 dropped; one (latest) close per month.
-    assert [p["date"] for p in pts] == ["2024-01-31", "2024-02-29", "2025-06-30"]
-    assert [p["price"] for p in pts] == [110.0, 120.0, 200.0]
+    # Oldest-first; pre-2024 dropped; one (latest) close per ISO week.
+    assert [p["date"] for p in pts] == ["2024-01-12", "2024-01-19", "2025-06-30"]
+    assert [p["price"] for p in pts] == [110.0, 115.0, 200.0]
     # No actual years (forecast-only) or no history → empty.
     assert _build_timeline_prices(historical, [{"period": "2026", "is_forecast": True}]) == []
     assert _build_timeline_prices({}, annual_timeline) == []
@@ -1964,15 +2072,17 @@ def test_apply_tam_handles_string_numbers():
 
 def test_apply_tam_ignores_invalid_future_year():
     """`future_year` only updates when AI returned a 4-digit numeric
-    string; garbage values don't break the iOS chart's x-axis."""
+    string; garbage values don't break the iOS chart's x-axis. (TAM pair is
+    complete so the AI path activates — a one-sided pair is rejected.)"""
     md = _md_with_zero_tam()
     _apply_tam_source(md, {
         "current_tam": 50_000_000_000,
-        "future_tam": 0,
+        "future_tam": 90_000_000_000,
         "future_year": "soonish",
-        "tam_source_quote": "Our market is $50B.",
+        "tam_source_quote": "Our market is $50B today, $90B ahead.",
     }, None)
-    assert md["future_year"] == "2031"  # unchanged from default
+    assert md["current_tam"] == 50.0    # AI pair applied...
+    assert md["future_year"] == "2031"  # ...but the garbage future_year is ignored
 
 
 def test_apply_tam_truncates_long_quotes():
@@ -1982,7 +2092,7 @@ def test_apply_tam_truncates_long_quotes():
     long_quote = "x" * 500
     _apply_tam_source(md, {
         "current_tam": 10_000_000_000,
-        "future_tam": 0,
+        "future_tam": 20_000_000_000,
         "tam_source_quote": long_quote,
     }, None)
     assert len(md["tam_source_quote"]) == 200

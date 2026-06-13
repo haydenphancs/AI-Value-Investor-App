@@ -57,6 +57,7 @@ from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.services._insider_common import (
     classify_insider_transaction,
+    ensure_insider_label,
     is_informative,
     normalize_insider_name,
 )
@@ -3358,14 +3359,18 @@ def _build_annual_timeline(
 def _build_timeline_prices(
     historical: Any, annual_timeline: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Monthly close series (last trading day per month) spanning the Earnings
+    """Weekly close series (last trading day per ISO week) spanning the Earnings
     Timeline's ACTUAL years, for its price overlay.
 
     EMBEDDED in the report so it's FROZEN at generation: the iOS panel used to
     fetch /earnings live for this line, which surfaced TODAY's prices (and newer
-    quarters) on an OLD report — a point-in-time leak. Monthly (~12 pts/yr) is
-    plenty for an annual chart and ~20x cheaper than the daily series, and reuses
-    `historical` the collector already fetched (no new FMP call). [] when no data.
+    quarters) on an OLD report — a point-in-time leak. Weekly (~52 pts/yr) draws a
+    smooth line — far finer than the earlier monthly downsample — yet stays ~5x
+    lighter than the full daily series and reads as smooth at the inline chart's
+    width. Reuses `historical` the collector already fetched (no new FMP call);
+    the date parsing runs ONCE here at generation, never on the iOS render path
+    (which is why monthly's cheap string-slice bucketing isn't needed). [] when no
+    data.
     """
     actual_years = [
         int(p["period"])
@@ -3376,26 +3381,28 @@ def _build_timeline_prices(
         return []
     year_min = min(actual_years)
 
-    monthly: Dict[str, Tuple[str, float]] = {}  # "YYYY-MM" -> (date, close)
+    weekly: Dict[Tuple[int, int], Tuple[str, float]] = {}  # (iso_year, iso_week) -> (date, close)
     for rec in _hist_list(historical):
         ds = (rec.get("date") or "")[:10]
-        if len(ds) < 7:
+        if len(ds) < 10:
             continue
         try:
-            if int(ds[:4]) < year_min:
-                continue
+            d = date.fromisoformat(ds)
         except ValueError:
+            continue
+        if d.year < year_min:
             continue
         close = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
         if close <= 0:
             continue
-        mkey = ds[:7]
-        prev = monthly.get(mkey)
-        if prev is None or ds > prev[0]:  # keep the latest close within the month
-            monthly[mkey] = (ds, close)
+        iso = d.isocalendar()
+        wkey = (iso[0], iso[1])  # ISO (year, week): a stable Mon–Sun bucket
+        prev = weekly.get(wkey)
+        if prev is None or ds > prev[0]:  # keep the latest close within the week
+            weekly[wkey] = (ds, close)
 
     return [
-        {"date": d, "price": round(c, 2)} for d, c in sorted(monthly.values())
+        {"date": d, "price": round(c, 2)} for d, c in sorted(weekly.values())
     ]
 
 
@@ -4411,6 +4418,7 @@ def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
         "tam_source_quote": None,
         "tam_source_label": None,
         "source_grain": None,
+        "tam_scope": None,
     }
 
 
@@ -4492,28 +4500,33 @@ def _apply_tam_source(
     ai_md: Optional[Dict[str, Any]],
     industry_tam: Optional[Any],
 ) -> None:
-    """Apply TAM with priority chain: AI quote → industry proxy → leave 0.
+    """Apply the TAM pair + industry growth attributes, mutating
+    `market_dynamics` in place.
 
-    Mutates `market_dynamics` in place. Sets `tam_source_label` to a
-    short caption iOS shows under the TAM row so users know which
-    source produced the figure.
+    TWO independent decisions (the split is the bug fix):
 
-    Priority 1 (highest trust): AI-extracted explicit quote from the
-    earnings transcript. Requires both a positive number AND a non-empty
-    source quote — strict to prevent fabrication.
+    TAM PAIR (current_tam, future_tam, years, source label):
+      Priority 1 — AI-extracted earnings-call quote, but ONLY when it carries a
+        COMPLETE pair: BOTH current AND future as plausible positive numbers,
+        plus a non-empty quote. A one-sided quote (e.g. a future "$3T by 2030"
+        with no current figure) is REJECTED here — applied alone it renders
+        "$0B → $3T" and buries the real current TAM the industry proxy holds.
+        (Strict on the quote to prevent fabrication.)
+      Priority 2 — industry-level proxy (Census 4-digit NAICS → FRED sector →
+        industry dossier, resolved upstream). Caption attributes the source.
+      Priority 3 — leave 0.0 (iOS renders "—").
 
-    Priority 2: industry-level proxy (Census 4-digit NAICS preferred,
-    FRED 2-digit sector as fallback — chain resolved upstream in
-    `industry_tam_service.get_industry_tam`). Caption is the source's
-    own label so the user sees which dataset produced the figure.
+    CAGR + lifecycle: taken from the industry dossier whenever it resolved,
+      REGARDLESS of which TAM source won. This fixes the "CAGR shows —" bug: a
+      valid AI TAM quote used to `return` early and silently skip the dossier's
+      CAGR. CAGR only fills when sector_aggregates (higher trust) didn't already
+      set it, so that precedence is preserved.
 
-    The industry proxy ALSO sets `cagr_5yr` when the sector_aggregates
-    batch hasn't produced one — keeps the CAGR cell from rendering as
-    "—" when we have a defensible sector growth rate.
-
-    Priority 3: leave 0.0 / null. iOS renders "—" instead of "$0B".
+    Concentration override stays tied to the proxy-TAM path (the dossier's
+    industry-wide HHI is applied when its TAM is the one shown).
     """
-    # Priority 1: AI-extracted transcript quote
+    # ── TAM PAIR ──────────────────────────────────────────────────────
+    ai_tam_applied = False
     if isinstance(ai_md, dict):
         quote_raw = ai_md.get("tam_source_quote")
         quote = quote_raw.strip() if isinstance(quote_raw, str) else ""
@@ -4523,11 +4536,11 @@ def _apply_tam_source(
             current = _normalize_ai_tam_billions(ai_md.get("current_tam"))
             future = _normalize_ai_tam_billions(ai_md.get("future_tam"))
 
-            if current is not None or future is not None:
-                if current is not None:
-                    market_dynamics["current_tam"] = current
-                if future is not None:
-                    market_dynamics["future_tam"] = future
+            # Require BOTH sides — a one-sided quote renders "$0B → $X" (or
+            # "$X → $0B") and hides the proxy's complete current+future+CAGR.
+            if current is not None and future is not None:
+                market_dynamics["current_tam"] = current
+                market_dynamics["future_tam"] = future
                 market_dynamics["tam_source_quote"] = quote[:200]
                 market_dynamics["tam_source_label"] = "Earnings call quote"
 
@@ -4536,11 +4549,11 @@ def _apply_tam_source(
                     s = str(fy).strip()
                     if s.isdigit() and len(s) == 4:
                         market_dynamics["future_year"] = s
-                return
+                ai_tam_applied = True
 
-    # Priority 2: industry-level proxy (Census → FRED chain, or
-    # pre-computed industry_dossier row when available).
-    if industry_tam is not None:
+    if not ai_tam_applied and industry_tam is not None:
+        # Priority 2: industry-level proxy (Census → FRED chain, or
+        # pre-computed industry_dossier row when available).
         market_dynamics["current_tam"] = industry_tam.current_tam
         market_dynamics["future_tam"] = industry_tam.future_tam
         market_dynamics["current_year"] = industry_tam.current_year
@@ -4561,33 +4574,36 @@ def _apply_tam_source(
         if dossier_concentration:
             market_dynamics["concentration"] = dossier_concentration
 
+    # ── CAGR + lifecycle from the dossier — applied REGARDLESS of which TAM
+    #    source won, so a valid AI TAM quote can't blank out the dossier's
+    #    CAGR (the "CAGR shows —" bug). ──────────────────────────────────
+    if industry_tam is not None:
+        # Scope label (US vs Global) follows the industry's resolved data
+        # source, regardless of which TAM source won the pair above — so an AI
+        # earnings quote inherits its industry's scope instead of being left
+        # unlabeled. Census/FRED dossiers are 'us'; Phase B overrides 'global'.
+        market_dynamics["tam_scope"] = getattr(industry_tam, "tam_scope", "us")
         # Dossier-derived lifecycle wins outright when present (already
-        # incorporates CAGR + constituent count). Otherwise fall back to
-        # the legacy CAGR-based promotion below.
+        # incorporates CAGR + constituent count).
         dossier_lifecycle = getattr(industry_tam, "lifecycle_phase", None)
         if dossier_lifecycle and dossier_lifecycle != "mature":
-            # `mature` is the dataclass default — only override the
-            # current lifecycle when the dossier produced a non-default
-            # classification (the dossier saw a real signal).
+            # `mature` is the dataclass default — only override when the
+            # dossier produced a non-default classification (a real signal).
             market_dynamics["lifecycle_phase"] = dossier_lifecycle
 
         # Surface the industry's realized CAGR only when sector_aggregates
-        # didn't already produce one — preserves higher-trust source.
+        # didn't already produce one — preserves the higher-trust source.
         if market_dynamics.get("cagr_5yr") is None:
             cagr = getattr(industry_tam, "cagr_5y_pct", None)
             if cagr is not None:
                 market_dynamics["cagr_5yr"] = cagr
-                # Legacy promotion path — only fires when the proxy
-                # didn't already publish a lifecycle (plain IndustryTAM,
-                # not a dossier).
+                # Legacy promotion — only when the proxy didn't publish a
+                # lifecycle (plain IndustryTAM, not a dossier).
                 if not dossier_lifecycle and market_dynamics.get("lifecycle_phase") == "mature":
                     if cagr > 15.0:
                         market_dynamics["lifecycle_phase"] = "secular_growth"
                     elif cagr < 0.0:
                         market_dynamics["lifecycle_phase"] = "declining"
-        return
-
-    # Priority 3: leave at 0.0 / null (iOS hides)
 
 
 def _apply_peer_score_baseline(
@@ -5571,6 +5587,7 @@ def _build_market_dynamics(
             "tam_source_quote": None,
             "tam_source_label": None,
             "source_grain": None,
+            "tam_scope": None,
         }
 
     # Priority 2: derive concentration from in-hand peer market caps
@@ -5598,6 +5615,7 @@ def _build_market_dynamics(
             "tam_source_quote": None,
             "tam_source_label": None,
             "source_grain": None,
+            "tam_scope": None,
         }
 
     # Priority 3: honest empty state
@@ -6454,8 +6472,11 @@ def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     enforces a signal-driven 2-5 count; this is the post-write defense)."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
-    bull = list(thesis.get("bull_case") or [])[:5]
-    bear = list(thesis.get("bear_case") or [])[:5]
+    # ensure_insider_label: a Stage-A fallback bullet citing insider buy/sell
+    # counts ("55 sells vs 1 buy") must say "insider" — these bullets render with
+    # no section header, and the Stage-A prompt has no self-labeling rule.
+    bull = [ensure_insider_label(p) for p in list(thesis.get("bull_case") or [])[:5]]
+    bear = [ensure_insider_label(p) for p in list(thesis.get("bear_case") or [])[:5]]
     return {"bull_case": bull, "bear_case": bear}
 
 

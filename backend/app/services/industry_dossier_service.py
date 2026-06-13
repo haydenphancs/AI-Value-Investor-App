@@ -127,6 +127,10 @@ class IndustryDossier:
     concentration_label: Optional[str] = None
     constituent_count: Optional[int] = None
     source_grain: str = "industry"
+    # Scope of the TAM figure: 'us' (Census/FRED US-domestic, the Phase A
+    # default) or 'global' (Gemini grounded research via industry_override_
+    # service, Phase B). Lets the report explicitly label US vs Global.
+    tam_scope: str = "us"
 
     def to_db_row(self) -> Dict[str, Any]:
         return {
@@ -145,6 +149,7 @@ class IndustryDossier:
             "constituent_count": self.constituent_count,
             "source_grain": self.source_grain,
             "source_label": self.source_label,
+            "tam_scope": self.tam_scope,
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=8)).isoformat(),
         }
@@ -171,6 +176,7 @@ class IndustryDossier:
             concentration_label=row.get("concentration_label"),
             constituent_count=row.get("constituent_count"),
             source_grain=str(row.get("source_grain") or "industry"),
+            tam_scope=str(row.get("tam_scope") or "us"),
         )
 
 

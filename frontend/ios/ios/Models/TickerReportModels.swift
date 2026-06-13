@@ -834,6 +834,22 @@ struct MarketDynamics {
     // (e.g., we fell back to the sector-level FRED series because no
     // industry-specific NAICS was mapped). Nil for AI-quote sourced TAM.
     let sourceGrain: String?
+    // Scope of the TAM figure: "us" or "global". Drives the explicit "US"/
+    // "Global" pill next to the market size. Nil when TAM wasn't populated
+    // (older cached reports / no source) → no pill shown.
+    let tamScope: String?
+
+    /// "Global" / "US" pill label, or nil when scope is unknown (no pill).
+    var scopeLabel: String? {
+        switch tamScope?.lowercased() {
+        case "global": return "Global"
+        case "us": return "US"
+        default: return nil
+        }
+    }
+
+    /// True for global scope — drives the pill's accent color.
+    var scopeIsGlobal: Bool { tamScope?.lowercased() == "global" }
 
     var formattedCAGR: String {
         guard let cagr = cagr5Yr else { return "—" }
@@ -1478,7 +1494,8 @@ extension TickerReportData {
                 lifecyclePhase: .secularGrowth,
                 tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030.",
                 tamSourceLabel: "Earnings call quote",
-                sourceGrain: nil
+                sourceGrain: nil,
+                tamScope: "global"
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

@@ -16,6 +16,7 @@ the ticker report's "Insider & Management" section from disagreeing about
 the same underlying Form 4 row.
 """
 
+import re
 from typing import Optional, Tuple
 
 
@@ -119,3 +120,50 @@ def classify_for_alerts(tx_type: str) -> Tuple[str, bool]:
     """
     classification = classify_insider_transaction(tx_type)
     return action_word(classification), is_informative(classification)
+
+
+# ── Thesis-bullet self-labeling ───────────────────────────────────────
+#
+# Bull/Bear thesis bullets on the Ticker Report render with NO section header, so
+# each must name its own signal. A bullet like "55 sells ($1.9B) vs 1 buy ($112K)
+# in 12 months" is unreadable out of context — the reader can't tell it describes
+# INSIDER activity (vs institutions, congress, or analysts, which also have
+# buyers/sellers). The synthesis prompt asks the model to write "55 insider
+# sells…", but the model doesn't reliably comply, and a leading "Insider:" prefix
+# can't survive because narrative_prompts._post_process strips leading "Word:"
+# labels. So the label is enforced deterministically, inlined before the sell word.
+
+_THESIS_SELL_RE = re.compile(r"\b(?:sell|sale)\w*", re.I)
+_THESIS_BUY_RE = re.compile(r"\bbuy\w*", re.I)
+# Other "buyers vs sellers" sources — never relabel one of these as insider.
+_THESIS_OTHER_SOURCE_RE = re.compile(
+    r"congress|senat|repres|\bhouse\b|institution|hedge|analyst|\bfund", re.I
+)
+
+
+def ensure_insider_label(point: str) -> str:
+    """Inject "insider" into a thesis bullet that describes insider buy/sell
+    activity but never says so, so the bullet stands on its own.
+
+    Conservative — acts ONLY when the bullet pairs a sell-count with a buy-count
+    and a number, isn't already labeled "insider", and doesn't name a different
+    source (congress / institutions / hedge funds / analysts). Otherwise the
+    bullet is returned unchanged. The label is inlined before the sell word
+    ("55 sells…" → "55 insider sells…") rather than prefixed, because a leading
+    "Insider:" would be stripped by _post_process downstream.
+    """
+    if not isinstance(point, str) or not point or "insider" in point.lower():
+        return point
+    if not (
+        _THESIS_SELL_RE.search(point)
+        and _THESIS_BUY_RE.search(point)
+        and any(ch.isdigit() for ch in point)
+    ):
+        return point
+    if _THESIS_OTHER_SOURCE_RE.search(point):
+        return point
+    m = _THESIS_SELL_RE.search(point)
+    if m.start() == 0:
+        # Rare: bullet leads with the sell word — prefix instead of inlining.
+        return "Insider " + point[0].lower() + point[1:]
+    return f"{point[:m.start()]}insider {point[m.start():]}"

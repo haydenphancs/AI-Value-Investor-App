@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.integrations.gemini import GeminiClient
+from app.services._insider_common import ensure_insider_label
 from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
@@ -1286,10 +1287,12 @@ def build_narrative_jobs(
             label="hidden_market_signals_insight",
             prompt=_hidden_market_signals_insight_prompt(persona, evidence, shell),
             # Headroom over the prompt's "2 to 4 sentences" target so the full
-            # insight is never chopped mid-thought with "…". Was 24, which
-            # truncated the (now multi-sentence) insight; the prompt was upgraded
-            # to 2-4 sentences but this cap wasn't. Safety net, not the target.
-            word_cap=90,
+            # insight is never chopped mid-thought with "…". 24 → 90 still clipped
+            # a 4-sentence, number-heavy synthesis (congress + short interest)
+            # that ran ~100 words — it cut at EXACTLY 90 + "…". 130 fits four
+            # substantive sentences with real headroom. Safety net, not the
+            # target — the prompt's "2 to 4 sentences" controls the real length.
+            word_cap=130,
             apply=_setter_for_dict_key(hms, "insight"),
             fallback_value=FALLBACK["hidden_market_signals_insight"],
         ))
@@ -2113,7 +2116,9 @@ def _clean_thesis_points(raw: Any) -> List[str]:
             continue
         cleaned = _post_process(item)  # strips quotes / markdown / stray labels
         if cleaned:
-            out.append(cleaned)
+            # Self-label insider buy/sell bullets AFTER _post_process (which would
+            # strip a leading "Insider:" prefix) so they're readable headerless.
+            out.append(ensure_insider_label(cleaned))
     return out[:5]
 
 

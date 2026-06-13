@@ -15,6 +15,11 @@ struct ReportKeyManagementTable: View {
     // Each sub-list shows 3 by default; the rest collapse behind "Show N more"
     // (same pattern as the Hidden Market Signals congress list).
     private let collapsedCount = 3
+    // When expanded, a long roster scrolls INSIDE this bounded height instead of
+    // stretching the whole report — same behavior as Insider Activity's "Show N
+    // more" (and the Holders tab's RecentActivitiesSection). A short list (≤
+    // collapsedCount) never shows the toggle, so it's unaffected.
+    private let expandedListHeight: CGFloat = 420
     @State private var showAllTopHolders = false
     @State private var showAllOfficers = false
 
@@ -80,8 +85,20 @@ struct ReportKeyManagementTable: View {
         expanded: Binding<Bool>
     ) -> some View {
         sectionHeader(title)
-        let visible = expanded.wrappedValue ? managers : Array(managers.prefix(collapsedCount))
-        ForEach(visible) { managerRow($0) }
+        // Expanded → the full list scrolls inside a bounded box so a long
+        // officer/holder roster doesn't lengthen the whole report; collapsed →
+        // top `collapsedCount` inline.
+        if expanded.wrappedValue {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: AppSpacing.md) {
+                    ForEach(managers) { managerRow($0) }
+                }
+            }
+            .scrollIndicators(.visible)
+            .frame(maxHeight: expandedListHeight)
+        } else {
+            ForEach(Array(managers.prefix(collapsedCount))) { managerRow($0) }
+        }
         if managers.count > collapsedCount {
             showMoreButton(hidden: managers.count - collapsedCount, expanded: expanded)
         }

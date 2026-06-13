@@ -81,6 +81,11 @@ struct MoneyMovesDetailView: View {
         .onAppear {
             loadSampleData()
         }
+        .task {
+            // Upgrade to fresh backend content (bundled content is already available
+            // synchronously from the store's init).
+            await MoneyMovesContentStore.shared.prefetch()
+        }
         // Prevent accidental navigation gestures
         .interactiveDismissDisabled(false)
     }
@@ -152,8 +157,10 @@ struct MoneyMovesDetailView: View {
     }
 
     private func handleMoveTap(_ move: MoneyMove) {
-        // Create article from move and show detail
-        selectedArticle = createArticleFromMove(move)
+        // Prefer authored content (backend → bundled) for this card; fall back to
+        // generated placeholder content for cards not yet authored.
+        selectedArticle = MoneyMovesContentStore.shared.article(forTitle: move.title)
+            ?? createArticleFromMove(move)
     }
 
     private func handleBookmark(_ move: MoneyMove) {

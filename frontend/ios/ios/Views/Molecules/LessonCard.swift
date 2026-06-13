@@ -42,13 +42,12 @@ struct LessonCard: View {
 
                 Spacer(minLength: AppSpacing.sm)
 
-                // Footer with duration and status
+                // Footer: duration on the left, status pinned to the trailing edge
+                // (completed check sits at the far right; "Up Next" pill shifts right too).
                 HStack {
                     LessonDurationLabel(durationMinutes: lesson.durationMinutes)
 
-                    Text("•")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    Spacer(minLength: AppSpacing.sm)
 
                     LessonStatusBadge(status: lesson.status)
                 }

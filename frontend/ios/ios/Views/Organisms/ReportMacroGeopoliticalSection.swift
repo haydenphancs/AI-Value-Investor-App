@@ -16,6 +16,10 @@ struct ReportMacroGeopoliticalSection: View {
     @State private var showAllFactors = false
 
     private let collapsedCount = 3
+    // When expanded, a long risk-factor list scrolls INSIDE this bounded height
+    // instead of stretching the report — same behavior as Insider Activity's
+    // "Show N more". A short list (≤ collapsedCount) never shows the toggle.
+    private let expandedListHeight: CGFloat = 420
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
@@ -63,16 +67,29 @@ struct ReportMacroGeopoliticalSection: View {
 
     private var riskFactorsSection: some View {
         let factors = sortedFactors
-        let visible = showAllFactors ? factors : Array(factors.prefix(collapsedCount))
-        let hiddenCount = factors.count - visible.count
+        let hiddenCount = factors.count - collapsedCount
 
         return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             // Flat rows in the standard report-list style (matches Key
             // Management / Recent Transactions / Congress) — each row carries
-            // its own hairline divider, no outer card.
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
-                ForEach(visible) { factor in
-                    ReportRiskFactorCard(factor: factor)
+            // its own hairline divider, no outer card. Expanded → the full list
+            // scrolls inside a bounded box so a long list doesn't stretch the
+            // report; collapsed → top `collapsedCount`.
+            if showAllFactors {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: AppSpacing.md) {
+                        ForEach(factors) { factor in
+                            ReportRiskFactorCard(factor: factor)
+                        }
+                    }
+                }
+                .scrollIndicators(.visible)
+                .frame(maxHeight: expandedListHeight)
+            } else {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    ForEach(Array(factors.prefix(collapsedCount))) { factor in
+                        ReportRiskFactorCard(factor: factor)
+                    }
                 }
             }
 

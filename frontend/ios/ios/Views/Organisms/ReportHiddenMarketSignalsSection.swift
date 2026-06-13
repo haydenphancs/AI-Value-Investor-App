@@ -13,6 +13,10 @@ import Charts
 struct ReportHiddenMarketSignalsSection: View {
     let data: ReportHiddenMarketSignals
     @State private var showAllCongress = false
+    // When expanded, a long disclosure list scrolls INSIDE this bounded height
+    // instead of stretching the report — same behavior as Insider Activity's
+    // "Show N more". A short list (≤ 3) never shows the toggle, so it's unaffected.
+    private let expandedListHeight: CGFloat = 420
 
     private static let dateParser: DateFormatter = {
         let f = DateFormatter()
@@ -44,8 +48,7 @@ struct ReportHiddenMarketSignalsSection: View {
         // Pills count UNIQUE politicians (num_buyers/num_sellers), matching the
         // Holders → Congress tab — a person who discloses multiple trades counts
         // once. The list below shows the individual disclosures.
-        let visible = showAllCongress ? c.trades : Array(c.trades.prefix(3))
-        let hiddenCount = c.trades.count - visible.count
+        let hiddenCount = c.trades.count - 3
         return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Congressional Trades")
@@ -64,20 +67,20 @@ struct ReportHiddenMarketSignalsSection: View {
             // Who actually traded — top 3, expandable ("Show N more"). Uses the
             // standard report list row (Key Management style) so it matches the
             // other report lists; 3 lines: name/role/date · range/owner/price.
+            // Expanded → the full list scrolls inside a bounded box so a long
+            // disclosure list doesn't stretch the report; collapsed → top 3.
             if !c.trades.isEmpty {
-                VStack(alignment: .leading, spacing: AppSpacing.md) {
-                    ForEach(visible) { trade in
-                        ReportListRow(
-                            leftPrimary: trade.name,
-                            leftLines: [
-                                ReportRowText(text: trade.role),
-                                ReportRowText(text: trade.formattedDate),
-                            ],
-                            rightLines: [
-                                ReportRowText(text: trade.formattedRange, color: trade.changeColor, isPrimary: true),
-                                ReportRowText(text: trade.ownerLabel, color: trade.ownerColor),
-                            ] + (trade.formattedPrice.isEmpty ? [] : [ReportRowText(text: trade.formattedPrice)])
-                        )
+                if showAllCongress {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: AppSpacing.md) {
+                            ForEach(c.trades) { congressRow($0) }
+                        }
+                    }
+                    .scrollIndicators(.visible)
+                    .frame(maxHeight: expandedListHeight)
+                } else {
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        ForEach(Array(c.trades.prefix(3))) { congressRow($0) }
                     }
                 }
                 if c.trades.count > 3 {
@@ -98,6 +101,23 @@ struct ReportHiddenMarketSignalsSection: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // One congressional-trade row — shared by the collapsed (top-3) and the
+    // expanded scrollable list so they render identically.
+    @ViewBuilder
+    private func congressRow(_ trade: CongressActivity) -> some View {
+        ReportListRow(
+            leftPrimary: trade.name,
+            leftLines: [
+                ReportRowText(text: trade.role),
+                ReportRowText(text: trade.formattedDate),
+            ],
+            rightLines: [
+                ReportRowText(text: trade.formattedRange, color: trade.changeColor, isPrimary: true),
+                ReportRowText(text: trade.ownerLabel, color: trade.ownerColor),
+            ] + (trade.formattedPrice.isEmpty ? [] : [ReportRowText(text: trade.formattedPrice)])
+        )
     }
 
     // MARK: - Short interest

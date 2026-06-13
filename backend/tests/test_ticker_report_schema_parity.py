@@ -217,6 +217,56 @@ def test_pros_cons_capped_at_five():
     assert len(report["core_thesis"]["bear_case"]) <= 5
 
 
+def test_thesis_bullets_label_insider_activity():
+    """A Bull/Bear thesis bullet that cites insider buy/sell counts must say
+    "insider". The bullets render with NO section header, so "55 sells vs 1 buy
+    in 12 months" is unreadable — it could be insiders, institutions, congress,
+    or analysts. The synthesis prompt asks the model to label it but the model
+    doesn't reliably comply (and a leading "Insider:" prefix is stripped by
+    _post_process), so BOTH sanitizers enforce the label deterministically.
+    A different source that also has buyers/sellers must NOT be relabeled."""
+    from app.services._insider_common import ensure_insider_label
+    from app.services.agents.ticker_report_data_collector import _sanitize_thesis
+    from app.services.agents.narrative_prompts import _clean_thesis_points
+
+    # The reported bug: an unlabeled insider sell/buy bullet is labeled INLINE
+    # (a prefix wouldn't survive _post_process), without disturbing the numbers.
+    fixed = ensure_insider_label("55 sells ($1.9B) vs 1 buy ($112K) in 12 months.")
+    assert fixed == "55 insider sells ($1.9B) vs 1 buy ($112K) in 12 months."
+
+    # Already-labeled bullets are left untouched (idempotent).
+    assert ensure_insider_label("55 insider sells vs 1 buy") == "55 insider sells vs 1 buy"
+    assert (
+        ensure_insider_label("Insiders sold 9.1M shares vs 1 buy")
+        == "Insiders sold 9.1M shares vs 1 buy"
+    )
+
+    # A DIFFERENT source that also has buyers/sellers must not be mislabeled.
+    for other in (
+        "Congress: 3 sells vs 1 buy in 12 months",
+        "Institutions: 40 sellers vs 12 buyers last quarter",
+        "Hedge funds: 5 sells vs 2 buys",
+    ):
+        assert ensure_insider_label(other) == other
+
+    # Non buy/sell bullets are untouched.
+    assert (
+        ensure_insider_label("Debt-to-Equity 3.63 vs sector 0.26")
+        == "Debt-to-Equity 3.63 vs sector 0.26"
+    )
+
+    # Both sanitizers carry the label through; non-insider bullets pass clean.
+    san = _sanitize_thesis({
+        "bull_case": ["ROE 50.38% (4.00x sector avg) shows capital efficiency"],
+        "bear_case": ["55 sells ($1.9B) vs 1 buy ($112K) in 12 months."],
+    })
+    assert "insider" in san["bear_case"][0].lower()
+    assert san["bull_case"] == ["ROE 50.38% (4.00x sector avg) shows capital efficiency"]
+
+    cleaned = _clean_thesis_points(["55 sells ($1.9B) vs 1 buy ($112K) in 12 months."])
+    assert cleaned and "insider" in cleaned[0].lower()
+
+
 def test_narrative_jobs_build_without_error_for_fallback_shell():
     """Stage B job builder must walk an assembled fallback report
     without KeyError or AttributeError."""
@@ -623,6 +673,55 @@ def test_build_insider_smart_money_windows_daily_prices():
     # Left edge of the price line ≈ 12 months ago (matching the leftmost bar),
     # not ~2 years — the whole point of the fix.
     assert min(dp.date for dp in sm.daily_prices) == _d(360)
+
+
+def test_build_congress_smart_money_windows_daily_prices():
+    """The Holders Congress chart (same SmartMoneyFlowChart molecule as Insider)
+    overlays a price line on buy/sell bars that span the trailing 12 months. The
+    raw daily series spans ~2 years (sized for the hedge-fund chart, which keeps
+    the full series), so _build_congress_smart_money must window the daily series
+    to the SAME span as the bars — the first day of the oldest of the 12 month
+    keys — otherwise the 2-year line stretched over 12-month bars sits each bar
+    under the wrong date. Mirrors test_build_insider_smart_money_windows_daily_
+    prices; the hedge-fund tab legitimately keeps the full series and is untouched."""
+    from datetime import datetime, timezone, timedelta
+    from app.services.holders_service import HoldersService
+    from app.schemas.holders import DailyPricePointSchema
+
+    now = datetime.now(timezone.utc)
+
+    def _d(days_ago: int) -> str:
+        return (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    # Bypass __init__ (which wires the FMP + Supabase clients) — the method under
+    # test is a pure transform that touches neither.
+    svc = HoldersService.__new__(HoldersService)
+
+    # The cutoff the production code computes: first day of the oldest of the 12
+    # month keys (month-aligned, so it lands ~334–365 days ago depending on the
+    # day-of-month). Test offsets keep a comfortable margin from that boundary.
+    month_keys = svc._generate_month_keys(12)
+    o_month, o_year = month_keys[0].split("/")
+    cutoff_str = f"{o_year}-{o_month}-01"
+
+    daily = [
+        DailyPricePointSchema(date=_d(740), price=90.0),   # ~2yr — must be trimmed
+        DailyPricePointSchema(date=_d(400), price=120.0),  # >12mo — must be trimmed
+        DailyPricePointSchema(date=_d(200), price=150.0),  # inside window — kept
+        DailyPricePointSchema(date=_d(5), price=165.0),    # recent — kept
+    ]
+
+    sm = svc._build_congress_smart_money(
+        senate_trades=[], house_trades=[], monthly_prices={}, daily_prices=daily,
+    )
+
+    assert sm.tab == "Congress"
+    assert sm.daily_prices, "in-window daily points survive"
+    assert all(dp.date >= cutoff_str for dp in sm.daily_prices)
+    assert len(sm.daily_prices) == 2  # the 740- and 400-day points trimmed
+    # Left edge of the price line lands within the trailing 12 months (matching
+    # the leftmost bar), not ~2 years — the whole point of the fix.
+    assert min(dp.date for dp in sm.daily_prices) == _d(200)
 
 
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))

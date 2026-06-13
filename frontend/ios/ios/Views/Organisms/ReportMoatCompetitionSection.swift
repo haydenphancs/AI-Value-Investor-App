@@ -110,6 +110,22 @@ struct ReportMoatCompetitionSection: View {
                                 .font(AppTypography.captionTiny)
                                 .foregroundColor(AppColors.textMuted)
                         }
+
+                        // Explicit US vs Global scope. The TAM is US-domestic
+                        // (Census/FRED) for most industries but Global for
+                        // globally-competitive ones, so label it unambiguously.
+                        if let scope = data.marketDynamics.scopeLabel {
+                            ReportSentimentBadge(
+                                text: scope,
+                                textColor: data.marketDynamics.scopeIsGlobal
+                                    ? AppColors.primaryBlue : AppColors.textSecondary,
+                                backgroundColor: (data.marketDynamics.scopeIsGlobal
+                                    ? AppColors.primaryBlue : AppColors.textSecondary)
+                                    .opacity(0.15),
+                                fontSize: AppTypography.captionTiny
+                            )
+                            .padding(.top, 1)
+                        }
                     } else {
                         Text("—")
                             .font(AppTypography.labelSmall).fontWeight(.bold)

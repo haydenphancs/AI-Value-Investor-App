@@ -489,6 +489,11 @@ struct MarketDynamicsDTO: Codable {
     // from an AI-extracted earnings-call quote (company-specific) or
     // when no source produced data.
     let sourceGrain: String?
+    // Scope of the TAM figure: "us" (Census/FRED US-domestic) or "global"
+    // (Gemini grounded research for globally-competitive industries). The UI
+    // renders an explicit "US"/"Global" pill so the market size is never
+    // ambiguous. Nil when TAM wasn't populated (legacy reports / no source).
+    let tamScope: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -501,6 +506,7 @@ struct MarketDynamicsDTO: Codable {
         case tamSourceQuote = "tam_source_quote"
         case tamSourceLabel = "tam_source_label"
         case sourceGrain = "source_grain"
+        case tamScope = "tam_scope"
     }
 
     init(from decoder: Decoder) throws {
@@ -516,6 +522,7 @@ struct MarketDynamicsDTO: Codable {
         self.tamSourceQuote = try c.decodeIfPresent(String.self, forKey: .tamSourceQuote)
         self.tamSourceLabel = try c.decodeIfPresent(String.self, forKey: .tamSourceLabel)
         self.sourceGrain = try c.decodeIfPresent(String.self, forKey: .sourceGrain)
+        self.tamScope = try c.decodeIfPresent(String.self, forKey: .tamScope)
     }
 }
 
@@ -923,7 +930,8 @@ extension TickerReportAPIResponse {
                 lifecyclePhase: Self.mapLifecycle(moatCompetition.marketDynamics.lifecyclePhase),
                 tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote,
                 tamSourceLabel: moatCompetition.marketDynamics.tamSourceLabel,
-                sourceGrain: moatCompetition.marketDynamics.sourceGrain
+                sourceGrain: moatCompetition.marketDynamics.sourceGrain,
+                tamScope: moatCompetition.marketDynamics.tamScope
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

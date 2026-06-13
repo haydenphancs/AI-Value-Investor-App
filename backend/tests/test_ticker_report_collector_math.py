@@ -1035,22 +1035,27 @@ def test_market_dynamics_derives_concentration_from_peers_on_cache_miss():
         {"mktCap": 100_000_000_000},
     ]
     md = _build_market_dynamics(focal, None, peers)
-    # Top firm has ~72% of the (focal + peers) total cap → monopoly.
-    assert md["concentration"] == "monopoly"
+    # Top firm has ~72% of the (focal + peers) total MARKET CAP. That's cap
+    # dominance, not a market-share monopoly, so the label is capped at
+    # oligopoly (monopoly/duopoly are reserved for real share data).
+    assert md["concentration"] == "oligopoly"
     assert md["cagr_5yr"] is None
     assert md["industry"] == "Software"
 
 
-def test_market_dynamics_monopoly_when_top1_above_50():
-    """Single dominant firm → monopoly enum (highest priority rule)."""
+def test_market_dynamics_high_cap_concentration_caps_at_oligopoly():
+    """A single firm with >50% of sector MARKET CAP is cap dominance, not a
+    market-share monopoly — capped at oligopoly so a smaller constituent's
+    report isn't mislabeled 'Monopoly'."""
     md = _build_market_dynamics({}, _agg(top1_share_pct=55.0, hhi=3500.0))
-    assert md["concentration"] == "monopoly"
+    assert md["concentration"] == "oligopoly"
 
 
-def test_market_dynamics_duopoly_when_top2_above_70():
-    """Two dominant firms → duopoly enum (second-priority rule)."""
+def test_market_dynamics_top2_cap_concentration_caps_at_oligopoly():
+    """Two firms with >70% of sector MARKET CAP → oligopoly (not duopoly),
+    same market-cap-vs-market-share reasoning."""
     md = _build_market_dynamics({}, _agg(top1_share_pct=40.0, top2_share_pct=75.0, hhi=2900.0))
-    assert md["concentration"] == "duopoly"
+    assert md["concentration"] == "oligopoly"
 
 
 def test_market_dynamics_oligopoly_when_hhi_high_but_no_dominant_firm():
@@ -2331,10 +2336,12 @@ def test_dossier_classification_helpers_match_collector_thresholds():
         _classify_lifecycle as collector_lifecycle,
     )
 
-    # Concentration thresholds: monopoly/duopoly/oligopoly/fragmented.
+    # Concentration is MARKET-CAP based, so high concentration caps at
+    # oligopoly (monopoly/duopoly are reserved for real share data). Parity is
+    # what this test pins: both mirrors must agree on every case.
     cases = [
-        (55.0, 80.0, 2200.0),   # monopoly (top1 > 50)
-        (35.0, 75.0, 1800.0),   # duopoly (top2 > 70)
+        (55.0, 80.0, 2200.0),   # high cap conc → oligopoly (capped, not monopoly)
+        (35.0, 75.0, 1800.0),   # high cap conc → oligopoly (capped, not duopoly)
         (20.0, 35.0, 1600.0),   # oligopoly (HHI >= 1500)
         (10.0, 18.0, 800.0),    # fragmented
     ]

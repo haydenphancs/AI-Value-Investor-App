@@ -23,19 +23,29 @@ class LearnViewModel: ObservableObject {
     @Published var error: String?
     @Published var searchText: String = ""
 
+    private var cancellables = Set<AnyCancellable>()
+
     // MARK: - Initialization
     init() {
         loadMockData()
+
+        // The journey card is derived from the shared completion store and rebuilt whenever a
+        // lesson is finished anywhere (e.g. inside the full-screen journey), so the two surfaces
+        // always agree. Build once now for an instant, correct first paint.
+        rebuildJourney()
+        JourneyProgressStore.shared.$completedTitles
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.rebuildJourney() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
     func loadMockData() {
         isLoading = true
 
-        // Simulate network delay
+        // Simulate network delay. Journey progress is NOT loaded here — it's derived live from
+        // the shared completion store via rebuildJourney() (see init).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.loadJourneyData()
-            self?.loadNextLesson()
             self?.loadMoneyMoves()
             self?.loadBooks()
             self?.loadDiscussions()
@@ -48,18 +58,78 @@ class LearnViewModel: ObservableObject {
         isLoading = true
         try? await Task.sleep(nanoseconds: 800_000_000)
         loadMockData()
+        rebuildJourney()
+    }
+
+    // MARK: - Journey Progress (shared with the full-screen journey)
+
+    /// Rebuild the Learn-tab journey card from the shared completion store over the lesson
+    /// catalog (InvestorJourneyData.sampleData). The card tracks the *current level* — the one
+    /// holding the global next-incomplete lesson — so its lit badge advances Foundation →
+    /// Analyst → … as levels finish. Mirrors the full-screen journey so both always agree.
+    private func rebuildJourney() {
+        let completed = JourneyProgressStore.shared.completedTitles
+        let levels = InvestorJourneyData.sampleData.levels
+
+        // Current level = first level with an unfinished lesson; if all done, the final level.
+        let activeLevel = levels.first { level in
+            level.lessons.contains { !completed.contains($0.title) }
+        } ?? levels.last
+
+        guard let active = activeLevel else {
+            journeyTrack = nil
+            nextLesson = nil
+            return
+        }
+
+        currentLevel = investorLevel(for: active.level)
+
+        // The first unfinished lesson in the active level is the global next lesson.
+        let next = active.lessons.first { !completed.contains($0.title) }
+
+        let items: [JourneyItem] = active.lessons.enumerated().map { index, lesson in
+            JourneyItem(
+                title: lesson.title,
+                isCompleted: completed.contains(lesson.title),
+                isActive: lesson.title == next?.title,
+                stepNumber: index + 1
+            )
+        }
+
+        journeyTrack = JourneyTrack(
+            level: currentLevel,
+            completedCount: active.lessons.filter { completed.contains($0.title) }.count,
+            totalCount: active.lessons.count,
+            items: items
+        )
+
+        // Next-lesson detail (kept in sync even though this screen doesn't render it today).
+        if let next {
+            nextLesson = NextLesson(
+                journeyNumber: active.level.rawValue,
+                journeyTitle: active.level.title,
+                lessonTitle: next.title,
+                lessonDescription: next.description,
+                estimatedMinutes: JourneyContentStore.shared.estimatedMinutes(forLessonTitled: next.title)
+                    ?? next.durationMinutes,
+                chapterCount: active.lessons.count
+            )
+        } else {
+            nextLesson = nil
+        }
+    }
+
+    /// Map the full-journey level enum onto the Learn-tab's level enum.
+    private func investorLevel(for level: JourneyLevel) -> InvestorLevel {
+        switch level {
+        case .foundation: return .foundation
+        case .analysis:   return .analyst
+        case .strategies: return .strategist
+        case .mastery:    return .master
+        }
     }
 
     // MARK: - Private Loaders
-    private func loadJourneyData() {
-        journeyTrack = JourneyTrack.sampleBeginner
-        currentLevel = .foundation
-    }
-
-    private func loadNextLesson() {
-        nextLesson = NextLesson.sampleData
-    }
-
     private func loadMoneyMoves() {
         moneyMoves = MoneyMove.sampleData
     }

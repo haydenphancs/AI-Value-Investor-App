@@ -188,14 +188,14 @@ def classify_concentration(top1_pct: float, top2_pct: float, hhi: float) -> str:
     """Mirror of `ticker_report_data_collector._classify_concentration`.
 
     Kept here so the dossier service has no dependency on the collector
-    module (which imports a lot). Update both together if thresholds
-    move.
+    module (which imports a lot). Update both together if thresholds move.
+
+    Inputs are MARKET-CAP shares (see `_compute_hhi(market_caps)`), not
+    market/revenue share — so, like the collector mirror, we never emit
+    'monopoly'/'duopoly' (those are share structures). Cap-derived
+    concentration tops out at 'oligopoly'.
     """
-    if top1_pct > 50.0:
-        return "monopoly"
-    if top2_pct > 70.0:
-        return "duopoly"
-    if hhi >= 1500.0:
+    if top1_pct > 50.0 or top2_pct > 70.0 or hhi >= 1500.0:
         return "oligopoly"
     return "fragmented"
 

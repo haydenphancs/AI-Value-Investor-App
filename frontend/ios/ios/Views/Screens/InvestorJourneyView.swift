@@ -136,6 +136,9 @@ struct InvestorJourneyView: View {
                         viewModel.dismissLessonStory()
                         // Handle CTA navigation based on destination
                         handleCTANavigation(destination)
+                    },
+                    onLessonCompleted: {
+                        viewModel.markSelectedLessonCompleted()
                     }
                 )
             }

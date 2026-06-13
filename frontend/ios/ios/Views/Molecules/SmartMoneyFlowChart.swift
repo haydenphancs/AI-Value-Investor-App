@@ -27,7 +27,7 @@ struct SmartMoneyFlowChart: View {
 
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
-    private let volumeChartHeight: CGFloat = 120
+    private let volumeChartHeight: CGFloat = 145
 
     /// Wider bars for quarterly (8 bars) vs monthly (12 bars)
     private var barWidth: CGFloat {
@@ -219,7 +219,10 @@ struct SmartMoneyFlowChart: View {
                 )
                 .foregroundStyle(HoldersColors.buyVolume)
                 .cornerRadius(2)
-                .annotation(position: .overlay, alignment: .top) {
+                // Outlier label sits ABOVE a (positive) buy bar — outside the
+                // column, not overlapping it — with the ↑ pointing to the
+                // clipped top edge.
+                .annotation(position: .top, spacing: 2) {
                     clippedBarLabel(point.buyVolume, arrow: "↑")
                 }
             }
@@ -233,7 +236,10 @@ struct SmartMoneyFlowChart: View {
                 )
                 .foregroundStyle(HoldersColors.sellVolume)
                 .cornerRadius(2)
-                .annotation(position: .overlay, alignment: .bottom) {
+                // Outlier label sits BELOW a (negative) sell bar — at the bottom
+                // of the column, above the month axis label, not overlapping the
+                // bar — with the ↓ pointing to the clipped bottom edge.
+                .annotation(position: .bottom, spacing: 2) {
                     clippedBarLabel(point.sellVolume, arrow: "↓")
                 }
             }
@@ -285,7 +291,7 @@ struct SmartMoneyFlowChart: View {
                 }
             }
         }
-        .chartYScale(domain: -axisMax...axisMax)
+        .chartYScale(domain: -yScaleMax...yScaleMax)
         .chartPlotStyle { plotArea in
             plotArea.background(Color.clear)
         }
@@ -343,6 +349,23 @@ struct SmartMoneyFlowChart: View {
     /// it draws clipped at the edge and shows its true value as a label.
     private func isClipped(_ value: Double) -> Bool {
         value > axisMax
+    }
+
+    /// True when ANY bar overflows the outlier-capped axis (its true magnitude
+    /// is drawn as a label just OUTSIDE the bar). Drives the extra y-scale
+    /// headroom below so that label doesn't collide with the month-axis labels.
+    private var hasClippedBar: Bool {
+        flowData.contains { isClipped($0.buyVolume) || isClipped($0.sellVolume) }
+    }
+
+    /// Y half-extent for the SCALE — distinct from `axisMax`, which caps the bar
+    /// HEIGHT. A clipped outlier's value label sits just outside the bar (.top
+    /// for buys, .bottom for sells); without headroom it spills onto the month
+    /// labels. Extending the scale past the bar cap parks the clipped tip short
+    /// of the plot edge, leaving room for the label INSIDE the plot. No clip →
+    /// unchanged, so normal tickers render exactly as before.
+    private var yScaleMax: Double {
+        hasClippedBar ? axisMax * 1.30 : axisMax
     }
 
     // A month with real but tiny volume — e.g. a single 480-share insider buy

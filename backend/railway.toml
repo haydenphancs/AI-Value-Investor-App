@@ -1,0 +1,11 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# /health/pdf 503s when WeasyPrint can't load -> a broken native stack FAILS the deploy
+# instead of silently shipping. Railway runs this once before promoting the new deployment.
+healthcheckPath = "/health/pdf"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5

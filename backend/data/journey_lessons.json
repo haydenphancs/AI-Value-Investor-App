@@ -1,0 +1,1553 @@
+{
+  "version": 2,
+  "lessons": [
+    {
+      "title": "Compound Interest",
+      "level": "foundation",
+      "sortOrder": 1,
+      "estimatedMinutes": 3,
+      "category": "standard",
+      "description": "Discover why Einstein called it the eighth wonder of the world.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Quiet Snowball",
+          "text": "Let me show you the gentlest way money grows. It's slow, it's patient, and once you see it, you'll never look at saving the **same** way again.",
+          "audioClip": "compound_interest_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Here's the heart of it. When you invest, your money can earn a little extra over time. Then that little extra starts earning too. So your returns begin making their own returns. That's money quietly making **more** money, while you go about your day.",
+          "audioClip": "compound_interest_02"
+        },
+        {
+          "type": "content",
+          "text": "But here's the part that surprises people. This growth isn't a straight line. It's a **curve**. Early on it feels slow, almost boring, like nothing is happening. Then it bends upward, and the gains start coming faster and faster. Same money, just more time behind it.",
+          "audioClip": "compound_interest_03"
+        },
+        {
+          "type": "content",
+          "text": "Picture a snowball at the top of a hill. At first it's tiny, and one little push barely moves it. But as it rolls, it grabs more snow, gets bigger, and rolls faster. Soon it's huge. Your money can roll downhill just like that **snowball**.",
+          "audioClip": "compound_interest_04"
+        },
+        {
+          "type": "content",
+          "text": "And the real engine here is **time**, not the size of what you start with. A little money invested early often grows more than a big pile invested late. Most of the magic shows up in the final years, near the bottom of the hill. So patience truly is the whole game.",
+          "audioClip": "compound_interest_05"
+        },
+        {
+          "type": "content",
+          "text": "Now one honest warning. This same force can work **against** you. Credit-card debt compounds too. Unpaid balances grow on themselves, faster and faster, just like that snowball, only rolling the wrong way. So let compounding work for you, never on you.",
+          "audioClip": "compound_interest_06"
+        },
+        {
+          "type": "completion",
+          "headline": "You've got this.",
+          "text": "Next time you look at a stock, picture the snowball and ask: am I giving this money enough time to roll?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Stock vs. Business",
+      "level": "foundation",
+      "sortOrder": 2,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Learn to think like an owner, not a trader. The fundamental shift.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "You Own a Slice",
+          "text": "That stock on your screen feels like a blinking number. But here's the quiet truth that changes everything: it's really a small piece of a **real** business.",
+          "audioClip": "stock_vs_business_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Think about what a share actually is. When you buy one, you own a tiny slice of a real company. A piece of its products. A piece of its profits. A piece of its future. Even a **single** share makes you a part-owner, not just someone watching from outside.",
+          "audioClip": "stock_vs_business_02"
+        },
+        {
+          "type": "content",
+          "text": "Now here's the mindset shift. A trader stares at the screen and asks, \"Will the price jump this week?\" An owner leans back and asks something calmer: \"Is this a **business** I'd be glad to hold for years?\" Same stock, very different question.",
+          "audioClip": "stock_vs_business_03"
+        },
+        {
+          "type": "content",
+          "text": "And over time, the owner's question wins. A good company's value tends to follow its **earnings**, which is just how much money it actually makes. The daily price bounces around for a hundred reasons. Most of that is noise. Owners watch the business, not the ticker.",
+          "audioClip": "stock_vs_business_04"
+        },
+        {
+          "type": "content",
+          "text": "So here's a simple gut-check you can use. Before buying, ask yourself, \"Would I be happy to own this **whole** company for ten years?\" It's a thinking exercise, not a rule to never sell. It just pulls your eyes back to the business itself.",
+          "audioClip": "stock_vs_business_05"
+        },
+        {
+          "type": "content",
+          "text": "And this is the real payoff. When prices wobble, and they always will, you won't panic. You'll just ask one steady question: \"Did the business actually **change**?\" Usually it didn't. That calm is what separates an owner from the crowd.",
+          "audioClip": "stock_vs_business_06"
+        },
+        {
+          "type": "completion",
+          "headline": "You're an owner now.",
+          "text": "Pick one company you admire, look up what it actually sells, and ask if you'd be glad to own that whole business for ten years.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Mr. Market",
+      "level": "foundation",
+      "sortOrder": 3,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "How the market works. Meet the bipolar partner who offers to buy or sell every day.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Meet Mr. Market",
+          "text": "Imagine you own half of a good business with a **partner**. His name is Mr. Market, and he has one very strange **habit**.",
+          "audioClip": "mr_market_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Every single day, Mr. Market knocks on your door. He offers to buy your half of the business, or sell you his. He never takes a day off. And every day, he names a **price** he is willing to trade at.",
+          "audioClip": "mr_market_02"
+        },
+        {
+          "type": "content",
+          "text": "Here is the odd part. His price jumps all over the place. One morning it is high, the next it is low. The business itself has not changed at all since yesterday. But his number keeps **swinging** for no clear reason.",
+          "audioClip": "mr_market_03"
+        },
+        {
+          "type": "content",
+          "text": "Why? Because Mr. Market is deeply **moody**. Some days he is thrilled and shouts a sky-high price. Other days he is scared and nearly gives his shares away. His mood moves the price, not the real **value** of the business.",
+          "audioClip": "mr_market_04"
+        },
+        {
+          "type": "content",
+          "text": "Now here is the freedom. You are never forced to trade with him. You can smile, say no thanks, and shut the door. You do not need an opinion every single day. You can let him come back **tomorrow** with a new mood.",
+          "audioClip": "mr_market_05"
+        },
+        {
+          "type": "content",
+          "text": "So his moods become your **opportunity**, not your boss. When his **fear** offers you a real bargain, you can buy. When his greed sends the price far above what the business is worth, you can pass, or sell to him gladly.",
+          "audioClip": "mr_market_06"
+        },
+        {
+          "type": "completion",
+          "headline": "Now you know him.",
+          "text": "Next time a stock you like drops on scary news, ask: did the business really change, or is that just Mr. Market in a mood?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Risk and Reward are Linked",
+      "level": "foundation",
+      "sortOrder": 4,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Two sides of the same coin. Understanding how they trade off is the first step to smarter investing.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Two Sides of a Coin",
+          "text": "Here's a rule the market never breaks: bigger rewards come holding hands with bigger **risk**.",
+          "audioClip": "risk_reward_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Think of it like this. Money in a savings account is very safe, but it grows slowly, almost in slow motion. Stocks can grow much faster, but they can also drop along the way. You simply can't have high reward with zero **risk**. The two are always linked.",
+          "audioClip": "risk_reward_02"
+        },
+        {
+          "type": "content",
+          "text": "So the goal isn't to dodge risk completely. That's impossible, and it would leave your money crawling behind inflation forever. The real goal is to take risk you actually understand, and to make sure you're being paid **fairly** for it.",
+          "audioClip": "risk_reward_03"
+        },
+        {
+          "type": "content",
+          "text": "Two simple things tame risk. Time lets a bumpy ride smooth out over many years. And spreading your money across different investments means no single stumble can sink you. Risk shrinks when you give it **room** and don't bet it all on one square.",
+          "audioClip": "risk_reward_04"
+        },
+        {
+          "type": "content",
+          "text": "Most of all, match the risk to your plan. Money you'll need next year shouldn't ride a roller coaster. Money you won't touch for decades can afford the bumps in exchange for **growth**. The right risk is the one that fits your goal.",
+          "audioClip": "risk_reward_05"
+        },
+        {
+          "type": "content",
+          "text": "And stay alert to one trap. If someone promises big rewards with no risk at all, that combination doesn't exist in honest investing. The words \"guaranteed high returns\" aren't a gift. They're a **warning** worth walking away from.",
+          "audioClip": "risk_reward_06"
+        },
+        {
+          "type": "content",
+          "text": "And here's a comforting flip side. Taking smart risk isn't reckless, it's how your money earns its keep. The trick is simply knowing how much you could lose without losing **sleep**, and never crossing that line.",
+          "audioClip": "risk_reward_07"
+        },
+        {
+          "type": "completion",
+          "headline": "Smartly done.",
+          "text": "Next time a stock tempts you, ask: do I understand this **risk**, and does the reward make it worth taking?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Bitcoin: Digital Gold?",
+      "level": "foundation",
+      "sortOrder": 5,
+      "estimatedMinutes": 4,
+      "category": "crypto",
+      "description": "Understanding the \"Store of Value\" thesis. Why scarcity (21 million coins) matters in a world of printing money.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Digital Gold?",
+          "text": "Some people call Bitcoin the gold of the internet. Let's unpack that **claim**, calmly and without the hype.",
+          "audioClip": "bitcoin_digital_gold_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "First, why gold? For thousands of years, people have trusted gold to hold its value. A big reason is simple: it's scarce. You can't just snap your fingers and make more of it. That rareness is what gives it staying **power**.",
+          "audioClip": "bitcoin_digital_gold_02"
+        },
+        {
+          "type": "content",
+          "text": "Bitcoin was built to copy that idea in digital form. Its rules cap the supply at twenty-one million coins, forever. No government, no company, no single person can print extra. That fixed, hard limit is why some call it digital **gold**.",
+          "audioClip": "bitcoin_digital_gold_03"
+        },
+        {
+          "type": "content",
+          "text": "Here's the thesis. When governments print lots of money, each dollar can buy a little less over time. Something with a fixed supply, the argument goes, might hold its value better. That's the case for Bitcoin as a kind of **shelter** from money-printing.",
+          "audioClip": "bitcoin_digital_gold_04"
+        },
+        {
+          "type": "content",
+          "text": "But here's the honest other half. Bitcoin is young, and its price can swing wildly, up or down, in a single week. It is far from a sure thing. Understanding the idea is smart. Betting more than you can afford to lose is **not**.",
+          "audioClip": "bitcoin_digital_gold_05"
+        },
+        {
+          "type": "content",
+          "text": "So treat it like learning, not a lottery ticket. Read how it works. Watch how it behaves. Then decide if a small, sensible slice fits your plan and your stomach. The goal isn't to chase it. It's to truly **understand** it.",
+          "audioClip": "bitcoin_digital_gold_06"
+        },
+        {
+          "type": "content",
+          "text": "And notice how different this is from a normal business. A stock owns factories and profits you can measure. Bitcoin owns only its scarcity and the trust people place in it. That makes the **store-of-value** idea its entire reason to exist.",
+          "audioClip": "bitcoin_digital_gold_07"
+        },
+        {
+          "type": "completion",
+          "headline": "Now you've heard both sides.",
+          "text": "Whenever you meet a bold investment story, practice this: name the **thesis**, then honestly name the risk.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "ETFs 101",
+      "level": "foundation",
+      "sortOrder": 6,
+      "estimatedMinutes": 3,
+      "category": "standard",
+      "description": "What is an ETF? How to invest in ETFs.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "One Basket, Many Stocks",
+          "text": "Let me introduce the simplest way to own a whole bunch of companies at **once**.",
+          "audioClip": "etfs_101_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Imagine buying fruit. You could pick one single apple and hope it's a good one. Or you could grab a whole basket with apples, oranges, and grapes. An ETF is that basket, but filled with **stocks** instead of fruit.",
+          "audioClip": "etfs_101_02"
+        },
+        {
+          "type": "content",
+          "text": "When you buy one ETF, your money instantly spreads across many companies at the same time. If one of them stumbles, the others help cushion the fall. That instant spreading is called diversification, and it lowers your **risk**.",
+          "audioClip": "etfs_101_03"
+        },
+        {
+          "type": "content",
+          "text": "Many ETFs simply follow a list called an index. A famous one, the S&P five hundred, holds about the five hundred biggest companies in America. Buy that single ETF, and in one click you own a slice of all of **them**.",
+          "audioClip": "etfs_101_04"
+        },
+        {
+          "type": "content",
+          "text": "Best of all, ETFs are usually cheap to own and as easy to buy as a single stock. That's why so many beginners start right here. It's a calm, simple way to plant your money in many places at **once**.",
+          "audioClip": "etfs_101_05"
+        },
+        {
+          "type": "content",
+          "text": "One gentle caution though. A basket spreads your risk, but it doesn't erase it. If the whole market has a rough day, your basket dips too. ETFs make investing simpler and steadier, not magically **risk-free**.",
+          "audioClip": "etfs_101_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a simple way to picture it. One ETF can hold hundreds of companies, so a single bad headline barely moves it. That's why many people use a broad ETF as the calm, steady **core** of their plan, then add a few single stocks around it.",
+          "audioClip": "etfs_101_07"
+        },
+        {
+          "type": "completion",
+          "headline": "You've got the basket.",
+          "text": "Look up a broad ETF, like one that tracks the **S&P 500**, and peek at the companies hiding inside it.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Inflation Thief",
+      "level": "foundation",
+      "sortOrder": 7,
+      "estimatedMinutes": 3,
+      "category": "standard",
+      "description": "How your money loses value while sitting still, and what to do.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Silent Thief",
+          "text": "There's a quiet pickpocket that nibbles at your savings while you sleep. Its name is **inflation**.",
+          "audioClip": "inflation_thief_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Here's how it works. Over time, prices slowly drift upward. The coffee that cost three dollars last year might cost three-twenty next year. Your money didn't shrink, but what it can actually **buy** did.",
+          "audioClip": "inflation_thief_02"
+        },
+        {
+          "type": "content",
+          "text": "Now picture cash just sitting in a drawer or a basic account. It looks safe and perfectly still. But quietly, year after year, inflation shrinks its real power. It's like a slow leak in a tire you can't even **see**.",
+          "audioClip": "inflation_thief_03"
+        },
+        {
+          "type": "content",
+          "text": "This is the big reason people invest. If your money only sits, the thief slowly wins. But if your money grows faster than prices rise, you stay ahead. Investing is how you **outrun** inflation, not just match it.",
+          "audioClip": "inflation_thief_04"
+        },
+        {
+          "type": "content",
+          "text": "So here's the mindset shift. Doing nothing with cash isn't truly safe. It's a slow, almost guaranteed loss of buying power. Putting your money to work is how you guard it from the silent **thief**.",
+          "audioClip": "inflation_thief_05"
+        },
+        {
+          "type": "content",
+          "text": "Remember the snowball from before? This is its rival. Inflation is a snowball rolling against you, while compounding rolls for you. Smart investing simply makes sure your snowball is the **bigger** one.",
+          "audioClip": "inflation_thief_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a number that makes it real. At just three percent a year, prices roughly double in about twenty-four years. The very same grocery run could cost twice as much by the time you **retire**.",
+          "audioClip": "inflation_thief_07"
+        },
+        {
+          "type": "content",
+          "text": "So the lesson isn't to fear spending. It's to make sure at least some of your money is growing, quietly working in the background, instead of sitting perfectly still while the thief slowly **empties** it.",
+          "audioClip": "inflation_thief_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Thief spotted.",
+          "text": "Think of one thing you buy often, picture its price in ten years, and let that nudge your money to **work**.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Key Statistics",
+      "level": "analysis",
+      "sortOrder": 1,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "The numbers that matter most when evaluating any company.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Your Quick Dashboard",
+          "text": "You don't need to read every number on a company. Just a handful tells you most of the **story**.",
+          "audioClip": "key_statistics_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Think of a car's dashboard. You don't watch every wire under the hood, just a few key dials. A stock has its own dashboard, and learning to read four or five numbers gets you surprisingly **far**.",
+          "audioClip": "key_statistics_02"
+        },
+        {
+          "type": "content",
+          "text": "First, market cap. It's the company's full price tag, every share added together. It tells you the size. Is this a scrappy small company or a giant? Size shapes how fast it might still **grow**.",
+          "audioClip": "key_statistics_03"
+        },
+        {
+          "type": "content",
+          "text": "Next, the P/E ratio. It's how much you pay for each dollar the company earns. A high number means investors expect a lot. A low one can mean a bargain, or trouble. It's a quick **gut-check** on price.",
+          "audioClip": "key_statistics_04"
+        },
+        {
+          "type": "content",
+          "text": "Then look at growth. Are revenue and earnings climbing year after year? Rising numbers mean the business is getting bigger. Flat or falling ones are a quiet signal to stop and ask **why**.",
+          "audioClip": "key_statistics_05"
+        },
+        {
+          "type": "content",
+          "text": "Finally, the dividend. Some companies share their profits as cash, paid straight to owners like you. Not every company does, and that's fine. But a steady dividend can be a sign of **stability**.",
+          "audioClip": "key_statistics_06"
+        },
+        {
+          "type": "content",
+          "text": "A quick word of care. No single number tells the whole story. A low price tag can hide a sinking business, and a high one can sit on a brilliant **company**. Always read a few dials together, never just one.",
+          "audioClip": "key_statistics_07"
+        },
+        {
+          "type": "content",
+          "text": "And always compare apples to apples. A number only means something next to the company's own history and its closest rivals. On its own, it's just a digit floating in **space**.",
+          "audioClip": "key_statistics_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Dashboard unlocked.",
+          "text": "Pull up any stock you like and find just its **market cap** and P/E. That's a real start.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Income Statement",
+      "level": "analysis",
+      "sortOrder": 2,
+      "estimatedMinutes": 8,
+      "category": "standard",
+      "description": "Reading the story of profitability and growth over time.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Story of Profit",
+          "text": "One simple report answers the most basic question of all: did the company actually **make money**?",
+          "audioClip": "income_statement_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Picture a lemonade stand. To know if it's working, you'd ask two things: how much did you sell, and what was left after costs? The income statement answers exactly that, just for a whole **company**.",
+          "audioClip": "income_statement_02"
+        },
+        {
+          "type": "content",
+          "text": "It starts at the very top with revenue, all the money from sales. People call this the top line. It's the size of the river of cash flowing **in**, before any bills get paid.",
+          "audioClip": "income_statement_03"
+        },
+        {
+          "type": "content",
+          "text": "Then come the costs: ingredients, wages, rent, taxes. Subtract them all, and what remains at the very bottom is profit, called net income. That's exactly why it's nicknamed the bottom **line**.",
+          "audioClip": "income_statement_04"
+        },
+        {
+          "type": "content",
+          "text": "But one year alone doesn't tell you much. The magic is in the trend. When both revenue and profit climb, year after year, you're looking at a business that's genuinely getting **stronger**.",
+          "audioClip": "income_statement_05"
+        },
+        {
+          "type": "content",
+          "text": "Here's a gem the pros watch: margins. If a company keeps a big slice of every sales dollar as profit, that's a healthy, efficient business. Thin or shrinking margins are worth a closer **look**.",
+          "audioClip": "income_statement_06"
+        },
+        {
+          "type": "content",
+          "text": "One last caution. A company can flatter a single year with a one-time trick, like selling a building. The steady, repeatable profit is the one that truly **counts**, not the lucky one-off.",
+          "audioClip": "income_statement_07"
+        },
+        {
+          "type": "content",
+          "text": "Here's a friendly way to remember it. Revenue is what came in the front door. Costs are what slipped out the back. And profit is whatever is still standing in the room when the day is **done**.",
+          "audioClip": "income_statement_08"
+        },
+        {
+          "type": "completion",
+          "headline": "You can read the story.",
+          "text": "Open one company's income statement and trace it from revenue at the top down to **profit** at the bottom.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Balance Sheet",
+      "level": "analysis",
+      "sortOrder": 3,
+      "estimatedMinutes": 6,
+      "category": "standard",
+      "description": "Understanding assets, liabilities, and what the company owns.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "What It Owns and Owes",
+          "text": "If the income statement is a movie, the balance sheet is a single, honest **photo**.",
+          "audioClip": "balance_sheet_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "A balance sheet is a snapshot taken on one day. It doesn't show the whole year, just where the company stands right now, like a photo of someone's finances at a single **moment**.",
+          "audioClip": "balance_sheet_02"
+        },
+        {
+          "type": "content",
+          "text": "It has two sides. On one side are assets: everything the company owns. Cash in the bank, buildings, equipment, products on the shelf. These are the things of **value** it holds.",
+          "audioClip": "balance_sheet_03"
+        },
+        {
+          "type": "content",
+          "text": "On the other side are liabilities: everything it owes. Loans, unpaid bills, debts coming due later. This is the weight the company is **carrying** on its back.",
+          "audioClip": "balance_sheet_04"
+        },
+        {
+          "type": "content",
+          "text": "Subtract what it owes from what it owns, and you get equity, the part that truly belongs to the owners. That leftover slice is, in a very real sense, **yours** as a shareholder.",
+          "audioClip": "balance_sheet_05"
+        },
+        {
+          "type": "content",
+          "text": "So what makes a balance sheet strong? Manageable debt and enough cash to survive a rough patch. A company drowning in loans is fragile. One with a cushion can weather a **storm**.",
+          "audioClip": "balance_sheet_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's why it matters so much to you. In a tough year, debt still demands to be paid, but cash gives a company room to breathe. A strong balance sheet is what lets a business survive long enough to **recover**.",
+          "audioClip": "balance_sheet_07"
+        },
+        {
+          "type": "content",
+          "text": "A simple habit helps. Glance at how much a company owes against how much it owns. If the debts tower over everything else, that's a quiet sign of **fragility** worth respecting.",
+          "audioClip": "balance_sheet_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Snapshot in focus.",
+          "text": "Check one company's balance sheet and compare what it **owns** against what it owes.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Cash Flow is King",
+      "level": "analysis",
+      "sortOrder": 4,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Why cash is king and profits can lie. Follow the money.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Follow the Cash",
+          "text": "Profit can be dressed up on paper. Cash is much harder to **fake**.",
+          "audioClip": "cash_flow_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Here's a quiet truth. The profit a company reports can be shaped by accounting choices, perfectly legal, but flattering. It's a bit like a photo with a good filter. Real, but **polished**.",
+          "audioClip": "cash_flow_02"
+        },
+        {
+          "type": "content",
+          "text": "Cash is different. Money either landed in the bank account, or it didn't. There's no filter for that. So following the cash gives you a more honest view of how the business is really **doing**.",
+          "audioClip": "cash_flow_03"
+        },
+        {
+          "type": "content",
+          "text": "Cash flow simply tracks money moving in and out, the real stuff, not the paper kind. When lots of cash flows in, the business has fuel. When it's draining away, that's a warning **light**.",
+          "audioClip": "cash_flow_04"
+        },
+        {
+          "type": "content",
+          "text": "The prize number is free cash flow, the cash left over after running and maintaining the business. That leftover is what pays dividends, funds growth, and buys back shares. It's the real **fuel**.",
+          "audioClip": "cash_flow_05"
+        },
+        {
+          "type": "content",
+          "text": "And here's the catch that surprises beginners. A company can report a shiny profit and still run out of cash. When in doubt, follow the **cash**, not just the headline number.",
+          "audioClip": "cash_flow_06"
+        },
+        {
+          "type": "content",
+          "text": "There's even a famous warning behind this. Companies rarely collapse because profits dipped for a quarter. They collapse because the cash ran dry. Cash is the oxygen a business actually **breathes**.",
+          "audioClip": "cash_flow_07"
+        },
+        {
+          "type": "content",
+          "text": "So make this a habit. When a company brags about record profits, quietly check whether real cash is flowing in to match. If the two drift far apart, gently ask **why**.",
+          "audioClip": "cash_flow_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Cash is king.",
+          "text": "Find one company's free **cash flow** and ask: is real money actually piling up here?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Economic Moats",
+      "level": "analysis",
+      "sortOrder": 5,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Identifying the competitive advantages that protect great businesses.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Castle's Moat",
+          "text": "The very best businesses are protected by something that quietly keeps rivals **out**.",
+          "audioClip": "economic_moats_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Picture a castle. What keeps invaders away? A wide moat of water around it. Great companies have their own kind of moat, an advantage that competitors just can't easily **cross**.",
+          "audioClip": "economic_moats_02"
+        },
+        {
+          "type": "content",
+          "text": "One moat is a beloved brand. When people happily pay more for a name they trust, rivals struggle to lure them away. That loyalty is a wall built quietly out of **trust**.",
+          "audioClip": "economic_moats_03"
+        },
+        {
+          "type": "content",
+          "text": "Another is the network effect. Some products get more useful as more people join, like a phone network or a busy marketplace. Each new user makes it harder for a rival to **compete**.",
+          "audioClip": "economic_moats_04"
+        },
+        {
+          "type": "content",
+          "text": "There are others too. The low-cost producer who can always undercut everyone. Or patents that legally protect an idea. Each one helps a company stay profitable for **years**, not just months.",
+          "audioClip": "economic_moats_05"
+        },
+        {
+          "type": "content",
+          "text": "So when you study a business, ask one simple question. What stops a competitor from copying this and stealing the customers? If the honest answer is \"a lot,\" you may have found a real **moat**.",
+          "audioClip": "economic_moats_06"
+        },
+        {
+          "type": "content",
+          "text": "And here's the payoff for you. A wide moat doesn't just protect today's profits, it protects tomorrow's. It buys a company the time and pricing power to keep **winning** while rivals struggle to catch up.",
+          "audioClip": "economic_moats_07"
+        },
+        {
+          "type": "content",
+          "text": "Moats can fade, though. A brand can grow stale, a patent can expire. So the real question isn't just does it have a moat, but is that moat getting **wider** or narrower over time?",
+          "audioClip": "economic_moats_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Moat spotted.",
+          "text": "Pick a company you admire and name its **moat**: a brand, a network, low cost, or a patent?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Tokenomics 101",
+      "level": "analysis",
+      "sortOrder": 6,
+      "estimatedMinutes": 4,
+      "category": "crypto",
+      "description": "The \"Central Bank\" of a crypto project. Who holds the tokens? Are they printing more tomorrow (inflation)?",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "A Token's Rulebook",
+          "text": "Every crypto coin runs on a set of hidden economic rules. Those rules are its **tokenomics**.",
+          "audioClip": "tokenomics_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Think of a country printing money. If it prints carefully, the money holds value. If it prints endlessly, each note is worth less. A crypto token has its own money rules, and they matter just as **much**.",
+          "audioClip": "tokenomics_02"
+        },
+        {
+          "type": "content",
+          "text": "The first question is supply. How many tokens exist, and will many more be created later? Endless new tokens can quietly water down what you hold, a slow **dilution** of your slice.",
+          "audioClip": "tokenomics_03"
+        },
+        {
+          "type": "content",
+          "text": "The second question is who holds them. If a small group of insiders owns a giant share, they could sell all at once and send the price tumbling. Always ask where the tokens actually **sit**.",
+          "audioClip": "tokenomics_04"
+        },
+        {
+          "type": "content",
+          "text": "The third question is the simplest. What is this token even for? Does it do something real, or does it just exist to be traded? A token with a genuine **use** stands on much firmer ground.",
+          "audioClip": "tokenomics_05"
+        },
+        {
+          "type": "content",
+          "text": "Put it together. Healthy tokenomics means limited, fair supply and a real purpose. Weak tokenomics means endless printing and pure hype. Reading the rulebook protects you from a bad **deal**.",
+          "audioClip": "tokenomics_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a simple comparison. Picture two towns. One prints a fixed amount of money and shares it fairly. The other prints endlessly and hands most of it to the mayor's friends. You'd trust the first town's money far **more**, and the same logic guides a token.",
+          "audioClip": "tokenomics_07"
+        },
+        {
+          "type": "content",
+          "text": "So before a price chart ever tempts you, read the rulebook. Good tokenomics won't guarantee success, but bad tokenomics is a quiet **trapdoor** waiting underneath.",
+          "audioClip": "tokenomics_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Rulebook read.",
+          "text": "Before any crypto catches your eye, ask the three questions: supply, holders, and **use**.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Red Flags",
+      "level": "analysis",
+      "sortOrder": 7,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Warning signs: Insider selling, frequent accounting changes, or missed earnings.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Warning Lights",
+          "text": "Some signals don't shout. They whisper, \"slow down and look a little **closer**.\"",
+          "audioClip": "red_flags_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Think of the warning lights on a dashboard. One blinking light doesn't mean the engine is dead, but it does mean pay attention. Companies flash their own warning **lights** too.",
+          "audioClip": "red_flags_02"
+        },
+        {
+          "type": "content",
+          "text": "One is heavy insider selling. When the executives who know the company best are quietly cashing out, it's worth gently asking what they might **see** that you don't.",
+          "audioClip": "red_flags_03"
+        },
+        {
+          "type": "content",
+          "text": "Another is messy accounting. If a company keeps changing how it reports its numbers, or swaps its auditors often, it can be a sign that something is hiding in the **shadows**.",
+          "audioClip": "red_flags_04"
+        },
+        {
+          "type": "content",
+          "text": "Watch the debt, too. When borrowing piles up faster than earnings, the company is leaning on a ladder that keeps getting **taller**. One slip from up there can really hurt.",
+          "audioClip": "red_flags_05"
+        },
+        {
+          "type": "content",
+          "text": "And notice broken promises. A company that repeatedly misses its own targets, or makes claims that sound too good to be true, has earned your **caution**, not your blind trust.",
+          "audioClip": "red_flags_06"
+        },
+        {
+          "type": "content",
+          "text": "One flag alone rarely means disaster. It's a cluster that should worry you. Heavy insider selling, plus rising debt, plus missed targets, all at once, is a pattern, not a **coincidence**.",
+          "audioClip": "red_flags_07"
+        },
+        {
+          "type": "content",
+          "text": "And trust your gut on confusion. If you read a company's reports and walk away more puzzled than before, that fog can itself be a red **flag**. Clear businesses tend to explain themselves clearly.",
+          "audioClip": "red_flags_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Eyes open.",
+          "text": "Scan one company for a red flag: insider **selling**, rising debt, or repeatedly missed targets?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Buffett Way",
+      "level": "strategies",
+      "sortOrder": 1,
+      "estimatedMinutes": 7,
+      "category": "standard",
+      "description": "Value investing principles from the Oracle of Omaha himself.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Wonderful at a Fair Price",
+          "text": "Warren Buffett's whole game fits in one line: buy great businesses and hold them **patiently**.",
+          "audioClip": "buffett_way_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Buffett doesn't trade stocks like playing cards. He buys pieces of wonderful businesses and holds them for years, sometimes decades. His favorite holding period, he likes to joke, is **forever**.",
+          "audioClip": "buffett_way_02"
+        },
+        {
+          "type": "content",
+          "text": "Rule one: stay inside your circle of competence. Only buy businesses you genuinely understand. If you can't explain how a company makes its money, that's a perfectly good reason to walk **away**.",
+          "audioClip": "buffett_way_03"
+        },
+        {
+          "type": "content",
+          "text": "Rule two: look for a moat and good people. He wants a durable advantage that protects profits, run by honest, capable managers who treat their shareholders like real **partners**.",
+          "audioClip": "buffett_way_04"
+        },
+        {
+          "type": "content",
+          "text": "Rule three: demand a margin of safety. Try to pay clearly less than the business is worth. That gap is your cushion, so even an honest mistake won't sink **you**.",
+          "audioClip": "buffett_way_05"
+        },
+        {
+          "type": "content",
+          "text": "Then comes the hardest part of all: doing nothing. Once he owns a great business at a fair price, he simply lets patience and compounding work quietly for **years**.",
+          "audioClip": "buffett_way_06"
+        },
+        {
+          "type": "content",
+          "text": "One last Buffett secret. Temperament beats brainpower. He stays calm when others panic, and treats a market crash as a chance to buy wonderful businesses on **sale**.",
+          "audioClip": "buffett_way_07"
+        },
+        {
+          "type": "content",
+          "text": "And here's the quiet genius of it. By holding wonderful businesses for years, he lets their profits compound and skips the taxes and fees that nibble at constant traders. Doing less, done well, quietly **wins**.",
+          "audioClip": "buffett_way_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Oracle-approved.",
+          "text": "Pick a business you understand and ask: does it have a **moat**, and is the price fair today?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Lynch Way",
+      "level": "strategies",
+      "sortOrder": 2,
+      "estimatedMinutes": 6,
+      "category": "standard",
+      "description": "Invest in what you know. Peter Lynch's common sense approach.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Invest in What You Know",
+          "text": "Peter Lynch found his winners in the most ordinary place of all: everyday **life**.",
+          "audioClip": "lynch_way_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Lynch had a wonderfully simple idea. Your daily life is a research lab. You often spot a great product, a packed store, a gadget everyone loves, long before Wall Street even **notices**.",
+          "audioClip": "lynch_way_02"
+        },
+        {
+          "type": "content",
+          "text": "But spotting it is only step one. If you love a product, dig into the company behind it. A great burger doesn't always mean a great business. The story still has to match the **numbers**.",
+          "audioClip": "lynch_way_03"
+        },
+        {
+          "type": "content",
+          "text": "His rule of thumb: only own what you can explain in a sentence or two. If you can't say simply why you own it, that's a quiet sign you don't really understand it **yet**.",
+          "audioClip": "lynch_way_04"
+        },
+        {
+          "type": "content",
+          "text": "He loved steady, understandable growers over flashy mysteries. A boring company that quietly grows year after year can quietly make you a small fortune over **time**.",
+          "audioClip": "lynch_way_05"
+        },
+        {
+          "type": "content",
+          "text": "So Lynch turns shopping into research. Pay attention to what you and your friends keep buying. Then check whether a strong, healthy business actually stands **behind** the product you love.",
+          "audioClip": "lynch_way_06"
+        },
+        {
+          "type": "content",
+          "text": "He had a famous warning, too. Never invest in an idea you can't draw with a crayon. If a business is too tangled to explain to a child, it may be too tangled to **own** safely.",
+          "audioClip": "lynch_way_07"
+        },
+        {
+          "type": "content",
+          "text": "And patience was part of his magic. The best everyday companies often take years to fully bloom. Lynch was happy to wait, letting a simple, growing business slowly **reward** him.",
+          "audioClip": "lynch_way_08"
+        },
+        {
+          "type": "completion",
+          "headline": "You're a field researcher now.",
+          "text": "Name one product you love, then go investigate the **company** that actually makes it.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Cathie Wood Way",
+      "level": "strategies",
+      "sortOrder": 3,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Disruptive innovation investing and exponential growth thinking.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Betting on the Future",
+          "text": "Some investors look right past today's profits, toward a world that doesn't exist **yet**.",
+          "audioClip": "cathie_wood_way_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Cathie Wood's style is bold. Instead of buying steady, proven companies, she bets on disruptors, firms chasing huge changes in areas like electric cars, AI, and **genomics**.",
+          "audioClip": "cathie_wood_way_02"
+        },
+        {
+          "type": "content",
+          "text": "The idea is that some technologies don't grow slowly, they explode, reshaping whole industries. Get in early on the right one, and the potential reward can be truly **enormous**.",
+          "audioClip": "cathie_wood_way_03"
+        },
+        {
+          "type": "content",
+          "text": "But here's the honest flip side. Many disruptors fail. Prices swing violently, and a stock can fall by half before, or instead of, ever soaring. This is high **risk**, not a sure thing.",
+          "audioClip": "cathie_wood_way_04"
+        },
+        {
+          "type": "content",
+          "text": "It also demands patience and a strong stomach. You have to hold through scary drops and loud doubters, trusting a story that may take years to play **out**, if it ever does.",
+          "audioClip": "cathie_wood_way_05"
+        },
+        {
+          "type": "content",
+          "text": "Think of it as the opposite end from Buffett's caution. Neither one is simply \"right.\" The lesson is to know which **risk** you're taking, and to size it so a miss can't wreck you.",
+          "audioClip": "cathie_wood_way_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a fair way to hold it in mind. These bets can be thrilling and genuinely important, funding the future we'll all live in. But thrilling is not the same as **safe**, and both can be true at once.",
+          "audioClip": "cathie_wood_way_07"
+        },
+        {
+          "type": "content",
+          "text": "So if this style calls to you, start small and stay humble. Let it be a spicy corner of your plan, never the whole meal, so a single failed bet can't undo **everything**.",
+          "audioClip": "cathie_wood_way_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Future, considered.",
+          "text": "Find one \"disruptive\" stock and ask honestly: do I understand both the dream and the **risk**?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Whale Watching",
+      "level": "strategies",
+      "sortOrder": 4,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Following institutional investors and learning from their moves.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Following the Giants",
+          "text": "The biggest investors leave footprints. You can learn a lot just by reading **them**.",
+          "audioClip": "whale_watching_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "The huge funds, the \"whales,\" move so much money that they must report many of their holdings publicly. That means you can peek at what the giants are quietly buying and **selling**.",
+          "audioClip": "whale_watching_02"
+        },
+        {
+          "type": "content",
+          "text": "It's a wonderful source of ideas. If several smart funds are piling into the same company, that's a hint worth investigating, a thread worth gently **pulling** on.",
+          "audioClip": "whale_watching_03"
+        },
+        {
+          "type": "content",
+          "text": "But mind the catch. These reports arrive weeks late. By the time you see a whale's move, it may already be old news, and the price may have **changed**.",
+          "audioClip": "whale_watching_04"
+        },
+        {
+          "type": "content",
+          "text": "And remember, their goals aren't yours. A fund might buy for reasons that make no sense for your plan or your timeline. Their map isn't always your **road**.",
+          "audioClip": "whale_watching_05"
+        },
+        {
+          "type": "content",
+          "text": "So use whale-watching for ideas, never blind copying. Let a giant point you toward a company, then do your own homework first. Follow the footprints, but always **think** for yourself.",
+          "audioClip": "whale_watching_06"
+        },
+        {
+          "type": "content",
+          "text": "There's a subtler lesson here, too. Even the giants are often wrong. A famous fund can pour millions into a stock that still sinks. Their size makes them visible, not **infallible**.",
+          "audioClip": "whale_watching_07"
+        },
+        {
+          "type": "content",
+          "text": "So treat their moves like a tip from a knowledgeable friend. Worth a listen, never a command. The final decision, and the responsibility, always stays with **you**.",
+          "audioClip": "whale_watching_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Tracking skills earned.",
+          "text": "Look up what a famous fund holds, pick one name that interests you, and **research** it yourself.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Portfolio Gardening",
+      "level": "strategies",
+      "sortOrder": 5,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Cultivating your investments: when to water, prune, or uproot. The myth of diversification.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Tend Your Garden",
+          "text": "A portfolio isn't a slot machine. It's a garden that needs gentle, patient **tending**.",
+          "audioClip": "portfolio_gardening_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Imagine your investments as a garden. It doesn't need you digging it up every single day. It needs patient care: a little water, a little pruning, and a lot of letting things **grow**.",
+          "audioClip": "portfolio_gardening_02"
+        },
+        {
+          "type": "content",
+          "text": "Water your winners. When a strong business keeps thriving, resist the urge to yank it out just to lock in a small gain. Let your healthiest plants reach for the **sky**.",
+          "audioClip": "portfolio_gardening_03"
+        },
+        {
+          "type": "content",
+          "text": "Prune the weak ones. If a holding's story has truly broken, and it no longer earns its place, trimming it frees up room and sunlight for **better** plants to thrive.",
+          "audioClip": "portfolio_gardening_04"
+        },
+        {
+          "type": "content",
+          "text": "But don't uproot a healthy plant just because a storm rolled through. A falling price isn't always a dying business. Sometimes it's just bad **weather** passing overhead.",
+          "audioClip": "portfolio_gardening_05"
+        },
+        {
+          "type": "content",
+          "text": "And beware planting too many seeds. Spreading across a few good plants is wise. Owning fifty you can't even name just waters the weeds along with the **flowers**.",
+          "audioClip": "portfolio_gardening_06"
+        },
+        {
+          "type": "content",
+          "text": "There's a myth worth busting here. More holdings isn't automatically safer. Past a point, every new name just dilutes your best ideas and makes the whole garden harder to **tend**.",
+          "audioClip": "portfolio_gardening_07"
+        },
+        {
+          "type": "content",
+          "text": "A gentle rhythm works best. Check in now and then, not every hour. Pull a weed, water a winner, and otherwise let your garden quietly do what gardens do: **grow**.",
+          "audioClip": "portfolio_gardening_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Green thumb earned.",
+          "text": "Look at your watchlist and ask: which are **winners** to water, and which are weeds to prune?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Power of Discipline",
+      "level": "strategies",
+      "sortOrder": 6,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Keeps your strategy on track and turns plans into profits.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Quiet Superpower",
+          "text": "The best plan in the world is worthless if you can't actually **stick** to it.",
+          "audioClip": "power_of_discipline_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Here's a hard truth. Most investing failures aren't about picking the wrong stock. They're about breaking your own plan the very moment things get **emotional**.",
+          "audioClip": "power_of_discipline_02"
+        },
+        {
+          "type": "content",
+          "text": "The market is a master tempter. It whispers \"buy now, it's flying!\" near the top, and screams \"sell, it's crashing!\" near the bottom. Discipline is what lets you calmly **ignore** both.",
+          "audioClip": "power_of_discipline_03"
+        },
+        {
+          "type": "content",
+          "text": "Discipline isn't dramatic. It's boring, on purpose. It's investing a little, steadily, on schedule, instead of trying to perfectly time the market. The boring path quietly **wins**.",
+          "audioClip": "power_of_discipline_04"
+        },
+        {
+          "type": "content",
+          "text": "It's exactly why steady beats brilliant. A clever investor who panics and quits loses to a calm one who simply keeps going through the good years and the **bad**.",
+          "audioClip": "power_of_discipline_05"
+        },
+        {
+          "type": "content",
+          "text": "So write your rules down while you're calm. How much to invest, when, and what would truly make you sell. Then follow them later, even when your emotions start to **shout**.",
+          "audioClip": "power_of_discipline_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a tool that makes discipline easy: automation. Set up steady, automatic investing, and the boring right thing happens on its own, even on the days you don't **feel** like it.",
+          "audioClip": "power_of_discipline_07"
+        },
+        {
+          "type": "content",
+          "text": "And forgive yourself the small slips. Discipline isn't perfection, it's returning to the plan again and again. One emotional day won't ruin you. Quitting the plan **entirely** might.",
+          "audioClip": "power_of_discipline_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Superpower unlocked.",
+          "text": "Write one simple rule you'll follow, even when the market is trying to make you **panic**.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Common Investing Mistakes",
+      "level": "strategies",
+      "sortOrder": 7,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Even smart investors make mistakes. Learning the common ones helps you avoid costly decisions before they happen.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Traps to Sidestep",
+          "text": "Even very smart investors stumble. Naming the traps out loud makes them far easier to **dodge**.",
+          "audioClip": "common_mistakes_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Mistake one: chasing hot tips. A stock everyone is shouting about is often already expensive. By the time the crowd gets loud, the easy gains are usually long **gone**.",
+          "audioClip": "common_mistakes_02"
+        },
+        {
+          "type": "content",
+          "text": "Mistake two: panic-selling. When prices fall, fear screams \"get out now!\" But selling in a panic locks in the loss, and often means selling at the very **bottom**.",
+          "audioClip": "common_mistakes_03"
+        },
+        {
+          "type": "content",
+          "text": "Mistake three: watching too closely. Checking prices every hour turns calm investing into a stressful video game, and nudges you into trades you'll later **regret**.",
+          "audioClip": "common_mistakes_04"
+        },
+        {
+          "type": "content",
+          "text": "Mistake four: betting it all on one name. Even a great company can surprise you. Putting everything into a single stock means one bad day can undo **years** of patient work.",
+          "audioClip": "common_mistakes_05"
+        },
+        {
+          "type": "content",
+          "text": "Mistake five: trying to time it perfectly. Almost nobody nails the exact top and bottom. Steady investing beats endlessly waiting for a perfect moment that rarely **comes**.",
+          "audioClip": "common_mistakes_06"
+        },
+        {
+          "type": "content",
+          "text": "Notice the thread running through all five. Almost every one is driven by emotion, not logic, by fear, greed, or impatience grabbing the wheel. Spotting the feeling early is half the **battle**.",
+          "audioClip": "common_mistakes_07"
+        },
+        {
+          "type": "content",
+          "text": "And here's the kind part. You don't have to be brilliant to do well. You mostly have to avoid these big, common blunders. Steady and sensible quietly beats clever and **reckless**.",
+          "audioClip": "common_mistakes_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Forewarned is forearmed.",
+          "text": "Pick the trap you're most likely to fall into, and decide right now how you'll **avoid** it.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The FOMO Cycle",
+      "level": "mastery",
+      "sortOrder": 1,
+      "estimatedMinutes": 6,
+      "category": "standard",
+      "description": "Recognizing and breaking free from emotion-driven investing patterns.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Fear of Missing Out",
+          "text": "There's an emotional loop that quietly tricks investors into buying high and selling **low**.",
+          "audioClip": "fomo_cycle_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "It starts with a rise. A stock climbs, headlines cheer, and friends brag about their gains. A feeling creeps in: everyone's getting rich but me. That's **FOMO**, the fear of missing out.",
+          "audioClip": "fomo_cycle_02"
+        },
+        {
+          "type": "content",
+          "text": "So you jump in, often right near the top, paying a high price just to chase the crowd. For a moment it feels great. You finally **belong** to the party everyone's talking about.",
+          "audioClip": "fomo_cycle_03"
+        },
+        {
+          "type": "content",
+          "text": "Then the mood turns. The price slips, the cheering stops, and a new feeling takes over: fear. \"Get out before it's worse.\" So you sell, often near the very **bottom**.",
+          "audioClip": "fomo_cycle_04"
+        },
+        {
+          "type": "content",
+          "text": "Look closely at what just happened. You bought high and sold low, the exact opposite of the goal, and emotion drove every single step. That's the FOMO **cycle** in action.",
+          "audioClip": "fomo_cycle_05"
+        },
+        {
+          "type": "content",
+          "text": "The escape is simple, but not easy. Notice the feeling as it rises. A plan and a little patience let you watch the frenzy calmly, instead of being **swept** right into it.",
+          "audioClip": "fomo_cycle_06"
+        },
+        {
+          "type": "content",
+          "text": "Here's a quiet trick that helps. The best opportunities often feel uncomfortable, bought when others are fearful, not when everyone is **cheering**. Comfort and crowds rarely lead to bargains.",
+          "audioClip": "fomo_cycle_07"
+        },
+        {
+          "type": "content",
+          "text": "Here's a grounding question for the heat of the moment. Ask yourself, would I still want this stock if it had fallen instead of soared? If the answer is no, you're chasing the crowd, not the **business**.",
+          "audioClip": "fomo_cycle_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Cycle broken.",
+          "text": "Next time a stock is all over the headlines, pause and name the **feeling** before you act.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Second-Order Thinking",
+      "level": "mastery",
+      "sortOrder": 2,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "Everyone asks \"What happens next?\" Masters ask \"And then what?\"",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "And Then What?",
+          "text": "Beginners ask what happens next. Masters ask one more question: and then **what**?",
+          "audioClip": "second_order_thinking_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "First-order thinking stops at the obvious. \"Good news came out, so I should buy.\" It feels perfectly logical. But it's the very first thought everyone **else** has too.",
+          "audioClip": "second_order_thinking_02"
+        },
+        {
+          "type": "content",
+          "text": "Here's the trick. If the news is obvious, the price has probably already moved to reflect it. The easy reaction is usually baked **in** before you even tap the buy button.",
+          "audioClip": "second_order_thinking_03"
+        },
+        {
+          "type": "content",
+          "text": "Second-order thinking digs one layer deeper. It asks, and then what? What does the crowd already expect, and what actually happens after that expectation comes **true**?",
+          "audioClip": "second_order_thinking_04"
+        },
+        {
+          "type": "content",
+          "text": "An edge comes from seeing the second step others miss. Not just \"sales are up,\" but \"everyone already knows sales are up, so what's the surprise nobody is **pricing** in?\"",
+          "audioClip": "second_order_thinking_05"
+        },
+        {
+          "type": "content",
+          "text": "Here's an everyday example. A hot new product launches. First-order says buy the maker. Second-order asks, is everyone already expecting huge sales, and what happens to the price if they turn out merely **good**, not amazing?",
+          "audioClip": "second_order_thinking_06"
+        },
+        {
+          "type": "content",
+          "text": "It works in reverse during scary news, too. First-order panics and sells. Second-order asks, has everyone already panicked, leaving the price low and the future quietly **brighter** than the mood suggests?",
+          "audioClip": "second_order_thinking_07"
+        },
+        {
+          "type": "content",
+          "text": "The goal isn't to outsmart everyone on every move. It's simply to pause, look one step past the obvious reaction, and ask what the crowd may have **overlooked**.",
+          "audioClip": "second_order_thinking_08"
+        },
+        {
+          "type": "completion",
+          "headline": "One step deeper.",
+          "text": "On your next idea, ask \"and then what?\" **twice** before you decide what to do.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Risk vs. Uncertainty",
+      "level": "mastery",
+      "sortOrder": 3,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Understanding the crucial difference and managing both effectively.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Two Kinds of Unknown",
+          "text": "Not knowing comes in two very different flavors: **risk** and uncertainty.",
+          "audioClip": "risk_vs_uncertainty_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Risk is the kind of unknown you can measure. Like a coin flip, you don't know the next result, but you do know the odds. You can weigh it, plan for it, and price **it**.",
+          "audioClip": "risk_vs_uncertainty_02"
+        },
+        {
+          "type": "content",
+          "text": "Uncertainty is deeper. It's the truly unknowable, where no reliable odds exist at all. Think of a brand-new technology, or next year's surprise that nobody saw **coming**.",
+          "audioClip": "risk_vs_uncertainty_03"
+        },
+        {
+          "type": "content",
+          "text": "Markets are full of both at once. The trouble starts when people treat uncertainty as if it were precise risk, building neat predictions on ground that's actually **shifting**.",
+          "audioClip": "risk_vs_uncertainty_04"
+        },
+        {
+          "type": "content",
+          "text": "That false confidence is dangerous. It tempts you to bet big on a forecast that was never as solid as it **looked**. The map felt certain; the real territory wasn't.",
+          "audioClip": "risk_vs_uncertainty_05"
+        },
+        {
+          "type": "content",
+          "text": "The cure is humility. Leave room for what you simply can't foresee. Size your bets so that even a total surprise can bruise you, but never truly **ruin** you.",
+          "audioClip": "risk_vs_uncertainty_06"
+        },
+        {
+          "type": "content",
+          "text": "History is full of this lesson. The most painful blowups came from people who were certain, who mistook a wild unknown for a tidy, measurable bet and **leveraged** into it.",
+          "audioClip": "risk_vs_uncertainty_07"
+        },
+        {
+          "type": "content",
+          "text": "So treat confident forecasts with gentle suspicion, especially your own. The future loves to surprise us. Building in a margin for the unknown isn't pessimism, it's quiet **wisdom**.",
+          "audioClip": "risk_vs_uncertainty_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Humility installed.",
+          "text": "On your next bet, ask: am I sizing this for what I **know**, or for what I only hope?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "The Art of Selling",
+      "level": "mastery",
+      "sortOrder": 4,
+      "estimatedMinutes": 4,
+      "category": "standard",
+      "description": "When and how to exit positions without emotion clouding judgment.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Knowing When to Let Go",
+          "text": "Everyone studies when to buy. The harder, quieter skill is knowing when to **sell**.",
+          "audioClip": "art_of_selling_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Buying gets all the excitement. But selling well is tougher, because it's where emotion runs hottest, caught between the fear of loss and the greed for **more**.",
+          "audioClip": "art_of_selling_02"
+        },
+        {
+          "type": "content",
+          "text": "There are good reasons to sell. The business truly broke, and your reason for owning it changed. Or you found something clearly better. Or one winner grew so big it's now a **risk**.",
+          "audioClip": "art_of_selling_03"
+        },
+        {
+          "type": "content",
+          "text": "And there are bad reasons. Boredom. A single scary headline. A tiny flicker of profit you're just itching to grab. These are emotions talking, not clear **logic**.",
+          "audioClip": "art_of_selling_04"
+        },
+        {
+          "type": "content",
+          "text": "The fix is to decide in advance. While you're calm, write down what would actually make you sell. Then, in the heat of the moment, you follow the plan, not the **panic**.",
+          "audioClip": "art_of_selling_05"
+        },
+        {
+          "type": "content",
+          "text": "And size matters when you sell. You rarely have to sell all at once. Trimming a little can lock in some gains and calm your nerves, while letting the rest keep **working** for you.",
+          "audioClip": "art_of_selling_06"
+        },
+        {
+          "type": "content",
+          "text": "Beware one sneaky trap: selling your winners too early just to feel a quick profit, while clinging to your losers out of pure hope. Great investors often do the **opposite**.",
+          "audioClip": "art_of_selling_07"
+        },
+        {
+          "type": "content",
+          "text": "So make selling a calm, planned decision, not a reaction. The buy was about opportunity. The sell should be about your reasons and your plan, almost never your **fear**.",
+          "audioClip": "art_of_selling_08"
+        },
+        {
+          "type": "completion",
+          "headline": "The full skill.",
+          "text": "For one stock you own or like, write down right now what would make you **sell** it.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "Inversion Thinking",
+      "level": "mastery",
+      "sortOrder": 5,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "Charlie Munger's secret weapon: solving problems backwards.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "Solve It Backwards",
+          "text": "Charlie Munger's secret weapon was a simple flip: don't ask how to win, ask how to **lose**.",
+          "audioClip": "inversion_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "Most people ask, how do I succeed? Munger flipped it around. He asked, how do I fail? Then he simply avoided those things. \"Invert,\" he liked to say, \"always **invert**.\"",
+          "audioClip": "inversion_02"
+        },
+        {
+          "type": "content",
+          "text": "It sounds almost too simple, but it's powerful. Picturing exactly how a plan could blow up reveals the traps you'd never spot while daydreaming about **success**.",
+          "audioClip": "inversion_03"
+        },
+        {
+          "type": "content",
+          "text": "Apply it to investing. How do you lose money? You overpay. You borrow too much. You panic and sell low. You chase every shiny fad. So your job becomes clear: don't do **those**.",
+          "audioClip": "inversion_04"
+        },
+        {
+          "type": "content",
+          "text": "Notice the shift. You're no longer desperately hunting for one brilliant winner. You're avoiding the big, dumb mistakes, and dodging disasters often matters more than finding **home runs**.",
+          "audioClip": "inversion_05"
+        },
+        {
+          "type": "content",
+          "text": "So before any decision, run it backwards. Ask, what's the dumbest way this could go wrong? Then quietly steer clear. The answer is often far easier to see in **reverse**.",
+          "audioClip": "inversion_06"
+        },
+        {
+          "type": "content",
+          "text": "Charlie used it everywhere, not just in markets. Want a happy life? Study what makes people miserable, then avoid that. The backwards path often lights up the way **forward**.",
+          "audioClip": "inversion_07"
+        },
+        {
+          "type": "content",
+          "text": "For your own money, keep a short list of the classic disasters and simply refuse to commit them. Avoiding ruin is what keeps you in the game long enough to **win**.",
+          "audioClip": "inversion_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Inverted and wiser.",
+          "text": "Before your next move, ask: what's the **worst** way this could go, and how do I avoid it?",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    },
+    {
+      "title": "AI and Beyond",
+      "level": "mastery",
+      "sortOrder": 6,
+      "estimatedMinutes": 5,
+      "category": "standard",
+      "description": "AI is changing how trades are made and investments are chosen, redefining the future of the markets.",
+      "cards": [
+        {
+          "type": "title",
+          "headline": "The Machines Have Arrived",
+          "text": "AI is reshaping how the market moves. Here's what stays **true** through all of it.",
+          "audioClip": "ai_and_beyond_01",
+          "hasImage": true
+        },
+        {
+          "type": "content",
+          "text": "AI is now everywhere in markets. It scans mountains of data, reads the news in milliseconds, and fires off trades faster than any human ever possibly **could**.",
+          "audioClip": "ai_and_beyond_02"
+        },
+        {
+          "type": "content",
+          "text": "That brings real power. Patterns no person could ever spot, decisions made in a blink. Used well, these tools can sharpen research and widen what one investor can **see**.",
+          "audioClip": "ai_and_beyond_03"
+        },
+        {
+          "type": "content",
+          "text": "But speed cuts both ways. AI amplifies mistakes just as fast as insights, and crowds of machines all reacting at once can move prices violently in mere **seconds**.",
+          "audioClip": "ai_and_beyond_04"
+        },
+        {
+          "type": "content",
+          "text": "Here's your anchor through it all. The timeless principles still hold. Value, patience, and discipline don't go out of style just because the market suddenly got **faster**.",
+          "audioClip": "ai_and_beyond_05"
+        },
+        {
+          "type": "content",
+          "text": "So welcome the machines, but keep your hand on the wheel. Let the new tools inform you, while your own judgment, and everything you've learned here, makes the final **call**.",
+          "audioClip": "ai_and_beyond_06"
+        },
+        {
+          "type": "content",
+          "text": "And here's a reassuring thought. AI can crunch the numbers, but it can't supply your patience, your goals, or your nerve in a storm. Those deeply human edges are still **yours**.",
+          "audioClip": "ai_and_beyond_07"
+        },
+        {
+          "type": "content",
+          "text": "So the future belongs to the calm, curious investor who uses these tools without surrendering to them. New machines, same timeless temperament. That blend is your real **advantage**.",
+          "audioClip": "ai_and_beyond_08"
+        },
+        {
+          "type": "completion",
+          "headline": "Journey complete.",
+          "text": "You've built a real foundation. Now go look at a real stock, and think like the **investor** you've become.",
+          "cta": "analyzeStock",
+          "hasImage": true
+        }
+      ]
+    }
+  ]
+}

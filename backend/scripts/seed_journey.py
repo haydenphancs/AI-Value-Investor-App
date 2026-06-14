@@ -30,8 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database import get_supabase  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-JSON_PATH = REPO / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
-AUDIO_DIR = Path(__file__).resolve().parents[1] / "data/journey_audio"
+BACKEND = Path(__file__).resolve().parents[1]
+# Frontend tree is the source of truth locally; on Railway only backend/ ships,
+# so fall back to the vendored copy at backend/data/journey_lessons.json.
+_FRONTEND_JSON = REPO / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
+JSON_PATH = _FRONTEND_JSON if _FRONTEND_JSON.exists() else BACKEND / "data/journey_lessons.json"
+AUDIO_DIR = BACKEND / "data/journey_audio"
 
 BUCKET = "journey-media"
 # Stable namespace so the same lesson key always maps to the same lessons.id.

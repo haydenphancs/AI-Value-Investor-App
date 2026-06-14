@@ -25,15 +25,21 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]                 # backend/
 REPO = ROOT.parent                                          # repo root
-JSON_PATH = REPO / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
+# Frontend tree is the source of truth locally; on Railway only backend/ is
+# deployed, so fall back to the vendored copy at backend/data/journey_lessons.json.
+_FRONTEND_JSON = REPO / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
+JSON_PATH = _FRONTEND_JSON if _FRONTEND_JSON.exists() else ROOT / "data/journey_lessons.json"
 OUT = ROOT / "data/journey_audio"
 OUT.mkdir(parents=True, exist_ok=True)
 
-KEY = None
-for line in (ROOT / ".env").read_text().splitlines():
-    if line.startswith("GEMINI_API_KEY="):
-        KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-assert KEY, "GEMINI_API_KEY not found in backend/.env"
+# Prefer the process env (Railway injects GEMINI_API_KEY); fall back to backend/.env locally.
+KEY = os.environ.get("GEMINI_API_KEY")
+_env_file = ROOT / ".env"
+if not KEY and _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        if line.startswith("GEMINI_API_KEY="):
+            KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+assert KEY, "GEMINI_API_KEY not found in env or backend/.env"
 
 MODEL = "gemini-2.5-flash-preview-tts"
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={KEY}"

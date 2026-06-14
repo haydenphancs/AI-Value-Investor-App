@@ -20,6 +20,11 @@ final class MoneyMovesContentStore {
 
     private var bundledByTitle: [String: MoneyMoveArticle] = [:]
     private var remoteByTitle: [String: MoneyMoveArticle] = [:]
+    // Ordered card lists (by sortOrder) so the catalog can be served from content
+    // instead of hardcoded in the view. Remote is authoritative; bundled is the
+    // offline fallback for whatever shipped in the binary.
+    private var bundledCards: [MoneyMove] = []
+    private var remoteCards: [MoneyMove] = []
     private var didPrefetch = false
 
     private init() {
@@ -37,6 +42,17 @@ final class MoneyMovesContentStore {
         remoteByTitle[title] != nil || bundledByTitle[title] != nil
     }
 
+    /// Authored catalog cards, ordered by sortOrder. Remote (backend) takes precedence;
+    /// any bundled-only article (e.g. shipped but not yet seeded) is appended so nothing
+    /// disappears offline. Adding a new article server-side makes a new card appear here
+    /// with no app update.
+    func cards() -> [MoneyMove] {
+        var result = remoteCards
+        let have = Set(result.map { $0.title })
+        result += bundledCards.filter { !have.contains($0.title) }
+        return result
+    }
+
     /// Fetch article content + narration URLs from the backend once per session.
     func prefetch() async {
         guard !didPrefetch else { return }
@@ -46,8 +62,12 @@ final class MoneyMovesContentStore {
                 endpoint: .getMoneyMoves,
                 responseType: MoneyMovesAPIResponse.self
             )
-            for dto in response.articles {
+            let ordered = response.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
+            remoteByTitle = [:]
+            remoteCards = []
+            for dto in ordered {
                 remoteByTitle[dto.title] = dto.toArticle()
+                remoteCards.append(dto.toCard())
             }
         } catch {
             // Stay on bundled content; never block the screen on a network hiccup.
@@ -66,8 +86,10 @@ final class MoneyMovesContentStore {
         }
         do {
             let file = try JSONDecoder().decode(MoneyMovesContentFile.self, from: data)
-            for dto in file.articles {
+            let ordered = file.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
+            for dto in ordered {
                 bundledByTitle[dto.title] = dto.toArticle()
+                bundledCards.append(dto.toCard())
             }
         } catch {
             print("[MoneyMovesContentStore] bundled decode failed: \(error)")

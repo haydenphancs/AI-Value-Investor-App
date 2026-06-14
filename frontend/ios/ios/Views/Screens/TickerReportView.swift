@@ -52,6 +52,12 @@ struct TickerReportView: View {
         .sheet(isPresented: $viewModel.showChatResponse) {
             chatResponseSheet
         }
+        .sheet(item: $viewModel.pdfSheet) { mode in
+            ReportPDFView(
+                reportId: viewModel.pdfReportId ?? "",
+                autoShare: mode == .share
+            )
+        }
         .alert("Delete this report?", isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
@@ -141,7 +147,8 @@ struct TickerReportView: View {
                 onBack: { dismiss() },
                 onShare: viewModel.shareTapped,
                 onViewDetailedAnalysis: viewModel.viewDetailedAnalysis,
-                onDelete: { showDeleteConfirm = true }
+                onDelete: { showDeleteConfirm = true },
+                canExportPDF: viewModel.canExportPDF
             )
 
             Text(report.liveDate)

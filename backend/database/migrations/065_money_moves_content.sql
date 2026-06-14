@@ -1,4 +1,4 @@
--- 063_money_moves_content.sql
+-- 065_money_moves_content.sql
 --
 -- Why: "Money Moves" (the iOS case-study / deep-dive reading + listening feature)
 -- has had its article content 100% hardcoded in Swift, with no backend behind it.

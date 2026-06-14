@@ -9,7 +9,7 @@ is generated/uploaded separately (a later step); audio_url is left NULL here.
 Deterministic id per slug (uuid5) so re-running updates in place instead of duplicating.
 
 Prerequisites:
-  - Migration 063_money_moves_content.sql applied (adds columns + grants + bucket).
+  - Migration 065_money_moves_content.sql applied (adds columns + grants + bucket).
   - backend/.env with SUPABASE service-role credentials (uses app.database.get_supabase()).
 
 Usage (from backend/):

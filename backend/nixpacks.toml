@@ -1,0 +1,20 @@
+# Railway / Nixpacks build config.
+#
+# Why: WeasyPrint (PDF detailed-analysis reports) loads native libraries at
+# runtime via cffi — pango, cairo, gdk-pixbuf, harfbuzz. Without them the app
+# still boots, but the first PDF render throws an OSError on `import weasyprint`.
+# This keeps the default Nixpacks Python build and just layers the apt packages
+# into the setup phase. The /health/pdf probe verifies the stack post-deploy.
+
+[phases.setup]
+aptPkgs = [
+  "libcairo2",
+  "libpango-1.0-0",
+  "libpangocairo-1.0-0",
+  "libgdk-pixbuf-2.0-0",
+  "libffi-dev",
+  "libharfbuzz0b",
+  "libfribidi0",
+  "shared-mime-info",
+  "fonts-dejavu-core",
+]

@@ -42,6 +42,8 @@ struct MoneyMoveArticleDTO: Decodable {
     let author: ArticleAuthorDTO
     let readTimeMinutes: Int
     let viewCount: String
+    let learnerCount: String?     // small "X investors learning" count shown on the card
+    let sortOrder: Int?           // catalog ordering within its category
     let commentCount: Int?
     let publishedDaysAgo: Int?
     let tagLabel: String?
@@ -80,6 +82,19 @@ struct MoneyMoveArticleDTO: Decodable {
             statistics: (statistics ?? []).map { $0.toStatistic() },
             comments: mappedComments,
             relatedArticles: (relatedArticles ?? []).map { $0.toRelated() }
+        )
+    }
+
+    /// Lightweight card (row tile) derived from the same authored content, so the
+    /// catalog can be served from the backend/bundle instead of hardcoded in Swift.
+    func toCard() -> MoneyMove {
+        MoneyMove(
+            title: title,
+            subtitle: subtitle,
+            category: MoneyMoveArticleDTO.category(from: category),
+            estimatedMinutes: readTimeMinutes,
+            learnerCount: learnerCount ?? viewCount,
+            isBookmarked: false
         )
     }
 

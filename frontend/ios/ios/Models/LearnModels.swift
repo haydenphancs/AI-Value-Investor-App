@@ -430,7 +430,7 @@ extension MoneyMove {
             title: "How Amazon Built Its Moat",
             subtitle: "The strategy behind unstoppable dominance.",
             category: .blueprints,
-            estimatedMinutes: 12,
+            estimatedMinutes: 9,
             learnerCount: "2.1k",
             isBookmarked: false
         ),
@@ -454,7 +454,7 @@ extension MoneyMove {
             title: "Warren Buffett's Early Days",
             subtitle: "The moves that built a fortune.",
             category: .blueprints,
-            estimatedMinutes: 10,
+            estimatedMinutes: 8,
             learnerCount: "1.8k",
             isBookmarked: false
         ),
@@ -473,6 +473,57 @@ extension MoneyMove {
             estimatedMinutes: 11,
             learnerCount: "1.3k",
             isBookmarked: false
+        ),
+        // Placeholder cards (not yet authored). They render generated boilerplate via
+        // createArticleFromMove until real content is authored + served. Authored
+        // topics from MoneyMovesContentStore take precedence over any same-titled card.
+        MoneyMove(
+            title: "Apple's Services Revolution",
+            subtitle: "How Apple transformed from hardware to ecosystem.",
+            category: .blueprints,
+            estimatedMinutes: 6,
+            learnerCount: "1.6k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Costco's Membership Magic",
+            subtitle: "The power of customer loyalty economics.",
+            category: .blueprints,
+            estimatedMinutes: 9,
+            learnerCount: "1.2k",
+            isBookmarked: true
+        ),
+        MoneyMove(
+            title: "The FTX Collapse",
+            subtitle: "Crypto's biggest fraud unraveled.",
+            category: .valueTraps,
+            estimatedMinutes: 18,
+            learnerCount: "3.2k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Theranos: Blood & Lies",
+            subtitle: "The $9 billion medical fraud.",
+            category: .valueTraps,
+            estimatedMinutes: 16,
+            learnerCount: "2.8k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Visa vs. Mastercard",
+            subtitle: "The payment network duopoly.",
+            category: .battles,
+            estimatedMinutes: 12,
+            learnerCount: "1.7k",
+            isBookmarked: false
+        ),
+        MoneyMove(
+            title: "Google vs. Microsoft: AI Wars",
+            subtitle: "The battle for AI supremacy.",
+            category: .battles,
+            estimatedMinutes: 15,
+            learnerCount: "2.5k",
+            isBookmarked: true
         )
     ]
 }

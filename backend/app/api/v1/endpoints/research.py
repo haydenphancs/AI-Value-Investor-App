@@ -15,6 +15,7 @@ Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from supabase import Client
 from typing import Any, Dict, List, Optional, Tuple
 import asyncio
@@ -323,6 +324,100 @@ async def get_research_ticker_report(
     return patch_legacy_price_action(ticker_report)
 
 
+# ── Detailed-Analysis PDF ────────────────────────────────────────────────────
+
+
+@router.get("/reports/{report_id}/pdf")
+async def get_research_report_pdf(
+    report_id: str,
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    supabase: Client = Depends(get_supabase),
+):
+    """Stream the detailed-analysis PDF for a completed report.
+
+    Ownership is re-checked per request (the bucket is private and served only
+    through this proxy). Returns the structured error contract so iOS can tell
+    "still preparing" (REPORT_NOT_READY) from "doesn't exist" (REPORT_NOT_FOUND).
+    """
+    result = supabase.table("research_reports").select(
+        "id, pdf_path, pdf_status"
+    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+
+    if not result.data:
+        return make_error_response(
+            ErrorCode.REPORT_NOT_FOUND,
+            message=f"No research_reports row for id={report_id}",
+            details={"report_id": report_id},
+        )
+
+    row = result.data
+    if row.get("pdf_status") != "ready" or not row.get("pdf_path"):
+        return make_error_response(
+            ErrorCode.REPORT_NOT_READY,
+            message=f"PDF status={row.get('pdf_status')!r}",
+            details={"report_id": report_id, "pdf_status": row.get("pdf_status")},
+        )
+
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            supabase.storage.from_("research-pdfs").download, row["pdf_path"]
+        )
+    except Exception as e:
+        logger.error("PDF download failed for %s: %s", report_id, e)
+        return make_error_response(
+            ErrorCode.DATA_INCOMPLETE,
+            message="Stored PDF could not be retrieved",
+            details={"report_id": report_id},
+        )
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="caydex_{report_id}.pdf"'},
+    )
+
+
+@router.post("/reports/{report_id}/pdf/regenerate")
+async def regenerate_research_report_pdf(
+    report_id: str,
+    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    supabase: Client = Depends(get_supabase),
+):
+    """Generate (or re-generate) the PDF inline. Backfills reports created
+    before the PDF feature and recovers pdf_status='failed'. Returns the
+    resulting {pdf_status}."""
+    result = supabase.table("research_reports").select(
+        "id, status"
+    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+
+    if not result.data:
+        return make_error_response(
+            ErrorCode.REPORT_NOT_FOUND,
+            message=f"No research_reports row for id={report_id}",
+            details={"report_id": report_id},
+        )
+    if result.data["status"] != "completed":
+        return make_error_response(
+            ErrorCode.REPORT_NOT_READY,
+            message=f"Report status={result.data['status']!r}",
+            details={"report_id": report_id, "status": result.data["status"]},
+        )
+
+    await _generate_report_pdf(report_id, user["id"])
+
+    row = supabase.table("research_reports").select("pdf_status").eq(
+        "id", report_id
+    ).eq("user_id", user["id"]).single().execute()
+    status = (row.data or {}).get("pdf_status", "failed")
+    if status != "ready":
+        return make_error_response(
+            ErrorCode.DATA_INCOMPLETE,
+            message="PDF generation did not complete",
+            details={"report_id": report_id, "pdf_status": status},
+        )
+    return {"report_id": report_id, "pdf_status": status}
+
+
 # ── List User Reports ────────────────────────────────────────────────────────
 
 
@@ -341,7 +436,8 @@ async def get_my_reports(
     result = supabase.table("research_reports").select(
         "id, ticker, company_name, industry, investor_persona, status, title, "
         "executive_summary, overall_score, fair_value_estimate, progress, "
-        "current_step, created_at, completed_at, user_rating, is_refunded"
+        "current_step, created_at, completed_at, user_rating, is_refunded, "
+        "pdf_status"
     ).eq("user_id", user["id"]).neq(
         "status", "deleted"
     ).order(
@@ -531,6 +627,57 @@ async def get_trending_analyses():
 # ── Background Task ──────────────────────────────────────────────────────────
 
 
+async def _generate_report_pdf(report_id: str, user_id: str) -> None:
+    """Eagerly render + store the detailed-analysis PDF after a report
+    completes. Best-effort: any failure is logged and recorded as
+    pdf_status='failed' but NEVER propagates — the report is already
+    'completed' and must not be rolled back."""
+    from datetime import datetime, timezone
+
+    from app.database import get_supabase
+
+    supabase = get_supabase()
+    try:
+        from app.services.pdf_report_service import generate_and_store_pdf
+
+        supabase.table("research_reports").update(
+            {"pdf_status": "pending"}
+        ).eq("id", report_id).execute()
+
+        row = supabase.table("research_reports").select(
+            "ticker_report_data, fair_value_estimate"
+        ).eq("id", report_id).single().execute()
+        data = row.data or {}
+        ticker_report_data = data.get("ticker_report_data")
+        if not ticker_report_data:
+            logger.warning("PDF skipped — no ticker_report_data for %s", report_id)
+            supabase.table("research_reports").update(
+                {"pdf_status": "failed"}
+            ).eq("id", report_id).execute()
+            return
+
+        path = await generate_and_store_pdf(
+            report_id, ticker_report_data, data.get("fair_value_estimate"), user_id
+        )
+        supabase.table("research_reports").update({
+            "pdf_path": path,
+            "pdf_status": "ready",
+            "pdf_generated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", report_id).execute()
+        logger.info("Detailed-analysis PDF ready for %s → %s", report_id, path)
+    except Exception as e:
+        logger.error(
+            "PDF generation failed for %s (report unaffected): %s: %s",
+            report_id, type(e).__name__, e, exc_info=True,
+        )
+        try:
+            supabase.table("research_reports").update(
+                {"pdf_status": "failed"}
+            ).eq("id", report_id).execute()
+        except Exception:
+            pass
+
+
 async def _run_research_task(
     report_id: str, ticker: str, persona_key: str, user_id: str
 ):
@@ -547,6 +694,12 @@ async def _run_research_task(
 
         service = ResearchService()
         await service.generate_report(report_id, ticker, persona_key, user_id)
+
+        # Eagerly render the detailed-analysis PDF now that the report is
+        # 'completed'. Isolated + best-effort: _generate_report_pdf swallows
+        # all its own errors, so a PDF failure never reaches the outer except
+        # below (which would wrongly mark the report failed + refund credits).
+        await _generate_report_pdf(report_id, user_id)
     except Exception as e:
         # Include the exception type so future debugging shows e.g.
         # "KeyError: profile" instead of just "profile" — the type is

@@ -14,6 +14,8 @@
       },
       "readTimeMinutes": 9,
       "viewCount": "3.1M",
+      "learnerCount": "2.1k",
+      "sortOrder": 0,
       "commentCount": 86,
       "publishedDaysAgo": 5,
       "tagLabel": "CASE STUDY",
@@ -222,6 +224,409 @@
           "readTimeMinutes": 16,
           "viewCount": "1.9M",
           "gradientColors": ["7C3AED", "5B21B6"]
+        }
+      ]
+    },
+    {
+      "slug": "warren-buffetts-early-days",
+      "title": "Warren Buffett's Early Days",
+      "subtitle": "From a paperboy with a pinball empire to the Buffett Partnership — how the world's greatest investor learned his craft long before he was famous.",
+      "category": "blueprints",
+      "author": {
+        "name": "The Alpha",
+        "title": "Investment Research",
+        "isVerified": true,
+        "followerCount": "45.2k"
+      },
+      "readTimeMinutes": 8,
+      "viewCount": "2.4M",
+      "learnerCount": "1.8k",
+      "sortOrder": 1,
+      "commentCount": 64,
+      "publishedDaysAgo": 8,
+      "tagLabel": "ORIGIN STORY",
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "heroGradientColors": ["D97706", "B45309", "78350F"],
+      "keyHighlights": [
+        {
+          "icon": "newspaper.fill",
+          "title": "The Hustler",
+          "description": "Paper routes, found golf balls, and a pinball empire in barbershops — Buffett was compounding small bets before he could vote."
+        },
+        {
+          "icon": "book.fill",
+          "title": "Meeting Graham",
+          "description": "At Columbia he found Benjamin Graham, value investing, and the one idea that anchored everything: margin of safety."
+        },
+        {
+          "icon": "percent",
+          "title": "The Partnership",
+          "description": "From 1957 to 1969 the Buffett Partnership compounded about 29% a year — and never had a single losing year."
+        }
+      ],
+      "sections": [
+        {
+          "title": "The Boy Who Counted Everything",
+          "icon": "figure.walk",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Long before he was the Oracle of Omaha, Warren Buffett was a kid obsessed with numbers. He counted the frequency of letters in newspapers, memorized the populations of cities, and timed how fast marbles rolled across the floor. By the time he was a teenager he had already run a string of small businesses — selling chewing gum and Coca-Cola door to door, hauling newspapers on five routes at once, even reselling found golf balls. Money, to Buffett, was never really the point. The point was watching a small thing grow into a bigger thing, one reinvested dollar at a time."
+            },
+            {
+              "type": "paragraph",
+              "text": "His sharpest early move was almost comic. As a teenager he and a friend bought used pinball machines for twenty-five dollars apiece and placed them in barbershops, splitting the take with the owners. Within months they had a little route of machines throwing off cash every week. He was learning, without the vocabulary for it yet, the two ideas that would define his life: own assets that produce income, and let that income compound."
+            },
+            {
+              "type": "callout",
+              "icon": "hourglass",
+              "style": "highlight",
+              "text": "By the time he finished high school, Buffett had saved over $5,000 from his ventures — a small fortune for a teenager in the 1940s, and the seed capital for everything that followed."
+            }
+          ]
+        },
+        {
+          "title": "An Education in Value",
+          "icon": "book.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Buffett wanted to learn from the best, and the best was Benjamin Graham. After being rejected by Harvard Business School — a rejection he later called one of the luckiest breaks of his life — he enrolled at Columbia, where Graham taught. Graham's book, The Intelligent Investor, had hit him 'like a religious experience.' Its central idea was deceptively simple: a stock is not a ticker symbol that bounces around, it is a fractional ownership stake in a real business with a real underlying value."
+            },
+            {
+              "type": "quote",
+              "text": "In the short run the market is a voting machine, but in the long run it is a weighing machine.",
+              "attribution": "Benjamin Graham"
+            },
+            {
+              "type": "paragraph",
+              "text": "Graham taught his students to picture the market as a moody business partner he called 'Mr. Market' — a fellow who shows up every day offering to buy your shares or sell you his, sometimes euphoric, sometimes despairing. The intelligent investor's job was not to be swept up in his moods but to exploit them: buy when Mr. Market panics, sit still when he's giddy."
+            },
+            {
+              "type": "subheading",
+              "text": "Margin of Safety"
+            },
+            {
+              "type": "paragraph",
+              "text": "The other pillar was the margin of safety — never paying so much that you have no room to be wrong. Graham hunted for companies trading below the cash and assets on their books: 'cigar butts,' beaten-down stocks with one last free puff left in them. Buffett absorbed all of it, went to work at Graham's firm in New York, and learned to find these statistical bargains with relentless discipline."
+            }
+          ]
+        },
+        {
+          "title": "The Partnership Years",
+          "icon": "percent",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "In 1956, at twenty-five, Buffett moved back to Omaha and started the Buffett Partnership with about $105,000 — most of it from family and friends, and only a token sum of his own. He ran it from a small study in his house. The terms were unusual and telling: he charged no fee on the first six percent of annual return, then took a quarter of the gains above that. If his partners didn't do well, neither did he."
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "Judge results over years, not months — and against the market, not zero",
+                "Stay quiet about what he was buying while he was buying it",
+                "Concentrate capital in his best ideas, not dozens of mediocre ones",
+                "Treat his partners' money with more care than his own"
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The results were staggering. From 1957 to 1969 the partnership compounded at roughly twenty-nine percent a year before fees, and it never had a single down year — not even during the market slumps that bloodied almost everyone else."
+            },
+            {
+              "type": "callout",
+              "icon": "chart.bar.fill",
+              "style": "info",
+              "text": "Across thirteen years, Buffett beat the Dow every single year. Compounding near twenty-nine percent turns one dollar into more than twenty-seven — with no losing year to climb back from."
+            }
+          ]
+        },
+        {
+          "title": "From Cigar Butts to Wonderful Companies",
+          "icon": "sparkles",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Then Buffett's thinking evolved, pushed by his friend and future partner Charlie Munger. Cigar-butt investing worked, but it didn't scale, and it meant constantly buying mediocre businesses simply because they were cheap. Munger argued for something better: buy genuinely great companies — ones with durable advantages and honest, capable managers — and hold them. The purchase of See's Candies, a wonderful business bought at a fair price, became the turning point."
+            },
+            {
+              "type": "quote",
+              "text": "It is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
+              "attribution": "Warren Buffett"
+            },
+            {
+              "type": "paragraph",
+              "text": "Ironically, the vehicle for this new philosophy was a mistake. Berkshire Hathaway was a failing New England textile mill Buffett had bought on cigar-butt logic; the textiles would bleed for years. But he turned the shell into a holding company, routing its cash into insurance and then into the wonderful businesses Munger had taught him to prize. And in 1969, with the market frothy and bargains scarce, Buffett did something almost no successful manager ever does: he wound down the partnership and handed his investors their money back. He would compound through Berkshire instead."
+            }
+          ]
+        },
+        {
+          "title": "What the Early Years Teach",
+          "icon": "graduationcap.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Buffett's early decades are a quieter and more useful story than the famous billionaire who came later, because they show the habits before the fame. The first lesson is the sheer power of starting early and letting compounding carry the load — the pinball route and the paper money were small, but the discipline behind them was not."
+            },
+            {
+              "type": "subheading",
+              "text": "Temperament Beats IQ"
+            },
+            {
+              "type": "paragraph",
+              "text": "The second lesson is that investing is more about temperament than intelligence. Buffett wasn't the cleverest person in every room; he was the most patient and the most rational — able to act when others panicked and to sit on his hands when others chased. The third is a willingness to evolve: he began as a strict bargain hunter and became a buyer of quality, because he let a better idea change his mind."
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "Don't mistake the lesson for a recipe. Buffett's record came from decades of patience and a temperament few people have — not from copying his latest holding. The transferable edge is the discipline, not the ticker."
+            },
+            {
+              "type": "paragraph",
+              "text": "If one thread runs from the boy counting marbles to the investor returning his partners' money at the top, it is this: do the rational thing, over and over, for a very long time. Most people understand what that means. Buffett's early days are proof of how rare it is to actually do it."
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        { "value": "~29%", "label": "Partnership Avg. Annual Gain ('57–'69)", "trend": "up" },
+        { "value": "0", "label": "Losing Years in the Partnership", "trend": "neutral" },
+        { "value": "$105K", "label": "Starting Capital (1956)", "trend": "up" }
+      ],
+      "comments": [
+        {
+          "authorName": "Marcus Webb",
+          "content": "The 'temperament beats IQ' part hit hard. Good reminder that the edge is patience, not genius.",
+          "likeCount": 27,
+          "replyCount": 3,
+          "isVerified": false,
+          "hoursAgo": 7
+        },
+        {
+          "authorName": "Elena Sokolova",
+          "content": "Loved the cigar-butt to wonderful-companies arc. Munger's influence is so underrated.",
+          "likeCount": 19,
+          "replyCount": 2,
+          "isVerified": true,
+          "hoursAgo": 15
+        }
+      ],
+      "relatedArticles": [
+        {
+          "title": "How Amazon Built Its Moat",
+          "subtitle": "The strategy behind unstoppable dominance.",
+          "category": "blueprints",
+          "readTimeMinutes": 9,
+          "viewCount": "3.1M",
+          "gradientColors": ["059669", "047857"]
+        },
+        {
+          "title": "The Future of Digital Finance",
+          "subtitle": "Exploring the intersection of fintech innovation and banking transformation.",
+          "category": "blueprints",
+          "readTimeMinutes": 18,
+          "viewCount": "4.2M",
+          "gradientColors": ["EA580C", "C2410C"]
+        },
+        {
+          "title": "How AI Is Revolutionizing Stock Market Analysis",
+          "subtitle": "From pattern recognition to predictive analytics.",
+          "category": "blueprints",
+          "readTimeMinutes": 16,
+          "viewCount": "1.9M",
+          "gradientColors": ["7C3AED", "5B21B6"]
+        }
+      ]
+    },
+    {
+      "slug": "apples-services-revolution",
+      "title": "Apple's Services Revolution",
+      "subtitle": "How Apple stopped depending on the next iPhone and turned two billion devices into a recurring, high-margin annuity.",
+      "category": "blueprints",
+      "author": {
+        "name": "The Alpha",
+        "title": "Investment Research",
+        "isVerified": true,
+        "followerCount": "45.2k"
+      },
+      "readTimeMinutes": 6,
+      "viewCount": "2.0M",
+      "learnerCount": "1.6k",
+      "sortOrder": 2,
+      "commentCount": 52,
+      "publishedDaysAgo": 11,
+      "tagLabel": "THE PIVOT",
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "heroGradientColors": ["64748B", "475569", "1E293B"],
+      "keyHighlights": [
+        {
+          "icon": "infinity",
+          "title": "Recurring Revenue",
+          "description": "Turning one-time iPhone buyers into a recurring, high-margin subscription relationship."
+        },
+        {
+          "icon": "lock.fill",
+          "title": "Ecosystem Lock-In",
+          "description": "iMessage, photos, purchases and App Store balances make leaving Apple quietly expensive."
+        },
+        {
+          "icon": "chart.pie.fill",
+          "title": "Margin Mix Shift",
+          "description": "Services earn roughly double hardware's margin — quietly re-rating the whole company."
+        }
+      ],
+      "sections": [
+        {
+          "title": "The Hardware Ceiling",
+          "icon": "iphone.gen3",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The iPhone is one of the most successful products in history, but it came with a hidden problem for investors. Hardware sales are lumpy and cyclical: people upgrade every few years, big launches create boom-and-bust quarters, and eventually almost everyone who wants a premium phone already owns one. A company that lives and dies by its next device is at the mercy of upgrade cycles it cannot fully control. By the late 2010s iPhone unit growth was flattening, and Wall Street began asking the uncomfortable question — where does Apple grow from here?"
+            },
+            {
+              "type": "paragraph",
+              "text": "Apple's answer reframed the entire business. Instead of asking how to sell more devices, it asked how to earn more from the devices it had already sold. Over a billion iPhones — and around two billion Apple devices in total — were already in people's pockets and homes. That enormous installed base wasn't just a sales record; it was an audience, renewing and expanding every year, waiting to be served."
+            },
+            {
+              "type": "callout",
+              "icon": "iphone.gen3",
+              "style": "info",
+              "text": "Apple's installed base passed two billion active devices — a captive, growing audience that doesn't reset when a hardware cycle ends."
+            }
+          ]
+        },
+        {
+          "title": "The Pivot to Services",
+          "icon": "square.grid.2x2.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "So Apple leaned hard into Services: the software and subscriptions that ride on top of the hardware. What had once been an afterthought became the company's growth engine and the centerpiece of its story to investors."
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "The App Store — a cut of nearly every digital purchase on the platform",
+                "iCloud storage, billed quietly every month",
+                "Apple Music, Apple TV+, Fitness+, Arcade and News+ subscriptions",
+                "AppleCare, Apple Pay, and a fast-growing advertising business"
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Each piece was small on its own, but together they turned a one-time hardware sale into an ongoing relationship. Someone who buys a single iPhone might pay Apple something every month for years afterward — for storage, music, a show, a warranty, a tap-to-pay coffee."
+            },
+            {
+              "type": "quote",
+              "text": "Our installed base of active devices is the gift that keeps on giving.",
+              "attribution": "Tim Cook"
+            }
+          ]
+        },
+        {
+          "title": "The Installed-Base Flywheel",
+          "icon": "arrow.triangle.2.circlepath",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "This is where the strategy compounds. Every active device is a tiny storefront for Services, and the installed base keeps growing, so the addressable audience for subscriptions grows with it. More devices mean more Services revenue; strong Services make the ecosystem more valuable; a stickier ecosystem sells more devices. And unlike hardware, Services revenue recurs — it arrives whether or not you bought a new phone this year, smoothing the lumpy cycles that used to whipsaw the stock."
+            },
+            {
+              "type": "callout",
+              "icon": "chart.pie.fill",
+              "style": "highlight",
+              "text": "Services carry gross margins around seventy percent — roughly double the margin on hardware. As Services grow as a share of revenue, the profitability of the entire company drifts upward."
+            },
+            {
+              "type": "paragraph",
+              "text": "Lock-in does the rest. iMessage, your photo library, years of app purchases, and an App Store balance all make leaving the ecosystem quietly expensive. The longer you stay, the more you accumulate, and the harder it is to walk away — which is exactly what makes the Services annuity so durable."
+            }
+          ]
+        },
+        {
+          "title": "What Investors Can Learn",
+          "icon": "graduationcap.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Apple's Services revolution is a lesson in the quiet power of recurring revenue. Markets pay far more for a dollar that arrives predictably every year than for a dollar that depends on the next product launch — recurring revenue is stickier, higher-margin, and easier to forecast, so it earns a richer valuation."
+            },
+            {
+              "type": "subheading",
+              "text": "Monetize What You Already Own"
+            },
+            {
+              "type": "paragraph",
+              "text": "The deeper lesson is that growth doesn't always require new customers. Apple's biggest opportunity wasn't the next billion buyers — it was earning more from the billions of devices already sold. When you analyze a company, ask whether it is sitting on an installed base, a user list, or a captive audience it hasn't fully monetized, and whether a shift in revenue mix could re-rate the whole business."
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "The Services engine has a vulnerability: much of its profit leans on App Store fees and lucrative default-search deals that regulators around the world are now challenging. A moat built partly on platform rules is only as safe as those rules."
+            },
+            {
+              "type": "paragraph",
+              "text": "Still, the playbook is clear and widely copied: build a large, loyal base, then layer recurring, high-margin services on top of it. Apple didn't just sell more iPhones — it changed what kind of company it is, and what investors were willing to pay for it."
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        { "value": "~$85B+", "label": "Annual Services Revenue", "trend": "up" },
+        { "value": "2B+", "label": "Active Devices", "trend": "up" },
+        { "value": "~70%", "label": "Services Gross Margin", "trend": "up" }
+      ],
+      "comments": [
+        {
+          "authorName": "Jordan Pike",
+          "content": "The margin mix point is the whole thesis. Same revenue, very different earnings power.",
+          "likeCount": 24,
+          "replyCount": 3,
+          "isVerified": false,
+          "hoursAgo": 9
+        },
+        {
+          "authorName": "Aisha Rahman",
+          "content": "Recurring revenue gets a premium multiple for a reason. Great breakdown of the pivot.",
+          "likeCount": 17,
+          "replyCount": 1,
+          "isVerified": true,
+          "hoursAgo": 20
+        }
+      ],
+      "relatedArticles": [
+        {
+          "title": "How Amazon Built Its Moat",
+          "subtitle": "The strategy behind unstoppable dominance.",
+          "category": "blueprints",
+          "readTimeMinutes": 9,
+          "viewCount": "3.1M",
+          "gradientColors": ["059669", "047857"]
+        },
+        {
+          "title": "Warren Buffett's Early Days",
+          "subtitle": "The moves that built a fortune.",
+          "category": "blueprints",
+          "readTimeMinutes": 8,
+          "viewCount": "2.4M",
+          "gradientColors": ["D97706", "B45309"]
+        },
+        {
+          "title": "The Future of Digital Finance",
+          "subtitle": "Exploring the intersection of fintech innovation and banking transformation.",
+          "category": "blueprints",
+          "readTimeMinutes": 18,
+          "viewCount": "4.2M",
+          "gradientColors": ["EA580C", "C2410C"]
         }
       ]
     }

@@ -153,13 +153,30 @@ class TickerReportViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Actions
+    // MARK: - Detailed-Analysis PDF
+
+    /// Which PDF sheet to present (nil = none). `.view` opens the in-app viewer;
+    /// `.share` opens the viewer and immediately offers the iOS share sheet.
+    @Published var pdfSheet: PDFSheet?
+
+    enum PDFSheet: Identifiable {
+        case view, share
+        var id: String { self == .view ? "view" : "share" }
+    }
+
+    /// The detailed-analysis PDF exists only for saved research reports (rows
+    /// with a backend id). Direct/ad-hoc fetches (reportId == nil) can't export.
+    var canExportPDF: Bool { reportId != nil }
+    var pdfReportId: String? { reportId }
+
     func shareTapped() {
-        print("📤 [TickerReport] Share report tapped for \(ticker)")
+        guard reportId != nil else { return }
+        pdfSheet = .share
     }
 
     func viewDetailedAnalysis() {
-        print("🔍 [TickerReport] View detailed analysis tapped for \(ticker)")
+        guard reportId != nil else { return }
+        pdfSheet = .view
     }
 
     /// Soft-delete this report via DELETE /research/reports/{id}. Returns

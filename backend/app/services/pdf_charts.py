@@ -272,3 +272,153 @@ def moat_radar(
         f"{rings}{axes}{peer_poly}{comp_poly}{dots}{labels}"
         f"</svg>"
     )
+
+
+# ── Earnings timeline (actuals → forecast bars) ───────────────────────────────
+def bars_actuals_forecast(
+    items: list[dict],
+    width: int = 700,
+    height: int = 150,
+    accent: str = ACCENT,
+    forecast_color: str = "#93C5FD",
+) -> str:
+    """Vertical bars; actuals solid accent, forecast lighter. Each item:
+    {label, value, is_forecast, value_label?}."""
+    rows = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        v = it.get("value")
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        rows.append(
+            (str(it.get("label", "")), float(v), bool(it.get("is_forecast")),
+             str(it.get("value_label") or ""))
+        )
+    if len(rows) < 2:
+        return ""
+    mx = max(v for _, v, _, _ in rows) or 1.0
+    pad_t, pad_b, pad_l, pad_r = 18, 20, 6, 6
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    n = len(rows)
+    slot = w / n
+    bw = min(slot * 0.62, 46)
+    out = ""
+    for i, (lbl, v, fc, vlabel) in enumerate(rows):
+        cx = pad_l + slot * (i + 0.5)
+        bh = h * (v / mx)
+        y = pad_t + h - bh
+        color = forecast_color if fc else accent
+        out += (
+            f'<rect x="{cx - bw/2:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+            f'rx="2" fill="{color}"/>'
+        )
+        if vlabel:
+            out += (
+                f'<text x="{cx:.1f}" y="{y - 4:.1f}" text-anchor="middle" font-size="8" '
+                f'font-weight="700" fill="{INK}" '
+                f'font-family="Helvetica, Arial, sans-serif">{_esc(vlabel)}</text>'
+            )
+        out += (
+            f'<text x="{cx:.1f}" y="{height - 6:.1f}" text-anchor="middle" font-size="8" '
+            f'fill="{MUTED}" font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>'
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">{out}</svg>'
+    )
+
+
+# ── Diverging buy/sell flow bars (insider + institutional) ────────────────────
+def diverging_bars(
+    items: list[dict],
+    width: int = 330,
+    height: int = 130,
+    up_color: str = ACCENT,
+    down_color: str = _RED,
+) -> str:
+    """items: {label, up, down}. `up` plotted above the zero line, `down` below.
+    Used for insider buy/sell flow and institutional net flow."""
+    rows = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        rows.append((
+            str(it.get("label", "")),
+            abs(float(it.get("up", 0) or 0)),
+            abs(float(it.get("down", 0) or 0)),
+        ))
+    if not rows:
+        return ""
+    mx = max([u for _, u, _ in rows] + [d for _, _, d in rows] + [1.0])
+    pad_t, pad_b, pad_l, pad_r = 6, 18, 4, 4
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    zero = pad_t + h / 2
+    n = len(rows)
+    slot = w / n
+    bw = min(slot * 0.5, 18)
+    out = ""
+    for i, (lbl, u, d) in enumerate(rows):
+        cx = pad_l + slot * (i + 0.5)
+        uh = (h / 2) * (u / mx)
+        dh = (h / 2) * (d / mx)
+        if u > 0:
+            out += (f'<rect x="{cx - bw/2:.1f}" y="{zero - uh:.1f}" width="{bw:.1f}" '
+                    f'height="{uh:.1f}" rx="1.5" fill="{up_color}"/>')
+        if d > 0:
+            out += (f'<rect x="{cx - bw/2:.1f}" y="{zero:.1f}" width="{bw:.1f}" '
+                    f'height="{dh:.1f}" rx="1.5" fill="{down_color}"/>')
+        out += (f'<text x="{cx:.1f}" y="{height - 5:.1f}" text-anchor="middle" '
+                f'font-size="7" fill="{MUTED}" '
+                f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>')
+    out += (f'<line x1="{pad_l}" y1="{zero:.1f}" x2="{pad_l + w}" y2="{zero:.1f}" '
+            f'stroke="{INK}" stroke-width="1"/>')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">{out}</svg>'
+    )
+
+
+# ── Compact trend line (short interest / dilution) ────────────────────────────
+def mini_line(
+    values: Iterable[Any], width: int = 300, height: int = 76, accent: str = ACCENT
+) -> str:
+    """Small line+area with no sentiment colouring — end dot uses `accent`."""
+    pts = _nums(values)
+    if len(pts) < 2:
+        return ""
+    lo, hi = min(pts), max(pts)
+    rng = (hi - lo) or 1.0
+    pad = 9
+    w = width - 2 * pad
+    h = height - 2 * pad
+    n = len(pts)
+
+    def x(i: int) -> float:
+        return pad + w * i / (n - 1)
+
+    def y(v: float) -> float:
+        return pad + h * (1 - (v - lo) / rng)
+
+    line = " ".join(f"{'M' if i == 0 else 'L'}{x(i):.1f},{y(v):.1f}" for i, v in enumerate(pts))
+    area = (
+        f"M{x(0):.1f},{pad + h:.1f} "
+        + " ".join(f"L{x(i):.1f},{y(v):.1f}" for i, v in enumerate(pts))
+        + f" L{x(n - 1):.1f},{pad + h:.1f} Z"
+    )
+    gid = f"ml{abs(hash(accent)) % 9999}"
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">'
+        f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="{accent}" stop-opacity="0.20"/>'
+        f'<stop offset="100%" stop-color="{accent}" stop-opacity="0.02"/>'
+        f"</linearGradient></defs>"
+        f'<path d="{area}" fill="url(#{gid})"/>'
+        f'<path d="{line}" fill="none" stroke="{accent}" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{x(n-1):.1f}" cy="{y(pts[-1]):.1f}" r="3" fill="{accent}"/>'
+        f"</svg>"
+    )

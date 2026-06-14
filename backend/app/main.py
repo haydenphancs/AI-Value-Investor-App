@@ -437,6 +437,18 @@ async def health():
     }
 
 
+@app.get("/health/pdf", tags=["Root"])
+async def health_pdf():
+    """Verify the WeasyPrint native stack (cairo/pango) loaded. A misconfigured
+    image fails here at deploy time instead of on the first user PDF request."""
+    try:
+        import weasyprint  # noqa: F401 — lazy import; just probing the native libs
+
+        return {"status": "healthy", "weasyprint": weasyprint.__version__}
+    except Exception as e:
+        return {"status": "degraded", "error": f"{type(e).__name__}: {e}"}
+
+
 @app.get("/disclaimer", tags=["Root"])
 async def disclaimer():
     return {"disclaimer": settings.LEGAL_DISCLAIMER}

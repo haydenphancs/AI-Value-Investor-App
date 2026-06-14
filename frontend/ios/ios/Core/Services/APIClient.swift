@@ -148,6 +148,40 @@ actor APIClient {
         }
     }
 
+    /// Download raw bytes (e.g. a PDF) without JSON decoding. Reuses the same
+    /// request building, validation, auth, and structured-error contract as
+    /// `request` — on a non-2xx status `validateResponse` still decodes the
+    /// backend's APIError body (e.g. REPORT_NOT_READY) into an `APIError`.
+    func downloadData(endpoint: APIEndpoint, retryCount: Int = 1) async throws -> Data {
+        let request = try buildRequest(for: endpoint)
+        logRequest(request, endpoint: endpoint)
+
+        do {
+            let (data, response) = try await session.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.unknown(message: "Invalid response type")
+            }
+
+            if isDebugLoggingEnabled {
+                let emoji = (200...299).contains(httpResponse.statusCode) ? "✅" : "❌"
+                print("\(emoji) Response \(httpResponse.statusCode) (\(data.count) bytes) from \(httpResponse.url?.path ?? "")")
+            }
+
+            try validateResponse(httpResponse, data: data)
+            return data
+
+        } catch let error as APIError {
+            if retryCount > 0, case .serverError = error {
+                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                return try await downloadData(endpoint: endpoint, retryCount: retryCount - 1)
+            }
+            throw error
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
     // MARK: - Failover
 
     #if DEBUG

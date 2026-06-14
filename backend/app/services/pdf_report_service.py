@@ -168,22 +168,127 @@ def build_context(
     persona_name = _persona_display(agent)
     persona_lens = agent.get("tagline") or agent.get("lens") or ""
 
-    # ── Charts (pre-rendered SVG) ─────────────────────────────────────────────
+    # ── Section data extraction ───────────────────────────────────────────────
     prices = price_action.get("prices") or []
     if prices and isinstance(prices[0], dict):
         prices = [p.get("price") or p.get("close") or p.get("value") for p in prices]
-    moat = data.get("moat_competition") or {}
 
+    moat = data.get("moat_competition") or {}
+    dims = [d for d in (moat.get("dimensions") or []) if isinstance(d, dict)]
+    dim_max = max(
+        [_num(d.get("score")) or 0 for d in dims]
+        + [_num(d.get("peer_score")) or 0 for d in dims]
+        + [0]
+    )
+    radar_max = 10.0 if 0 < dim_max <= 10 else 100.0
+
+    # Revenue engine — derive % of total + YoY growth per segment.
+    engine = data.get("revenue_engine") or {}
+    raw_segments = engine.get("segments") or []
+    seg_denom = _num(engine.get("total_revenue")) or sum(
+        _num(s.get("current_revenue")) or 0.0 for s in raw_segments
+    )
+    segments = []
+    for s in raw_segments:
+        cur = _num(s.get("current_revenue")) or 0.0
+        prev = _num(s.get("previous_revenue"))
+        segments.append({
+            "name": s.get("name") or "—",
+            "current_revenue": cur,
+            "pct": (cur / seg_denom * 100.0) if seg_denom else 0.0,
+            "growth": ((cur - prev) / prev * 100.0) if prev else None,
+        })
+
+    # Forecast timeline chart (gapless annual; fall back to curated projections).
+    forecast = data.get("revenue_forecast") or {}
+    timeline = forecast.get("annual_timeline") or forecast.get("projections") or []
+    timeline_items = [{
+        "label": (p.get("period") or "").replace("FY", "").strip() or p.get("period"),
+        "value": _num(p.get("revenue")) or 0.0,
+        "value_label": p.get("revenue_label") or "",
+        "is_forecast": bool(p.get("is_forecast")),
+    } for p in timeline if isinstance(p, dict)]
+
+    # Insider flow + dilution.
+    insider = data.get("insider_data") or {}
+    flow = ((insider.get("insider_flow") or {}).get("flow_data")) or []
+    insider_flow_items = [{
+        "label": (f.get("month") or "")[-3:],
+        "up": f.get("buy_volume") or 0,
+        "down": f.get("sell_volume") or 0,
+    } for f in flow if isinstance(f, dict)]
+    cap = insider.get("capital_allocation") or {}
+    dilution_pts = [
+        _num(p.get("shares_outstanding"))
+        for p in (cap.get("data_points") or [])
+        if isinstance(p, dict) and _num(p.get("shares_outstanding"))
+    ]
+    recent_tx = ((insider.get("recent_transactions") or {}).get("activities")) or []
+
+    # Hidden signals.
+    hidden = data.get("hidden_market_signals") or {}
+    congress = hidden.get("congress") if hidden else None
+    short_int = hidden.get("short_interest") if hidden else None
+    si_history = (short_int or {}).get("history") or []
+    si_series = [
+        (_num(h.get("days_to_cover")) or _num(h.get("shares_short")))
+        for h in si_history
+        if isinstance(h, dict) and (_num(h.get("days_to_cover")) or _num(h.get("shares_short")))
+    ]
+
+    # Institutional (13F) flow for the Wall Street section.
+    inst_flow = wsc.get("hedge_fund_flow_data") or []
+    inst_flow_items = [{
+        "label": (f.get("month") or "")[-3:],
+        "up": f.get("buy_volume") or 0,
+        "down": f.get("sell_volume") or 0,
+    } for f in inst_flow if isinstance(f, dict)]
+
+    # Source citations → one deduped, numbered list for the end-of-report
+    # references. SourceCitationResponse (title/uri/publisher) only appears on
+    # web-grounded macro risk factors today, so that's "all the links we have".
+    # Each risk factor keeps the reference numbers of its own citations.
+    macro_rfs = (data.get("macro_data") or {}).get("risk_factors") or []
+    _src_index: dict[str, int] = {}
+    sources_list: list[dict] = []
+    for rf in macro_rfs:
+        for s in (rf.get("sources") or []):
+            uri = str(s.get("uri") or "").strip()
+            if not uri or uri in _src_index:
+                continue
+            _src_index[uri] = len(sources_list) + 1
+            sources_list.append({
+                "n": _src_index[uri],
+                "title": s.get("title") or "",
+                "uri": uri,
+                "publisher": s.get("publisher") or "",
+            })
+    macro_risk_factors = []
+    for rf in macro_rfs:
+        refs = sorted({
+            _src_index[str(s.get("uri") or "").strip()]
+            for s in (rf.get("sources") or [])
+            if str(s.get("uri") or "").strip() in _src_index
+        })
+        macro_risk_factors.append({**rf, "source_refs": refs})
+
+    # ── Charts (pre-rendered SVG) ─────────────────────────────────────────────
     charts = {
         "gauge": pdf_charts.score_gauge(quality, size=140),
-        "sparkline": pdf_charts.price_sparkline(prices, width=700, height=94),
+        "sparkline": pdf_charts.price_sparkline(prices, width=700, height=120),
+        "earnings_timeline": pdf_charts.bars_actuals_forecast(
+            timeline_items, width=700, height=150),
+        "insider_flow": pdf_charts.diverging_bars(insider_flow_items, width=330, height=118),
+        "dilution": pdf_charts.mini_line(dilution_pts, width=300, height=68),
+        "short_interest": pdf_charts.mini_line(si_series, width=330, height=76, accent="#D97706"),
+        "radar": pdf_charts.moat_radar(dims, size=210, max_score=radar_max),
         "consensus": pdf_charts.analyst_consensus_stacked_bar(
-            consensus_counts, width=320, height=22
-        ),
-        "radar": pdf_charts.moat_radar(moat.get("dimensions") or [], size=196),
+            consensus_counts, width=330, height=22),
+        "institution_flow": pdf_charts.diverging_bars(inst_flow_items, width=330, height=118),
     }
 
     return {
+        # ── Cover ──
         "symbol": data.get("symbol") or data.get("ticker") or "—",
         "company_name": data.get("company_name") or "—",
         "exchange": data.get("exchange") or "",
@@ -209,8 +314,85 @@ def build_context(
         "vitals": vitals,
         "bull_case": bull_case,
         "bear_case": bear_case,
-        "charts": charts,
         "exec_summary": data.get("executive_summary_text") or "",
+        # ── Deep-dive sections ──
+        "price": {
+            "narrative": price_action.get("narrative") or "",
+            "tier": price_action.get("tier"),
+            "z_score": _num(price_action.get("z_score")),
+            "sigma_daily_pct": _num(price_action.get("sigma_daily_pct")),
+            "expected_band_pct": _num(price_action.get("expected_band_pct")),
+            "event": price_action.get("event"),
+            "direction": price_action.get("direction") or "flat",
+        },
+        "revenue_engine": {
+            "segments": segments,
+            "total_revenue": _num(engine.get("total_revenue")),
+            "revenue_unit": engine.get("revenue_unit") or "",
+            "period": engine.get("period") or "",
+            "analysis_note": engine.get("analysis_note") or "",
+        },
+        "fundamentals": {
+            "cards": data.get("fundamental_metrics") or [],
+            "overall": data.get("overall_assessment") or {},
+        },
+        "forecast": {
+            "cagr": _num(forecast.get("cagr")),
+            "eps_growth": _num(forecast.get("eps_growth")),
+            "management_guidance": forecast.get("management_guidance") or "",
+            "projections": forecast.get("projections") or [],
+            "track_record": forecast.get("earnings_track_record") or [],
+            "beat_summary": forecast.get("beat_summary") or "",
+            "guidance_quote": forecast.get("guidance_quote") or "",
+            "guidance_speaker": forecast.get("guidance_speaker") or "",
+            "guidance_period": forecast.get("guidance_period") or "",
+            "forecast_analyst_count": forecast.get("forecast_analyst_count"),
+            "insight": forecast.get("insight") or "",
+        },
+        "insider": {
+            "sentiment": insider.get("sentiment") or "",
+            "timeframe": insider.get("timeframe") or "",
+            "transactions": insider.get("transactions") or [],
+            "capital_allocation": cap or None,
+            "recent": recent_tx,
+            "ownership_note": insider.get("ownership_note") or "",
+        },
+        "management": {
+            "top_holders": (data.get("key_management") or {}).get("top_holders") or [],
+            "officers": (data.get("key_management") or {}).get("officers") or [],
+            "ownership_insight": (data.get("key_management") or {}).get("ownership_insight") or "",
+        },
+        "hidden": {
+            "congress": congress,
+            "short_interest": short_int,
+            "insight": (hidden or {}).get("insight") or "",
+        },
+        "moat": {
+            "market_dynamics": moat.get("market_dynamics") or {},
+            "dimensions": dims,
+            "competitors": moat.get("competitors") or [],
+            "durability_note": moat.get("durability_note") or "",
+            "competitive_insight": moat.get("competitive_insight") or "",
+            "radar_max": radar_max,
+        },
+        "macro": {
+            "overall_threat_level": (data.get("macro_data") or {}).get("overall_threat_level") or "",
+            "headline": (data.get("macro_data") or {}).get("headline") or "",
+            "intelligence_brief": (data.get("macro_data") or {}).get("intelligence_brief") or "",
+            "risk_factors": macro_risk_factors,
+        },
+        "sources": sources_list,
+        "wall_street": {
+            "rating": (wsc.get("rating") or "").replace("_", " ").title(),
+            "valuation_status": wsc.get("valuation_status") or "",
+            "discount_percent": _num(wsc.get("discount_percent")),
+            "momentum_upgrades": wsc.get("momentum_upgrades") or 0,
+            "momentum_downgrades": wsc.get("momentum_downgrades") or 0,
+            "momentum_maintains": wsc.get("momentum_maintains") or 0,
+            "insight": wsc.get("wall_street_insight") or "",
+        },
+        "factors": data.get("critical_factors") or [],
+        "charts": charts,
         "disclaimer": data.get("disclaimer_text")
         or "Generated by Cay AI for informational purposes only. "
         "Not investment advice. Data reflects a point-in-time snapshot.",

@@ -113,6 +113,8 @@ enum APIEndpoint: Sendable {
     case generateResearch(stockId: String, persona: String)
     case getResearchStatus(reportId: String)
     case getResearchReport(reportId: String)
+    case getResearchReportPDF(reportId: String)
+    case regenerateResearchReportPDF(reportId: String)
     /// Returns the full TickerReportResponse cached in `ticker_report_data`
     /// for a completed research report. Faster than /stocks/{ticker}/report
     /// and preserves the persona used at generation time.
@@ -301,6 +303,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/research/reports/\(reportId)/status"
         case .getResearchReport(let reportId):
             return "/api/v1/research/reports/\(reportId)"
+        case .getResearchReportPDF(let reportId):
+            return "/api/v1/research/reports/\(reportId)/pdf"
+        case .regenerateResearchReportPDF(let reportId):
+            return "/api/v1/research/reports/\(reportId)/pdf/regenerate"
         case .getResearchTickerReport(let reportId):
             return "/api/v1/research/reports/\(reportId)/ticker-report"
         case .getMyReports:
@@ -381,7 +387,7 @@ enum APIEndpoint: Sendable {
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
-             .createPortfolio:
+             .createPortfolio, .regenerateResearchReportPDF:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -598,8 +604,10 @@ enum APIEndpoint: Sendable {
 
     nonisolated var timeout: TimeInterval {
         switch self {
-        case .generateResearch, .getTickerReport:
-            return 120 // 2 minutes for AI generation
+        case .generateResearch, .getTickerReport, .regenerateResearchReportPDF:
+            return 120 // 2 minutes for AI generation / inline PDF render
+        case .getResearchReportPDF:
+            return 60 // binary PDF download
         case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
         case .getTechnicalAnalysis, .getTechnicalAnalysisDetail,

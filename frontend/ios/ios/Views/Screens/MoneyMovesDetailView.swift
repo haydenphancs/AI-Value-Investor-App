@@ -83,77 +83,27 @@ struct MoneyMovesDetailView: View {
         }
         .task {
             // Upgrade to fresh backend content (bundled content is already available
-            // synchronously from the store's init).
+            // synchronously from the store's init), then rebuild the rows so any
+            // server-side-only topics appear without an app update.
             await MoneyMovesContentStore.shared.prefetch()
+            loadSampleData()
         }
         // Prevent accidental navigation gestures
         .interactiveDismissDisabled(false)
     }
 
+    /// Build the card rows from authored content first (backend → bundled, served by
+    /// MoneyMovesContentStore), then fill the rest with not-yet-authored placeholder
+    /// cards. Adding an article server-side makes its card appear here with NO app
+    /// update — the placeholders are only a fallback for unauthored topics.
     private func loadSampleData() {
-        // Filter sample data by category
-        let allMoves = MoneyMove.sampleData
-        blueprints = allMoves.filter { $0.category == .blueprints }
-        valueTraps = allMoves.filter { $0.category == .valueTraps }
-        battles = allMoves.filter { $0.category == .battles }
+        var cards = MoneyMovesContentStore.shared.cards()
+        let authoredTitles = Set(cards.map { $0.title })
+        cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
 
-        // Add more sample data for each category
-        blueprints.append(contentsOf: [
-            MoneyMove(
-                title: "Apple's Services Revolution",
-                subtitle: "How Apple transformed from hardware to ecosystem.",
-                category: .blueprints,
-                estimatedMinutes: 14,
-                learnerCount: "1.6k",
-                isBookmarked: false
-            ),
-            MoneyMove(
-                title: "Costco's Membership Magic",
-                subtitle: "The power of customer loyalty economics.",
-                category: .blueprints,
-                estimatedMinutes: 9,
-                learnerCount: "1.2k",
-                isBookmarked: true
-            )
-        ])
-
-        valueTraps.append(contentsOf: [
-            MoneyMove(
-                title: "The FTX Collapse",
-                subtitle: "Crypto's biggest fraud unraveled.",
-                category: .valueTraps,
-                estimatedMinutes: 18,
-                learnerCount: "3.2k",
-                isBookmarked: false
-            ),
-            MoneyMove(
-                title: "Theranos: Blood & Lies",
-                subtitle: "The $9 billion medical fraud.",
-                category: .valueTraps,
-                estimatedMinutes: 16,
-                learnerCount: "2.8k",
-                isBookmarked: false
-            )
-        ])
-
-        battles.append(contentsOf: [
-            MoneyMove(
-                title: "Visa vs. Mastercard",
-                subtitle: "The payment network duopoly.",
-                category: .battles,
-                estimatedMinutes: 12,
-                learnerCount: "1.7k",
-                isBookmarked: false
-            ),
-            MoneyMove(
-                title: "Google vs. Microsoft: AI Wars",
-                subtitle: "The battle for AI supremacy.",
-                category: .battles,
-                estimatedMinutes: 15,
-                learnerCount: "2.5k",
-                isBookmarked: true
-            )
-        ])
+        blueprints = cards.filter { $0.category == .blueprints }
+        valueTraps = cards.filter { $0.category == .valueTraps }
+        battles = cards.filter { $0.category == .battles }
     }
 
     private func handleMoveTap(_ move: MoneyMove) {

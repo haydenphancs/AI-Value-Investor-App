@@ -143,6 +143,11 @@ class ResearchReportDetail(BaseModel):
     is_refunded: bool = False
     credits_charged: int = 5
 
+    # Detailed-analysis PDF (migration 064). pdf_status: pending|ready|failed.
+    # Null on reports created before the PDF feature until backfilled.
+    pdf_status: Optional[str] = None
+    pdf_generated_at: Optional[str] = None
+
 
 class ResearchReportListItem(BaseModel):
     """Lightweight model for the reports list (GET /research/reports).
@@ -171,6 +176,8 @@ class ResearchReportListItem(BaseModel):
     # Credit lifecycle (migration 041): drives the iOS "[Refunded]"
     # chip on failed cards.
     is_refunded: bool = False
+    # Detailed-analysis PDF readiness (migration 064): pending|ready|failed.
+    pdf_status: Optional[str] = None
 
 
 class PersonaResponse(BaseModel):

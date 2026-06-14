@@ -17,6 +17,9 @@ struct ReportHeaderBar: View {
     let onShare: () -> Void
     let onViewDetailedAnalysis: () -> Void
     let onDelete: () -> Void
+    /// PDF export (Share + View Detailed Analysis) is only available for saved
+    /// research reports. Hidden otherwise so the menu never offers a dead action.
+    var canExportPDF: Bool = true
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
@@ -80,13 +83,15 @@ struct ReportHeaderBar: View {
             // Overflow menu (••• → Share / View Ticker / View Detailed Analysis /
             // Regenerate / Delete). Destructive role auto-renders Delete in red.
             Menu {
-                Button(action: onShare) {
-                    Label("Share", systemImage: "square.and.arrow.up")
+                if canExportPDF {
+                    Button(action: onShare) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    Button(action: onViewDetailedAnalysis) {
+                        Label("View Detailed Analysis", systemImage: "doc.text.magnifyingglass")
+                    }
+                    Divider()
                 }
-                Button(action: onViewDetailedAnalysis) {
-                    Label("View Detailed Analysis", systemImage: "doc.text.magnifyingglass")
-                }
-                Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }

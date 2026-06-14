@@ -37,7 +37,8 @@ struct MoneyMovesAPIResponse: Decodable {
 struct MoneyMoveArticleDTO: Decodable {
     let slug: String
     let title: String
-    let subtitle: String
+    let subtitle: String          // rich subtitle shown on the article hero
+    let cardSubtitle: String?     // short subtitle for the catalog card (falls back to subtitle)
     let category: String
     let author: ArticleAuthorDTO
     let readTimeMinutes: Int
@@ -90,7 +91,7 @@ struct MoneyMoveArticleDTO: Decodable {
     func toCard() -> MoneyMove {
         MoneyMove(
             title: title,
-            subtitle: subtitle,
+            subtitle: cardSubtitle ?? subtitle,
             category: MoneyMoveArticleDTO.category(from: category),
             estimatedMinutes: readTimeMinutes,
             learnerCount: learnerCount ?? viewCount,

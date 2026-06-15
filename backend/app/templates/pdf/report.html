@@ -33,13 +33,9 @@
   .brand .sub { font-size: 9.5px; font-weight: 600; color: var(--muted); letter-spacing: .5px; }
   .topbar .meta { float: right; text-align: right; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
   .topbar .meta b { color: var(--ink); }
-  .title { margin-top: 12px; }
-  .title .name { float: left; }
+  .title { margin-top: 12px; text-align: center; }
   .title .name h1 { font-size: 24px; font-weight: 800; letter-spacing: -.4px; }
   .title .name .subline { color: var(--muted); font-size: 11px; margin-top: 3px; }
-  .persona-chip { float: right; margin-top: 4px; background: #EFF6FF; color: #1E40AF;
-    border: 1px solid #BFDBFE; border-radius: 999px; padding: 5px 13px; font-size: 10px; font-weight: 700; }
-  .persona-chip .lens { font-weight: 500; opacity: .8; }
 
   /* ── Hero ── */
   .hero { width: 100%; border-collapse: collapse; margin-top: 14px; border: 1px solid var(--grid); border-radius: 8px; }
@@ -195,7 +191,6 @@
       <h1>{{ company_name }}</h1>
       <div class="subline">{{ symbol }}{% if exchange %} · {{ exchange }}{% endif %}{% if sector %} · {{ sector }}{% endif %}</div>
     </div>
-    <div class="persona-chip">{{ persona_name }}{% if persona_lens %} <span class="lens">· {{ persona_lens }}</span>{% endif %}</div>
     <div class="clear"></div>
   </div>
 
@@ -205,7 +200,6 @@
       <td class="gauge-cell">
         {{ charts.gauge | safe }}
         <div class="quality-label">{{ quality_label }}</div>
-        <div class="quality-sub">Per {{ persona_name }}</div>
       </td>
       <td>
         <table class="stats">

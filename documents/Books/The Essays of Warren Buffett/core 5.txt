@@ -1,0 +1,16 @@
+Core 5: The Art of Capital Deployment
+The CEO’s Secret Addiction Here is the friction: You assume the CEO works for you. You assume their primary goal is to make your shares more valuable. In reality, most CEOs suffer from a "growth addiction." Their salaries, prestige, and magazine covers are often tied to the size of the company (total revenue), not the value per share.
+
+This creates a conflict of interest. A CEO will often take the cash the business generates—your cash—and light it on fire by buying a mediocre competitor at a premium price, just to make the empire bigger. They call it "strategic synergy." Usually, it’s just ego. If you don't watch how management spends the money in the bank, you are letting a teenager with a credit card run your household.
+
+The "One Dollar" Ultimatum
+Buffett counters this with a ruthless rule known as the "One Dollar Test." In his letters, he lays out a simple ultimatum for management: A company should only retain earnings if, for every dollar retained, it creates at least one dollar of market value over time.
+
+He tells the story of how easy it is for a CEO to "buy" growth. Anyone can grow sales by buying a bad business. But a true "Capital Allocator" (Buffett's highest praise) knows when to shrink. If the company cannot reinvest cash at a high rate of return, the CEO must have the humility to give it back to the shareholders—either through dividends (a direct check) or share buybacks (increasing your percentage of ownership). He views a share buyback not as a market signal, but as a way to buy out "unhappy partners" at a discount, instantly making the remaining partners richer without them lifting a finger.
+
+The Buyback Masquerade In the modern tech era, the "Share Buyback" has been corrupted. Many Silicon Valley giants announce massive, multi-billion dollar buyback programs to great fanfare. It sounds like they are returning capital to you. Often, they are lying.
+
+They are using those buybacks to offset "Stock-Based Compensation" (SBC). They pay their engineers in millions of new shares (diluting you), then use company cash to buy those shares back (undiluting you). The net result? The share count stays flat, but the cash is gone. This is running in place. A "wiser" analysis looks at the net change in share count. If a company spends $10 billion on buybacks but the share count doesn't drop, that wasn't a return of capital—it was a disguised employee salary expense.
+
+The Action Plan
+The Buyback Truth Test: Don't trust the headline "Company X authorizes $10 Billion Buyback." Verify it. Open the company's financial statements and look at the "Weighted Average Shares Outstanding" line on the Income Statement over the last 3-5 years. If this number hasn't decreased significantly—despite the company spending billions on "Repurchase of Common Stock" (found in the Cash Flow Statement)—they are simply using your shareholder cash to offset the dilution from their own employee stock options. A true buyback reduces the share count, increasing your percentage of ownership; anything else is a disguised expense.

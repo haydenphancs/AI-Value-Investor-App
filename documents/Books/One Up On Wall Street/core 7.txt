@@ -1,0 +1,20 @@
+Core 7: The Earnings Engine
+The Hook 
+The Price Tag Distraction
+You are hypnotized by the wrong number. You wake up, check your phone, and see a stock price. It’s up $5. You feel brilliant. It’s down $10. You feel like a failure. You are letting the market’s mood swings dictate your emotional state. This is because you view a stock as a piece of paper that magically changes value, rather than what it actually is: a claim on a stream of cash. If you don't know exactly how the company makes a dollar of profit, you are walking blindfolded into traffic.
+
+The Author’s Solution
+The Two-Minute Drill
+ Peter Lynch had a simple cure for price-fixation: the "Two-Minute Drill." Before buying, he forced himself to deliver a monologue. If he couldn't explain to a child in two minutes why the company's earnings were going to go up, he wouldn't buy.
+
+He loved to show charts where the stock price line wobbled all over the place like a drunk, while the earnings line climbed steadily upward like a staircase. His point? The drunk (price) eventually has to come home to the staircase (earnings). If a company’s earnings grow by 20% a year for a decade, the stock price will eventually follow, regardless of wars, recessions, or bad moods on Wall Street. He famously said, "If you can’t predict the earnings, you can’t predict the stock." He didn't care about the "story" unless the story ended in a check being cashed.
+
+The 'Wiser' Analysis
+The "Profitless Prosperity" Myth
+ In the modern era, Silicon Valley has tried to convince you that "Earnings don't matter"—that "Growth" and "Users" and "Total Addressable Market" are the new metrics. This is a trap. Look at the SaaS (Software as a Service) boom of 2020-2021. Companies like Snowflake or Asana were trading at 50x or 100x revenue while losing millions of dollars. Investors said, "It's a new paradigm!" Then interest rates rose, and the floor fell out. The stocks that survived and thrived (like Microsoft or Alphabet) were the ones with massive, undeniable profits. Even Uber, the poster child for "growth at all costs," only became a stable investment once it proved it could actually generate positive cash flow. The "earnings engine" is the only thing that keeps a stock afloat when the hype cycle ends.
+
+The Action Plan
+
+The Monologue Test: Stand in front of a mirror. Say: "I am buying [Stock] because earnings will grow due to [Reason X], and the P/E ratio is [Y]." If you stutter, don't buy.
+
+Check the "E": If a company has no earnings (P/E is "N/A"), you are a venture capitalist, not an investor. Size your position accordingly (small).

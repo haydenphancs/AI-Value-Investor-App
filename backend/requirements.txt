@@ -28,9 +28,12 @@ email-validator==2.2.0
 pandas>=2.1.0
 ta>=0.11.0
 
-# PDF report generation (WeasyPrint loads cairo/pango at runtime — system
-# libs are provisioned in backend/nixpacks.toml for Railway)
+# PDF report generation. WeasyPrint loads cairo/pango/glib at runtime — system
+# libs are provisioned in backend/Dockerfile for Railway. pydyf is pinned: WeasyPrint
+# 62.3 calls pydyf's pre-0.11 transform() API, but an unpinned install pulls pydyf
+# 0.12.x which changed it (AttributeError: 'super' object has no attribute 'transform').
 weasyprint==62.3
+pydyf==0.10.0
 jinja2>=3.1.4
 
 # Utilities

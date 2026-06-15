@@ -1,0 +1,26 @@
+Core 1: The Spreadsheet Delusion
+
+Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.
+
+But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.
+
+The Fever of the Era
+
+The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.
+
+If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.
+
+Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.
+
+Trading the Algorithm for the Human
+
+Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.
+
+Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.
+
+In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically "perfect" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.
+
+
+The Action Plan
+
+Audit Your Sleep Factor: Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: "If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive "no."

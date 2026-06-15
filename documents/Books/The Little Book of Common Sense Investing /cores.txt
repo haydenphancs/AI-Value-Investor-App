@@ -1,0 +1,90 @@
+Course Title: The Bogle Strategy: Mastering the Mathematics of Wealth
+Phase 1: The Philosophical Reset
+Establishing the worldview necessary for index investing.
+
+Core 1: Escaping the Intermediary Trap
+
+Synthesizes: The "Parable of the Gotrocks" (Introduction), The fundamental conflict of interest in finance (Chapter 1), and the "Croupier" concept.
+
+The Big Idea: The stock market is a closed system where investors as a group earn the market return minus the massive fees paid to helpers; to win, you must eliminate the helpers.
+
+Core 2: Separating Business from Speculation
+
+Synthesizes: "Rational Exuberance" (Chapter 2), The distinction between Investment Return (Dividends + Earnings Growth) vs. Speculative Return (P/E Change).
+
+The Big Idea: Stop betting on how much people will pay for a stock tomorrow (Speculation) and start banking on the actual profits companies generate (Investment).
+
+Core 3: Accepting the Zero-Sum Game
+
+Synthesizes: The Alpha paradox, The comparison of Managed Funds vs. Index Funds (Chapter 4), and the arithmetic of active management.
+
+The Big Idea: For every investor who beats the market, another must lose to it—making active investing a 50/50 gamble before costs, and a loser's game after costs.
+
+Phase 2: The Silent Killers of Wealth
+Identifying and eliminating the invisible drains on a portfolio.
+
+Core 4: Defeating the Tyranny of Compounding Costs
+
+Synthesizes: Expense Ratios, Transaction Costs, and "Castles in the Air" (Chapter 3 & 4).
+
+The Big Idea: While compound interest is a miracle for your wealth, compound fees are a miracle for Wall Street; a 2% fee doesn't reduce your return by 2%—it can consume 60% of your final nest egg over a lifetime.
+
+Core 5: Plugging the Tax Leak
+
+Synthesizes: Tax inefficiency in active turnover vs. Tax efficiency in indexing (Chapter 5).
+
+The Big Idea: It isn't what you earn, it's what you keep; high-turnover funds generate massive tax bills that index funds naturally avoid.
+
+Core 6: Ignoring the Siren Song of "Stars"
+
+Synthesizes: "Selecting Long-Term Winners" (Chapter 8), "Yesterday's Winners, Tomorrow's Losers" (Chapter 9), and Morningstar rating pitfalls.
+
+The Big Idea: Chasing 5-star funds is a trap because top performance rarely persists; yesterday's "smart money" is statistically destined to regress to the mean.
+
+Phase 3: The Execution Strategy
+Building the portfolio.
+
+Core 7: Buying the Haystack
+
+Synthesizes: The Total Market Index Fund concept (Chapter 11), Broad diversification, eliminating single-stock risk.
+
+The Big Idea: Don't waste time looking for the needle (the winning stock) in the haystack; simply buy the haystack (the whole market) to guarantee you own every winner.
+
+Core 8: Respecting the Law of Gravity
+
+Synthesizes: Reversion to the Mean (Chapter 6 & 7), The history of fund managers failing to beat the market consistently.
+
+The Big Idea: In financial markets, what goes up abnormally fast must eventually come down; betting against "Reversion to the Mean" is the most dangerous gamble in finance.
+
+Core 9: Anchoring with Bonds
+
+Synthesizes: Asset Allocation (Chapter 10), "Bond Funds" (Chapter 14), Managing risk tolerance.
+
+The Big Idea: Bonds aren't for aggressive growth, they are the "anchor" to windward that prevents you from panic-selling your stocks during a crash.
+
+Phase 4: Modern Pitfalls & Behavioral Mastery
+Navigating new financial products and one's own psychology.
+
+Core 10: Navigating the ETF Minefield
+
+Synthesizes: "Exchange Traded Funds" (Chapter 15), The difference between investing in an index and trading an index.
+
+The Big Idea: ETFs are a great invention that is often used terribly; use them to buy-and-hold the market, not to day-trade sectors or countries.
+
+Core 11: Avoiding the "Smart Beta" Trap
+
+Synthesizes: "What about Index Funds that Promise to Beat the Market?" (Chapter 16), Fundamental Indexing, The "New Paradigm" risks.
+
+The Big Idea: Wall Street constantly invents complex new names for active management (like "Smart Beta") to charge higher fees—treat them with extreme skepticism.
+
+Core 12: Auditing Your Advisor
+
+Synthesizes: "What about an Investment Advisor?" (Chapter 17), Assessing value-add vs. cost.
+
+The Big Idea: Only hire an advisor for asset allocation and behavioral coaching, never for stock picking; if they claim they can beat the market, fire them.
+
+Core 13: Mastering the Art of Doing Nothing
+
+Synthesizes: "Stay the Course" (Chapter 18), Behavioral finance warnings, The emotional cycle of investing.
+
+The Big Idea: The hardest part of indexing is not the math, but the discipline to stand still when the world is panicking; your emotions are your portfolio’s greatest enemy.

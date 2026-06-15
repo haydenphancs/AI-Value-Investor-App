@@ -1,0 +1,17 @@
+Core 11: Spotting the Red Flags
+1. The Optimism Blindfold
+The most dangerous defect in the human brain is the ability to ignore data that contradicts a happy story. You buy a stock because the CEO is charismatic and the vision is "world-changing." When the footnotes in the financial report show massive debt or insider selling, you gloss over them. "They're just investing for growth," you tell yourself. The friction is that you are analyzing the narrative, not the structure. You are admiring the paint job on a house while termites are eating the foundation. By the time the floor collapses, it is too late.
+
+2. The Conglomerate House of Cards
+The author masterfully exposes this by taking us back to the "Conglomerate Boom." He tells the story of companies that stopped inventing products and started inventing accounting tricks.
+
+Imagine a boring company that decides to become "exciting" by buying up random businesses—a steel mill, an airline, a rental car agency. On paper, their revenue explodes. The CEO looks like a genius. But the author peels back the curtain to reveal the rot: they paid for these acquisitions with overpriced stock and massive debt. The "growth" was an illusion created by merging sloppy businesses together. The "Synergy" they promised never happened. When the economy slowed down, the debt remained, but the cash flow vanished. The stock, once a darling of Wall Street, went to zero. The lesson? Complexity is often a mask for fraud. If you cannot understand how a company makes money in two sentences, it probably doesn't.
+
+3. The "Community Adjusted" Reality
+Today, the red flags are hidden in plain sight under the guise of "Innovation." The modern equivalent of the Conglomerate trick is the "Pivot." When a crypto exchange collapses, or an "AI" startup implodes, the signs were always there.
+
+Consider the recent "SPAC" (Special Purpose Acquisition Company) mania. Companies with zero revenue were taken public based on PowerPoint slides projecting trillions in future profit. Or look at the "WeWork" disaster, where the company invented a metric called "Community Adjusted EBITDA" to pretend that renting desks at a loss was actually profitable. They removed the "bad" costs (like rent and marketing) to show a "good" number. This is not accounting; it is fiction. If a company pivots its entire business model to the latest buzzword (like adding "Blockchain" in 2017 or "AI" in 2024) without a working product, run. They are selling you stock, not software.
+
+4. The Protocol
+
+The Insider Exit: If the CEO and CFO are "consistently" selling their own stock while telling you to buy it on CNBC, believe their actions, not their words.

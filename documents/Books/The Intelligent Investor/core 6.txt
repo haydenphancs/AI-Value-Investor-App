@@ -1,0 +1,13 @@
+Core 6: The Mutual Fund Maze
+1. The Croupier's Cut
+The financial industry is built on a single, powerful myth: "Investing is too complicated for you to do alone; you need an expert." So, you hand your money to a mutual fund manager—a "star" in a suit who promises to navigate the market's storms. You pay them a 1% or 2% fee every year, regardless of whether they make you money or lose it. The friction here is mathematical, not emotional. That 2% fee sounds small, but over 30 years, it can consume up to 40% of your total wealth. You are taking 100% of the risk, providing 100% of the capital, and giving away nearly half the upside to a manager who, statistically, will fail to beat the market anyway. You aren't hiring a guide; you're carrying a parasite.
+
+2. The Rearview Mirror Trap
+The author saw this coming decades ago. He identified the fatal flaw in how mutual funds are sold: Performance Chasing. He describes the "Hot Hand" fallacy—the investor who looks at a list of funds, picks the one that went up 50% last year, and assumes it will do the same next year.
+
+Graham warns that "past performance is not a guarantee of future results" isn't just a legal disclaimer; it is an iron law. He observed that funds with spectacular returns usually achieved them by taking spectacular risks or getting lucky in a specific sector. Once that sector cools off, the "genius" manager looks like a fool, and the investor who bought in at the top suffers the crash. The author’s solution was brutal honesty: most funds are just expensive marketing machines designed to gather assets, not to generate alpha.
+
+3. The Index Revolution
+Today, the trap is even more subtle. We have "Thematic ETFs"—funds dedicated to AI, Cannabis, or Space Travel. These are the modern version of the "hot" mutual funds Graham warned about. They package a compelling narrative (e.g., "Robots are the future!") and charge you a premium to own a basket of hype.
+
+The "Wiser" analysis, championed by Graham’s disciple John Bogle, is that you should stop looking for the needle in the haystack and just buy the haystack. The modern S&P 500 Index Fund allows you to fire the manager. Instead of paying 1.5% for a human to guess which stocks will go up, you pay 0.03% to a computer to own all the stocks. In a world where information is instant, the "edge" that active managers used to have is gone. By indexing, you guarantee you will outperform 90% of professional investors simply by refusing to pay their salaries.

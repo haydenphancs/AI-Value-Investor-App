@@ -1,0 +1,26 @@
+Core 6: The Six Categories of Opportunity
+The Hook
+The One-Size-Fits-All Error
+ You are judging a fish by its ability to climb a tree. You buy a utility company and get angry when it doesn't double in six months. You buy a high-growth tech stock and panic when it drops 20% in a week. You are losing money because you are applying the same rules to completely different games. You treat every ticker symbol as a "stock," but that is like treating a racehorse, a dairy cow, and a house cat as just "animals." If you try to milk the racehorse, you’re going to get kicked.
+
+The Author’s Solution
+The Taxonomy of Profit
+ Peter Lynch stopped this madness by creating a strict taxonomy. Before he bought a single share, he forced the company into one of six boxes: Slow Growers, Stalwarts, Fast Growers, Cyclicals, Asset Plays, or Turnarounds.
+
+He tells the story of how this saved him with the auto industry. Most people treated car companies like "Stalwarts" (steady reliable growers like Coca-Cola). Lynch recognized them as "Cyclicals"—companies whose fortunes rise and fall with the economy. When Ford was booming, amateurs bought more, thinking the growth was permanent. Lynch sold, knowing the cycle would inevitably turn. He viewed "Fast Growers" (like Taco Bell in its early days) as the only ones worth holding through volatility, whereas "Turnarounds" (like Chrysler) were pure plays on survival, not growth. If you don't know which category your stock is in, you don't know when to sell.
+
+The 'Wiser' Analysis
+The Identity Crisis
+ In the modern market, misclassification is the primary cause of portfolio death. Look at Zoom or Peloton during the pandemic. Millions of investors mistook them for "Fast Growers" (permanent secular trends). In reality, they were "Cyclicals" tied to the "stay-at-home" cycle. When the world reopened, the cycle turned, and the stocks collapsed. The same applies to Crypto Miners. They are not "tech growth stocks"; they are commodity cyclicals tied to the price of Bitcoin. If Bitcoin drops, their earnings vanish. Conversely, Microsoft and Apple have transitioned from Fast Growers to "Stalwarts." They won't make you rich overnight anymore, but they offer recession protection that a small-cap AI startup simply cannot.
+
+The Action Plan
+
+Audit Your Portfolio: Go through every stock you own and write one of the six categories next to it. If you can't categorize it, sell it.
+
+Match the Strategy:
+
+Cyclicals (Chips, Energy, Crypto): Sell when P/E is low (earnings are at peak).
+
+Fast Growers (AI, SaaS): Hold as long as the earnings growth story is intact.
+
+Stalwarts (Big Tech): Sell if the valuation gets absurd (e.g., 80x earnings).

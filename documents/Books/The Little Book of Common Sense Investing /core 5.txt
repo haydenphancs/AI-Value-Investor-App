@@ -1,0 +1,19 @@
+Core 5: Plugging the Tax Leak
+The Hook: The Government’s Invisible Equity
+There is a silent partner in your portfolio who contributes zero capital, takes zero risk, yet claims up to 37% of your profits. You know him as Uncle Sam. The friction here is a dangerous mental accounting error: you see a stock go up 20% and think you have made 20%. You haven't.
+
+Most investors treat taxes as an afterthought, something to worry about in April. But in the mathematics of wealth, taxes are a compound interest penalty. Every time you sell a winner to buy a new stock, you trigger a "taxable event." You are voluntarily severing the arm of your compound interest curve. You aren't just paying a bill; you are removing capital that could have been working for you for the next 30 years.
+
+The Story: The Tale of the "Statue" vs. The Trader
+The author illuminates this with a concept we can call the "Tax Efficiency Gap." He compares two investors.
+
+Investor A owns an actively managed mutual fund. The manager is frantic, constantly selling "overvalued" stocks to buy "undervalued" ones. This fund has a turnover rate of 100%—meaning the entire portfolio is replaced every year. This generates massive short-term capital gains distributions, which are taxed at the highest income rates. Investor A is bleeding money every year, even if he never sells a single share of the fund itself.
+
+Investor B owns a broad market index fund. The fund manager does... nothing. He is a statue. He only sells if a company goes bankrupt or leaves the index. Because there is almost zero turnover, there are almost zero capital gains taxes. Investor B’s money compounds tax-deferred, growing like an IRA, simply because the vehicle is efficient. The lesson? In investing, laziness is tax-efficient; activity is tax-punitive.
+
+The Modern Context: The Crypto & ETF "Shell Game"
+Today, the tax leak has turned into a flood, driven by the gamification of "swapping."
+
+Consider the modern Crypto investor. You swap Ethereum for Solana, then Solana for a "Memecoin," then back to a Stablecoin. In your mind, you are just moving chips on a table. In the eyes of the IRS, every single swap is a sale and a purchase. You might trigger five taxable events in an hour. You could easily owe more in taxes than you have in cash if the market crashes after your trades.
+
+The same applies to the "Sector Rotation" game in stocks. You sell your "Clean Energy" ETF because it's down to buy a "Data Center" ETF because it's hot. You are converting potential long-term capital gains (taxed at ~15-20%) into short-term gains (taxed at ~37%). You are sprinting up an escalator that is moving down.

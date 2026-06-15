@@ -1,0 +1,31 @@
+Core 8: Financial Forensics
+The Hook
+The Balance Sheet Blindness
+ You are driving a sports car at 150 miles per hour, but you’ve taped over the fuel gauge because "math is boring." You love the speed—the rising stock price, the hype, the revolutionary technology. But you are ignoring the only thing that can kill you instantly: running out of gas.
+
+Most investors treat the Balance Sheet like a terms-and-conditions document—they scroll right past it. They assume that if a company is "changing the world," the money will sort itself out. This is a fatal error. Companies don't go bankrupt because they lack vision; they go bankrupt because they run out of cash. If you cannot spot the difference between a company that is "investing in growth" and one that is bleeding to death, you are not an investor; you are a philanthropist for bad management.
+
+The Author’s Solution
+The Debt Detective
+ Peter Lynch approached the balance sheet not like an accountant, but like a detective at a crime scene. He wasn't looking for "perfect" numbers; he was looking for the "murder weapon"—usually Debt.
+
+He tells the story of Chrysler in the early 1980s. Everyone thought the company was dead. The stock was trading at miserable lows. But Lynch dug into the debt structure and found a crucial detail that the market missed: Chrysler’s debt was mostly "funded debt" (long-term bonds), not "bank debt" (loans the bank can call in immediately). This meant Chrysler had time to turn the ship around. The banks couldn't force them into bankruptcy overnight.
+
+He also obsessed over Inventory. Lynch would look at a company’s sales growth versus its inventory growth. If sales were up 10% but inventory was up 30%, he ran for the exit. Why? Because it meant the company was stuffing warehouses with products nobody wanted. In the retail world, unsold inventory is like rotting fish—the longer it sits, the more it stinks, and eventually, you have to pay someone to take it away (mark it down to zero). He viewed a buildup of inventory as the single most reliable "sell signal" in the market, often appearing months before the stock price collapsed.
+
+The 'Wiser' Analysis
+The ZIRP Zombie Apocalypse
+
+ In the last decade, we lived through a "Zero Interest Rate Policy" (ZIRP) fantasy world where debt was free. This created an entire generation of "Zombie Companies"—tech startups and growth stocks that survived only by constantly borrowing cheap money or issuing new shares. They had great revenue growth but terrible balance sheets.
+
+Now that interest rates have normalized, the tide has gone out, and we can see who is swimming naked. Look at the collapse of WeWork or the struggles of Peloton. These companies had incredible "stories" and "revenue growth," but their balance sheets were ticking time bombs. They were burning cash faster than they could bring it in.
+
+Today, "Financial Forensics" means looking past the "Adjusted EBITDA" (which Charlie Munger famously called "bullshit earnings") and looking at Free Cash Flow. In the SaaS (Software as a Service) world, look at the "Burn Rate." If a company has $100 million in the bank but burns $50 million a quarter, they have six months to live. No amount of "AI integration" announcements can save a company that cannot pay its server bills.
+
+The Action Plan
+
+The "Net Cash" Calculation: Before buying, take Cash & Equivalents and subtract Long-Term Debt. If the number is positive, the company has a "fortress balance sheet" (like Google or Apple). If it’s deeply negative, check the interest rate on that debt.
+
+The Inventory Red Flag: Check the last quarterly report. Did "Inventory" grow faster than "Revenue"? If yes, be careful.
+
+Ignore "Adjusted" Metrics: If a company highlights "Adjusted EBITDA" but their "Net Income" is negative, assume they are losing money. Real money doesn't need to be "adjusted."

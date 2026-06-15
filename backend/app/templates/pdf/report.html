@@ -376,7 +376,10 @@
           <td><div class="k">Share Δ</div><div class="v" style="color:{{ '#2563EB' if (ca.share_count_change or 0) <= 0 else '#DC2626' }}">{{ pct(ca.share_count_change) }}</div></td>
         </tr>
       </table>
-      {% if charts.dilution %}<div class="chart-wrap" style="margin-top:4px">{{ charts.dilution | safe }}</div><div class="chart-legend">Shares outstanding trend</div>{% endif %}
+      {% if charts.capital_returned %}<div class="chart-wrap" style="margin-top:4px">{{ charts.capital_returned | safe }}</div>
+      <div class="chart-legend"><span class="sw" style="background:#93C5FD"></span>Dividends<span class="sw" style="background:#16A34A"></span>Buybacks</div>{% endif %}
+      {% if charts.shares_trend %}<div class="chart-wrap" style="margin-top:6px">{{ charts.shares_trend | safe }}</div>
+      <div class="chart-legend">Shares outstanding</div>{% endif %}
       {% else %}<div class="no-data">Capital-allocation data unavailable.</div>{% endif %}
     </td>
   </table>
@@ -389,14 +392,14 @@
   <table class="two-col" style="margin-top:8px">
     <td class="col-l">
       <div class="sub-h">Top Holders</div>
-      {% if management.top_holders %}<table class="kv"><tbody>
-      {% for h in management.top_holders[:4] %}<tr><td class="name">{{ h.name }}</td><td class="r">{% if h.percent_ownership %}<span class="pill">{{ "%.0f"|format(h.percent_ownership) }}% owner</span>{% else %}{{ h.ownership_value }}{% endif %}</td></tr>{% endfor %}
+      {% if management.top_holders %}<table class="kv"><thead><tr><th>Holder</th><th class="r">Shares</th></tr></thead><tbody>
+      {% for h in management.top_holders[:5] %}<tr><td class="name">{{ h.name }}{% if h.percent_ownership %} <span class="pill">{{ "%.0f"|format(h.percent_ownership) }}% owner</span>{% endif %}</td><td class="r">{{ h.ownership or h.ownership_value }}</td></tr>{% endfor %}
       </tbody></table>{% else %}<div class="no-data">—</div>{% endif %}
     </td>
     <td class="col-r">
       <div class="sub-h">Key Officers</div>
-      {% if management.officers %}<table class="kv"><tbody>
-      {% for o in management.officers[:5] %}<tr><td class="name">{{ o.name }}</td><td class="muted">{{ o.title }}</td><td class="r">{{ o.ownership_value }}</td></tr>{% endfor %}
+      {% if management.officers %}<table class="kv"><thead><tr><th>Officer</th><th>Role</th><th class="r">Owned</th></tr></thead><tbody>
+      {% for o in management.officers[:5] %}<tr><td class="name">{{ o.name }}</td><td class="muted">{{ o.title }}</td><td class="r">{% if o.pct_owned_label %}{{ o.pct_owned_label }} · {% endif %}{{ o.ownership or o.ownership_value }}</td></tr>{% endfor %}
       </tbody></table>{% else %}<div class="no-data">—</div>{% endif %}
     </td>
   </table>{% endif %}
@@ -417,8 +420,8 @@
         </tr>
       </table>
       {% if c.trades %}<table class="kv"><thead><tr><th>Member</th><th>Date</th><th>Type</th></tr></thead><tbody>
-      {% for tr in c.trades[:5] %}<tr><td class="name">{{ tr.name }}</td><td class="muted">{{ tr.date }}</td><td>{{ tr.transaction_type }}</td></tr>{% endfor %}
-      </tbody></table>{% endif %}
+      {% for tr in c.trades[:14] %}<tr><td class="name">{{ tr.name }}</td><td class="muted">{{ tr.date }}</td><td style="color:{{ '#DC2626' if tr.transaction_type == 'Sale' else '#2563EB' }};font-weight:700">{{ tr.transaction_type }}</td></tr>{% endfor %}
+      </tbody></table>{% if c.trades|length > 14 %}<div class="caption-note">+{{ c.trades|length - 14 }} more congressional trades</div>{% endif %}{% endif %}
       {% else %}<div class="no-data">No congressional activity.</div>{% endif %}
     </td>
     <td class="col-r">
@@ -431,7 +434,7 @@
           <td><div class="k">3M Δ</div><div class="v" style="color:{{ '#DC2626' if (si.change_3m or 0) > 0 else '#2563EB' }}">{{ pct(si.change_3m) }}</div></td>
         </tr>
       </table>
-      {% if charts.short_interest %}<div class="chart-wrap" style="margin-top:4px">{{ charts.short_interest | safe }}</div><div class="chart-legend">Days-to-cover trend</div>{% endif %}
+      {% if charts.short_interest %}<div class="chart-wrap" style="margin-top:4px">{{ charts.short_interest | safe }}</div><div class="chart-legend"><span class="sw" style="background:#D97706"></span>Short interest (shares)</div>{% endif %}
       {% else %}<div class="no-data">No short-interest data.</div>{% endif %}
     </td>
   </table>

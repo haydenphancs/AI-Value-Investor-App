@@ -61,6 +61,14 @@ class LearnViewModel: ObservableObject {
         rebuildJourney()
     }
 
+    /// Upgrade the Money Moves row to fresh backend content. The store serves bundled content
+    /// synchronously for first paint, then this swaps in /learn/money-moves. Safe to call
+    /// repeatedly — the store prefetches once per session. Mirrors MoneyMovesDetailView.
+    func prefetchMoneyMoves() async {
+        await MoneyMovesContentStore.shared.prefetch()
+        loadMoneyMoves()
+    }
+
     // MARK: - Journey Progress (shared with the full-screen journey)
 
     /// Rebuild the Learn-tab journey card from the shared completion store over the lesson
@@ -131,7 +139,13 @@ class LearnViewModel: ObservableObject {
 
     // MARK: - Private Loaders
     private func loadMoneyMoves() {
-        moneyMoves = MoneyMove.sampleData
+        // Authored catalog (backend → bundled, via MoneyMovesContentStore) first; fill the rest
+        // with not-yet-authored sample placeholders so the row is never empty. Adding an article
+        // server-side makes its card appear here with no app update. Mirrors MoneyMovesDetailView.
+        var cards = MoneyMovesContentStore.shared.cards()
+        let authoredTitles = Set(cards.map { $0.title })
+        cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
+        moneyMoves = cards
     }
 
     private func loadBooks() {

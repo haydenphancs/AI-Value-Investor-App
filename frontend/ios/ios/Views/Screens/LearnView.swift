@@ -85,6 +85,11 @@ struct LearnContentView: View {
                 .preferredColorScheme(.dark)
         }
         .navigationBarHidden(true)
+        .task {
+            // Upgrade the Wiser-screen Money Moves row to fresh backend content so it matches
+            // the See-All screen. Bundled content already painted synchronously from the store.
+            await viewModel.prefetchMoneyMoves()
+        }
         }
     }
 
@@ -188,7 +193,10 @@ struct LearnContentView: View {
     }
 
     private func handleMoneyMoveTap(_ moneyMove: MoneyMove) {
-        selectedMoneyMoveArticle = createArticleFromMove(moneyMove)
+        // Prefer authored content (backend → bundled, via MoneyMovesContentStore); fall back to
+        // generated placeholder for cards not yet authored. Mirrors MoneyMovesDetailView.
+        selectedMoneyMoveArticle = MoneyMovesContentStore.shared.article(forTitle: moneyMove.title)
+            ?? createArticleFromMove(moneyMove)
     }
 
     private func handleBookmarkMoneyMove(_ moneyMove: MoneyMove) {

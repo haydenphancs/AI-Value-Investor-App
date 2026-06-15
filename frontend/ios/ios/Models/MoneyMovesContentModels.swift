@@ -74,7 +74,7 @@ struct MoneyMoveArticleDTO: Decodable {
             viewCount: viewCount,
             commentCount: commentCount ?? mappedComments.count,
             isBookmarked: false,
-            hasAudioVersion: hasAudioVersion ?? (audioUrl != nil),
+            hasAudioVersion: audioUrl != nil,   // honest gate: only show Listen when narration exists
             heroGradientColors: heroGradientColors,
             tagLabel: tagLabel,
             isFeatured: isFeatured ?? false,
@@ -82,7 +82,8 @@ struct MoneyMoveArticleDTO: Decodable {
             sections: sections.map { $0.toSection() },
             statistics: (statistics ?? []).map { $0.toStatistic() },
             comments: mappedComments,
-            relatedArticles: (relatedArticles ?? []).map { $0.toRelated() }
+            relatedArticles: (relatedArticles ?? []).map { $0.toRelated() },
+            audioUrl: audioUrl
         )
     }
 

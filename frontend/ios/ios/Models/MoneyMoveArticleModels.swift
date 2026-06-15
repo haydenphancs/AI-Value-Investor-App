@@ -36,6 +36,9 @@ struct MoneyMoveArticle: Identifiable {
     let comments: [ArticleComment]
     let relatedArticles: [RelatedArticle]
 
+    // Narration audio (Supabase Storage URL); nil until narration is generated.
+    var audioUrl: String? = nil
+
     var formattedDate: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM dd, yyyy"
@@ -281,7 +284,7 @@ extension MoneyMoveArticle {
         viewCount: "4.2M",
         commentCount: 124,
         isBookmarked: false,
-        hasAudioVersion: true,
+        hasAudioVersion: false,
         heroGradientColors: ["1E3A5F", "0D1B2A", "1B263B"],
         tagLabel: "MUST READ",
         isFeatured: false,
@@ -430,7 +433,7 @@ extension MoneyMoveArticle {
         viewCount: "4.2M",
         commentCount: 124,
         isBookmarked: false,
-        hasAudioVersion: true,
+        hasAudioVersion: false,
         heroGradientColors: ["EA580C", "C2410C", "9A3412"], // Orange gradient for featured articles
         tagLabel: "MUST READ",
         isFeatured: true, // Mark as featured to show "FEATURED DEEP DIVE" instead of category

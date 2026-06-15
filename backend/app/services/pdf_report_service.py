@@ -98,6 +98,25 @@ def _num(v: Any) -> Optional[float]:
         return None
 
 
+_MONTH_ABBR = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt_month_label(mk: Any) -> str:
+    """Smart-money bucket key 'MM/YYYY' -> "Mon 'YY" (e.g. '06/2025' -> "Jun '25").
+    Returns the raw value unchanged if it isn't in the expected format."""
+    s = str(mk or "").strip()
+    if "/" in s:
+        mm, _, yyyy = s.partition("/")
+        try:
+            mi = int(mm)
+        except ValueError:
+            return s
+        if 1 <= mi <= 12 and len(yyyy) >= 2:
+            return f"{_MONTH_ABBR[mi]} '{yyyy[-2:]}"
+    return s
+
+
 def build_context(
     data: dict,
     fair_value_estimate: Optional[float] = None,
@@ -122,7 +141,11 @@ def build_context(
     # ── Fair value / margin of safety ─────────────────────────────────────────
     price_action = data.get("price_action") or {}
     current_price = _num(price_action.get("current_price"))
-    fair_value = _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
+    # Fair value = Wall Street analyst consensus target (the hero card is labeled
+    # "Per Wall Street consensus"). Fall back to the stored estimate only when the
+    # consensus has no target.
+    ws_target = _num((data.get("wall_street_consensus") or {}).get("target_price"))
+    fair_value = ws_target or _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
     mos_pct = None
     valuation_word = "—"
     valuation_color = pdf_charts.MUTED
@@ -213,7 +236,7 @@ def build_context(
     insider = data.get("insider_data") or {}
     flow = ((insider.get("insider_flow") or {}).get("flow_data")) or []
     insider_flow_items = [{
-        "label": (f.get("month") or "")[-3:],
+        "label": _fmt_month_label(f.get("month")),
         "up": f.get("buy_volume") or 0,
         "down": f.get("sell_volume") or 0,
     } for f in flow if isinstance(f, dict)]
@@ -239,7 +262,7 @@ def build_context(
     # Institutional (13F) flow for the Wall Street section.
     inst_flow = wsc.get("hedge_fund_flow_data") or []
     inst_flow_items = [{
-        "label": (f.get("month") or "")[-3:],
+        "label": _fmt_month_label(f.get("month")),
         "up": f.get("buy_volume") or 0,
         "down": f.get("sell_volume") or 0,
     } for f in inst_flow if isinstance(f, dict)]

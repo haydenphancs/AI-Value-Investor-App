@@ -359,20 +359,28 @@ def diverging_bars(
     n = len(rows)
     slot = w / n
     bw = min(slot * 0.5, 18)
+    # A dominant outlier (e.g. one giant insider sale) can shrink every other bar
+    # to nothing — floor non-zero bars at a visible sliver. Thin x-axis labels so
+    # many monthly buckets don't overlap in the narrow print width.
+    min_bar = 2.0
+    label_step = max(1, math.ceil(n / 8))
     out = ""
     for i, (lbl, u, d) in enumerate(rows):
         cx = pad_l + slot * (i + 0.5)
         uh = (h / 2) * (u / mx)
         dh = (h / 2) * (d / mx)
         if u > 0:
+            uh = max(uh, min_bar)
             out += (f'<rect x="{cx - bw/2:.1f}" y="{zero - uh:.1f}" width="{bw:.1f}" '
                     f'height="{uh:.1f}" rx="1.5" fill="{up_color}"/>')
         if d > 0:
+            dh = max(dh, min_bar)
             out += (f'<rect x="{cx - bw/2:.1f}" y="{zero:.1f}" width="{bw:.1f}" '
                     f'height="{dh:.1f}" rx="1.5" fill="{down_color}"/>')
-        out += (f'<text x="{cx:.1f}" y="{height - 5:.1f}" text-anchor="middle" '
-                f'font-size="7" fill="{MUTED}" '
-                f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>')
+        if lbl and (i % label_step == 0 or i == n - 1):
+            out += (f'<text x="{cx:.1f}" y="{height - 5:.1f}" text-anchor="middle" '
+                    f'font-size="7" fill="{MUTED}" '
+                    f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>')
     out += (f'<line x1="{pad_l}" y1="{zero:.1f}" x2="{pad_l + w}" y2="{zero:.1f}" '
             f'stroke="{INK}" stroke-width="1"/>')
     return (

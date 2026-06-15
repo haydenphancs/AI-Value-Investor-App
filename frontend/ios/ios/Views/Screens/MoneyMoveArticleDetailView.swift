@@ -32,7 +32,8 @@ struct MoneyMoveArticleDetailView: View {
             duration: TimeInterval(article.readTimeMinutes * 60),
             category: .moneyMoves,
             authorName: article.author.name,
-            sourceId: article.id.uuidString
+            sourceId: article.id.uuidString,
+            audioUrl: article.audioUrl
         )
     }
 

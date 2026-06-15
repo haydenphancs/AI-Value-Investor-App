@@ -146,7 +146,7 @@ struct MoneyMovesDetailView: View {
             viewCount: move.learnerCount,
             commentCount: Int.random(in: 20...200),
             isBookmarked: move.isBookmarked,
-            hasAudioVersion: true,
+            hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
             tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),
             isFeatured: false,

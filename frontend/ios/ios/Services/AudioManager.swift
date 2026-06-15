@@ -70,9 +70,15 @@ final class AudioManager: ObservableObject {
     }
 
     // MARK: - Private Properties
-    private var playbackTimer: Timer?
+    private var playbackTimer: Timer?          // drives the simulated fallback (URL-less episodes)
     private var sleepTimerInstance: Timer?
     private var cancellables = Set<AnyCancellable>()
+
+    // Real playback — used when an episode carries an audioUrl. URL-less episodes
+    // (e.g. Books / Daily Brief without narration) keep the simulated timer path below.
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+    private var endObserver: NSObjectProtocol?
 
     // Audio session configuration
     private let audioSession = AVAudioSession.sharedInstance()
@@ -118,10 +124,17 @@ final class AudioManager: ObservableObject {
             addToHistory(current)
         }
 
+        teardownPlayer()
+        stopPlaybackTimer()
         currentEpisode = episode
         duration = episode.duration
         currentTime = 0
         playbackState = .paused
+
+        // Prepare (but don't start) a real player when narration is available.
+        if let urlString = episode.audioUrl, let url = URL(string: urlString) {
+            preparePlayer(url: url)
+        }
     }
 
     /// Play a new episode
@@ -131,15 +144,26 @@ final class AudioManager: ObservableObject {
             addToHistory(current)
         }
 
+        teardownPlayer()
+        stopPlaybackTimer()
         currentEpisode = episode
         duration = episode.duration
         currentTime = 0
         playbackState = .loading
 
-        // Simulate loading delay then start playing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.playbackState = .playing
-            self?.startPlaybackTimer()
+        if let urlString = episode.audioUrl, let url = URL(string: urlString) {
+            // Real playback via AVPlayer (the periodic time observer drives currentTime/duration).
+            preparePlayer(url: url)
+            player?.playImmediately(atRate: Float(playbackSpeed.rawValue))
+            playbackState = .playing
+        } else {
+            // No narration URL: keep the legacy simulated progress so non-audio episodes
+            // (e.g. Books / Daily Brief) behave exactly as before.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.player == nil else { return }
+                self.playbackState = .playing
+                self.startPlaybackTimer()
+            }
         }
     }
 
@@ -147,12 +171,17 @@ final class AudioManager: ObservableObject {
     func resume() {
         guard currentEpisode != nil else { return }
         playbackState = .playing
-        startPlaybackTimer()
+        if let player {
+            player.playImmediately(atRate: Float(playbackSpeed.rawValue))
+        } else {
+            startPlaybackTimer()
+        }
     }
 
     /// Pause playback
     func pause() {
         playbackState = .paused
+        player?.pause()
         stopPlaybackTimer()
     }
 
@@ -175,6 +204,7 @@ final class AudioManager: ObservableObject {
     /// Stop playback and clear current episode
     func stop() {
         stopPlaybackTimer()
+        teardownPlayer()
         stopSleepTimer()
         playbackState = .idle
 
@@ -191,7 +221,9 @@ final class AudioManager: ObservableObject {
 
     /// Seek to specific time
     func seek(to time: TimeInterval) {
-        currentTime = max(0, min(time, duration))
+        let clamped = max(0, min(time, duration))
+        currentTime = clamped
+        player?.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
     }
 
     /// Seek by offset (positive = forward, negative = backward)
@@ -248,9 +280,13 @@ final class AudioManager: ObservableObject {
     // MARK: - Speed Control
 
     private func updatePlaybackSpeed(_ speed: PlaybackSpeed) {
-        // In real implementation, update AVPlayer rate
-        // For simulation, this affects the timer interval
-        if playbackState == .playing {
+        if let player {
+            // A non-zero rate also resumes playback, so only apply it while playing.
+            if playbackState == .playing {
+                player.rate = Float(speed.rawValue)
+            }
+        } else if playbackState == .playing {
+            // Simulated fallback: re-arm the timer at the new interval.
             stopPlaybackTimer()
             startPlaybackTimer()
         }
@@ -296,6 +332,52 @@ final class AudioManager: ObservableObject {
         sleepTimerInstance = nil
     }
 
+    // MARK: - Real Playback (AVPlayer)
+
+    /// Build an AVPlayer for the URL and attach observers that mirror playback into the
+    /// published state the UI binds to (currentTime, real duration, completion). Does not start.
+    private func preparePlayer(url: URL) {
+        teardownPlayer()
+        let item = AVPlayerItem(url: url)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.automaticallyWaitsToMinimizeStalling = true
+        player = newPlayer
+
+        // Mirror playback position (and the real duration once known) into published state.
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            Task { @MainActor [weak self] in
+                guard let self, self.player != nil else { return }
+                let secs = time.seconds
+                if secs.isFinite { self.currentTime = secs }
+                if let itemDuration = self.player?.currentItem?.duration.seconds,
+                   itemDuration.isFinite, itemDuration > 0 {
+                    self.duration = itemDuration
+                }
+            }
+        }
+
+        // Advance the queue / settle state when the clip finishes naturally.
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.handlePlaybackComplete() }
+        }
+    }
+
+    private func teardownPlayer() {
+        if let timeObserver, let player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        endObserver = nil
+        player?.pause()
+        player = nil
+    }
+
     // MARK: - Playback Timer (Simulation)
 
     private func startPlaybackTimer() {
@@ -322,6 +404,7 @@ final class AudioManager: ObservableObject {
 
     private func handlePlaybackComplete() {
         stopPlaybackTimer()
+        teardownPlayer()
 
         // Notify listeners that the episode completed naturally
         if let episode = currentEpisode {

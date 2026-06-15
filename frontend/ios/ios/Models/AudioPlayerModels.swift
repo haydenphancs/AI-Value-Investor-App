@@ -20,6 +20,7 @@ struct AudioEpisode: Identifiable, Equatable {
     let category: AudioCategory
     let authorName: String
     let sourceId: String // Original article/book ID for navigation
+    var audioUrl: String? = nil // Remote narration URL (Supabase Storage); nil => no real audio (simulated fallback)
 
     var formattedDuration: String {
         let minutes = Int(duration) / 60

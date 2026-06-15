@@ -95,11 +95,22 @@ def test_build_context_full_sample():
     ctx = build_context(_sample(), fair_value_estimate=196.0)
     assert ctx["quality_score"] == 72
     assert ctx["persona_name"] == "Buffett Agent"
-    assert ctx["fair_value"] == 196.0
-    assert ctx["margin_of_safety_pct"] > 0  # 196 vs 172.4 → undervalued
+    assert ctx["fair_value"] == 205.0  # Wall Street consensus target, not the passed estimate
+    assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4 → undervalued
     assert ctx["valuation_word"] == "Undervalued"
     assert len(ctx["vitals"]) == 8
     assert ctx["bull_case"] and ctx["bear_case"]
+
+
+def test_fair_value_prefers_wall_street_target():
+    """Fair value = Wall Street consensus target (the hero card is labeled
+    'Per Wall Street consensus'); the passed estimate is only a fallback."""
+    ctx = build_context(_sample(), fair_value_estimate=196.0)
+    assert ctx["fair_value"] == 205.0  # consensus target wins over the estimate
+    sample = _sample()
+    sample["wall_street_consensus"]["target_price"] = None
+    ctx2 = build_context(sample, fair_value_estimate=196.0)
+    assert ctx2["fair_value"] == 196.0  # no consensus target → fall back to the estimate
 
 
 def test_render_html_embeds_data_and_charts():

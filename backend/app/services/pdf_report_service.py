@@ -117,6 +117,38 @@ def _fmt_month_label(mk: Any) -> str:
     return s
 
 
+def _fmt_date_label(d: Any) -> str:
+    """ISO date 'YYYY-MM-DD' -> "Mon 'YY" (e.g. '2025-06-15' -> "Jun '25").
+    Returns the raw value unchanged if it isn't in the expected format."""
+    s = str(d or "").strip()
+    parts = s.split("-")
+    if len(parts) >= 2 and len(parts[0]) == 4:
+        try:
+            mi = int(parts[1])
+        except ValueError:
+            return s
+        if 1 <= mi <= 12:
+            return f"{_MONTH_ABBR[mi]} '{parts[0][-2:]}"
+    return s
+
+
+def _fmt_owner_pct(v: Any) -> str:
+    """Significant-figure ownership-% label matching the iOS officer column
+    (e.g. 0.43 -> '0.43%', 0.0083 -> '0.0083%')."""
+    n = _num(v)
+    if n is None:
+        return ""
+    if n >= 10:
+        return f"{n:.1f}%"
+    if n >= 0.1:
+        return f"{n:.2f}%"
+    if n >= 0.01:
+        return f"{n:.3f}%"
+    if n >= 0.001:
+        return f"{n:.4f}%"
+    return "<0.001%"
+
+
 def build_context(
     data: dict,
     fair_value_estimate: Optional[float] = None,
@@ -241,11 +273,19 @@ def build_context(
         "down": f.get("sell_volume") or 0,
     } for f in flow if isinstance(f, dict)]
     cap = insider.get("capital_allocation") or {}
-    dilution_pts = [
-        _num(p.get("shares_outstanding"))
-        for p in (cap.get("data_points") or [])
-        if isinstance(p, dict) and _num(p.get("shares_outstanding"))
-    ]
+    ca_points = [p for p in (cap.get("data_points") or []) if isinstance(p, dict)]
+    # Capital returned per quarter (dividend + buyback). Amounts are in $millions;
+    # scale to raw dollars so the axis formatter renders $M/$B labels.
+    ca_capital_items = [{
+        "label": p.get("period") or "",
+        "values": [(_num(p.get("dividend_amount")) or 0.0) * 1e6,
+                   (_num(p.get("buyback_amount")) or 0.0) * 1e6],
+    } for p in ca_points]
+    # Shares-outstanding trend (also $millions of shares -> raw count).
+    ca_shares_items = [{
+        "label": p.get("period") or "",
+        "value": (_num(p.get("shares_outstanding")) or 0.0) * 1e6,
+    } for p in ca_points if _num(p.get("shares_outstanding"))]
     recent_tx = ((insider.get("recent_transactions") or {}).get("activities")) or []
 
     # Hidden signals.
@@ -253,11 +293,11 @@ def build_context(
     congress = hidden.get("congress") if hidden else None
     short_int = hidden.get("short_interest") if hidden else None
     si_history = (short_int or {}).get("history") or []
-    si_series = [
-        (_num(h.get("days_to_cover")) or _num(h.get("shares_short")))
-        for h in si_history
-        if isinstance(h, dict) and (_num(h.get("days_to_cover")) or _num(h.get("shares_short")))
-    ]
+    # Short-interest trend: shares short per FINRA settlement (bars), dated x-axis.
+    si_bar_items = [{
+        "label": _fmt_date_label(h.get("settlement_date")),
+        "values": [_num(h.get("shares_short")) or 0.0],
+    } for h in si_history if isinstance(h, dict) and _num(h.get("shares_short"))]
 
     # Institutional (13F) flow for the Wall Street section.
     inst_flow = wsc.get("hedge_fund_flow_data") or []
@@ -302,8 +342,11 @@ def build_context(
         "earnings_timeline": pdf_charts.bars_actuals_forecast(
             timeline_items, width=700, height=150),
         "insider_flow": pdf_charts.diverging_bars(insider_flow_items, width=330, height=118),
-        "dilution": pdf_charts.mini_line(dilution_pts, width=300, height=68),
-        "short_interest": pdf_charts.mini_line(si_series, width=330, height=76, accent="#D97706"),
+        "capital_returned": pdf_charts.axed_bars(
+            ca_capital_items, colors=["#93C5FD", "#16A34A"], width=300, height=104, fmt="money"),
+        "shares_trend": pdf_charts.axed_line(ca_shares_items, width=300, height=94, fmt="num"),
+        "short_interest": pdf_charts.axed_bars(
+            si_bar_items, colors=["#D97706"], width=320, height=104, fmt="num"),
         "radar": pdf_charts.moat_radar(dims, size=210, max_score=radar_max),
         "consensus": pdf_charts.analyst_consensus_stacked_bar(
             consensus_counts, width=330, height=22),
@@ -381,8 +424,16 @@ def build_context(
             "ownership_note": insider.get("ownership_note") or "",
         },
         "management": {
-            "top_holders": (data.get("key_management") or {}).get("top_holders") or [],
-            "officers": (data.get("key_management") or {}).get("officers") or [],
+            "top_holders": [
+                h for h in ((data.get("key_management") or {}).get("top_holders") or [])
+                if isinstance(h, dict)
+            ],
+            # Officers gain a formatted ownership-% label (iOS shows "0.43% / 1.0M").
+            "officers": [
+                {**o, "pct_owned_label": _fmt_owner_pct(o.get("percent_owned"))}
+                for o in ((data.get("key_management") or {}).get("officers") or [])
+                if isinstance(o, dict)
+            ],
             "ownership_insight": (data.get("key_management") or {}).get("ownership_insight") or "",
         },
         "hidden": {

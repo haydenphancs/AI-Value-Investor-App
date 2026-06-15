@@ -430,3 +430,156 @@ def mini_line(
         f'<circle cx="{x(n-1):.1f}" cy="{y(pts[-1]):.1f}" r="3" fill="{accent}"/>'
         f"</svg>"
     )
+
+
+# ── Axis-label formatting (shared by the axed charts below) ────────────────────
+def _fmt_compact(v: float, money: bool = False) -> str:
+    """1_400_000_000 -> '$1.4B' / '340M' — compact magnitude label for an axis."""
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+    pre = "$" if money else ""
+    if a >= 1e9:
+        return f"{sign}{pre}{a / 1e9:.1f}B"
+    if a >= 1e6:
+        return f"{sign}{pre}{a / 1e6:.0f}M"
+    if a >= 1e3:
+        return f"{sign}{pre}{a / 1e3:.0f}K"
+    if a == 0 or a >= 1:
+        return f"{sign}{pre}{a:.0f}"
+    return f"{sign}{pre}{a:.1f}"
+
+
+def _axis_label(v: float, fmt: str) -> str:
+    if fmt == "money":
+        return _fmt_compact(v, money=True)
+    if fmt == "pct":
+        return f"{v:.1f}%"
+    return _fmt_compact(v, money=False)
+
+
+# ── Axed grouped bars (1-2 series) — left y-axis + thinned x-axis ──────────────
+def axed_bars(
+    items: list[dict],
+    *,
+    colors: list[str],
+    width: int = 300,
+    height: int = 120,
+    fmt: str = "num",
+) -> str:
+    """Grouped vertical bars with a labelled left y-axis (0 / mid / max ticks +
+    gridlines) and thinned x-axis labels. ``items``: ``{label, values:[...]}``;
+    one bar per colour. Returns "" when there is no positive data."""
+    rows: list[tuple[str, list[float]]] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        vals = [
+            float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0.0
+            for x in (it.get("values") or [])
+        ]
+        rows.append((str(it.get("label", "")), vals))
+    if not rows:
+        return ""
+    ns = len(colors)
+    vmax = max([v for _, vals in rows for v in vals[:ns]] + [0.0])
+    if vmax <= 0:
+        return ""
+    pad_t, pad_b, pad_l, pad_r = 10, 16, 34, 6
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    n = len(rows)
+    slot = w / n
+    group_w = min(slot * 0.7, 26)
+    bw = group_w / ns
+    out = ""
+    for frac in (0.0, 0.5, 1.0):
+        gy = pad_t + h * (1 - frac)
+        out += (f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + w}" y2="{gy:.1f}" '
+                f'stroke="{GRID}" stroke-width="1"/>')
+        out += (f'<text x="{pad_l - 4}" y="{gy + 3:.1f}" text-anchor="end" font-size="7" '
+                f'fill="{MUTED}" font-family="Helvetica, Arial, sans-serif">'
+                f'{_esc(_axis_label(vmax * frac, fmt))}</text>')
+    label_step = max(1, math.ceil(n / 6))
+    for i, (lbl, vals) in enumerate(rows):
+        gx = pad_l + slot * (i + 0.5) - group_w / 2
+        for j in range(ns):
+            v = vals[j] if j < len(vals) else 0.0
+            if v <= 0:
+                continue
+            bh = h * (v / vmax)
+            out += (f'<rect x="{gx + bw * j:.1f}" y="{pad_t + h - bh:.1f}" width="{bw:.1f}" '
+                    f'height="{bh:.1f}" rx="1" fill="{colors[j]}"/>')
+        if lbl and (i % label_step == 0 or i == n - 1):
+            cx = pad_l + slot * (i + 0.5)
+            out += (f'<text x="{cx:.1f}" y="{height - 4:.1f}" text-anchor="middle" '
+                    f'font-size="7" fill="{MUTED}" '
+                    f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">{out}</svg>'
+    )
+
+
+# ── Axed trend line — left y-axis + thinned x-axis ────────────────────────────
+def axed_line(
+    points: list[dict],
+    *,
+    accent: str = ACCENT,
+    width: int = 300,
+    height: int = 110,
+    fmt: str = "num",
+) -> str:
+    """Single trend line with a labelled left y-axis (min / mid / max ticks +
+    gridlines) and thinned x-axis labels. ``points``: ``{label, value}``."""
+    rows: list[tuple[str, float]] = []
+    for p in points or []:
+        if not isinstance(p, dict):
+            continue
+        v = p.get("value")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            rows.append((str(p.get("label", "")), float(v)))
+    if len(rows) < 2:
+        return ""
+    vals = [v for _, v in rows]
+    lo, hi = min(vals), max(vals)
+    if hi == lo:
+        hi = lo + 1.0
+    pad = (hi - lo) * 0.08
+    lo, hi = lo - pad, hi + pad
+    rng = hi - lo
+    pad_t, pad_b, pad_l, pad_r = 10, 16, 36, 6
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    n = len(rows)
+
+    def x(i: int) -> float:
+        return pad_l + w * i / (n - 1)
+
+    def y(v: float) -> float:
+        return pad_t + h * (1 - (v - lo) / rng)
+
+    out = ""
+    for frac in (0.0, 0.5, 1.0):
+        val = lo + rng * frac
+        gy = y(val)
+        out += (f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + w}" y2="{gy:.1f}" '
+                f'stroke="{GRID}" stroke-width="1"/>')
+        out += (f'<text x="{pad_l - 4}" y="{gy + 3:.1f}" text-anchor="end" font-size="7" '
+                f'fill="{MUTED}" font-family="Helvetica, Arial, sans-serif">'
+                f'{_esc(_axis_label(val, fmt))}</text>')
+    line = " ".join(
+        f"{'M' if i == 0 else 'L'}{x(i):.1f},{y(v):.1f}" for i, (_, v) in enumerate(rows)
+    )
+    out += (f'<path d="{line}" fill="none" stroke="{accent}" stroke-width="2" '
+            f'stroke-linejoin="round" stroke-linecap="round"/>')
+    out += f'<circle cx="{x(n - 1):.1f}" cy="{y(rows[-1][1]):.1f}" r="3" fill="{accent}"/>'
+    label_step = max(1, math.ceil(n / 6))
+    for i, (lbl, _) in enumerate(rows):
+        if lbl and (i % label_step == 0 or i == n - 1):
+            out += (f'<text x="{x(i):.1f}" y="{height - 4:.1f}" text-anchor="middle" '
+                    f'font-size="7" fill="{MUTED}" '
+                    f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">{out}</svg>'
+    )

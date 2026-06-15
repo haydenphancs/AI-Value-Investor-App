@@ -352,7 +352,7 @@ def diverging_bars(
     if not rows:
         return ""
     mx = max([u for _, u, _ in rows] + [d for _, _, d in rows] + [1.0])
-    pad_t, pad_b, pad_l, pad_r = 6, 18, 4, 4
+    pad_t, pad_b, pad_l, pad_r = 6, 18, 30, 6
     w = width - pad_l - pad_r
     h = height - pad_t - pad_b
     zero = pad_t + h / 2
@@ -364,7 +364,17 @@ def diverging_bars(
     # many monthly buckets don't overlap in the narrow print width.
     min_bar = 2.0
     label_step = max(1, math.ceil(n / 8))
-    out = ""
+    # Left y-axis: share magnitude at top (buys) and bottom (sells), 0 at centre.
+    top_y, bot_y = pad_t, pad_t + h
+    out = (
+        f'<line x1="{pad_l}" y1="{top_y:.1f}" x2="{pad_l + w}" y2="{top_y:.1f}" '
+        f'stroke="{GRID}" stroke-width="1"/>'
+        f'<line x1="{pad_l}" y1="{bot_y:.1f}" x2="{pad_l + w}" y2="{bot_y:.1f}" '
+        f'stroke="{GRID}" stroke-width="1"/>'
+    )
+    for yy, txt in ((top_y, _fmt_compact(mx)), (zero, "0"), (bot_y, _fmt_compact(mx))):
+        out += (f'<text x="{pad_l - 4}" y="{yy + 3:.1f}" text-anchor="end" font-size="7" '
+                f'fill="{MUTED}" font-family="Helvetica, Arial, sans-serif">{_esc(txt)}</text>')
     for i, (lbl, u, d) in enumerate(rows):
         cx = pad_l + slot * (i + 0.5)
         uh = (h / 2) * (u / mx)

@@ -19,6 +19,7 @@ crashing app boot. The CPU-bound render + the sync Storage upload are pushed to
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -57,6 +58,16 @@ _VITAL_LABELS: list[tuple[str, str]] = [
     ("macro", "Macro Resilience"),
     ("analyst", "Analyst Sentiment"),
     ("momentum", "Price Momentum"),
+]
+
+
+# Analyst-rating legend order + colours (match analyst_consensus_stacked_bar).
+_CONSENSUS_ORDER: list[tuple[str, str, str]] = [
+    ("strong_buy", "Strong Buy", "#1E3A8A"),
+    ("buy", "Buy", "#60A5FA"),
+    ("hold", "Hold", "#F59E0B"),
+    ("sell", "Sell", "#F87171"),
+    ("strong_sell", "Strong Sell", "#B91C1C"),
 ]
 
 
@@ -149,6 +160,44 @@ def _fmt_owner_pct(v: Any) -> str:
     return "<0.001%"
 
 
+def _to_int(v: Any) -> Optional[int]:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_market_dynamics(md: dict) -> dict:
+    """Mirror the iOS today-aligned TAM projection so the PDF matches the Deep
+    Dive. Phase-A (Census/FRED) TAM is often a year or two stale (e.g. Census
+    2023); iOS bumps the current year to today, preserves the (future - current)
+    span, and grows both TAM values by the source CAGR. Replicated here so the
+    report's TAM years/values line up with what the app shows."""
+    md = dict(md or {})
+    src = _to_int(md.get("current_year"))
+    if src is None:
+        return md
+    try:
+        today = datetime.now(timezone.utc).year
+    except Exception:
+        return md
+    fut = _to_int(md.get("future_year"))
+    cagr = _num(md.get("cagr_5yr"))
+    years = max(0, today - src)
+    mult = (1.0 + cagr / 100.0) ** years if (years > 0 and cagr is not None) else 1.0
+    disp_cur = today if years > 0 else src
+    md["current_year"] = str(disp_cur)
+    if fut is not None:
+        md["future_year"] = str(disp_cur + (fut - src))
+    cur_tam = _num(md.get("current_tam"))
+    fut_tam = _num(md.get("future_tam"))
+    if cur_tam is not None:
+        md["current_tam"] = cur_tam * mult
+    if fut_tam is not None:
+        md["future_tam"] = fut_tam * mult
+    return md
+
+
 def build_context(
     data: dict,
     fair_value_estimate: Optional[float] = None,
@@ -210,6 +259,12 @@ def build_context(
         "sell": wsc.get("analyst_sell"),
         "strong_sell": wsc.get("analyst_strong_sell"),
     }
+    # Legend rows for the PDF — only rating levels with at least one analyst.
+    consensus_legend = [
+        {"label": lbl, "color": col, "count": int(consensus_counts.get(k) or 0)}
+        for k, lbl, col in _CONSENSUS_ORDER
+        if (consensus_counts.get(k) or 0) >= 1
+    ]
 
     # ── Bull / bear thesis ────────────────────────────────────────────────────
     thesis = data.get("core_thesis") or {}
@@ -301,39 +356,48 @@ def build_context(
 
     # Institutional (13F) flow for the Wall Street section.
     inst_flow = wsc.get("hedge_fund_flow_data") or []
+    # HoldersService reports institutional buy/sell volume in millions of shares;
+    # scale to raw so diverging_bars' shared y-axis reads M/B like the insider chart.
     inst_flow_items = [{
         "label": _fmt_month_label(f.get("month")),
-        "up": f.get("buy_volume") or 0,
-        "down": f.get("sell_volume") or 0,
+        "up": (_num(f.get("buy_volume")) or 0.0) * 1e6,
+        "down": (_num(f.get("sell_volume")) or 0.0) * 1e6,
     } for f in inst_flow if isinstance(f, dict)]
 
     # Source citations → one deduped, numbered list for the end-of-report
-    # references. SourceCitationResponse (title/uri/publisher) only appears on
-    # web-grounded macro risk factors today, so that's "all the links we have".
-    # Each risk factor keeps the reference numbers of its own citations.
-    macro_rfs = (data.get("macro_data") or {}).get("risk_factors") or []
+    # references. Grounded citations (title/uri/publisher) appear on the Recent
+    # Price Movement insight and on web-grounded macro risk factors. Each section
+    # keeps the reference numbers of its own citations; numbering follows
+    # document order (price section first).
     _src_index: dict[str, int] = {}
     sources_list: list[dict] = []
-    for rf in macro_rfs:
-        for s in (rf.get("sources") or []):
-            uri = str(s.get("uri") or "").strip()
-            if not uri or uri in _src_index:
+
+    def _ref_numbers(items: Any) -> list[int]:
+        refs: list[int] = []
+        for s in (items or []):
+            if not isinstance(s, dict):
                 continue
-            _src_index[uri] = len(sources_list) + 1
-            sources_list.append({
-                "n": _src_index[uri],
-                "title": s.get("title") or "",
-                "uri": uri,
-                "publisher": s.get("publisher") or "",
-            })
-    macro_risk_factors = []
-    for rf in macro_rfs:
-        refs = sorted({
-            _src_index[str(s.get("uri") or "").strip()]
-            for s in (rf.get("sources") or [])
-            if str(s.get("uri") or "").strip() in _src_index
-        })
-        macro_risk_factors.append({**rf, "source_refs": refs})
+            uri = str(s.get("uri") or "").strip()
+            if not uri:
+                continue
+            if uri not in _src_index:
+                _src_index[uri] = len(sources_list) + 1
+                sources_list.append({
+                    "n": _src_index[uri],
+                    "title": s.get("title") or "",
+                    "uri": uri,
+                    "publisher": s.get("publisher") or "",
+                })
+            if _src_index[uri] not in refs:
+                refs.append(_src_index[uri])
+        return sorted(refs)
+
+    # Recent Price Movement (section 01) cites first → low reference numbers.
+    price_source_refs = _ref_numbers(price_action.get("sources"))
+    macro_rfs = (data.get("macro_data") or {}).get("risk_factors") or []
+    macro_risk_factors = [
+        {**rf, "source_refs": _ref_numbers(rf.get("sources"))} for rf in macro_rfs
+    ]
 
     # ── Charts (pre-rendered SVG) ─────────────────────────────────────────────
     charts = {
@@ -374,6 +438,7 @@ def build_context(
         "low_target": _num(wsc.get("low_target")),
         "high_target": _num(wsc.get("high_target")),
         "consensus_counts": {k: (v or 0) for k, v in consensus_counts.items()},
+        "consensus_legend": consensus_legend,
         "consensus_total": sum((v or 0) for v in consensus_counts.values()),
         "price_change_pct": _num(price_action.get("change_pct")),
         "window_label": price_action.get("window_label") or "12M",
@@ -384,6 +449,7 @@ def build_context(
         # ── Deep-dive sections ──
         "price": {
             "narrative": price_action.get("narrative") or "",
+            "source_refs": price_source_refs,
             "tier": price_action.get("tier"),
             "z_score": _num(price_action.get("z_score")),
             "sigma_daily_pct": _num(price_action.get("sigma_daily_pct")),
@@ -442,7 +508,7 @@ def build_context(
             "insight": (hidden or {}).get("insight") or "",
         },
         "moat": {
-            "market_dynamics": moat.get("market_dynamics") or {},
+            "market_dynamics": _project_market_dynamics(moat.get("market_dynamics") or {}),
             "dimensions": dims,
             "competitors": moat.get("competitors") or [],
             "durability_note": moat.get("durability_note") or "",

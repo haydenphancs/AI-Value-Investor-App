@@ -427,6 +427,10 @@ class TickerReportDataCollector:
 
         out.price_catalyst_grounded = grounded
         pa["_grounded_reason"] = grounded.get("reason") or ""
+        # Carry the grounded {title, uri, publisher} citations into the frozen
+        # report so the PDF can cite the Recent Price Movement insight (iOS
+        # ignores the key — same pattern as macro risk-factor sources).
+        pa["sources"] = grounded.get("sources") or []
         tag = grounded.get("tag")
         if tag:
             pa["tag"] = tag

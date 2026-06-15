@@ -206,6 +206,14 @@ class KeyManagementResponse(BaseModel):
 # ── Deep Dive: Price Action ───────────────────────────────────────────────────
 
 
+class SourceCitationResponse(BaseModel):
+    """A web-search citation backing a grounded factor (price catalyst, macro).
+    Persisted for the report-detail PDF; the iOS report view ignores it."""
+    title: str
+    uri: str
+    publisher: str
+
+
 class PriceEventResponse(BaseModel):
     tag: str
     date: str
@@ -229,6 +237,9 @@ class PriceActionResponse(BaseModel):
     z_score: Optional[float] = None
     sigma_daily_pct: Optional[float] = None
     expected_band_pct: Optional[float] = None
+    # Web-search citations behind the grounded "Recent Price Movement" insight
+    # (notable moves only). Carried for the PDF; iOS ignores the key.
+    sources: Optional[List[SourceCitationResponse]] = None
 
 
 # ── Deep Dive: Revenue Engine ─────────────────────────────────────────────────
@@ -328,14 +339,6 @@ class MoatCompetitionResponse(BaseModel):
 
 
 # ── Deep Dive: Macro & Geopolitical ───────────────────────────────────────────
-
-
-class SourceCitationResponse(BaseModel):
-    """A web-search citation backing a grounded factor. Persisted for the
-    future report-detail PDF; the iOS report view does NOT render these."""
-    title: str
-    uri: str
-    publisher: str
 
 
 class MacroRiskFactorResponse(BaseModel):

@@ -171,6 +171,7 @@
 {% macro trend(t) %}{% if t == 'up' %}<span style="color:#2563EB">▲</span>{% elif t == 'down' %}<span style="color:#DC2626">▼</span>{% else %}<span style="color:#94A3B8">·</span>{% endif %}{% endmacro %}
 {% macro money(v, d=2) %}{% if v is not none %}${{ ("{:,.%df}"|format(d)).format(v) }}{% else %}—{% endif %}{% endmacro %}
 {% macro pct(v, signed=True) %}{% if v is not none %}{{ ("%+.1f" if signed else "%.1f")|format(v) }}%{% else %}—{% endif %}{% endmacro %}
+{% macro tam_money(v) %}{% if v is not none %}{% if v >= 1000 %}${{ "%.1f"|format(v/1000) }}T{% else %}${{ "%.0f"|format(v) }}B{% endif %}{% else %}—{% endif %}{% endmacro %}
 
   <!-- ═══ Topbar ═══ -->
   <div class="topbar">
@@ -267,6 +268,7 @@
   </table>
   {% endif %}
   {% if price.narrative %}<p class="lead">{{ price.narrative }}</p>{% endif %}
+  {% if price.source_refs %}<div class="src">Sources: {% for n in price.source_refs %}<span class="ref">[{{ n }}]</span>{% endfor %}</div>{% endif %}
 
   <!-- ═══ 4. The Revenue Engine ═══ -->
   <div class="section-bar"><span class="n">02</span>The Revenue Engine{% if revenue_engine.period %}<span class="hint">{{ revenue_engine.period }}</span>{% endif %}</div>
@@ -458,19 +460,19 @@
   {% if moat.market_dynamics and moat.market_dynamics.current_tam %}{% set md = moat.market_dynamics %}
   <table class="strip">
     <tr>
-      <td><div class="k">TAM ({{ md.current_year }})</div><div class="v">${{ "%.0f"|format(md.current_tam) }}B</div></td>
-      <td><div class="k">TAM ({{ md.future_year }})</div><div class="v">${{ "%.0f"|format(md.future_tam) }}B</div></td>
+      <td><div class="k">TAM ({{ md.current_year }})</div><div class="v">{{ tam_money(md.current_tam) }}</div></td>
+      <td><div class="k">TAM ({{ md.future_year }})</div><div class="v">{{ tam_money(md.future_tam) }}</div></td>
       <td><div class="k">5Y CAGR</div><div class="v">{{ pct(md.cagr_5yr) }}</div></td>
       <td><div class="k">Structure</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.concentration }}</div></td>
       <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ (md.lifecycle_phase or '').replace('_',' ') }}</div></td>
     </tr>
   </table>
-  {% if md.tam_source_quote %}<div class="src">TAM source: “{{ md.tam_source_quote }}”{% if md.tam_source_label %} — {{ md.tam_source_label }}{% endif %}{% if md.tam_scope %} ({{ md.tam_scope|upper }}){% endif %}</div>{% endif %}
+  {% if md.tam_source_quote or md.tam_source_label %}<div class="src">TAM source: {% if md.tam_source_quote %}“{{ md.tam_source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.tam_scope %} ({{ md.tam_scope|upper }}){% endif %}</div>{% endif %}
   {% endif %}
   {% if moat.competitors %}
   <div class="sub-h" style="margin-top:8px">Competitive Landscape</div>
-  <table class="kv"><thead><tr><th>Competitor</th><th>Ticker</th><th class="r">Threat (0–10)</th><th class="r">Mkt Share</th><th class="r">Level</th></tr></thead><tbody>
-  {% for c in moat.competitors[:5] %}<tr><td class="name">{{ c.name }}</td><td class="muted">{{ c.ticker }}</td><td class="r">{{ "%.1f"|format(c.competitive_score) }}</td><td class="r">{{ pct(c.market_share_percent, false) }}</td><td class="r" style="text-transform:capitalize">{{ c.threat_level }}</td></tr>{% endfor %}
+  <table class="kv"><thead><tr><th>Competitor</th><th>Ticker</th><th class="r">Threat (0–10)</th><th class="r">Level</th></tr></thead><tbody>
+  {% for c in moat.competitors[:5] %}<tr><td class="name">{{ c.name }}</td><td class="muted">{{ c.ticker }}</td><td class="r">{{ "%.1f"|format(c.competitive_score) }}</td><td class="r" style="text-transform:capitalize">{{ c.threat_level }}</td></tr>{% endfor %}
   </tbody></table>{% endif %}
   {% if moat.competitive_insight %}<div class="insight">{{ moat.competitive_insight }}</div>{% endif %}
 
@@ -494,8 +496,7 @@
       <div class="sub-h">Analyst Ratings{% if wall_street.rating %} · {{ wall_street.rating }}{% endif %}</div>
       {% if charts.consensus %}{{ charts.consensus | safe }}
       <table class="kv" style="margin-top:6px"><tbody>
-        <tr><td><span class="sw" style="background:#1E3A8A;display:inline-block;width:9px;height:9px;border-radius:2px"></span> Strong Buy</td><td class="r">{{ consensus_counts.strong_buy }}</td><td><span class="sw" style="background:#F59E0B;display:inline-block;width:9px;height:9px;border-radius:2px"></span> Hold</td><td class="r">{{ consensus_counts.hold }}</td></tr>
-        <tr><td><span class="sw" style="background:#60A5FA;display:inline-block;width:9px;height:9px;border-radius:2px"></span> Buy</td><td class="r">{{ consensus_counts.buy }}</td><td><span class="sw" style="background:#F87171;display:inline-block;width:9px;height:9px;border-radius:2px"></span> Sell</td><td class="r">{{ consensus_counts.sell }}</td></tr>
+      {% for r in consensus_legend %}{% if loop.index0 % 2 == 0 %}<tr>{% endif %}<td><span class="sw" style="background:{{ r.color }};display:inline-block;width:9px;height:9px;border-radius:2px"></span> {{ r.label }}</td><td class="r">{{ r.count }}</td>{% if loop.index % 2 == 0 or loop.last %}</tr>{% endif %}{% endfor %}
       </tbody></table>{% else %}<div class="no-data">No analyst coverage.</div>{% endif %}
     </td>
     <td class="col-r">
@@ -544,7 +545,7 @@
     <li><span class="src-pub">{{ s.publisher or s.title or "Source" }}</span>{% if s.title and s.publisher %} — {{ s.title }}{% endif %}<br/><a href="{{ s.uri }}">{{ s.uri }}</a></li>
     {% endfor %}
   </ol>
-  <div class="caption-note">Web citations from Cay AI's grounded macro &amp; geopolitical research. Bracketed markers above (e.g. [1]) reference this list.</div>
+  <div class="caption-note">Web citations from Cay AI's grounded research. Bracketed markers above (e.g. [1]) reference this list.</div>
   {% else %}
   <div class="no-data">No external web sources were cited for this report.</div>
   {% endif %}

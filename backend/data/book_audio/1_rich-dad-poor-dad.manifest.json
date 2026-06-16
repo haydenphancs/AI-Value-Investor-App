@@ -1,0 +1,56 @@
+{
+  "curriculum_order": 1,
+  "book_title": "Rich Dad Poor Dad",
+  "author": "Robert T. Kiyosaki",
+  "slug": "rich-dad-poor-dad",
+  "audio_file": "1_rich-dad-poor-dad.m4a",
+  "voice": "Achird",
+  "target_wpm": 170,
+  "break_seconds": 2.5,
+  "total_seconds": 1053.76,
+  "total_label": "17:34",
+  "cores": [
+    {
+      "number": 1,
+      "title": "De-Programming the \"Employee\" Mindset",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "Mastering the Financial Scorecard",
+      "start_seconds": 157.1,
+      "start_label": "2:37"
+    },
+    {
+      "number": 3,
+      "title": "The Corporate Shield Strategy",
+      "start_seconds": 309.61,
+      "start_label": "5:10"
+    },
+    {
+      "number": 4,
+      "title": "The Opportunity Hunter",
+      "start_seconds": 458.58,
+      "start_label": "7:39"
+    },
+    {
+      "number": 5,
+      "title": "Trading Security for Skills",
+      "start_seconds": 605.79,
+      "start_label": "10:06"
+    },
+    {
+      "number": 6,
+      "title": "Conquering the Inner Saboteur",
+      "start_seconds": 763.95,
+      "start_label": "12:44"
+    },
+    {
+      "number": 7,
+      "title": "The \"First 3 Steps\" Launchpad",
+      "start_seconds": 906.58,
+      "start_label": "15:07"
+    }
+  ]
+}

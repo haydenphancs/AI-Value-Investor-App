@@ -171,7 +171,7 @@ struct ReportsListSection: View {
     private var searchReveal: some View {
         HStack(spacing: AppSpacing.sm) {
             SearchBar(text: $searchText,
-                      placeholder: "Search ticker or company",
+                      placeholder: "Search ticker, company, or persona",
                       autoFocus: true)
             Button("Cancel") {
                 withAnimation(.easeInOut(duration: 0.2)) {

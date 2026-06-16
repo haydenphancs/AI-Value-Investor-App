@@ -29,7 +29,7 @@ struct AnalysisDescriptionCard: View {
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(persona.description)
-                    .font(AppTypography.labelSmall)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)

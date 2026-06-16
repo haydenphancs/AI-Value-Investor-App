@@ -22,7 +22,7 @@ struct ArticleHighlightCard: View {
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(highlight.description)
-                    .font(AppTypography.bodySmall)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)

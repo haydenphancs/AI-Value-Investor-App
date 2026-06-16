@@ -25,7 +25,7 @@ struct ReportCriticalFactorRow: View {
             }
 
             Text(factor.description)
-                .font(AppTypography.label)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -37,7 +37,7 @@ struct ReportCriticalFactorRow: View {
                     .font(AppTypography.label).fontWeight(.semibold)
                     .foregroundColor(AppColors.primaryBlue)
                 let watchText = Text(watch)
-                    .font(AppTypography.label)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                 Text("\(watchLabel)\(watchText)")
                     .lineSpacing(3)

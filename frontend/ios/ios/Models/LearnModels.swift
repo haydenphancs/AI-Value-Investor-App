@@ -223,11 +223,13 @@ struct BookCoreChapter: Identifiable {
     func getDetailContent(for book: LibraryBook) -> CoreChapterContent? {
         // Map chapter numbers to their detailed content
         // In a real app, this would fetch from a database or API
-        switch (book.curriculumOrder, number) {
-        case (1, 1): return .sampleEmployeeMindset
-        case (1, 2): return .sampleFinancialScorecard
-        default: return createGenericContent(for: book)
+        // Real authored content for every book in the library, imported verbatim from
+        // documents/books/ (see BooksContent.swift), keyed by curriculumOrder then core number.
+        if let coresForBook = CoreChapterContent.booksByOrder[book.curriculumOrder],
+           let content = coresForBook[number] {
+            return content
         }
+        return createGenericContent(for: book)
     }
 
     /// Creates generic content for chapters without detailed content
@@ -634,8 +636,8 @@ extension LibraryBook {
                 bio: "Robert Kiyosaki is an American businessman and author. He founded the Rich Dad Company which provides personal finance and business education through books and videos.",
                 avatarGradientColors: ["3B82F6", "1E40AF"]
             ),
-            audioDurationSeconds: 1080,
-            readTimeMinutes: 18,
+            audioDurationSeconds: 1367,   // sum of the 7 cores' narration (~23 min @150wpm)
+            readTimeMinutes: 23,          // total read time computed from the authored core content
             viewCount: "4.2M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 27))!,
             keyHighlights: [
@@ -644,15 +646,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Work to Learn", description: "Don't work for money. Work to learn skills that will help you become financially independent.", iconName: "lightbulb.fill", iconColor: "F59E0B"),
                 BookKeyHighlight(title: "Take Risks", description: "Playing it safe is actually the riskiest thing you can do. Learn to manage risk and take calculated chances.", iconName: "bolt.fill", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "De-Programming the \"Employee\" Mindset", description: "Stop trading time for money by breaking the psychological cycle of fear and greed that keeps 90% of people trapped in the Rat Race."),
-                BookCoreChapter(number: 2, title: "Mastering the Financial Scorecard", description: "Wealth isn't about how much you make, but how much you keep—learn to read the \"report card\" of adulthood by strictly distinguishing assets from liabilities."),
-                BookCoreChapter(number: 3, title: "The Corporate Shield Strategy", description: "Utilize the \"secret weapon\" of the wealthy to legally minimize tax exposure and protect your assets before the government gets paid."),
-                BookCoreChapter(number: 4, title: "The Opportunity Hunter", description: "Train your brain to see deals where others see chaos; financial intelligence is simply having more options than the average person."),
-                BookCoreChapter(number: 5, title: "Trading Security for Skills", description: "View your job as a paid internship where you acquire the \"Triangle of Skills\"—sales, marketing, and communication—rather than a safety net."),
-                BookCoreChapter(number: 6, title: "Conquering the Inner Saboteur", description: "Identify and neutralize the emotional barriers that kill investment deals even when the numbers make sense."),
-                BookCoreChapter(number: 7, title: "The \"First 3 Steps\" Launchpad", description: "A tactical checklist to move from \"analysis paralysis\" to your first asset acquisition within 90 days.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[1] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 2
         ),
@@ -671,7 +665,7 @@ extension LibraryBook {
             coverGradientStart: "1E3A5F",
             coverGradientEnd: "0F1F35",
             level: .intermediate,
-            chapterCount: 20,
+            chapterCount: 13,
             categoryTags: [.investing, .analysis, .strategy],
             whyThisBook: "The Intelligent Investor is widely considered the bible of value investing. Benjamin Graham's timeless wisdom on how to think about investing has guided generations of the world's most successful investors.\n\nThe book teaches the concept of 'Mr. Market,' margin of safety, and the distinction between investing and speculation. Warren Buffett credits this book for shaping his investment philosophy.",
             authorDetail: BookAuthor(
@@ -680,8 +674,8 @@ extension LibraryBook {
                 bio: "Benjamin Graham was an influential economist, professor, and professional investor. Known as the 'father of value investing,' he mentored Warren Buffett and developed fundamental analysis techniques still used today.",
                 avatarGradientColors: ["1E3A5F", "0F1F35"]
             ),
-            audioDurationSeconds: 2700,
-            readTimeMinutes: 45,
+            audioDurationSeconds: 2640,
+            readTimeMinutes: 44,
             viewCount: "8.1M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 20))!,
             keyHighlights: [
@@ -690,14 +684,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Investor vs Speculator", description: "An investor analyzes fundamentals; a speculator bets on price movements.", iconName: "chart.bar.fill", iconColor: "F59E0B"),
                 BookKeyHighlight(title: "Defensive Investing", description: "Build a diversified portfolio that doesn't require constant attention.", iconName: "lock.shield.fill", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "Investment versus Speculation", description: "Defining what it means to be a true investor rather than a gambler."),
-                BookCoreChapter(number: 2, title: "The Investor and Inflation", description: "How to protect your portfolio against the erosion of purchasing power."),
-                BookCoreChapter(number: 3, title: "A Century of Stock Market History", description: "Lessons from 100 years of market performance."),
-                BookCoreChapter(number: 4, title: "General Portfolio Policy", description: "The defensive investor's approach to asset allocation."),
-                BookCoreChapter(number: 5, title: "The Defensive Investor and Common Stocks", description: "Criteria for selecting quality stocks for conservative portfolios."),
-                BookCoreChapter(number: 6, title: "The Enterprising Investor", description: "Strategies for more active investors seeking higher returns.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[2] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 6
         ),
@@ -716,7 +703,7 @@ extension LibraryBook {
             coverGradientStart: "059669",
             coverGradientEnd: "064E3B",
             level: .starter,
-            chapterCount: 20,
+            chapterCount: 13,
             categoryTags: [.psychology, .mindset, .finance],
             whyThisBook: "Morgan Housel explores the strange ways people think about money and teaches you how to make better sense of one of life's most important topics.\n\nThrough 19 short stories, the book demonstrates that financial success is not about what you know technically but how you behave. It's about soft skills that are often overlooked in financial education.",
             authorDetail: BookAuthor(
@@ -725,8 +712,8 @@ extension LibraryBook {
                 bio: "Morgan Housel is a partner at Collaborative Fund and a former columnist at The Motley Fool and The Wall Street Journal. He is a two-time winner of the Best in Business Award from the Society of American Business Editors.",
                 avatarGradientColors: ["059669", "047857"]
             ),
-            audioDurationSeconds: 1560,
-            readTimeMinutes: 26,
+            audioDurationSeconds: 3660,
+            readTimeMinutes: 61,
             viewCount: "5.7M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 15))!,
             keyHighlights: [
@@ -735,14 +722,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Wealth is Hidden", description: "True wealth is what you don't see—money not spent on visible luxuries.", iconName: "eye.slash.fill", iconColor: "8B5CF6"),
                 BookKeyHighlight(title: "Reasonable > Rational", description: "Being reasonable is more sustainable than being coldly rational with money.", iconName: "heart.fill", iconColor: "EC4899")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "No One's Crazy", description: "Everyone has unique experiences that shape their financial behavior."),
-                BookCoreChapter(number: 2, title: "Luck & Risk", description: "Nothing is as good or bad as it seems; outcomes involve luck."),
-                BookCoreChapter(number: 3, title: "Never Enough", description: "The hardest financial skill is getting the goalpost to stop moving."),
-                BookCoreChapter(number: 4, title: "Confounding Compounding", description: "The counterintuitive math behind exponential growth."),
-                BookCoreChapter(number: 5, title: "Getting Wealthy vs. Staying Wealthy", description: "Making money requires risk; keeping it requires humility."),
-                BookCoreChapter(number: 6, title: "Tails, You Win", description: "A few outlier events drive the majority of outcomes.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[3] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -761,7 +741,7 @@ extension LibraryBook {
             coverGradientStart: "2D4A3E",
             coverGradientEnd: "1A2D25",
             level: .intermediate,
-            chapterCount: 18,
+            chapterCount: 13,
             categoryTags: [.investing, .strategy, .analysis],
             whyThisBook: "Peter Lynch ran the Magellan Fund at Fidelity, achieving an average annual return of 29.2% over 13 years. In this book, he shares his investment approach of finding 'tenbaggers' - stocks that increase tenfold in value.\n\nLynch teaches investors to use their everyday experiences to find investment opportunities, categorizing stocks into six types to help identify the best opportunities.",
             authorDetail: BookAuthor(
@@ -770,8 +750,8 @@ extension LibraryBook {
                 bio: "Peter Lynch is a legendary American investor, known for achieving an average annual return of 29.2% as manager of the Magellan Fund at Fidelity Investments, making it the best-performing mutual fund in the world.",
                 avatarGradientColors: ["2D4A3E", "1A2D25"]
             ),
-            audioDurationSeconds: 1680,
-            readTimeMinutes: 28,
+            audioDurationSeconds: 2640,
+            readTimeMinutes: 44,
             viewCount: "3.2M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 10))!,
             keyHighlights: [
@@ -780,14 +760,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Six Stock Categories", description: "Classify stocks as slow growers, stalwarts, fast growers, cyclicals, turnarounds, or asset plays.", iconName: "square.grid.2x2.fill", iconColor: "3B82F6"),
                 BookKeyHighlight(title: "Do Your Homework", description: "Research the company's story, financials, and competitive position.", iconName: "doc.text.magnifyingglass", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "The Making of a Stockpicker", description: "Lynch's journey to becoming a legendary investor."),
-                BookCoreChapter(number: 2, title: "The Wall Street Oxymorons", description: "Why individual investors can beat the professionals."),
-                BookCoreChapter(number: 3, title: "Is This Gambling, or What?", description: "Distinguishing investing from speculation."),
-                BookCoreChapter(number: 4, title: "Passing the Mirror Test", description: "Knowing yourself before investing."),
-                BookCoreChapter(number: 5, title: "Is This a Good Market?", description: "Why market timing doesn't work."),
-                BookCoreChapter(number: 6, title: "Stalking the Tenbagger", description: "Finding stocks with multi-bagger potential.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[4] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -806,7 +779,7 @@ extension LibraryBook {
             coverGradientStart: "4A1E1E",
             coverGradientEnd: "2D1212",
             level: .intermediate,
-            chapterCount: 14,
+            chapterCount: 7,
             categoryTags: [.investing, .strategy, .analysis],
             whyThisBook: "Philip Fisher pioneered growth investing and developed the 'scuttlebutt' method of research. This book presents Fisher's 15 points to look for in a common stock.\n\nWarren Buffett describes himself as '85% Graham and 15% Fisher,' highlighting the profound impact this book had on his transition from pure value investing to quality-focused investing.",
             authorDetail: BookAuthor(
@@ -815,8 +788,8 @@ extension LibraryBook {
                 bio: "Philip Fisher was an American stock investor known for his investment philosophy, detailed in his book 'Common Stocks and Uncommon Profits.' He pioneered the growth investing strategy and influenced Warren Buffett.",
                 avatarGradientColors: ["4A1E1E", "2D1212"]
             ),
-            audioDurationSeconds: 1440,
-            readTimeMinutes: 24,
+            audioDurationSeconds: 1320,
+            readTimeMinutes: 22,
             viewCount: "2.1M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,
             keyHighlights: [
@@ -825,14 +798,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Hold for Long Term", description: "Buy great companies and hold them for years or decades.", iconName: "clock.fill", iconColor: "F59E0B"),
                 BookKeyHighlight(title: "Management Quality", description: "The caliber of management is crucial to long-term success.", iconName: "person.3.fill", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "Clues from the Past", description: "How historical performance indicates future potential."),
-                BookCoreChapter(number: 2, title: "What 'Scuttlebutt' Can Do", description: "The power of on-the-ground research."),
-                BookCoreChapter(number: 3, title: "What to Buy: The Fifteen Points", description: "Fisher's famous checklist for stock selection."),
-                BookCoreChapter(number: 4, title: "What to Buy: Applying This to Your Own Needs", description: "Customizing the approach to your situation."),
-                BookCoreChapter(number: 5, title: "When to Buy", description: "Timing your purchases for maximum value."),
-                BookCoreChapter(number: 6, title: "When to Sell", description: "The rare circumstances that justify selling.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[5] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -851,7 +817,7 @@ extension LibraryBook {
             coverGradientStart: "1E40AF",
             coverGradientEnd: "1E3A8A",
             level: .starter,
-            chapterCount: 20,
+            chapterCount: 14,
             categoryTags: [.investing, .strategy],
             whyThisBook: "John Bogle, founder of Vanguard, revolutionized investing by creating the first index fund. This book makes the case for passive investing and demonstrates why most active managers fail to beat the market.\n\nThe book teaches the importance of low costs, broad diversification, and staying the course through market volatility.",
             authorDetail: BookAuthor(
@@ -860,8 +826,8 @@ extension LibraryBook {
                 bio: "John Clifton Bogle was the founder and chief executive of The Vanguard Group. He is credited with creating the first index fund and was a driving force behind the growth of passive investing.",
                 avatarGradientColors: ["1E40AF", "1E3A8A"]
             ),
-            audioDurationSeconds: 1320,
-            readTimeMinutes: 22,
+            audioDurationSeconds: 3180,
+            readTimeMinutes: 53,
             viewCount: "2.8M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 28))!,
             keyHighlights: [
@@ -870,14 +836,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Stay the Course", description: "Time in the market beats timing the market.", iconName: "clock.arrow.circlepath", iconColor: "3B82F6"),
                 BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: "sparkles", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "A Parable", description: "The Gotrocks family learns about the cost of financial intermediaries."),
-                BookCoreChapter(number: 2, title: "Rational Exuberance", description: "Understanding long-term stock market returns."),
-                BookCoreChapter(number: 3, title: "Cast Your Lot with Business", description: "Why owning businesses beats speculating."),
-                BookCoreChapter(number: 4, title: "How Most Investors Turn a Winner's Game into a Loser's Game", description: "The mathematics of active management failure."),
-                BookCoreChapter(number: 5, title: "The Grand Illusion", description: "Why past performance doesn't predict future results."),
-                BookCoreChapter(number: 6, title: "Taxes Are Costs, Too", description: "The hidden drag of tax inefficiency.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[6] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -896,7 +855,7 @@ extension LibraryBook {
             coverGradientStart: "7C2D12",
             coverGradientEnd: "451A03",
             level: .intermediate,
-            chapterCount: 15,
+            chapterCount: 11,
             categoryTags: [.economics, .investing, .analysis],
             whyThisBook: "Burton Malkiel's classic introduces the efficient market hypothesis and challenges the notion that expert stock pickers can consistently beat the market.\n\nThe book covers both fundamental and technical analysis, exploring their limitations, and makes the case for a diversified, low-cost investment strategy.",
             authorDetail: BookAuthor(
@@ -905,8 +864,8 @@ extension LibraryBook {
                 bio: "Burton Gordon Malkiel is an American economist and writer, most known for his classic finance book A Random Walk Down Wall Street. He is a proponent of the efficient market hypothesis.",
                 avatarGradientColors: ["7C2D12", "451A03"]
             ),
-            audioDurationSeconds: 1920,
-            readTimeMinutes: 32,
+            audioDurationSeconds: 2160,
+            readTimeMinutes: 36,
             viewCount: "1.9M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 20))!,
             keyHighlights: [
@@ -915,14 +874,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Diversification", description: "Don't put all your eggs in one basket; spread risk across assets.", iconName: "square.grid.3x3.fill", iconColor: "22C55E"),
                 BookKeyHighlight(title: "Buy and Hold", description: "Time in the market beats timing the market.", iconName: "hand.raised.fill", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "Firm Foundations and Castles in the Air", description: "Two theories of how markets work."),
-                BookCoreChapter(number: 2, title: "The Madness of Crowds", description: "Historical bubbles and manias."),
-                BookCoreChapter(number: 3, title: "Stock Valuation from the Sixties", description: "How valuation methods evolved."),
-                BookCoreChapter(number: 4, title: "The Biggest Bubble of All", description: "Lessons from the internet bubble."),
-                BookCoreChapter(number: 5, title: "Technical and Fundamental Analysis", description: "Examining the two main approaches to picking stocks."),
-                BookCoreChapter(number: 6, title: "A New Walking Shoe", description: "Modern portfolio theory explained.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[7] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -941,7 +893,7 @@ extension LibraryBook {
             coverGradientStart: "B45309",
             coverGradientEnd: "78350F",
             level: .advanced,
-            chapterCount: 8,
+            chapterCount: 7,
             categoryTags: [.investing, .business, .strategy],
             whyThisBook: "This collection compiles Warren Buffett's annual shareholder letters into a coherent philosophy of investing and business management.\n\nThe essays cover corporate governance, finance, investing, and common stock, providing direct insight into the mind of the world's most successful investor.",
             authorDetail: BookAuthor(
@@ -950,8 +902,8 @@ extension LibraryBook {
                 bio: "Warren Edward Buffett is an American business magnate, investor, and philanthropist. Known as the 'Oracle of Omaha,' he is one of the most successful investors in history and consistently ranks among the world's wealthiest people.",
                 avatarGradientColors: ["B45309", "78350F"]
             ),
-            audioDurationSeconds: 2100,
-            readTimeMinutes: 35,
+            audioDurationSeconds: 1260,
+            readTimeMinutes: 21,
             viewCount: "4.5M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 15))!,
             keyHighlights: [
@@ -960,59 +912,45 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Owner Earnings", description: "Focus on cash flow available to shareholders after maintenance capex.", iconName: "banknote.fill", iconColor: "F59E0B"),
                 BookKeyHighlight(title: "Long-term Focus", description: "Our favorite holding period is forever.", iconName: "infinity", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "Corporate Governance", description: "How boards and managers should serve shareholders."),
-                BookCoreChapter(number: 2, title: "Corporate Finance and Investing", description: "Capital allocation and investment philosophy."),
-                BookCoreChapter(number: 3, title: "Alternatives to Common Stock", description: "Fixed-income securities and other investments."),
-                BookCoreChapter(number: 4, title: "Common Stock", description: "How to value and select individual stocks."),
-                BookCoreChapter(number: 5, title: "Mergers and Acquisitions", description: "When acquisitions create or destroy value."),
-                BookCoreChapter(number: 6, title: "Accounting and Valuation", description: "Understanding financial statements deeply.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[8] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
 
-        // Book 9 - Security Analysis
+        // Book 9 - The Little Book that Still Beats the Market (replaces Security Analysis)
         LibraryBook(
-            title: "Security Analysis",
-            author: "Benjamin Graham & David Dodd",
-            description: "The classic 1934 edition. The foundation of modern value investing analysis.",
-            pageCount: 725,
-            publishedYear: 1934,
-            rating: 4.6,
+            title: "The Little Book that Still Beats the Market",
+            author: "Joel Greenblatt",
+            description: "The 'Magic Formula' — a simple, systematic way to buy good companies at bargain prices.",
+            pageCount: 176,
+            publishedYear: 2010,
+            rating: 4.5,
             curriculumOrder: 9,
             isMastered: false,
-            keyIdeasCount: 22,
-            coverGradientStart: "374151",
-            coverGradientEnd: "1F2937",
-            level: .advanced,
-            chapterCount: 52,
-            categoryTags: [.analysis, .investing, .finance],
-            whyThisBook: "The foundational text of value investing, Security Analysis established the discipline of professional financial analysis during the Great Depression.\n\nThis comprehensive guide covers bond analysis, preferred stock analysis, and common stock analysis with timeless principles that remain relevant today.",
+            keyIdeasCount: 9,
+            coverGradientStart: "10B981",
+            coverGradientEnd: "065F46",
+            level: .intermediate,
+            chapterCount: 9,
+            categoryTags: [.investing, .strategy, .finance],
+            whyThisBook: "Joel Greenblatt distills value investing into a two-factor 'Magic Formula': buy above-average companies (high return on capital) at below-average prices (high earnings yield), and hold them systematically.\n\nThe book argues the edge isn't secret — it's behavioral. The formula underperforms often enough that most investors abandon it, which is exactly why it keeps working for those who don't.",
             authorDetail: BookAuthor(
-                name: "Benjamin Graham & David Dodd",
-                title: "Founders of Value Investing",
-                bio: "Benjamin Graham and David Dodd were professors at Columbia Business School who together wrote Security Analysis, establishing the intellectual foundation for what would later be called value investing.",
-                avatarGradientColors: ["374151", "1F2937"]
+                name: "Joel Greenblatt",
+                title: "Founder, Gotham Capital · Columbia Professor",
+                bio: "Joel Greenblatt is an American investor, hedge-fund manager, and Columbia Business School professor. At Gotham Capital he compounded capital at roughly 40% annually for two decades, and he popularized the 'Magic Formula' approach to value investing.",
+                avatarGradientColors: ["10B981", "065F46"]
             ),
-            audioDurationSeconds: 3600,
-            readTimeMinutes: 60,
+            audioDurationSeconds: 2580,
+            readTimeMinutes: 43,
             viewCount: "1.5M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 10))!,
             keyHighlights: [
-                BookKeyHighlight(title: "Intrinsic Value", description: "Every security has a value based on its underlying fundamentals.", iconName: "dollarsign.square.fill", iconColor: "22C55E"),
-                BookKeyHighlight(title: "Margin of Safety", description: "The difference between price and value protects against loss.", iconName: "shield.fill", iconColor: "3B82F6"),
-                BookKeyHighlight(title: "Financial Statement Analysis", description: "Deep dive into balance sheets, income statements, and cash flows.", iconName: "doc.text.fill", iconColor: "F59E0B"),
-                BookKeyHighlight(title: "Bond Analysis", description: "Evaluating fixed income securities for safety and yield.", iconName: "percent", iconColor: "8B5CF6")
+                BookKeyHighlight(title: "The Magic Formula", description: "Rank stocks by earnings yield and return on capital, then buy the best.", iconName: "function", iconColor: "22C55E"),
+                BookKeyHighlight(title: "Earnings Yield", description: "Buy companies cheap relative to the profits they actually generate.", iconName: "percent", iconColor: "3B82F6"),
+                BookKeyHighlight(title: "Return on Capital", description: "Favor businesses that earn high returns on the capital they deploy.", iconName: "chart.line.uptrend.xyaxis", iconColor: "F59E0B"),
+                BookKeyHighlight(title: "Discipline Over Emotion", description: "The formula works over years precisely because most can't stick with it.", iconName: "brain.head.profile", iconColor: "8B5CF6")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "The Scope and Limits of Security Analysis", description: "Defining what analysis can and cannot do."),
-                BookCoreChapter(number: 2, title: "Fundamental Elements in the Problem of Analysis", description: "Core concepts underlying all security analysis."),
-                BookCoreChapter(number: 3, title: "Sources of Information", description: "Where to find reliable data for analysis."),
-                BookCoreChapter(number: 4, title: "Distinctions Between Investment and Speculation", description: "A clear framework for classifying activities."),
-                BookCoreChapter(number: 5, title: "Classification of Securities", description: "Understanding different types of financial instruments."),
-                BookCoreChapter(number: 6, title: "The Selection of Fixed-Value Investments", description: "Criteria for choosing bonds and preferred stocks.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[9] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         ),
@@ -1031,7 +969,7 @@ extension LibraryBook {
             coverGradientStart: "581C87",
             coverGradientEnd: "3B0764",
             level: .advanced,
-            chapterCount: 20,
+            chapterCount: 15,
             categoryTags: [.investing, .psychology, .strategy],
             whyThisBook: "Howard Marks distills 40 years of investment wisdom into the essential principles that separate successful investors from the rest.\n\nThe book covers second-level thinking, understanding market cycles, managing risk, and the importance of contrarian thinking in achieving superior returns.",
             authorDetail: BookAuthor(
@@ -1040,8 +978,8 @@ extension LibraryBook {
                 bio: "Howard Stanley Marks is an American investor and writer. He is the co-founder and co-chairman of Oaktree Capital Management, the largest investor in distressed securities worldwide.",
                 avatarGradientColors: ["581C87", "3B0764"]
             ),
-            audioDurationSeconds: 1200,
-            readTimeMinutes: 20,
+            audioDurationSeconds: 3720,
+            readTimeMinutes: 62,
             viewCount: "2.3M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 5))!,
             keyHighlights: [
@@ -1050,14 +988,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Market Cycles", description: "Markets swing between euphoria and despair; position accordingly.", iconName: "waveform.path", iconColor: "3B82F6"),
                 BookKeyHighlight(title: "Contrarian Thinking", description: "The best opportunities come from disagreeing with consensus.", iconName: "arrow.left.arrow.right", iconColor: "22C55E")
             ],
-            coreChapters: [
-                BookCoreChapter(number: 1, title: "Second-Level Thinking", description: "The foundation of superior returns."),
-                BookCoreChapter(number: 2, title: "Understanding Market Efficiency", description: "What efficient markets mean for investors."),
-                BookCoreChapter(number: 3, title: "Value", description: "The relationship between price and intrinsic value."),
-                BookCoreChapter(number: 4, title: "The Relationship Between Price and Value", description: "Why buying below value is essential."),
-                BookCoreChapter(number: 5, title: "Understanding Risk", description: "Redefining risk beyond volatility."),
-                BookCoreChapter(number: 6, title: "Recognizing Risk", description: "When risk is highest and lowest.")
-            ],
+            coreChapters: BookCoreChapter.listsByOrder[10] ?? [],
             discussions: sampleDiscussions,
             currentChapter: 1
         )

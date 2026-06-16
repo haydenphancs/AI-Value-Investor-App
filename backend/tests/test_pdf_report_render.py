@@ -33,8 +33,9 @@ def _sample() -> dict:
         "agent": "buffett",
         "quality_score": 72,
         "_scoring_inputs": {
-            "profitability": 84, "health": 58, "growth": 76, "valuation": 47,
-            "insider": 52, "macro": 63, "analyst": 81, "momentum": 89,
+            "valuation": 47, "financial_health": 58, "revenue": 76, "forecast": 70,
+            "moat": 84, "wall_street": 81, "insider": 52, "capital_allocation": 66,
+            "macro": 63,
         },
         "core_thesis": {"bull_case": ["Cloud backlog"], "bear_case": ["Leverage"]},
         "executive_summary_text": "Fair-quality compounder.",
@@ -98,7 +99,7 @@ def test_build_context_full_sample():
     assert ctx["fair_value"] == 205.0  # Wall Street consensus target, not the passed estimate
     assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4 → undervalued
     assert ctx["valuation_word"] == "Undervalued"
-    assert len(ctx["vitals"]) == 8
+    assert len(ctx["vitals"]) == 9
     assert ctx["bull_case"] and ctx["bear_case"]
 
 

@@ -67,7 +67,7 @@ struct ReportFutureForecastSection: View {
                     }
 
                     Text(insight)
-                        .font(AppTypography.label)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(3)
                 }

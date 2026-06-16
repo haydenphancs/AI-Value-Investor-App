@@ -51,7 +51,7 @@ struct ReportRiskFactorCard: View {
 
                 // Description — always shown.
                 Text(factor.description)
-                    .font(AppTypography.caption)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textMuted)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)

@@ -22,7 +22,7 @@ struct ArticleCalloutBox: View {
 
             // Text
             Text(text)
-                .font(AppTypography.bodySmall)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textPrimary)
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)

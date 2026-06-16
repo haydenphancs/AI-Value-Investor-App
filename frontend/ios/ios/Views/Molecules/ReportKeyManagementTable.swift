@@ -60,7 +60,7 @@ struct ReportKeyManagementTable: View {
                 }
 
                 Text(management.ownershipInsight)
-                    .font(AppTypography.label)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

@@ -137,7 +137,7 @@ struct ReportMacroGeopoliticalSection: View {
             }
 
             Text(data.intelligenceBrief)
-                .font(AppTypography.label)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }

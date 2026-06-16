@@ -27,7 +27,7 @@ struct TickerDetailCompanyProfileSection: View {
                 // Description with expandable text
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
                     Text(profile.description)
-                        .font(AppTypography.labelSmall)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .lineLimit(isExpanded ? nil : collapsedLineLimit)

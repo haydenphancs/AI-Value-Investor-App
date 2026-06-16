@@ -16,7 +16,7 @@ struct BulletPointRow: View {
                 .frame(width: 20)
 
             Text(bulletPoint.text)
-                .font(AppTypography.bodySmall)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

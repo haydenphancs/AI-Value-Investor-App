@@ -46,7 +46,7 @@ struct ReportCoreThesisCard: View {
                             .padding(.top, 6)
 
                         Text(bullet.text)
-                            .font(AppTypography.label)
+                            .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .lineSpacing(3)
                     }

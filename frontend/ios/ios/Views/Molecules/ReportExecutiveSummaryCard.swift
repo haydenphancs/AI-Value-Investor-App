@@ -27,7 +27,7 @@ struct ReportExecutiveSummaryCard: View {
             // Summary text — a general overview (what the company is, how it's
             // doing, the report's take). Specifics live in Bull/Bear below.
             Text(summaryText)
-                .font(AppTypography.label)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(4)
         }

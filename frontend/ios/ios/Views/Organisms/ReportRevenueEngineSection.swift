@@ -62,7 +62,7 @@ struct ReportRevenueEngineSection: View {
                 // Role badge
                 HStack(spacing: AppSpacing.xs) {
                     Text(role.rawValue.uppercased())
-                        .font(AppTypography.captionTiny)
+                        .font(AppTypography.captionSmall)
                         .foregroundColor(role.color)
                 }
                 .padding(.horizontal, AppSpacing.sm)
@@ -152,7 +152,6 @@ struct ReportRevenueEngineSection: View {
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
-        .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -1,5 +1,6 @@
 Core 5: Plugging the Tax Leak
-The Hook: The Government’s Invisible Equity
+The Government’s Invisible Equity
+
 There is a silent partner in your portfolio who contributes zero capital, takes zero risk, yet claims up to 37% of your profits. You know him as Uncle Sam. The friction here is a dangerous mental accounting error: you see a stock go up 20% and think you have made 20%. You haven't.
 
 Most investors treat taxes as an afterthought, something to worry about in April. But in the mathematics of wealth, taxes are a compound interest penalty. Every time you sell a winner to buy a new stock, you trigger a "taxable event." You are voluntarily severing the arm of your compound interest curve. You aren't just paying a bill; you are removing capital that could have been working for you for the next 30 years.

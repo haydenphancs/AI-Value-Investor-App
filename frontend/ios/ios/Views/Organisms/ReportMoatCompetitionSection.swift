@@ -107,14 +107,14 @@ struct ReportMoatCompetitionSection: View {
 
                         HStack(spacing: AppSpacing.xxs) {
                             Text("(\(data.marketDynamics.displayedCurrentYear))")
-                                .font(AppTypography.captionTiny)
+                                .font(AppTypography.captionSmall)
                                 .foregroundColor(AppColors.textMuted)
 
                             Spacer()
                                 .frame(width: 14)
 
                             Text("(\(data.marketDynamics.displayedFutureYear))")
-                                .font(AppTypography.captionTiny)
+                                .font(AppTypography.captionSmall)
                                 .foregroundColor(AppColors.textMuted)
                         }
                     } else {
@@ -180,7 +180,7 @@ struct ReportMoatCompetitionSection: View {
 
             if let subtitle = subtitle {
                 Text(subtitle)
-                    .font(AppTypography.captionTiny)
+                    .font(AppTypography.captionSmall)
                     .foregroundColor(AppColors.textMuted)
             }
         }
@@ -300,7 +300,7 @@ struct ReportMoatCompetitionSection: View {
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
-        .padding(AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Peer Comparison

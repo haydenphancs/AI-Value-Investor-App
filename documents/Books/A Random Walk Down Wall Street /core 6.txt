@@ -1,13 +1,19 @@
 Core 6: The Art of Risk Engineering
-The Hook: The "Fake Diversity" Scam Most investors are walking around with a ticking time bomb in their pockets, and they call it a "diversified portfolio." You think because you own Apple, Microsoft, NVIDIA, and Google, you are safe. You aren't. You just own four different flavors of the exact same risk. If the tech sector catches a cold, your entire financial life gets pneumonia. The friction here is the misunderstanding of correlation. You are not engineering risk; you are piling it up in one corner and hoping gravity doesn't notice.
+The "Fake Diversity" Scam
 
-The Author’s Solution: The Island of Sun and Rain The author explains the cure for this madness—Modern Portfolio Theory—with a simple parable about an island economy. Imagine there are only two companies on this island: a large beach resort and an umbrella manufacturer.
+Most investors are walking around with a ticking time bomb in their pockets, and they call it a "diversified portfolio." You think because you own Apple, Microsoft, NVIDIA, and Google, you are safe. You aren't. You just own four different flavors of the exact same risk. If the tech sector catches a cold, your entire financial life gets pneumonia. The friction here is the misunderstanding of correlation. You are not engineering risk; you are piling it up in one corner and hoping gravity doesn't notice.
+
+The Island of Sun and Rain
+
+The author explains the cure for this madness—Modern Portfolio Theory—with a simple parable about an island economy. Imagine there are only two companies on this island: a large beach resort and an umbrella manufacturer.
 
 If you invest all your money in the resort, you make a fortune when it's sunny, but you go broke when it rains. It’s a rollercoaster. If you invest only in the umbrella company, you feast during storms but starve during the summer.
 
 The "Free Lunch" of economics appears when you buy both. Because their fortunes move in opposite directions (negative correlation), the volatility cancels out. You earn a steady, reliable return regardless of the weather. The author demonstrates that by combining volatile assets that zig when others zag, you can actually reduce your total risk without lowering your expected return. This is the mathematical miracle of diversification.
 
-The 'Wiser' Analysis: The 2026 Correlation Crisis Now, the "Island" is global, and finding assets that don't move together is harder than ever. During a panic, "all correlations go to one." When the market crashes, almost everything—stocks, real estate, even crypto—dumps together.
+The 2026 Correlation Crisis
+
+Now, the "Island" is global, and finding assets that don't move together is harder than ever. During a panic, "all correlations go to one." When the market crashes, almost everything—stocks, real estate, even crypto—dumps together.
 
 The mistake today is thinking that Bitcoin is a "hedge" against the stock market. It often isn't; it’s just a high-beta tech stock that trades 24/7. True "Risk Engineering" in the modern era requires uncomfortable assets. It means holding boring government bonds, perhaps managed futures, or commodities like gold that actually move differently than your AI stocks. If your entire portfolio makes you happy at the same time, you are not diversified. You should always hate at least one thing you own.
 

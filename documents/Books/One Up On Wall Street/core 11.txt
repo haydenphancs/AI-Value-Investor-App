@@ -1,15 +1,12 @@
 Core 11: The Re-Evaluation Loop
-The Hook
 The Loyalty Penalty
 You treat your stocks like a marriage, sticking with them "for better or worse" long after the love is gone. You bought a company because it had a great new product three years ago. Today, competitors have flooded the market, the CEO quit, and profit margins are shrinking. Yet you still hold on, paralyzed by nostalgia. You are investing in a memory, not a business. The most dangerous phrase in your vocabulary is "I’ll just hold it for the long term," because "long term" is often just a euphemism for "I’m too lazy to check if the thesis is broken."
 
-The Author’s Solution
 The Life-Cycle Audit
  Peter Lynch didn't "buy and hold"; he "bought and watched." He treated his portfolio like a constantly evolving narrative. He tells the story of Holiday Inn. In the 1950s and 60s, it was a classic "Fast Grower." You could travel across America and see them popping up at every exit. The stock was a rocket ship. But by the mid-70s, the growth phase was mathematically over—they were everywhere. There was no more room to build.
 
 Lynch realized the "story" had changed. The company wasn't dying, but it had morphed from a sprinter into a slow jogger. The investors who kept expecting "Fast Grower" returns from a saturated "Stalwart" got crushed. He instituted a "Two-Minute Drill" re-check every few months. If the story had drifted—like a company moving from "high growth" to "cyclical"—he didn't hesitate to sell, even if he liked the stock. He knew that when the story ends, you have to leave the theater.
 
-The 'Wiser' Analysis 
 The Disruption Clock
 In the modern world, "stories" rot faster than ever. Technology accelerates the lifecycle of companies. Think about BlackBerry. For years, it was the standard for business communication. It was a "Fast Grower." Then the iPhone launched. The story didn't just change; it evaporated overnight. Investors who re-evaluated the "moat" (physical keyboards vs. touchscreens) got out. Those who relied on past glory ("Everyone uses BBM!") lost everything. The same happened with Peloton. The "story" was: "Everyone is working out at home forever." Then gyms reopened. The story broke. If you didn't re-evaluate immediately when vaccines rolled out, you rode the stock all the way down. Today, you must watch for "AI Disruption." Is your "Stalwart" software company about to be automated away by a Large Language Model? If the fundamental "why" of your investment is threatened by a new technology, you must sell before the earnings report confirms the damage.
 

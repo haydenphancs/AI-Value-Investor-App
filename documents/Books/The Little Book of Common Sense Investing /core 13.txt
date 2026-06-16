@@ -1,12 +1,14 @@
 Core 13: Mastering the Art of Doing Nothing
-The Hook: The Curse of the "Do Something" Instinct
+The Curse of the "Do Something" Instinct
+
 There is a fatal flaw in human evolution that makes you a terrible investor: the biological bias for action. For two hundred thousand years, your ancestors survived because they were hyper-reactive. When a twig snapped in the jungle, the ones who paused to analyze the data were eaten; the ones who sprinted away survived to pass on their genes. You are the descendant of the paranoid and the twitchy.
 
 In the modern financial markets, this survival instinct is a suicide pact. When the S&P 500 drops 20% in a month, or when a headline screams about "Hyperinflation," your amygdala—the lizard brain—hijacks your logic. It screams, "Don't just stand there, do something! Sell! Hedge! Buy gold! Move to cash!" You feel a physical, visceral guilt if you are not taking action to "fix" the problem.
 
 The friction here is that investing is the only domain in human life where effort is negatively correlated with success. In your career, if you work harder, you make more money. In the gym, if you lift more, you get stronger. But in the stock market, the more you "do"—the more you trade, tinker, adjust, and react—the more likely you are to destroy your wealth. The "insider secret" that the financial industry spends billions to hide is that the most profitable activity you can engage in is often... absolutely nothing. The hardest thing to do in the world is to stand still while everyone around you is running for the exits.
 
-The Author's Solution: The Odysseus Contract
+The Odysseus Contract
+
 The author, John Bogle, was a student of history as much as he was a student of finance. To solve this behavioral trap, he often pointed to the ancient Greek myth of Odysseus and the Sirens.
 
 In the Odyssey, the hero Odysseus has to sail his ship past the island of the Sirens. He knows that their song is so beautiful, so seductive, that any man who hears it will be compelled to steer his ship into the rocks and drown. Odysseus is smart enough to know that he is not strong enough to resist. He does not rely on his willpower. He does not say, "I will just listen a little bit and then turn away."

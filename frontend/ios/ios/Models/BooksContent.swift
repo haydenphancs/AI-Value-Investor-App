@@ -23,22 +23,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Hamster Wheel of Emotion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Hamster Wheel of Emotion You wake up, you go to work, you pay your bills, you wait for the weekend. Repeat until you die. This isn't just a routine; it’s a trap designed by your own biology. Most people are driven by two primal emotions: Fear (of not having money) and Greed (the desire for a better lifestyle). When you get a raise, the Fear temporarily subsides, but Greed immediately kicks in, whispering that you need a new car, a bigger house, or that luxury vacation. So, you spend the raise. The Fear returns. You run faster. You are in the Rat Race, and the friction burning you out isn't your boss—it’s your own emotional reaction to money.")
+                        content: .text("You wake up, you go to work, you pay your bills, you wait for the weekend. Repeat until you die. This isn't just a routine; it’s a trap designed by your own biology. Most people are driven by two primal emotions: Fear (of not having money) and Greed (the desire for a better lifestyle). When you get a raise, the Fear temporarily subsides, but Greed immediately kicks in, whispering that you need a new car, a bigger house, or that luxury vacation. So, you spend the raise. The Fear returns. You run faster. You are in the Rat Race, and the friction burning you out isn't your boss—it’s your own emotional reaction to money.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The 10-Cent Lesson")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 10-Cent Lesson The author tells the story of being nine years old and making a deal with his \"Rich Dad.\" He agrees to work in a convenience store for 10 cents an hour. He slaves away for three weeks, dusting cans, hating the work, and feeling exploited. Finally, he marches to his Rich Dad to quit, demanding a raise.")
+                        content: .text("The author tells the story of being nine years old and making a deal with his \"Rich Dad.\" He agrees to work in a convenience store for 10 cents an hour. He slaves away for three weeks, dusting cans, hating the work, and feeling exploited. Finally, he marches to his Rich Dad to quit, demanding a raise.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -48,12 +48,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Trap In 2026, the Rat Race has upgraded. It’s no longer just about paying bills; it’s about the \"Golden Handcuffs\" of remote work comfort and the subtle threat of AI displacement. The \"safe job\" is a myth. If your primary income relies on trading hours for dollars, you are essentially shorting your own future. The modern employee mindset says, \"I need to learn prompt engineering so I don't get fired.\" The wealthy mindset says, \"I will build an AI agent that does the work for me while I sleep.\" The trap today is thinking that \"upskilling\" for a salary is freedom. It is not. It is just a shinier wheel.")
+                        content: .text("In 2026, the Rat Race has upgraded. It’s no longer just about paying bills; it’s about the \"Golden Handcuffs\" of remote work comfort and the subtle threat of AI displacement. The \"safe job\" is a myth. If your primary income relies on trading hours for dollars, you are essentially shorting your own future. The modern employee mindset says, \"I need to learn prompt engineering so I don't get fired.\" The wealthy mindset says, \"I will build an AI agent that does the work for me while I sleep.\" The trap today is thinking that \"upskilling\" for a salary is freedom. It is not. It is just a shinier wheel.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -77,7 +77,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 202,
+                audioDurationSeconds: 199,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -89,22 +89,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Illusion of Wealth")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Illusion of Wealth Here is the secret that keeps the middle class exhausted: You are looking at the wrong scoreboard. Most professionals believe that a high salary equals wealth. It doesn’t. You can earn $250,000 a year and still be technically insolvent if your monthly burn rate matches your income. The friction isn't your paycheck; it’s your financial literacy. You have been trained to read words, but you haven't been trained to read numbers. Consequently, you spend your life building someone else's business (your boss's), buying someone else's investments (the bank's), and paying someone else's bills (the government's).")
+                        content: .text("Here is the secret that keeps the middle class exhausted: You are looking at the wrong scoreboard. Most professionals believe that a high salary equals wealth. It doesn’t. You can earn $250,000 a year and still be technically insolvent if your monthly burn rate matches your income. The friction isn't your paycheck; it’s your financial literacy. You have been trained to read words, but you haven't been trained to read numbers. Consequently, you spend your life building someone else's business (your boss's), buying someone else's investments (the bank's), and paying someone else's bills (the government's).")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Tale of Two Columns")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Tale of Two Columns The author illustrates this with a simple, brutal truth that shattered the worldview of a young couple. They celebrate a pay raise by buying their \"dream home.\" They proudly list this house under the \"Asset\" column of their financial statement.")
+                        content: .text("The author illustrates this with a simple, brutal truth that shattered the worldview of a young couple. They celebrate a pay raise by buying their \"dream home.\" They proudly list this house under the \"Asset\" column of their financial statement.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -119,12 +119,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Camouflage")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Camouflage In 2026, the \"Liability Trap\" is even more sophisticated. It’s no longer just a house; it’s digital. It is the crypto \"investment\" that has zero utility and generates no yield—that is speculation, not an asset. It is the five different AI software subscriptions you pay for monthly but don’t use to generate income.")
+                        content: .text("In 2026, the \"Liability Trap\" is even more sophisticated. It’s no longer just a house; it’s digital. It is the crypto \"investment\" that has zero utility and generates no yield—that is speculation, not an asset. It is the five different AI software subscriptions you pay for monthly but don’t use to generate income.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -153,7 +153,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 192,
+                audioDurationSeconds: 189,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
@@ -165,22 +165,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Government's First Bite")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Government's First Bite Here is the raw deal you signed up for without reading the fine print: You work for money, the government takes a huge bite (taxes), and you try to live on what’s left. The harder you work, the more they take. It’s a rigged game. Most people think tax law is a punishment for making money. It isn’t. It’s an incentive system designed by the wealthy to reward the wealthy. If you are an employee, you are playing the game on \"Hard Mode.\" You earn, you get taxed, and then you spend. You are paying the bill for everyone else's roads and schools before you even buy your own groceries.")
+                        content: .text("Here is the raw deal you signed up for without reading the fine print: You work for money, the government takes a huge bite (taxes), and you try to live on what’s left. The harder you work, the more they take. It’s a rigged game. Most people think tax law is a punishment for making money. It isn’t. It’s an incentive system designed by the wealthy to reward the wealthy. If you are an employee, you are playing the game on \"Hard Mode.\" You earn, you get taxed, and then you spend. You are paying the bill for everyone else's roads and schools before you even buy your own groceries.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Magic Folder")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Magic Folder The author reveals a secret that completely demystifies the word \"Corporation.\" He explains that a corporation isn't a factory with smokestacks or a skyscraper with a logo. It is simply a file folder with some legal documents in it. It is a legal entity that creates a body without a soul.")
+                        content: .text("The author reveals a secret that completely demystifies the word \"Corporation.\" He explains that a corporation isn't a factory with smokestacks or a skyscraper with a logo. It is simply a file folder with some legal documents in it. It is a legal entity that creates a body without a soul.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -190,12 +190,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Solopreneur's Edge")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Solopreneur's Edge In 2026, you don't need a boardroom to have a corporation. You just need a laptop. The \"Gig Economy\" and remote work have democratized the Corporate Shield. If you are a freelancer, a content creator, or a consultant, you are a business. That high-end laptop you use for coding? That’s a business expense. That trip to a tech conference in Tokyo? That’s travel and education. Even a portion of your home internet and rent can be a write-off if you have a compliant home office. The modern wealthy don't evade taxes; they just use the incentives (like depreciation on real estate or R&D credits for AI development) that the government wants them to use.")
+                        content: .text("In 2026, you don't need a boardroom to have a corporation. You just need a laptop. The \"Gig Economy\" and remote work have democratized the Corporate Shield. If you are a freelancer, a content creator, or a consultant, you are a business. That high-end laptop you use for coding? That’s a business expense. That trip to a tech conference in Tokyo? That’s travel and education. Even a portion of your home internet and rent can be a write-off if you have a compliant home office. The modern wealthy don't evade taxes; they just use the incentives (like depreciation on real estate or R&D credits for AI development) that the government wants them to use.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -219,7 +219,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 183,
+                audioDurationSeconds: 180,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -231,22 +231,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"I Can't\" Paralysis")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"I Can't\" Paralysis Most people are blind. They walk down the street and see buildings, businesses, and people. A wealthy person walks down the same street and sees deals. The friction for the average person is a mental firewall: the belief that \"I don't have the money\" is a stop sign. It isn’t; it’s a question. When you say \"I can't afford it,\" your brain shuts down. You stop looking. You become a victim of the economy rather than a master of it. The failure here isn't a lack of resources; it's a lack of imagination.")
+                        content: .text("Most people are blind. They walk down the street and see buildings, businesses, and people. A wealthy person walks down the same street and sees deals. The friction for the average person is a mental firewall: the belief that \"I don't have the money\" is a stop sign. It isn’t; it’s a question. When you say \"I can't afford it,\" your brain shuts down. You stop looking. You become a victim of the economy rather than a master of it. The failure here isn't a lack of resources; it's a lack of imagination.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Phoenix Fire Sale")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Phoenix Fire Sale The author illustrates this with a story from the recession. While everyone else was screaming that the sky was falling, the author saw a clearance sale. He recounts finding a house in Phoenix during a market crash. The home was worth $65,000, but the owner was desperate, and the bank was foreclosing. The price? $20,000.")
+                        content: .text("The author illustrates this with a story from the recession. While everyone else was screaming that the sky was falling, the author saw a clearance sale. He recounts finding a house in Phoenix during a market crash. The home was worth $65,000, but the owner was desperate, and the bank was foreclosing. The price? $20,000.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -261,12 +261,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Arbitrage")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Arbitrage In 2026, you don't need to drive around Phoenix to find deals; the opportunities are digital and move at the speed of light. The \"distressed seller\" might be a tech startup liquidating assets, or a mispriced token in a DeFi liquidity pool. The \"house\" might be an undervalued domain name, a neglected newsletter with 10,000 subscribers, or an inefficiency in an AI workflow that you can automate and sell.")
+                        content: .text("In 2026, you don't need to drive around Phoenix to find deals; the opportunities are digital and move at the speed of light. The \"distressed seller\" might be a tech startup liquidating assets, or a mispriced token in a DeFi liquidity pool. The \"house\" might be an undervalued domain name, a neglected newsletter with 10,000 subscribers, or an inefficiency in an AI workflow that you can automate and sell.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -295,7 +295,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 193,
+                audioDurationSeconds: 190,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -307,22 +307,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Specialist's Curse")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Specialist's Curse Here is the lie that universities sell you: \"Specialize to succeed.\" They tell you to become the best neurosurgeon, the sharpest coder, or the most nuanced accountant. The friction is that specialization is a form of dependency. When you know more and more about less and less, you become a cog that only fits into one specific machine. If that machine breaks (or the industry shifts), you are obsolete. Most people fail to build wealth because they are too busy protecting their \"career path\" to notice they are walking off a cliff. They cling to job security, unaware that \"JOB\" is an acronym for \"Just Over Broke.\"")
+                        content: .text("Here is the lie that universities sell you: \"Specialize to succeed.\" They tell you to become the best neurosurgeon, the sharpest coder, or the most nuanced accountant. The friction is that specialization is a form of dependency. When you know more and more about less and less, you become a cog that only fits into one specific machine. If that machine breaks (or the industry shifts), you are obsolete. Most people fail to build wealth because they are too busy protecting their \"career path\" to notice they are walking off a cliff. They cling to job security, unaware that \"JOB\" is an acronym for \"Just Over Broke.\"")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The \"Best-Selling\" Author")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Best-Selling\" Author The author illustrates this with a stinging encounter with a talented young newspaper reporter. She had a Master’s degree in English and wrote beautifully, but she was struggling to make a living from her novels. She asked the author for advice. His answer? \"Go take a sales training course.\"")
+                        content: .text("The author illustrates this with a stinging encounter with a talented young newspaper reporter. She had a Master’s degree in English and wrote beautifully, but she was struggling to make a living from her novels. She asked the author for advice. His answer? \"Go take a sales training course.\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -337,12 +337,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 \"Full Stack\" Human")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 \"Full Stack\" Human In 2026, the danger of specialization is existential. AI Agents can now write the code, draft the legal contract, and generate the marketing copy. If you are just a \"writer\" or just a \"coder,\" you are competing with a bot that costs pennies.")
+                        content: .text("In 2026, the danger of specialization is existential. AI Agents can now write the code, draft the legal contract, and generate the marketing copy. If you are just a \"writer\" or just a \"coder,\" you are competing with a bot that costs pennies.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -371,7 +371,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 208,
+                audioDurationSeconds: 205,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -383,22 +383,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"What If\" Paralyzing Agent")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"What If\" Paralyzing Agent Here is the tragedy: You have the financial literacy. You understand assets vs. liabilities. You see the deal. And then… you freeze. The friction isn't the market; it’s the voice in your head screaming, \"What if the tenant leaves?\" \"What if the crypto market crashes?\" \"What if I lose my job?\" This is the \"Inner Saboteur.\" It turns smart people into cowards and keeps the middle class safely poor. The problem is that your brain is wired to survive, not to thrive. It treats a financial risk like a saber-toothed tiger.")
+                        content: .text("Here is the tragedy: You have the financial literacy. You understand assets vs. liabilities. You see the deal. And then… you freeze. The friction isn't the market; it’s the voice in your head screaming, \"What if the tenant leaves?\" \"What if the crypto market crashes?\" \"What if I lose my job?\" This is the \"Inner Saboteur.\" It turns smart people into cowards and keeps the middle class safely poor. The problem is that your brain is wired to survive, not to thrive. It treats a financial risk like a saber-toothed tiger.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Colonel and the Alamo")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Colonel and the Alamo The author confronts this fear—the fear of losing money—head-on. He tells the story of the Texans and the Alamo. When the Alamo fell, everyone died. It was a tragic, total defeat. But Texans didn’t bury their heads in shame. They shouted, \"Remember the Alamo!\" and used that failure as the fuel to win their independence.")
+                        content: .text("The author confronts this fear—the fear of losing money—head-on. He tells the story of the Texans and the Alamo. When the Alamo fell, everyone died. It was a tragic, total defeat. But Texans didn’t bury their heads in shame. They shouted, \"Remember the Alamo!\" and used that failure as the fuel to win their independence.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -408,12 +408,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Algorithmic Doomer")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Algorithmic Doomer In 2026, the \"Chicken Littles\" have a megaphone. They are the algorithmic feeds on your phone, optimized to keep you terrified because fear drives engagement. The \"Inner Saboteur\" is now powered by AI-generated deepfakes and 24/7 \"Crash Coming Soon\" YouTube thumbnails.")
+                        content: .text("In 2026, the \"Chicken Littles\" have a megaphone. They are the algorithmic feeds on your phone, optimized to keep you terrified because fear drives engagement. The \"Inner Saboteur\" is now powered by AI-generated deepfakes and 24/7 \"Crash Coming Soon\" YouTube thumbnails.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -442,7 +442,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 182,
+                audioDurationSeconds: 179,
                 currentProgress: 0.0
             ),
             7: CoreChapterContent(
@@ -454,22 +454,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Knowledge Coma")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Knowledge Coma Here is the final, most dangerous trap: You are smarter now. You have read the Cores. You understand the math. And yet, tomorrow morning, you will likely wake up and do exactly what you did today. This is the \"Knowledge Coma.\" The friction isn't ignorance anymore; it is inertia. Most people collect financial advice like baseball cards—they categorize it, admire it, and show it off, but they never play the game. They are waiting for the \"perfect time\" or the \"perfect deal,\" unaware that perfection is just procrastination in a tuxedo.")
+                        content: .text("Here is the final, most dangerous trap: You are smarter now. You have read the Cores. You understand the math. And yet, tomorrow morning, you will likely wake up and do exactly what you did today. This is the \"Knowledge Coma.\" The friction isn't ignorance anymore; it is inertia. Most people collect financial advice like baseball cards—they categorize it, admire it, and show it off, but they never play the game. They are waiting for the \"perfect time\" or the \"perfect deal,\" unaware that perfection is just procrastination in a tuxedo.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Power of \"I Don't Want\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Power of \"I Don't Want\" The author shatters this paralysis not with a spreadsheet, but with a piece of paper. He tells the story of how he found his \"Why\"—the fuel that outlasted his fear. He didn't start by writing down \"I want to be rich.\" That was too vague. Instead, he sat down and ruthlessly listed what he didn't want.")
+                        content: .text("The author shatters this paralysis not with a spreadsheet, but with a piece of paper. He tells the story of how he found his \"Why\"—the fuel that outlasted his fear. He didn't start by writing down \"I want to be rich.\" That was too vague. Instead, he sat down and ruthlessly listed what he didn't want.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -484,12 +484,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 \"Micro-Step\" Revolution")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 \"Micro-Step\" Revolution In 2026, the barrier to entry has collapsed. You don't need $50,000 for a down payment or a license to trade. The \"Launchpad\" today is built on micro-actions. The author couldn't buy 0.0001% of a building in 1997. Today, you can. You can buy fractional shares of real estate, tokenized gold, or a slice of a startup for the price of a latte.")
+                        content: .text("In 2026, the barrier to entry has collapsed. You don't need $50,000 for a down payment or a license to trade. The \"Launchpad\" today is built on micro-actions. The author couldn't buy 0.0001% of a building in 1997. Today, you can. You can buy fractional shares of real estate, tokenized gold, or a slice of a startup for the price of a latte.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -523,7 +523,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 207,
+                audioDurationSeconds: 204,
                 currentProgress: 0.0
             ),
         ],
@@ -535,14 +535,24 @@ extension CoreChapterContent {
                 bookAuthor: "Benjamin Graham",
                 sections: [
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .heading,
                         title: nil,
-                        content: .text("1. The Illusion of Competence Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gambling with better odds. The friction in your financial life usually stems from a single category error. You treat the stock market like a casino where the chips are expensive and the rules are vague. You assume that because you bought a stock and held it for a year, you are an investor. You aren't. If you bought it based on a feeling, a tip, or a chart pattern, you are speculating. And the market loves to punish speculators who believe they are investors.")
+                        content: .text("The Illusion of Competence")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("2. The Trinity of Safety The author solves this by demanding we sign a mental contract before spending a dime. He strips away the noise and offers a ruthless definition. An operation is only an investment if it meets three specific criteria upon thorough analysis:")
+                        content: .text("Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gambling with better odds. The friction in your financial life usually stems from a single category error. You treat the stock market like a casino where the chips are expensive and the rules are vague. You assume that because you bought a stock and held it for a year, you are an investor. You aren't. If you bought it based on a feeling, a tip, or a chart pattern, you are speculating. And the market loves to punish speculators who believe they are investors.")
+                    ),
+                    CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Trinity of Safety")
+                    ),
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("The author solves this by demanding we sign a mental contract before spending a dime. He strips away the noise and offers a ruthless definition. An operation is only an investment if it meets three specific criteria upon thorough analysis:")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -565,14 +575,19 @@ extension CoreChapterContent {
                         content: .text("Imagine a man betting on a horse race. He studies the track record, the jockey, and the weather. He is informed, but he is still gambling because he has no safety of principal—if the horse loses, his money vanishes. The \"Intelligent Investor\" refuses to bet on the horse; he buys the racetrack.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Gamification Trap")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("3. The Gamification Trap In the modern era, this distinction is harder to see because the casino has moved into your pocket. Trading apps shower you with digital confetti when you execute a trade, conditioning you to crave action over analysis. We see this in the \"Crypto Craze\" or the \"AI Gold Rush.\" Buying a digital token because you hope a billionaire tweets about it is not investing; it is the \"Greater Fool Theory\"—hoping someone else will pay more for your mistake. The danger today isn't just market volatility; it’s the user interface of your life designed to make speculation feel like strategy. If your asset relies entirely on hype to succeed, you aren't investing in a business; you're investing in a narrative.")
+                        content: .text("In the modern era, this distinction is harder to see because the casino has moved into your pocket. Trading apps shower you with digital confetti when you execute a trade, conditioning you to crave action over analysis. We see this in the \"Crypto Craze\" or the \"AI Gold Rush.\" Buying a digital token because you hope a billionaire tweets about it is not investing; it is the \"Greater Fool Theory\"—hoping someone else will pay more for your mistake. The danger today isn't just market volatility; it’s the user interface of your life designed to make speculation feel like strategy. If your asset relies entirely on hype to succeed, you aren't investing in a business; you're investing in a narrative.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -591,7 +606,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 183,
+                audioDurationSeconds: 182,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -601,14 +616,24 @@ extension CoreChapterContent {
                 bookAuthor: "Benjamin Graham",
                 sections: [
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .heading,
                         title: nil,
-                        content: .text("1. The Safety Paradox The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at your bank account, and the number stays the same or grows slightly. You feel a warm sense of security. You sleep well. But this is a hallucination. In the physical world, if you left a car in a garage for twenty years, you’d expect it to rust. Money is no different, yet we treat it as if it’s immune to decay. The friction here is psychological: we are wired to fear the volatility of the stock market (where prices bounce up and down visibly), so we run into the arms of a guaranteed loss. We choose the slow bleed over the bumpy ride.")
+                        content: .text("The Safety Paradox")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("2. The Yardstick That Shrank The author illustrates this with a brutal reality check from the first half of the 20th century. He tells the story of the \"Conservative Investor\" who, traumatized by market crashes, put 100% of his wealth into high-grade bonds. This man felt prudent. He collected his fixed interest checks like clockwork. But while he was staring at the stable numbers on his statements, the world around him changed.")
+                        content: .text("The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at your bank account, and the number stays the same or grows slightly. You feel a warm sense of security. You sleep well. But this is a hallucination. In the physical world, if you left a car in a garage for twenty years, you’d expect it to rust. Money is no different, yet we treat it as if it’s immune to decay. The friction here is psychological: we are wired to fear the volatility of the stock market (where prices bounce up and down visibly), so we run into the arms of a guaranteed loss. We choose the slow bleed over the bumpy ride.")
+                    ),
+                    CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Yardstick That Shrank")
+                    ),
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("The author illustrates this with a brutal reality check from the first half of the 20th century. He tells the story of the \"Conservative Investor\" who, traumatized by market crashes, put 100% of his wealth into high-grade bonds. This man felt prudent. He collected his fixed interest checks like clockwork. But while he was staring at the stable numbers on his statements, the world around him changed.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -616,9 +641,14 @@ extension CoreChapterContent {
                         content: .text("The price of bread, housing, and energy doubled. The \"yardstick\" of money had shrunk. The author points out that by the time this investor needed to spend his principal, it had lost half its purchasing power. The man hadn't lost dollars; he had lost lifestyle. The \"safe\" investment was actually a trap that guaranteed he would be poorer at the end than when he started. The author’s lesson is stark: Inflation is a thief that works in the dark, and keeping all your money in \"safe\" cash is not prudence—it is a decision to let the thief empty your house while you watch.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The High-Yield Hallucination")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("3. The High-Yield Hallucination Today, this enemy is even more deceptive. You open a High-Yield Savings Account (HYSA) offering 5% and think you are winning. You aren’t. You are barely treading water. If inflation is running at 3.5% and the tax man takes another 1.5% of your gains, your real return is zero. You are running on a financial treadmill just to stay in the same place.")
+                        content: .text("Today, this enemy is even more deceptive. You open a High-Yield Savings Account (HYSA) offering 5% and think you are winning. You aren’t. You are barely treading water. If inflation is running at 3.5% and the tax man takes another 1.5% of your gains, your real return is zero. You are running on a financial treadmill just to stay in the same place.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -626,7 +656,7 @@ extension CoreChapterContent {
                         content: .text("Furthermore, the \"basket of goods\" has changed. The author worried about the price of milk; you need to worry about the cost of healthcare, college tuition, and prime real estate, which often inflate significantly faster than the government's official CPI numbers. If you are paying 1% to a financial advisor to manage a portfolio of cash and bonds that yields 4%, you are essentially paying someone to manage your slow bankruptcy. In a world of unlimited fiat currency printing, holding cash is like holding a melting ice cube. You cannot save your way to wealth in a currency that is designed to depreciate.")
                     ),
                 ],
-                audioDurationSeconds: 190,
+                audioDurationSeconds: 189,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
@@ -636,9 +666,14 @@ extension CoreChapterContent {
                 bookAuthor: "Benjamin Graham",
                 sections: [
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Price Tag Panic")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("1. The Price Tag Panic Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now imagine a stranger stands on your lawn every single morning yelling a different price at you. Monday he screams, \"I'll give you $500,000!\" Tuesday he whispers, \"The market is crashing! I'll only give you $150,000!\" Wednesday he is euphoric again and offers $900,000.")
+                        content: .text("Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now imagine a stranger stands on your lawn every single morning yelling a different price at you. Monday he screams, \"I'll give you $500,000!\" Tuesday he whispers, \"The market is crashing! I'll only give you $150,000!\" Wednesday he is euphoric again and offers $900,000.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -646,9 +681,14 @@ extension CoreChapterContent {
                         content: .text("Most people would close the blinds and ignore him. But in the stock market, you do the opposite. You let this stranger dictate your emotional state. When he yells a low price, you panic and sell your house cheap. When he yells a high price, you feel rich and buy more houses. This is the friction: you confuse the price on the screen with the value of the business. You let the fluctuating price tag determine your worth, rather than the quality of the merchandise.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Partner You Can't Fire")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("2. The Partner You Can't Fire The author introduces us to this stranger. His name is \"Mr. Market.\" He is your business partner in a private company. Mr. Market is obliging but emotionally unstable. Every day, without fail, he names a price at which he will either buy your interest or sell you his.")
+                        content: .text("The author introduces us to this stranger. His name is \"Mr. Market.\" He is your business partner in a private company. Mr. Market is obliging but emotionally unstable. Every day, without fail, he names a price at which he will either buy your interest or sell you his.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -656,9 +696,14 @@ extension CoreChapterContent {
                         content: .text("The catch? His price has nothing to do with the business's actual performance. It is based entirely on his mood. When he is manic (optimistic), he sees only sunshine and names a high price. When he is depressed (pessimistic), he sees only trouble and names a low price. The author’s solution is a mindset shift: Mr. Market is there to serve you, not to guide you. You are not forced to deal with him. If his offer is ridiculous, you ignore him. If his offer is a bargain, you buy. If his offer is absurdly high, you sell. You are the adult in the room; he is the hysterical child.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Algorithm of Anxiety")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("3. The Algorithm of Anxiety Today, Mr. Market isn't just a guy on your lawn; he is in your pocket, buzzing every 15 minutes. He is the notification on your phone saying \"Bitcoin is down 10%\" or \"Nvidia hits all-time high.\" The modern Mr. Market is amplified by algorithms designed to trigger your dopamine and cortisol.")
+                        content: .text("Today, Mr. Market isn't just a guy on your lawn; he is in your pocket, buzzing every 15 minutes. He is the notification on your phone saying \"Bitcoin is down 10%\" or \"Nvidia hits all-time high.\" The modern Mr. Market is amplified by algorithms designed to trigger your dopamine and cortisol.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -668,7 +713,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -682,7 +727,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 209,
+                audioDurationSeconds: 208,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -692,14 +737,24 @@ extension CoreChapterContent {
                 bookAuthor: "Benjamin Graham",
                 sections: [
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .heading,
                         title: nil,
-                        content: .text("1. The Myth of the Mastermind There is a persistent lie in finance that \"effort equals return.\" In your job, if you work 80 hours a week, you get a promotion. In the stock market, if you work 80 hours a week analyzing charts, reading news, and tweaking your portfolio, you will likely underperform a dead person. The friction here is ego. You believe you are smarter than the market. You believe you can time the top and the bottom. You believe that \"doing nothing\" is lazy. But in investing, activity is the enemy of returns. The more you touch your portfolio, the more you incur fees, taxes, and emotional errors. The goal of the Fortress is to protect you from your own desire to be clever.")
+                        content: .text("The Myth of the Mastermind")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("2. The 50/50 Split The author solves this by creating a specific category for people who want to get rich without making investing their second job: the \"Defensive Investor.\" He proposes a radical simplicity. Imagine a portfolio that is a perfect balance scale. On one side, you have high-grade bonds (lending money to stable governments or corporations). On the other side, you have a diversified list of leading common stocks (owning a piece of the economy).")
+                        content: .text("There is a persistent lie in finance that \"effort equals return.\" In your job, if you work 80 hours a week, you get a promotion. In the stock market, if you work 80 hours a week analyzing charts, reading news, and tweaking your portfolio, you will likely underperform a dead person. The friction here is ego. You believe you are smarter than the market. You believe you can time the top and the bottom. You believe that \"doing nothing\" is lazy. But in investing, activity is the enemy of returns. The more you touch your portfolio, the more you incur fees, taxes, and emotional errors. The goal of the Fortress is to protect you from your own desire to be clever.")
+                    ),
+                    CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The 50/50 Split")
+                    ),
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("The author solves this by creating a specific category for people who want to get rich without making investing their second job: the \"Defensive Investor.\" He proposes a radical simplicity. Imagine a portfolio that is a perfect balance scale. On one side, you have high-grade bonds (lending money to stable governments or corporations). On the other side, you have a diversified list of leading common stocks (owning a piece of the economy).")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -707,9 +762,14 @@ extension CoreChapterContent {
                         content: .text("The author suggests a baseline split of 50% stocks and 50% bonds. This is your \"Fortress.\" When the stock market crashes and people are jumping out of windows, your bonds hold their value, and your portfolio only drops half as much as the market. You sleep well. When the market booms and your neighbor is bragging about his gains, your stocks participate in the rally. You never fully lose, and you never miss out. The genius is in the maintenance: if stocks go up and become 60% of your portfolio, you simply sell some stocks and buy bonds to get back to 50/50. This forces you to do the one thing everyone fails at: sell high and buy low, automatically.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Autopilot Advantage")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("3. The Autopilot Advantage Today, building this Fortress is easier than the author could have ever dreamed. In his day, you had to buy individual bonds and pick 20 different stocks. Today, you can build the entire Fortress with two clicks using low-cost Index Funds or ETFs (Exchange Traded Funds).")
+                        content: .text("Today, building this Fortress is easier than the author could have ever dreamed. In his day, you had to buy individual bonds and pick 20 different stocks. Today, you can build the entire Fortress with two clicks using low-cost Index Funds or ETFs (Exchange Traded Funds).")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -717,7 +777,7 @@ extension CoreChapterContent {
                         content: .text("Instead of picking \"winners\" (which is hard), you buy the entire S&P 500 or a Total World Stock ETF. You own Apple, Microsoft, Amazon, and 4,000 other companies. If one goes bankrupt, you don't even notice. If a new AI giant emerges, you automatically own it. This is the \"Boglehead\" philosophy (named after Jack Bogle, who popularized index funds), which is the modern spiritual successor to Graham’s Defensive strategy. It accepts that you cannot predict the future, so you simply own the entire economy. It turns investing from a stress-inducing hunt for \"the next Bitcoin\" into a boring, reliable utility bill that pays you.")
                     ),
                 ],
-                audioDurationSeconds: 194,
+                audioDurationSeconds: 193,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -734,7 +794,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Hero Complex")
+                        content: .text("The Hero Complex")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -744,7 +804,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Negative Art")
+                        content: .text("The Negative Art")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -759,7 +819,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Edge of Discomfort")
+                        content: .text("The Edge of Discomfort")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -774,7 +834,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -788,7 +848,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 212,
+                audioDurationSeconds: 210,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -800,7 +860,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Croupier's Cut")
+                        content: .text("The Croupier's Cut")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -810,7 +870,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Rearview Mirror Trap")
+                        content: .text("The Rearview Mirror Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -825,7 +885,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Index Revolution")
+                        content: .text("The Index Revolution")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -838,12 +898,12 @@ extension CoreChapterContent {
                         content: .text("The \"Wiser\" analysis, championed by Graham’s disciple John Bogle, is that you should stop looking for the needle in the haystack and just buy the haystack. The modern S&P 500 Index Fund allows you to fire the manager. Instead of paying 1.5% for a human to guess which stocks will go up, you pay 0.03% to a computer to own all the stocks. In a world where information is instant, the \"edge\" that active managers used to have is gone. By indexing, you guarantee you will outperform 90% of professional investors simply by refusing to pay their salaries.")
                     ),
                 ],
-                audioDurationSeconds: 176,
+                audioDurationSeconds: 174,
                 currentProgress: 0.0
             ),
             7: CoreChapterContent(
                 chapterNumber: 7,
-                chapterTitle: "1. The Earnings Mirage",
+                chapterTitle: "The Earnings Mirage",
                 bookTitle: "The Intelligent Investor",
                 bookAuthor: "Benjamin Graham",
                 sections: [
@@ -855,7 +915,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Kitchen Sink Trap")
+                        content: .text("The Kitchen Sink Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -870,7 +930,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The EBITDA Alibi")
+                        content: .text("The EBITDA Alibi")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -885,7 +945,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -899,7 +959,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 179,
+                audioDurationSeconds: 177,
                 currentProgress: 0.0
             ),
             8: CoreChapterContent(
@@ -911,7 +971,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Vacuum Trap")
+                        content: .text("The Vacuum Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -921,7 +981,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Tale of Two Companies")
+                        content: .text("The Tale of Two Companies")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -936,7 +996,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The \"Tesla\" Premium")
+                        content: .text("The \"Tesla\" Premium")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -951,7 +1011,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -970,7 +1030,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 208,
+                audioDurationSeconds: 206,
                 currentProgress: 0.0
             ),
             9: CoreChapterContent(
@@ -982,7 +1042,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Junk Food Portfolio")
+                        content: .text("The Junk Food Portfolio")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -992,7 +1052,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Seven-Point Bouncer")
+                        content: .text("The Seven-Point Bouncer")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1047,7 +1107,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Zombie Apocalypse")
+                        content: .text("The Zombie Apocalypse")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1060,7 +1120,7 @@ extension CoreChapterContent {
                         content: .text("You can apply Graham’s screen to filter out the noise of the modern tech bubble. While you might relax the P/E ratio slightly for high-quality tech giants (who have asset-light models), the core principle remains: Profits matter. Dividends matter. A company like Uber or Airbnb in their early years would have been rejected by this screen—and Graham would be fine with that. He would rather miss a Google than suffer a WeWork. Today, you can automate this by looking at \"Dividend Aristocrats\" or \"Quality Factor\" ETFs, which effectively run this code for you.")
                     ),
                 ],
-                audioDurationSeconds: 179,
+                audioDurationSeconds: 178,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -1072,7 +1132,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Dumpster Diver's Dilemma")
+                        content: .text("The Dumpster Diver's Dilemma")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1082,7 +1142,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Cigar Butt Strategy")
+                        content: .text("The Cigar Butt Strategy")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -1102,7 +1162,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Hidden Assets of the Digital Age")
+                        content: .text("The Hidden Assets of the Digital Age")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1117,7 +1177,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -1131,7 +1191,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 209,
+                audioDurationSeconds: 207,
                 currentProgress: 0.0
             ),
             11: CoreChapterContent(
@@ -1143,7 +1203,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Optimism Blindfold")
+                        content: .text("The Optimism Blindfold")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1153,7 +1213,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Conglomerate House of Cards")
+                        content: .text("The Conglomerate House of Cards")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1168,7 +1228,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The \"Community Adjusted\" Reality")
+                        content: .text("The \"Community Adjusted\" Reality")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1183,7 +1243,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -1197,7 +1257,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 176,
+                audioDurationSeconds: 174,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(
@@ -1209,7 +1269,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. The Perfectionist's Fallacy")
+                        content: .text("The Perfectionist's Fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1219,7 +1279,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Engineering Secret")
+                        content: .text("The Engineering Secret")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1239,7 +1299,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Buffer Against Chaos")
+                        content: .text("The Buffer Against Chaos")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -1254,7 +1314,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Protocol")
+                        content: .text("The Protocol")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -1273,7 +1333,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 213,
+                audioDurationSeconds: 211,
                 currentProgress: 0.0
             ),
         ],
@@ -1478,7 +1538,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -1981,7 +2041,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Demand the boring version:")
+                        content: .text("Demand the boring version")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -2061,7 +2121,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("1. Interrogate the Valuation")
+                        content: .text("Interrogate the Valuation")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -2071,7 +2131,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. Chat with the Cold Truth")
+                        content: .text("Chat with the Cold Truth")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -2079,7 +2139,7 @@ extension CoreChapterContent {
                         content: .text("When an internet guru promises a revolutionary new paradigm that \"changes the rules of investing,\" open the Wiser tab to chat with Caudex AI, with a simple question: \"Has this kind of market narrative happened before, and how does it usually end?\". Let the vector-stored logic of history throw cold water on the hot mirage.")
                     ),
                 ],
-                audioDurationSeconds: 290,
+                audioDurationSeconds: 289,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(
@@ -2193,11 +2253,6 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The ETF Blindspot")
                     ),
                     CoreChapterSection(
@@ -2232,7 +2287,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 184,
+                audioDurationSeconds: 183,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -2244,22 +2299,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Casino Fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("Most people treat the stock market like a casino, hoping for a lucky spin, but panicking the moment the dealer takes a chip. They buy high because their neighbor made a killing, and sell low because the news anchor looked worried. They fail not because they lack intelligence or data, but because they lack stomach. They haven't asked themselves the only question that matters before opening a brokerage account: \"What will I do when—not if—my portfolio drops 50%?\" If you don't have an answer, you are already the market's prey.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2275,11 +2320,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Lynch tells the story of the frantic calls he’d get during market crashes. Even when his fund, Magellan, was the best performing in the world, the average investor in his fund actually lost money. Why? because they bought in when he was on the cover of a magazine and sold out the moment the market dipped. They treated the stock market like a savings account that pays 15% interest. It doesn't. He explains that the most important organ for investing isn't the brain; it's the stomach. If you are susceptible to selling everything in a panic because \"The Big One\" is coming, you should never buy a stock in the first place. You are better off in a money market fund than being right about a company but wrong about your own psychology.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2318,7 +2358,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 197,
+                audioDurationSeconds: 194,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
@@ -2330,22 +2370,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Prediction Addiction")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("The single biggest waste of time for any investor is trying to predict the economy. You sit there, paralyzed, watching CNBC, terrified because the Fed might raise rates by a quarter point or because some pundit says a recession is \"imminent\" (they’ve been saying that for six years). You think you’re being responsible by waiting for the \"right time\" when the skies clear. But here is the brutal truth: the skies never clear. There is always something to worry about. If you spend 13 minutes a year thinking about economics, you've wasted 10 minutes.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2361,11 +2391,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Lynch illustrated this with his \"Cocktail Party Theory.\" When he’d go to a party during a market bottom, no one wanted to talk about stocks; they talked about dentistry or the weather. When the market was up 15%, they’d ask him for tips. When the market was at a dangerous peak, they were giving him tips. His point was simple: the crowd is always reacting to what has happened, not what will happen. He famously said, \"If you could predict the economy, you'd be a billionaire.\" Since you can't, you must ignore the macro and focus entirely on the micro: the specific earnings of the company in front of you.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2399,7 +2424,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 185,
+                audioDurationSeconds: 182,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -2411,22 +2436,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Wall Street Gatekeeper")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You probably think the best stock tips are hidden in a locked room on Wall Street, guarded by men in $5,000 suits whispering about \"proprietary data.\" So you ignore the most powerful investment tool you own: your eyes. You walk right past the next Apple or Starbucks every single day, use their products, complain about their competitors, and then go home to buy a stock you’ve never heard of because a stranger on the internet said it was \"ready to pop.\" This is madness. The best research isn't on a spreadsheet; it's in your shopping cart.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2442,11 +2457,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Lynch didn't run a complex discounted cash flow model initially. He just looked at the checkout line. He saw women buying them in droves. He realized that Hanes had a monopoly on the \"supermarket pantyhose\" niche. While the \"smart money\" was ignoring a boring clothing company, the stock went up six-fold. He applied the same logic to Dunkin’ Donuts. He didn't need an annual report to tell him the coffee was good; he just saw that the parking lot was full at 6:00 AM every single morning. If you like the product, chances are millions of others do too.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2485,7 +2495,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 204,
+                audioDurationSeconds: 201,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -2497,22 +2507,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Seduction of \"Sexy\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You are addicted to \"sexy.\" You want to own the company that’s curing cancer, mining asteroids, or inventing the next iPhone. You want a stock ticker you can drop into a conversation at a dinner party that makes you look sophisticated and plugged-in. But here is the secret that will make you rich while your sophisticated friends go broke: excitement is expensive. If a company is \"hot,\" it’s already overpriced. The path to massive wealth is paved with boredom, disgust, and toxic waste.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2528,11 +2528,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Lynch loved SCI because it hit every single one of his \"Perfect Stock\" criteria: it had a boring name, it did something disagreeable (nobody likes thinking about death), and rumors about the industry were depressing. Wall Street analysts refused to cover it because they didn't want to call their clients and say, \"I've got a great deal on coffins.\" Because the pros ignored it, the stock price stayed low relative to its earnings for years, allowing Lynch to buy in cheap while the company quietly bought up mom-and-pop funeral homes across the country, compounding its value in the shadows. He jokingly said if he could find a company with a name like \"Bob’s Toxic Waste & Septic Tank Cleaning,\" he’d buy it immediately.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2566,7 +2561,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 176,
+                audioDurationSeconds: 173,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -2578,22 +2573,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The One-Size-Fits-All Error")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You are judging a fish by its ability to climb a tree. You buy a utility company and get angry when it doesn't double in six months. You buy a high-growth tech stock and panic when it drops 20% in a week. You are losing money because you are applying the same rules to completely different games. You treat every ticker symbol as a \"stock,\" but that is like treating a racehorse, a dairy cow, and a house cat as just \"animals.\" If you try to milk the racehorse, you’re going to get kicked.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2613,11 +2598,6 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Identity Crisis")
                     ),
                     CoreChapterSection(
@@ -2633,7 +2613,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Match the Strategy:")
+                        content: .text("Match the Strategy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -2662,7 +2642,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 176,
+                audioDurationSeconds: 172,
                 currentProgress: 0.0
             ),
             7: CoreChapterContent(
@@ -2674,22 +2654,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Price Tag Distraction")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You are hypnotized by the wrong number. You wake up, check your phone, and see a stock price. It’s up $5. You feel brilliant. It’s down $10. You feel like a failure. You are letting the market’s mood swings dictate your emotional state. This is because you view a stock as a piece of paper that magically changes value, rather than what it actually is: a claim on a stream of cash. If you don't know exactly how the company makes a dollar of profit, you are walking blindfolded into traffic.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2705,11 +2675,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("He loved to show charts where the stock price line wobbled all over the place like a drunk, while the earnings line climbed steadily upward like a staircase. His point? The drunk (price) eventually has to come home to the staircase (earnings). If a company’s earnings grow by 20% a year for a decade, the stock price will eventually follow, regardless of wars, recessions, or bad moods on Wall Street. He famously said, \"If you can’t predict the earnings, you can’t predict the stock.\" He didn't care about the \"story\" unless the story ended in a check being cashed.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2743,7 +2708,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 180,
+                audioDurationSeconds: 176,
                 currentProgress: 0.0
             ),
             8: CoreChapterContent(
@@ -2752,11 +2717,6 @@ extension CoreChapterContent {
                 bookTitle: "One Up On Wall Street",
                 bookAuthor: "Peter Lynch",
                 sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Hook")
-                    ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
@@ -2771,11 +2731,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Most investors treat the Balance Sheet like a terms-and-conditions document—they scroll right past it. They assume that if a company is \"changing the world,\" the money will sort itself out. This is a fatal error. Companies don't go bankrupt because they lack vision; they go bankrupt because they run out of cash. If you cannot spot the difference between a company that is \"investing in growth\" and one that is bleeding to death, you are not an investor; you are a philanthropist for bad management.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2796,11 +2751,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("He also obsessed over Inventory. Lynch would look at a company’s sales growth versus its inventory growth. If sales were up 10% but inventory was up 30%, he ran for the exit. Why? Because it meant the company was stuffing warehouses with products nobody wanted. In the retail world, unsold inventory is like rotting fish—the longer it sits, the more it stinks, and eventually, you have to pay someone to take it away (mark it down to zero). He viewed a buildup of inventory as the single most reliable \"sell signal\" in the market, often appearing months before the stock price collapsed.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2849,7 +2799,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 255,
+                audioDurationSeconds: 252,
                 currentProgress: 0.0
             ),
             9: CoreChapterContent(
@@ -2861,22 +2811,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Empire Builder Complex")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You love a charismatic CEO. You watch them on TV, radiating confidence, talking about \"synergies\" and \"ecosystems,\" and you think, \"This guy is a visionary.\" You are falling for the oldest trick in the book. Most managers, when left unsupervised with a pile of cash, do not act like responsible stewards; they act like emperors. They get bored with the core business that made them rich and start looking for excitement. They want to buy a movie studio, a sports team, or a competitor they don't understand, just to make their empire bigger. And they use your money to do it.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2897,11 +2837,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("He loved the \"dull\" management teams that simply raised the dividend every year. It was a signal that the business was real. He famously said that while companies can fake earnings with accounting tricks, \"dividends don't lie.\" You either have the cash to pay them, or you don't.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -2935,7 +2870,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 177,
+                audioDurationSeconds: 174,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -2944,11 +2879,6 @@ extension CoreChapterContent {
                 bookTitle: "One Up On Wall Street",
                 bookAuthor: "Peter Lynch",
                 sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Hook")
-                    ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
@@ -2967,11 +2897,6 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Concentration Edge")
                     ),
                     CoreChapterSection(
@@ -2983,11 +2908,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("If you have a distinct \"edge\" in only one company, own one. If you find five great situations, own five. But don't buy a 10th stock just to \"spread risk\" if you don't know anything about it. Lynch’s strategy was to constantly rotate capital based on the \"story,\" not the price. If a \"Stalwart\" (steady grower) went up 50% and got expensive, he would sell it to buy a \"Fast Grower\" or a \"Turnaround\" that was just starting its journey. He didn't sell because the price was up; he sold because the opportunity had shifted to a better category.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3021,7 +2941,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 179,
+                audioDurationSeconds: 176,
                 currentProgress: 0.0
             ),
             11: CoreChapterContent(
@@ -3033,22 +2953,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Loyalty Penalty")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("You treat your stocks like a marriage, sticking with them \"for better or worse\" long after the love is gone. You bought a company because it had a great new product three years ago. Today, competitors have flooded the market, the CEO quit, and profit margins are shrinking. Yet you still hold on, paralyzed by nostalgia. You are investing in a memory, not a business. The most dangerous phrase in your vocabulary is \"I’ll just hold it for the long term,\" because \"long term\" is often just a euphemism for \"I’m too lazy to check if the thesis is broken.\"")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3064,11 +2974,6 @@ extension CoreChapterContent {
                         type: .paragraph,
                         title: nil,
                         content: .text("Lynch realized the \"story\" had changed. The company wasn't dying, but it had morphed from a sprinter into a slow jogger. The investors who kept expecting \"Fast Grower\" returns from a saturated \"Stalwart\" got crushed. He instituted a \"Two-Minute Drill\" re-check every few months. If the story had drifted—like a company moving from \"high growth\" to \"cyclical\"—he didn't hesitate to sell, even if he liked the stock. He knew that when the story ends, you have to leave the theater.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The 'Wiser' Analysis")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3102,7 +3007,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 188,
+                audioDurationSeconds: 185,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(
@@ -3114,22 +3019,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Emotional Inversion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
                         content: .text("Buying a stock is like falling in love—it’s exciting, full of promise, and driven by dopamine. Selling a stock is like a divorce—it’s painful, confusing, and driven by fear. Most investors are terrible at \"the breakup.\" You sell your winners too early because you’re terrified the profit will vanish (locking in a small gain), and you hold your losers too long because you can’t admit you were wrong (praying for a rebound). You are emotionally inverted: you are loyal to the things that hurt you and fickle with the things that help you. You need a prenup for your portfolio.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Author’s Solution")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3149,11 +3044,6 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
                         content: .text("The Algorithmic Front-Run")
                     ),
                     CoreChapterSection(
@@ -3164,7 +3054,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Final Words:")
+                        content: .text("Final Words")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3177,7 +3067,7 @@ extension CoreChapterContent {
                         content: .text("Tomorrow morning, when the opening bell rings and the financial networks scream about the next imminent crisis, you are no longer the market's prey. You now operate with a ruthless, resilient system: you know how to leverage your local knowledge, run the financial forensics on an earnings engine, and execute strict exit protocols based on a company's true category rather than its stock price. You are no longer playing their gamified, high-frequency casino; you are playing the quiet, patient game of business ownership. So, trust the balance sheet, and just look around you—the edge has been yours the whole time, and now you finally know how to master it.")
                     ),
                 ],
-                audioDurationSeconds: 284,
+                audioDurationSeconds: 281,
                 currentProgress: 0.0
             ),
         ],
@@ -3191,22 +3081,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Sanitized\" Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Sanitized\" Trap Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNBC headlines, you are already the \"sucker at the table.\" Why? Because that information has been sanitized by lawyers, polished by PR firms, and digested by millions of algorithms before you ever see it. Most investors fail because they analyze a stock like a consumer reading a menu. They look at the price and the description, assuming what is listed is exactly what will be served. But the real story—the one that drives 10x returns or prevents catastrophic losses—is never on the menu. It’s in the kitchen.")
+                        content: .text("Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNBC headlines, you are already the \"sucker at the table.\" Why? Because that information has been sanitized by lawyers, polished by PR firms, and digested by millions of algorithms before you ever see it. Most investors fail because they analyze a stock like a consumer reading a menu. They look at the price and the description, assuming what is listed is exactly what will be served. But the real story—the one that drives 10x returns or prevents catastrophic losses—is never on the menu. It’s in the kitchen.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Gossip Network")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Gossip Network Philip Fisher didn’t trust the menu. He coined the term \"Scuttlebutt\"—an old naval term for the gossip around the water cooler. Fisher’s genius wasn't in analyzing balance sheets, but in acting like a detective. He believed that the most honest information about a company (Company A) never came from Company A itself.")
+                        content: .text("Philip Fisher didn’t trust the menu. He coined the term \"Scuttlebutt\"—an old naval term for the gossip around the water cooler. Fisher’s genius wasn't in analyzing balance sheets, but in acting like a detective. He believed that the most honest information about a company (Company A) never came from Company A itself.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3216,12 +3106,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("Digital Forensics")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("Digital Forensics Fisher had to rely on telephone calls and lunch meetings; you have a supercomputer in your pocket. Today, \"Scuttlebutt\" is digital forensics.")
+                        content: .text("Fisher had to rely on telephone calls and lunch meetings; you have a supercomputer in your pocket. Today, \"Scuttlebutt\" is digital forensics.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3265,7 +3155,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 182,
+                audioDurationSeconds: 179,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -3277,22 +3167,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Better Mousetrap\" Fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Better Mousetrap\" Fallacy Here is the most expensive mistake you will ever make: assuming the best product wins. You find a tech company with faster chips, cleaner code, or a revolutionary drug. You pile in, convinced the world will beat a path to their door. One year later, the stock is flat, and a competitor with inferior tech is eating their lunch. Why? You fell for the \"Engineer’s Delusion.\" You audited the engine (the innovation) but ignored the transmission (the sales force). An engine without a transmission just makes noise; it doesn't move the car.")
+                        content: .text("Here is the most expensive mistake you will ever make: assuming the best product wins. You find a tech company with faster chips, cleaner code, or a revolutionary drug. You pile in, convinced the world will beat a path to their door. One year later, the stock is flat, and a competitor with inferior tech is eating their lunch. Why? You fell for the \"Engineer’s Delusion.\" You audited the engine (the innovation) but ignored the transmission (the sales force). An engine without a transmission just makes noise; it doesn't move the car.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Invisible Army")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Invisible Army Philip Fisher refused to invest in \"lab experiments.\" He tells the story of visiting companies where the R&D department was treated like royalty—pristine labs, unlimited budgets, geniuses in white coats. But when he asked about the sales organization, the executives would wave it off as a necessary evil. Fisher would immediately walk away.")
+                        content: .text("Philip Fisher refused to invest in \"lab experiments.\" He tells the story of visiting companies where the R&D department was treated like royalty—pristine labs, unlimited budgets, geniuses in white coats. But when he asked about the sales organization, the executives would wave it off as a necessary evil. Fisher would immediately walk away.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3302,7 +3192,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis: The Distribution Moat")
+                        content: .text("The Distribution Moat")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3336,7 +3226,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 208,
+                audioDurationSeconds: 205,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
@@ -3348,22 +3238,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Visionary\" Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Visionary\" Trap You watch the keynote. The CEO strides across the stage in a leather jacket, promising to revolutionize the industry with a single algorithm. You are hooked. You buy the stock. Six months later, you are down 40%. Why? Because you bought the sales pitch, not the operator. You fell for the \"Charisma Trap.\" Most investors fail here because they assess a captain only when the sea is calm. But a CEO’s true DNA isn't revealed in the CNBC interview when the stock is at an all-time high; it is revealed in the silence that follows a disaster.")
+                        content: .text("You watch the keynote. The CEO strides across the stage in a leather jacket, promising to revolutionize the industry with a single algorithm. You are hooked. You buy the stock. Six months later, you are down 40%. Why? Because you bought the sales pitch, not the operator. You fell for the \"Charisma Trap.\" Most investors fail here because they assess a captain only when the sea is calm. But a CEO’s true DNA isn't revealed in the CNBC interview when the stock is at an all-time high; it is revealed in the silence that follows a disaster.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The \"Clam\" Test")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Clam\" Test Philip Fisher had a ruthless litmus test for management: The \"Clam\" Factor. He tells the story of management teams that were the darlings of Wall Street—friendly, accessible, and constantly issuing press releases—as long as the charts were green. But the moment a factory burned down or a product failed, the phone lines went dead. They \"clammed up.\" Fisher instantly sold these stocks.")
+                        content: .text("Philip Fisher had a ruthless litmus test for management: The \"Clam\" Factor. He tells the story of management teams that were the darlings of Wall Street—friendly, accessible, and constantly issuing press releases—as long as the charts were green. But the moment a factory burned down or a product failed, the phone lines went dead. They \"clammed up.\" Fisher instantly sold these stocks.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3373,12 +3263,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Era of the \"Twitter Meltdown\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Era of the \"Twitter Meltdown\" In the modern era, the \"Clam\" has evolved into the \"Deflector.\" We live in the age of the Cult CEO, where leaders often use social media to bypass scrutiny. Look at the crypto collapse of FTX. Investors were blinded by the effective altruism and the media persona, missing the complete lack of internal controls. The red flag wasn't silence; it was the noise of distraction.")
+                        content: .text("In the modern era, the \"Clam\" has evolved into the \"Deflector.\" We live in the age of the Cult CEO, where leaders often use social media to bypass scrutiny. Look at the crypto collapse of FTX. Investors were blinded by the effective altruism and the media persona, missing the complete lack of internal controls. The red flag wasn't silence; it was the noise of distraction.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3407,7 +3297,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 193,
+                audioDurationSeconds: 190,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -3419,22 +3309,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Limit Order\" Tragedy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Limit Order\" Tragedy Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve done the \"Scuttlebutt.\" You know it’s the next big thing. The stock is trading at $50.50. You, trying to be a \"smart\" trader, put in a limit order at $50.00. You want that psychological win of getting a bargain. The stock dips to $50.05, then turns around and runs to $500. You missed a 1,000% return because you were haggling over 50 cents. Most investors fail not because they pick the wrong stock, but because they treat a generational asset like a used car, refusing to buy unless the sticker price is slashed.")
+                        content: .text("Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve done the \"Scuttlebutt.\" You know it’s the next big thing. The stock is trading at $50.50. You, trying to be a \"smart\" trader, put in a limit order at $50.00. You want that psychological win of getting a bargain. The stock dips to $50.05, then turns around and runs to $500. You missed a 1,000% return because you were haggling over 50 cents. Most investors fail not because they pick the wrong stock, but because they treat a generational asset like a used car, refusing to buy unless the sticker price is slashed.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The \"Eighths and Quarters\" Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Eighths and Quarters\" Trap Philip Fisher saw this destroy more wealth than any bear market. He tells the story of an investor who identified a small, high-growth manufacturing company. The stock was trading around $35.50. The investor decided the \"fair value\" was exactly $35.00. He refused to pay the extra 50 cents—back then, stocks traded in \"eighths and quarters.\"")
+                        content: .text("Philip Fisher saw this destroy more wealth than any bear market. He tells the story of an investor who identified a small, high-growth manufacturing company. The stock was trading around $35.50. The investor decided the \"fair value\" was exactly $35.00. He refused to pay the extra 50 cents—back then, stocks traded in \"eighths and quarters.\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3444,12 +3334,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("Algorithm Food")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("Algorithm Food In Fisher’s day, you were competing with other humans. Today, you are competing with High-Frequency Trading (HFT) algorithms that can see your limit order and front-run it. If you are trying to \"time\" an entry into a volatile asset like Bitcoin or a high-beta AI stock like NVIDIA, you are playing a losing game. These assets don't move in straight lines; they move in violent steps. If you wait for the \"perfect pullback\" in a parabolic trend (like the AI boom), you will likely be left on the platform. The modern market moves too fast for \"sniper\" precision on price. The only precision that matters is \"sniper\" precision on quality.")
+                        content: .text("In Fisher’s day, you were competing with other humans. Today, you are competing with High-Frequency Trading (HFT) algorithms that can see your limit order and front-run it. If you are trying to \"time\" an entry into a volatile asset like Bitcoin or a high-beta AI stock like NVIDIA, you are playing a losing game. These assets don't move in straight lines; they move in violent steps. If you wait for the \"perfect pullback\" in a parabolic trend (like the AI boom), you will likely be left on the platform. The modern market moves too fast for \"sniper\" precision on price. The only precision that matters is \"sniper\" precision on quality.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3473,7 +3363,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 194,
+                audioDurationSeconds: 191,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -3485,22 +3375,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Taking Profits\" Fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Taking Profits\" Fallacy This is the most painful lesson you will ever learn: you will likely make more money from the one stock you didn't sell than from all the brilliant trades you did. The amateur investor feels an itch when a stock goes up 50%. They think, \"I should take some chips off the table.\" They sell the winner and put that money into a \"cheaper\" stock that hasn't moved yet. This is called \"watering the weeds and cutting the flowers.\" You are systematically killing your compounders to feed your losers.")
+                        content: .text("This is the most painful lesson you will ever learn: you will likely make more money from the one stock you didn't sell than from all the brilliant trades you did. The amateur investor feels an itch when a stock goes up 50%. They think, \"I should take some chips off the table.\" They sell the winner and put that money into a \"cheaper\" stock that hasn't moved yet. This is called \"watering the weeds and cutting the flowers.\" You are systematically killing your compounders to feed your losers.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Accidental Billionaire")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Accidental Billionaire Philip Fisher noticed something strange about the wealthiest families he advised. They didn't get rich by being smart traders; they got rich because they were \"trapped.\" In Fisher's time, capital gains taxes were incredibly high—sometimes over 25-30% on paper profits. He tells the story of investors who bought a great company, watched it double, and wanted to sell. But when they calculated the tax bill, they realized they would lose a third of their wealth to the IRS. So, they gritted their teeth and held.")
+                        content: .text("Philip Fisher noticed something strange about the wealthiest families he advised. They didn't get rich by being smart traders; they got rich because they were \"trapped.\" In Fisher's time, capital gains taxes were incredibly high—sometimes over 25-30% on paper profits. He tells the story of investors who bought a great company, watched it double, and wanted to sell. But when they calculated the tax bill, they realized they would lose a third of their wealth to the IRS. So, they gritted their teeth and held.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3510,12 +3400,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Volatility Tax")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Volatility Tax In the crypto and tech era, the \"tax\" isn't just from the IRS; it's the volatility. Look at Amazon or Bitcoin. To capture the 10,000% gains, you had to sit through multiple drawdowns of 50%, 70%, even 90%. If you sold Bitcoin in 2013 because it \"doubled too fast,\" you missed the defining asset class of the decade. The same applies to early Tesla investors. The \"Forever Hold\" isn't about stubbornness; it's about recognizing that true disruption takes decades, not quarters, to play out. If you own an ETF like QQQ, you are effectively outsourcing this \"holding\" discipline—the index automatically holds the winners and drops the losers. But if you are picking individual stocks, you must be the algorithm that refuses to sell just because the ride gets bumpy.")
+                        content: .text("In the crypto and tech era, the \"tax\" isn't just from the IRS; it's the volatility. Look at Amazon or Bitcoin. To capture the 10,000% gains, you had to sit through multiple drawdowns of 50%, 70%, even 90%. If you sold Bitcoin in 2013 because it \"doubled too fast,\" you missed the defining asset class of the decade. The same applies to early Tesla investors. The \"Forever Hold\" isn't about stubbornness; it's about recognizing that true disruption takes decades, not quarters, to play out. If you own an ETF like QQQ, you are effectively outsourcing this \"holding\" discipline—the index automatically holds the winners and drops the losers. But if you are picking individual stocks, you must be the algorithm that refuses to sell just because the ride gets bumpy.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3539,7 +3429,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 187,
+                audioDurationSeconds: 184,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -3551,22 +3441,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Macro\" Illusion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Macro\" Illusion Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\" You let a stranger on television, who has never analyzed the specific company you own, convince you that the entire economy is collapsing. You looked at the \"market\" instead of the business. You obsessed over interest rates, election polls, and GDP forecasts—variables you cannot control and definitely cannot predict. Most investors fail because they treat the stock market like a voting machine, trying to guess what other people will do, rather than a weighing machine that measures what the company is doing.")
+                        content: .text("Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\" You let a stranger on television, who has never analyzed the specific company you own, convince you that the entire economy is collapsing. You looked at the \"market\" instead of the business. You obsessed over interest rates, election polls, and GDP forecasts—variables you cannot control and definitely cannot predict. Most investors fail because they treat the stock market like a voting machine, trying to guess what other people will do, rather than a weighing machine that measures what the company is doing.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The \"Dividend\" Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Dividend\" Trap Philip Fisher saw investors constantly seduced by the wrong metrics. One of his most famous \"Don'ts\" was: \"Don't buy a stock just because the annual report has a nice tone.\" But his deeper lesson was about ignoring the crowd’s obsession with \"safety.\"")
+                        content: .text("Philip Fisher saw investors constantly seduced by the wrong metrics. One of his most famous \"Don'ts\" was: \"Don't buy a stock just because the annual report has a nice tone.\" But his deeper lesson was about ignoring the crowd’s obsession with \"safety.\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3576,12 +3466,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Algorithm of Fear")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Algorithm of Fear Today, the noise isn't just a quarterly report; it’s a 24/7 algorithmic assault. If you open Twitter/X or turn on CNBC, you are bombarded with \"Recession Imminent\" or \"Crypto is Dead\" headlines. These platforms are designed to maximize engagement, and fear drives engagement.")
+                        content: .text("Today, the noise isn't just a quarterly report; it’s a 24/7 algorithmic assault. If you open Twitter/X or turn on CNBC, you are bombarded with \"Recession Imminent\" or \"Crypto is Dead\" headlines. These platforms are designed to maximize engagement, and fear drives engagement.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3615,7 +3505,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 190,
+                audioDurationSeconds: 187,
                 currentProgress: 0.0
             ),
         ],
@@ -3629,7 +3519,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Friction: The House Always Wins")
+                        content: .text("The House Always Wins")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3684,7 +3574,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -3703,7 +3593,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 218,
+                audioDurationSeconds: 217,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -3715,7 +3605,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Optical Illusion of Wealth")
+                        content: .text("The Optical Illusion of Wealth")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3795,7 +3685,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Alpha Delusion")
+                        content: .text("The Alpha Delusion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3868,7 +3758,7 @@ extension CoreChapterContent {
                         content: .text("Check your Portfolio Insights widget for your Diversification Score. If the score warns that you are heavily concentrated in one sector (e.g., \"90% Tech\"), you are trying to beat the dealer. Rebalance until the score indicates you own the \"House\" (the broad economy), not just a few risky tables.")
                     ),
                 ],
-                audioDurationSeconds: 228,
+                audioDurationSeconds: 227,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -3880,7 +3770,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Silent Heist")
+                        content: .text("The Silent Heist")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -3940,7 +3830,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -3953,7 +3843,7 @@ extension CoreChapterContent {
                         content: .text("Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: \"Is this a company I can hold for 10 years without selling?\" If the answer is no, think again. The cheapest trade is the one you never have to exit.")
                     ),
                 ],
-                audioDurationSeconds: 196,
+                audioDurationSeconds: 195,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -3965,7 +3855,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Government’s Invisible Equity")
+                        content: .text("The Government’s Invisible Equity")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4018,7 +3908,7 @@ extension CoreChapterContent {
                         content: .text("The same applies to the \"Sector Rotation\" game in stocks. You sell your \"Clean Energy\" ETF because it's down to buy a \"Data Center\" ETF because it's hot. You are converting potential long-term capital gains (taxed at ~15-20%) into short-term gains (taxed at ~37%). You are sprinting up an escalator that is moving down.")
                     ),
                 ],
-                audioDurationSeconds: 182,
+                audioDurationSeconds: 181,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -4030,7 +3920,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Rearview Mirror Trap")
+                        content: .text("The Rearview Mirror Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4078,7 +3968,7 @@ extension CoreChapterContent {
                         content: .text("But look closer. These funds often concentrate their bets on high-risk, unprofitable tech stocks. When interest rates rise or the hype cycle breaks (as we saw in 2022), the \"Disruptor\" funds crash harder than the market. If you bought in after the 5-star year—which is what 90% of retail investors do—you didn't buy the disruption; you paid for the bag. The \"Siren Song\" today is amplified by algorithms that feed you news about whoever is winning right now, blinding you to the cliff edge they are approaching.")
                     ),
                 ],
-                audioDurationSeconds: 181,
+                audioDurationSeconds: 180,
                 currentProgress: 0.0
             ),
             7: CoreChapterContent(
@@ -4090,7 +3980,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Treasure Hunter’s Curse")
+                        content: .text("The Treasure Hunter’s Curse")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4145,7 +4035,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -4158,7 +4048,7 @@ extension CoreChapterContent {
                         content: .text("Go to your Tracking Tab and look at the Diversification Score widget. The Instruction: If your score is low (e.g., heavily weighted in \"Tech\" or \"Crypto\"), you are holding a handful of grass, not the haystack. You are exposed to the risk of a single fire wiping you out. Aim for a score that reflects the broad economy.")
                     ),
                 ],
-                audioDurationSeconds: 264,
+                audioDurationSeconds: 263,
                 currentProgress: 0.0
             ),
             8: CoreChapterContent(
@@ -4170,7 +4060,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Icarus Delusion")
+                        content: .text("The Icarus Delusion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4218,7 +4108,7 @@ extension CoreChapterContent {
                         content: .text("We saw this recently with stocks like Super Micro Computer (SMCI) or various \"Altcoins.\" They went vertical, creating instant millionaires on paper. Then, RTM arrived. One bad earnings report, one regulatory headline, and the stock fell 50% in weeks. The \"Law of Gravity\" applies to everyone—even the company building the future. If the P/E ratio is expanding faster than the profits, you are essentially defying gravity without a parachute. When you buy into a \"Trade War\" beneficiary or a \"Remote Work\" darling after it has already tripled, you are not investing; you are volunteering to be the bag holder for the smart money that is already exiting.")
                     ),
                 ],
-                audioDurationSeconds: 190,
+                audioDurationSeconds: 189,
                 currentProgress: 0.0
             ),
             9: CoreChapterContent(
@@ -4230,7 +4120,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The \"All-Gas\" Suicide Pact")
+                        content: .text("The \"All-Gas\" Suicide Pact")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4280,7 +4170,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4288,7 +4178,7 @@ extension CoreChapterContent {
                         content: .text("Search for a Treasury ETF (like SGOV or BIL). Check the Dividend Yield. If this \"risk-free\" number is near 4-5%, ask yourself: \"Is my risky tech portfolio actually beating this guaranteed hurdle after the recent drop?\" If not, you are taking on stress for zero premium.")
                     ),
                 ],
-                audioDurationSeconds: 218,
+                audioDurationSeconds: 217,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -4300,7 +4190,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Weaponization of Access")
+                        content: .text("The Weaponization of Access")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4315,7 +4205,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Double-Edged Sword")
+                        content: .text("The Double-Edged Sword")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4363,7 +4253,7 @@ extension CoreChapterContent {
                         content: .text("Search for any niche or thematic fund you are watching and locate the Net Yield in the Snapshots. The Instruction: If the number is above 0.20%, stop. Ask yourself: \"Am I paying this premium for better performance, or just for a cool name?\" Compare it to a standard Total Market ETF (usually 0.03%). If the gap is huge, the value proposition is likely zero.")
                     ),
                 ],
-                audioDurationSeconds: 242,
+                audioDurationSeconds: 240,
                 currentProgress: 0.0
             ),
             11: CoreChapterContent(
@@ -4375,7 +4265,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Alchemy of Wall Street")
+                        content: .text("The Alchemy of Wall Street")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4423,7 +4313,7 @@ extension CoreChapterContent {
                         content: .text("Consider the \"Quant\" strategies in Crypto or the complex \"Buffer ETFs.\" They are selling you a free lunch. But here is the irony: You already have AI. Your app gives you sentiment analysis and deep research. When you buy an \"AI ETF\" with a 0.75% expense ratio, you are often paying a middleman to do exactly what your phone can do for you. The author didn’t write about AI, but his logic cuts through the hype: If an algorithm truly had a guaranteed edge, the creator wouldn't sell it to you for a 0.75% fee; they would keep it secret and become a trillionaire!")
                     ),
                 ],
-                audioDurationSeconds: 201,
+                audioDurationSeconds: 200,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(
@@ -4435,7 +4325,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Most Expensive Friend You Have")
+                        content: .text("The Most Expensive Friend You Have")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4450,7 +4340,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The \"Croupier\" vs. The Coach")
+                        content: .text("The \"Croupier\" vs. The Coach")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4485,12 +4375,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The \"Jargon\" Detector:")
+                        content: .text("The \"Jargon\" Detector")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4509,7 +4399,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 247,
+                audioDurationSeconds: 245,
                 currentProgress: 0.0
             ),
             13: CoreChapterContent(
@@ -4521,7 +4411,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Curse of the \"Do Something\" Instinct")
+                        content: .text("The Curse of the \"Do Something\" Instinct")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4541,7 +4431,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Odysseus Contract")
+                        content: .text("The Odysseus Contract")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4589,7 +4479,7 @@ extension CoreChapterContent {
                         content: .text("In an age of hyper-reactive AI, your edge isn't speed—it's \"stillness\". Algorithms are designed to fight over the noise of the millisecond; you win by ruthlessly committing to the silence of the decade!")
                     ),
                 ],
-                audioDurationSeconds: 318,
+                audioDurationSeconds: 316,
                 currentProgress: 0.0
             ),
         ],
@@ -4603,22 +4493,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Wall Street Civil War")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Wall Street Civil War There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock market is one big casino where everyone is playing the same game. You aren't. There are actually two rival tribes fighting for your money, and they speak completely different languages. If you don't know which tribe you belong to, you will buy for the wrong reason and sell at the wrong time. The friction is confusion: You buy a stock because \"it's going up\" (Tribe A) but panic when the earnings report is bad (Tribe B). You are mixing oil and water, and your portfolio is the one catching fire.")
+                        content: .text("There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock market is one big casino where everyone is playing the same game. You aren't. There are actually two rival tribes fighting for your money, and they speak completely different languages. If you don't know which tribe you belong to, you will buy for the wrong reason and sell at the wrong time. The friction is confusion: You buy a stock because \"it's going up\" (Tribe A) but panic when the earnings report is bad (Tribe B). You are mixing oil and water, and your portfolio is the one catching fire.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Castle vs. The Foundation")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Castle vs. The Foundation The author simplifies this chaos into two distinct philosophies.")
+                        content: .text("The author simplifies this chaos into two distinct philosophies.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4633,12 +4523,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Hybrid")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Hybrid The lines have blurred, but the danger is higher. The \"Castle in the Air\" is now turbo-charged by social media. A meme coin or a hyped AI startup with zero revenue can skyrocket simply because a subreddit or a TikTok trend decided it should. This is pure \"Castle\" building. It works until the music stops.")
+                        content: .text("The lines have blurred, but the danger is higher. The \"Castle in the Air\" is now turbo-charged by social media. A meme coin or a hyped AI startup with zero revenue can skyrocket simply because a subreddit or a TikTok trend decided it should. This is pure \"Castle\" building. It works until the music stops.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4667,7 +4557,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 204,
+                audioDurationSeconds: 201,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -4679,22 +4569,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The IQ Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The IQ Trap Here is the embarrassing truth: High IQ does not protect you from financial stupidity. In fact, smart people are often more susceptible to bubbles because they are better at rationalizing their madness. The friction isn't a lack of data; it is a surplus of dopamine. When you see your neighbor—who you know is less intelligent than you—making a fortune on a \"sure thing,\" your brain breaks. Envy overrides logic. You buy at the top not because you believe the math, but because you cannot bear the pain of missing out. You are not investing; you are hallucinating wealth.")
+                        content: .text("Here is the embarrassing truth: High IQ does not protect you from financial stupidity. In fact, smart people are often more susceptible to bubbles because they are better at rationalizing their madness. The friction isn't a lack of data; it is a surplus of dopamine. When you see your neighbor—who you know is less intelligent than you—making a fortune on a \"sure thing,\" your brain breaks. Envy overrides logic. You buy at the top not because you believe the math, but because you cannot bear the pain of missing out. You are not investing; you are hallucinating wealth.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The $50,000 Onion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The $50,000 Onion The author inoculates you against this madness by taking you back to 17th-century Holland. He tells the story of Tulipmania, the original blueprint for every financial disaster since.")
+                        content: .text("The author inoculates you against this madness by taking you back to 17th-century Holland. He tells the story of Tulipmania, the original blueprint for every financial disaster since.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4704,12 +4594,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 \"New Paradigm\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 \"New Paradigm\" Nowadays, we don't buy tulips; we buy \"narratives.\" The hallucination today wears a lab coat or a hoodie. It is the AI startup with no product but a $5 billion valuation. It is the \"Governance Token\" that governs nothing. It is the meme stock that rallies because an influencer posted a frog emoji.")
+                        content: .text("Nowadays, we don't buy tulips; we buy \"narratives.\" The hallucination today wears a lab coat or a hoodie. It is the AI startup with no product but a $5 billion valuation. It is the \"Governance Token\" that governs nothing. It is the meme stock that rallies because an influencer posted a frog emoji.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -4743,7 +4633,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 191,
+                audioDurationSeconds: 188,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
@@ -4755,22 +4645,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Fortune Teller’s Guild")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Fortune Teller’s Guild Humans are desperate for patterns. If you stare at clouds long enough, you see faces. If you stare at stock charts long enough, you see money. This is the friction: You want to believe there is a secret code, a \"Head and Shoulders\" pattern or a \"Golden Cross\" that predicts the future. You think if you just study the lines on the screen hard enough, you can outsmart the market. You are wrong. The market isn't a map; it’s a mirror reflecting your own wishful thinking. The people selling you these \"systems\" aren't rich from trading; they are rich from selling you the system.")
+                        content: .text("Humans are desperate for patterns. If you stare at clouds long enough, you see faces. If you stare at stock charts long enough, you see money. This is the friction: You want to believe there is a secret code, a \"Head and Shoulders\" pattern or a \"Golden Cross\" that predicts the future. You think if you just study the lines on the screen hard enough, you can outsmart the market. You are wrong. The market isn't a map; it’s a mirror reflecting your own wishful thinking. The people selling you these \"systems\" aren't rich from trading; they are rich from selling you the system.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Coin Flip Experiment")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Coin Flip Experiment The author destroys this entire industry—Technical Analysis—with a humiliating experiment. He asked his students to create a fake stock chart. They did this by flipping a coin: Heads meant the stock went up, Tails meant it went down. They plotted the results on graph paper.")
+                        content: .text("The author destroys this entire industry—Technical Analysis—with a humiliating experiment. He asked his students to create a fake stock chart. They did this by flipping a coin: Heads meant the stock went up, Tails meant it went down. They plotted the results on graph paper.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4780,12 +4670,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Algorithmic Slaughterhouse")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Algorithmic Slaughterhouse The Technical Analysis trap is even deadlier because you aren't competing against a guy with a ruler; you are competing against High-Frequency Trading (HFT) bots. These AI algorithms analyze every tick, every pattern, and every millisecond of data. If there was a profitable pattern, the AI found it, exploited it, and erased it before your chart even loaded.")
+                        content: .text("The Technical Analysis trap is even deadlier because you aren't competing against a guy with a ruler; you are competing against High-Frequency Trading (HFT) bots. These AI algorithms analyze every tick, every pattern, and every millisecond of data. If there was a profitable pattern, the AI found it, exploited it, and erased it before your chart even loaded.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4814,7 +4704,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 189,
+                audioDurationSeconds: 186,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -4826,22 +4716,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Trap of \"Doing Your Homework\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Trap of \"Doing Your Homework\" Here is the most painful lesson for smart people: You can do everything right and still lose. You can read every balance sheet, calculate every ratio, and perfectly model a company’s future cash flows. You can be the \"Warren Buffett\" of your friend group. But there is a fatal flaw in the logic of \"Fundamental Analysis.\" You believe that if you find a great company at a fair price, the stock must go up. The market does not care about your spreadsheet. The friction is that you are trying to predict the future with tools that only measure the past.")
+                        content: .text("Here is the most painful lesson for smart people: You can do everything right and still lose. You can read every balance sheet, calculate every ratio, and perfectly model a company’s future cash flows. You can be the \"Warren Buffett\" of your friend group. But there is a fatal flaw in the logic of \"Fundamental Analysis.\" You believe that if you find a great company at a fair price, the stock must go up. The market does not care about your spreadsheet. The friction is that you are trying to predict the future with tools that only measure the past.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Blindfolded Monkeys")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Blindfolded Monkeys The author exposes this illusion with a famous challenge to the entire financial industry. He declared that a blindfolded monkey throwing darts at the financial pages of a newspaper could select a portfolio that would do just as well as one carefully selected by experts.")
+                        content: .text("The author exposes this illusion with a famous challenge to the entire financial industry. He declared that a blindfolded monkey throwing darts at the financial pages of a newspaper could select a portfolio that would do just as well as one carefully selected by experts.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4851,12 +4741,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The AI Forecasting fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The AI Forecasting fallacy The illusion of \"predicting fundamentals\" has moved to AI. We now have \"Predictive Analytics\" and \"Big Data\" models that claim to foresee earnings surprises. But here is the catch: If the AI works, everyone uses it. If everyone uses it, the advantage disappears instantly.")
+                        content: .text("The illusion of \"predicting fundamentals\" has moved to AI. We now have \"Predictive Analytics\" and \"Big Data\" models that claim to foresee earnings surprises. But here is the catch: If the AI works, everyone uses it. If everyone uses it, the advantage disappears instantly.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4885,7 +4775,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 194,
+                audioDurationSeconds: 190,
                 currentProgress: 0.0
             ),
             5: CoreChapterContent(
@@ -4897,22 +4787,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Ego of the Picker")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Ego of the Picker Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your ego. You believe that because you read a few articles or follow a few experts, you have an \"edge.\" You think you can spot the next Apple or avoid the next crash before everyone else. This belief is expensive. Every time you try to outsmart the market by picking winners and losers, you are fighting a collective intelligence of millions of people, banks, and algorithms that have already priced in every piece of news you just read. You are betting against the wisdom of the crowd, and the house almost always wins.")
+                        content: .text("Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your ego. You believe that because you read a few articles or follow a few experts, you have an \"edge.\" You think you can spot the next Apple or avoid the next crash before everyone else. This belief is expensive. Every time you try to outsmart the market by picking winners and losers, you are fighting a collective intelligence of millions of people, banks, and algorithms that have already priced in every piece of news you just read. You are betting against the wisdom of the crowd, and the house almost always wins.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The $100 Bill on the Sidewalk")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The $100 Bill on the Sidewalk The author illustrates this with a classic economist joke. Two economists are walking down the street. One spots a $100 bill lying on the ground. \"Look!\" he says. \"A hundred dollars!\" The other economist doesn't even stop walking. \"It can't be real,\" he replies. \"If it were a real $100 bill, someone would have already picked it up.\"")
+                        content: .text("The author illustrates this with a classic economist joke. Two economists are walking down the street. One spots a $100 bill lying on the ground. \"Look!\" he says. \"A hundred dollars!\" The other economist doesn't even stop walking. \"It can't be real,\" he replies. \"If it were a real $100 bill, someone would have already picked it up.\"")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -4927,12 +4817,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Speed of Light")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Speed of Light Now, the Efficiency Engine has gone nuclear. Information doesn't just travel fast; it travels at the speed of light via fiber optic cables directly into the servers of High-Frequency Trading firms. If an AI detects a positive sentiment in a CEO's voice during an earnings call, it buys the stock before the CEO finishes the sentence.")
+                        content: .text("Now, the Efficiency Engine has gone nuclear. Information doesn't just travel fast; it travels at the speed of light via fiber optic cables directly into the servers of High-Frequency Trading firms. If an AI detects a positive sentiment in a CEO's voice during an earnings call, it buys the stock before the CEO finishes the sentence.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -4961,7 +4851,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 192,
+                audioDurationSeconds: 188,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -4973,22 +4863,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"Fake Diversity\" Scam")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Fake Diversity\" Scam Most investors are walking around with a ticking time bomb in their pockets, and they call it a \"diversified portfolio.\" You think because you own Apple, Microsoft, NVIDIA, and Google, you are safe. You aren't. You just own four different flavors of the exact same risk. If the tech sector catches a cold, your entire financial life gets pneumonia. The friction here is the misunderstanding of correlation. You are not engineering risk; you are piling it up in one corner and hoping gravity doesn't notice.")
+                        content: .text("Most investors are walking around with a ticking time bomb in their pockets, and they call it a \"diversified portfolio.\" You think because you own Apple, Microsoft, NVIDIA, and Google, you are safe. You aren't. You just own four different flavors of the exact same risk. If the tech sector catches a cold, your entire financial life gets pneumonia. The friction here is the misunderstanding of correlation. You are not engineering risk; you are piling it up in one corner and hoping gravity doesn't notice.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Island of Sun and Rain")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Island of Sun and Rain The author explains the cure for this madness—Modern Portfolio Theory—with a simple parable about an island economy. Imagine there are only two companies on this island: a large beach resort and an umbrella manufacturer.")
+                        content: .text("The author explains the cure for this madness—Modern Portfolio Theory—with a simple parable about an island economy. Imagine there are only two companies on this island: a large beach resort and an umbrella manufacturer.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5003,12 +4893,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Correlation Crisis")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Correlation Crisis Now, the \"Island\" is global, and finding assets that don't move together is harder than ever. During a panic, \"all correlations go to one.\" When the market crashes, almost everything—stocks, real estate, even crypto—dumps together.")
+                        content: .text("Now, the \"Island\" is global, and finding assets that don't move together is harder than ever. During a panic, \"all correlations go to one.\" When the market crashes, almost everything—stocks, real estate, even crypto—dumps together.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5037,7 +4927,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 173,
+                audioDurationSeconds: 170,
                 currentProgress: 0.0
             ),
             7: CoreChapterContent(
@@ -5049,22 +4939,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The \"New Coke\" of Finance")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"New Coke\" of Finance Wall Street has a massive problem: Simple index funds work too well. They are cheap, effective, and boring. This is a disaster for fund managers who need to buy yachts. Their solution? Re-branding. They realized they couldn't sell \"Active Management\" anymore because the data proved it failed. So, they invented a sexy new term: \"Smart Beta.\" The friction here is marketing. You are being sold a product that claims to be \"smarter\" than the market—offering higher returns with lower risk. It sounds perfect. It is almost always a trap designed to extract higher fees for a slightly tweaked product.")
+                        content: .text("Wall Street has a massive problem: Simple index funds work too well. They are cheap, effective, and boring. This is a disaster for fund managers who need to buy yachts. Their solution? Re-branding. They realized they couldn't sell \"Active Management\" anymore because the data proved it failed. So, they invented a sexy new term: \"Smart Beta.\" The friction here is marketing. You are being sold a product that claims to be \"smarter\" than the market—offering higher returns with lower risk. It sounds perfect. It is almost always a trap designed to extract higher fees for a slightly tweaked product.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Tilt and the Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Tilt and the Trap The author dissects this trend with the precision of a surgeon. He explains that \"Smart Beta\" strategies essentially take a boring index (like the S&P 500) and \"tilt\" it. Instead of buying companies based on size (Market Cap), they buy based on \"Factors\" like Value (cheap stocks), Momentum (rising stocks), or Low Volatility (stable stocks).")
+                        content: .text("The author dissects this trend with the precision of a surgeon. He explains that \"Smart Beta\" strategies essentially take a boring index (like the S&P 500) and \"tilt\" it. Instead of buying companies based on size (Market Cap), they buy based on \"Factors\" like Value (cheap stocks), Momentum (rising stocks), or Low Volatility (stable stocks).")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5074,12 +4964,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 \"Factor Zoo\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 \"Factor Zoo\" The \"Smart\" marketing has evolved into \"Thematic\" and \"AI-Driven\" madness. We now have the \"Factor Zoo\"—hundreds of complex ETFs claiming to exploit obscure market inefficiencies. You might see an \"AI-Powered Sentiment ETF\" or a \"Work-From-Home Alpha Fund.\" These are the grandchildren of Smart Beta.")
+                        content: .text("The \"Smart\" marketing has evolved into \"Thematic\" and \"AI-Driven\" madness. We now have the \"Factor Zoo\"—hundreds of complex ETFs claiming to exploit obscure market inefficiencies. You might see an \"AI-Powered Sentiment ETF\" or a \"Work-From-Home Alpha Fund.\" These are the grandchildren of Smart Beta.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5108,7 +4998,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 182,
+                audioDurationSeconds: 178,
                 currentProgress: 0.0
             ),
             8: CoreChapterContent(
@@ -5120,22 +5010,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Caveman in the Casino")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Caveman in the Casino Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed to survive on the savannah, not to trade derivatives on a smartphone. When you see a stock crash, your amygdala—the fear center—lights up exactly as if a tiger were chasing you. You panic and sell. When you see a stock soaring, your dopamine centers light up like you just found a fruit tree. You buy. The friction is that successful investing requires you to do the exact opposite of your survival instincts. You are biologically hardwired to buy high (greed) and sell low (fear). You are not a rational economic actor; you are an emotional ape with a bank account.")
+                        content: .text("Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed to survive on the savannah, not to trade derivatives on a smartphone. When you see a stock crash, your amygdala—the fear center—lights up exactly as if a tiger were chasing you. You panic and sell. When you see a stock soaring, your dopamine centers light up like you just found a fruit tree. You buy. The friction is that successful investing requires you to do the exact opposite of your survival instincts. You are biologically hardwired to buy high (greed) and sell low (fear). You are not a rational economic actor; you are an emotional ape with a bank account.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Pain of the Loss")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Pain of the Loss The author drags this psychological flaw into the light using Behavioral Finance. He explains a concept called Loss Aversion with a brutal truth: The pain of losing $1,000 is twice as intense as the pleasure of gaining $1,000.")
+                        content: .text("The author drags this psychological flaw into the light using Behavioral Finance. He explains a concept called Loss Aversion with a brutal truth: The pain of losing $1,000 is twice as intense as the pleasure of gaining $1,000.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5145,12 +5035,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Dopamine dispenser")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Dopamine dispenser The financial industry has weaponized your biology against you. Trading apps are no longer tools; they are video games. When you buy a stock, confetti explodes on the screen. When you check your crypto portfolio, the numbers flash in bright green or red, specifically designed to trigger a dopamine loop.")
+                        content: .text("The financial industry has weaponized your biology against you. Trading apps are no longer tools; they are video games. When you buy a stock, confetti explodes on the screen. When you check your crypto portfolio, the numbers flash in bright green or red, specifically designed to trigger a dopamine loop.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5179,7 +5069,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 204,
+                audioDurationSeconds: 200,
                 currentProgress: 0.0
             ),
             9: CoreChapterContent(
@@ -5191,22 +5081,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Parasite in Your Portfolio")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Parasite in Your Portfolio Here is the scandal of the century: The financial industry is the only industry on Earth where you get worse service the more you pay for it. If you hire a cheap lawyer, you go to jail. If you hire a cheap heart surgeon, you die. But if you hire an expensive fund manager, you go broke. The friction is that we are trained to believe \"You get what you pay for.\" In investing, you get what you don't pay for. Every dollar you pay in management fees, trading costs, and taxes is a dollar that isn't compounding for your future. You are feeding a system of parasites that produce nothing but excuses for why they failed to beat the average.")
+                        content: .text("Here is the scandal of the century: The financial industry is the only industry on Earth where you get worse service the more you pay for it. If you hire a cheap lawyer, you go to jail. If you hire a cheap heart surgeon, you die. But if you hire an expensive fund manager, you go broke. The friction is that we are trained to believe \"You get what you pay for.\" In investing, you get what you don't pay for. Every dollar you pay in management fees, trading costs, and taxes is a dollar that isn't compounding for your future. You are feeding a system of parasites that produce nothing but excuses for why they failed to beat the average.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Ultimate \"Cheat Code\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Ultimate \"Cheat Code\" The author presents the \"Index Fund\" not as a compromise, but as a mathematical weapon. He explains that the stock market is a \"positive-sum game\"—corporate profits grow, and everyone can win. But active trading is a \"zero-sum game\"—for every person who beats the market, someone else must lose.")
+                        content: .text("The author presents the \"Index Fund\" not as a compromise, but as a mathematical weapon. He explains that the stock market is a \"positive-sum game\"—corporate profits grow, and everyone can win. But active trading is a \"zero-sum game\"—for every person who beats the market, someone else must lose.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5216,12 +5106,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The Self-Healing Beast")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Self-Healing Beast In 2026, the Index Fund is even more powerful because of velocity. The modern S&P 500 is a ruthless, self-cleaning organism. When a company (like an old retail giant) starts to die, the Index automatically demotes it. When a new innovator (like an AI giant) rises, the Index automatically adds it.")
+                        content: .text("In 2026, the Index Fund is even more powerful because of velocity. The modern S&P 500 is a ruthless, self-cleaning organism. When a company (like an old retail giant) starts to die, the Index automatically demotes it. When a new innovator (like an AI giant) rises, the Index automatically adds it.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5250,7 +5140,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 206,
+                audioDurationSeconds: 203,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -5262,22 +5152,22 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook")
+                        content: .text("The Sleeping Bag Strategy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Sleeping Bag Strategy Here is the most expensive mistake smart people make: They treat investing like a static number. They ask, \"What is the best portfolio?\" as if the answer is the same for a 22-year-old software engineer and a 65-year-old retiree. It isn't. The friction is Risk Capacity. A young person can lose 50% of their money and laugh about it because they have 40 years of \"Human Capital\" (future earnings) left to replace it. A retiree who loses 50% faces a catastrophic decline in lifestyle. Most people fail because they are either too conservative when young (sleeping on a pile of cash that inflation is eating) or too aggressive when old (sleeping on a bed of crypto that might vanish overnight).")
+                        content: .text("Here is the most expensive mistake smart people make: They treat investing like a static number. They ask, \"What is the best portfolio?\" as if the answer is the same for a 22-year-old software engineer and a 65-year-old retiree. It isn't. The friction is Risk Capacity. A young person can lose 50% of their money and laugh about it because they have 40 years of \"Human Capital\" (future earnings) left to replace it. A retiree who loses 50% faces a catastrophic decline in lifestyle. Most people fail because they are either too conservative when young (sleeping on a pile of cash that inflation is eating) or too aggressive when old (sleeping on a bed of crypto that might vanish overnight).")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author’s Solution")
+                        content: .text("The Glide Path")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Glide Path The author solves this by introducing the \"Lifecycle Guide\"—a roadmap that shifts as you age. He doesn't just give you a pie chart; he gives you a movie script.")
+                        content: .text("The author solves this by introducing the \"Lifecycle Guide\"—a roadmap that shifts as you age. He doesn't just give you a pie chart; he gives you a movie script.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5287,12 +5177,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The 'Wiser' Analysis")
+                        content: .text("The 2026 Longevity Gamble")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The 2026 Longevity Gamble In 2026, the old \"100 minus your age\" rule for stock allocation is dangerous not because you will live to 100, but because you might. The greatest risk to a modern retirement isn't the market crashing; it is Longevity Risk—the mathematical probability that you survive longer than your savings do.")
+                        content: .text("In 2026, the old \"100 minus your age\" rule for stock allocation is dangerous not because you will live to 100, but because you might. The greatest risk to a modern retirement isn't the market crashing; it is Longevity Risk—the mathematical probability that you survive longer than your savings do.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5326,7 +5216,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 223,
+                audioDurationSeconds: 220,
                 currentProgress: 0.0
             ),
         ],
@@ -5718,7 +5608,7 @@ extension CoreChapterContent {
             ),
             2: CoreChapterContent(
                 chapterNumber: 2,
-                chapterTitle: "1. The Hook: The Myth of the Rational Machine",
+                chapterTitle: "The Myth of the Rational Machine",
                 bookTitle: "The Little Book that Still Beats the Market",
                 bookAuthor: "Joel Greenblatt",
                 sections: [
@@ -5730,7 +5620,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Author's Solution: Meet Your Manic Partner")
+                        content: .text("Meet Your Manic Partner")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5760,7 +5650,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -5774,12 +5664,12 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 254,
+                audioDurationSeconds: 252,
                 currentProgress: 0.0
             ),
             3: CoreChapterContent(
                 chapterNumber: 3,
-                chapterTitle: "1. The Hook: The Casino Chip Delusion",
+                chapterTitle: "The Casino Chip Delusion",
                 bookTitle: "The Little Book that Still Beats the Market",
                 bookAuthor: "Joel Greenblatt",
                 sections: [
@@ -5796,7 +5686,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("2. The Author's Solution: The Math of the Schoolyard Hustle")
+                        content: .text("The Math of the Schoolyard Hustle")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5821,7 +5711,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("3. The Modern Context: Piercing the Silicon Mirage")
+                        content: .text("The Modern Context: Piercing the Silicon Mirage")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5841,25 +5731,31 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .paragraph,
                         title: nil,
                         content: .text("Here is how you wire this cash-focused discipline into your routine tomorrow:")
                     ),
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The Yield Interrogation: Open the app’s screening tool and pull up the three most \"exciting\" companies on your current watchlist. Locate their \"Earnings Yield\" metric immediately. If that yield doesn't definitively crush the risk-free bond rate you established in Core 1, aggressively delete them from your watchlist. You do not fund bad math.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Translate to Reality: Train your brain to stop looking at share prices in a vacuum. Tomorrow, whenever you view an asset inside the app, force yourself to verbally translate the price into a physical business transaction: \"I am paying $X to acquire exactly $Y of actual cash profit.\" If that sentence sounds like a terrible business deal in the real world, walk away.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The Yield Interrogation",
+                                description: "Open the app’s screening tool and pull up the three most \"exciting\" companies on your current watchlist. Locate their \"Earnings Yield\" metric immediately. If that yield doesn't definitively crush the risk-free bond rate you established in Core 1, aggressively delete them from your watchlist. You do not fund bad math.",
+                                isCompleted: false
+                            ),
+                            ActionStep(
+                                title: "Translate to Reality",
+                                description: "Train your brain to stop looking at share prices in a vacuum. Tomorrow, whenever you view an asset inside the app, force yourself to verbally translate the price into a physical business transaction: \"I am paying $X to acquire exactly $Y of actual cash profit.\" If that sentence sounds like a terrible business deal in the real world, walk away.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
-                audioDurationSeconds: 389,
+                audioDurationSeconds: 386,
                 currentProgress: 0.0
             ),
             4: CoreChapterContent(
@@ -6349,7 +6245,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Action Plan:")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -6441,7 +6337,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Gravity of the Crowd")
+                        content: .text("The Gravity of the Crowd")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6456,7 +6352,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Pendulum of Expectations")
+                        content: .text("The Pendulum of Expectations")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6494,12 +6390,12 @@ extension CoreChapterContent {
                         content: .text("This applies perfectly to the hyper-volatile sectors of today. Look at Data Center and AI infrastructure companies. The underlying businesses are growing steadily—building facilities and laying cables. That is the Real Market. But the stocks swing 30% in a single week based on a whispered rumor about a delayed microchip. When you let the gamified alerts and the 24/7 news cycle dictate your mood, you are tying your emotional state to a pendulum being violently pushed by high-frequency trading bots and engagement-hungry media companies. Your only true edge in the modern era is emotional detachment. You win by building a psychological fortress that the noise cannot penetrate.")
                     ),
                 ],
-                audioDurationSeconds: 245,
+                audioDurationSeconds: 243,
                 currentProgress: 0.0
             ),
             8: CoreChapterContent(
                 chapterNumber: 8,
-                chapterTitle: "The Hook: The Illusion of Safety in Numbers",
+                chapterTitle: "The Illusion of Safety in Numbers",
                 bookTitle: "The Most Important Thing",
                 bookAuthor: "Howard Marks",
                 sections: [
@@ -6516,7 +6412,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: Standing in Front of the Pendulum")
+                        content: .text("Standing in Front of the Pendulum")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6556,7 +6452,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -6570,7 +6466,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 272,
+                audioDurationSeconds: 269,
                 currentProgress: 0.0
             ),
             9: CoreChapterContent(
@@ -6582,7 +6478,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Glamour Trap")
+                        content: .text("The Glamour Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6597,7 +6493,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Triumph of the Tortoise")
+                        content: .text("The Triumph of the Tortoise")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6635,7 +6531,7 @@ extension CoreChapterContent {
                         content: .text("But where is the neglected value? It is in the unsexy backbone. While the crowd fights over the AI software companies trading at 100 times their earnings, the neglected value is in the boring industrial utility companies that have to supply the massive electrical power to the new Data Centers. It is in the unglamorous copper miners providing the wiring for the Clean Energy grid. These companies often pay steady dividends and grow their earnings predictably, but they don't get trending hashtags. In a market obsessed with disrupting the future, your greatest edge is finding the quiet, highly profitable companies that are simply selling the shovels for the gold rush.")
                     ),
                 ],
-                audioDurationSeconds: 220,
+                audioDurationSeconds: 218,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -6647,7 +6543,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Myth of the Hustle")
+                        content: .text("The Myth of the Hustle")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6662,7 +6558,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Umpire Without a Whistle")
+                        content: .text("The Umpire Without a Whistle")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6712,12 +6608,12 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The \"Competence Interrogation\":")
+                        content: .text("The \"Competence Interrogation\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6725,7 +6621,7 @@ extension CoreChapterContent {
                         content: .text("The next time you feel the urge to capitalize on a trending narrative (like a new AI infrastructure company), open your Chat tab. The Instruction: Force yourself to teach the business model to the AI. Type: \"Here is how [Company] generates free cash flow, and here is exactly why their competitors cannot steal their margins. Critique my thesis.\" If you cannot write that prompt clearly, or if the AI instantly demolishes your logic, you are swinging at a pitch outside your zone!")
                     ),
                 ],
-                audioDurationSeconds: 329,
+                audioDurationSeconds: 327,
                 currentProgress: 0.0
             ),
             11: CoreChapterContent(
@@ -6737,7 +6633,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Genius Delusion")
+                        content: .text("The Genius Delusion")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6752,7 +6648,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The National Coin-Flipping Tournament")
+                        content: .text("The National Coin-Flipping Tournament")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6797,7 +6693,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .actionPlan,
@@ -6816,7 +6712,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 276,
+                audioDurationSeconds: 274,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(
@@ -6828,7 +6724,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The \"Highlight Reel\" Trap")
+                        content: .text("The \"Highlight Reel\" Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6843,7 +6739,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Amateur's Tennis Match")
+                        content: .text("The Amateur's Tennis Match")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6881,7 +6777,7 @@ extension CoreChapterContent {
                         content: .text("In a world of \"0DTE\" options and instant liquidity, your greatest edge is your defensive posture. Whether you are holding a total market index or a specific digital asset, the person who wins is the one who refuses to be shaken out by short-term noise. Defensive investing today means realizing that the person who simply refuses to blow up their portfolio through over-trading or excessive fees is the one who stays on the court long enough to see the \"winners\" fail.")
                     ),
                 ],
-                audioDurationSeconds: 249,
+                audioDurationSeconds: 247,
                 currentProgress: 0.0
             ),
             13: CoreChapterContent(
@@ -6893,7 +6789,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The Symmetrical Trap")
+                        content: .text("The Symmetrical Trap")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6908,7 +6804,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Weighted Coin")
+                        content: .text("The Weighted Coin")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6948,7 +6844,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("4. The Action Plan")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -6961,7 +6857,7 @@ extension CoreChapterContent {
                         content: .text("Open your Chat tab and ask Caudex to identify the \"unsexy\" infrastructure providers for any hyped sector on your watchlist. Focus on companies that provide the power, land, or basic protocols required for that industry to function, ensuring your floor is supported by physical necessity rather than just sentiment.")
                     ),
                 ],
-                audioDurationSeconds: 272,
+                audioDurationSeconds: 270,
                 currentProgress: 0.0
             ),
             14: CoreChapterContent(
@@ -6973,7 +6869,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Hook: The \"Just This Once\" Fallacy")
+                        content: .text("The \"Just This Once\" Fallacy")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -6988,7 +6884,7 @@ extension CoreChapterContent {
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("The Author's Solution: The Grand Master’s Blunder")
+                        content: .text("The Grand Master’s Blunder")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -7041,7 +6937,7 @@ extension CoreChapterContent {
                         content: .text("Your journey through these 14 Cores was designed to strip away the noise. You now know that the \"croupiers\" in suits and the \"influencers\" on screens are playing a different game than you are. Let them chase the wind. Let them pay the taxes, the fees, and the emotional toll of the casino. Your money is quietly, ruthlessly capturing the growth of human progress. Trust the math, ignore the crowd, and above all else, stay the course.")
                     ),
                 ],
-                audioDurationSeconds: 301,
+                audioDurationSeconds: 299,
                 currentProgress: 0.0
             ),
         ],
@@ -7052,22 +6948,22 @@ extension BookCoreChapter {
     /// The real Core list (timeline rows) per book, keyed by curriculumOrder.
     static let listsByOrder: [Int: [BookCoreChapter]] = [
         1: [
-            BookCoreChapter(number: 1, title: "De-Programming the \"Employee\" Mindset", description: "The Hamster Wheel of Emotion You wake up, you go to work, you pay your bills, you wait for the weekend. Repeat until you die. This…"),
-            BookCoreChapter(number: 2, title: "Mastering the Financial Scorecard", description: "The Illusion of Wealth Here is the secret that keeps the middle class exhausted: You are looking at the wrong scoreboard. Most pro…"),
-            BookCoreChapter(number: 3, title: "The Corporate Shield Strategy", description: "The Government's First Bite Here is the raw deal you signed up for without reading the fine print: You work for money, the governm…"),
-            BookCoreChapter(number: 4, title: "The Opportunity Hunter", description: "The \"I Can't\" Paralysis Most people are blind. They walk down the street and see buildings, businesses, and people. A wealthy pers…"),
-            BookCoreChapter(number: 5, title: "Trading Security for Skills", description: "The Specialist's Curse Here is the lie that universities sell you: \"Specialize to succeed.\" They tell you to become the best neuro…"),
-            BookCoreChapter(number: 6, title: "Conquering the Inner Saboteur", description: "The \"What If\" Paralyzing Agent Here is the tragedy: You have the financial literacy. You understand assets vs. liabilities. You se…"),
-            BookCoreChapter(number: 7, title: "The \"First 3 Steps\" Launchpad", description: "The Knowledge Coma Here is the final, most dangerous trap: You are smarter now. You have read the Cores. You understand the math.…"),
+            BookCoreChapter(number: 1, title: "De-Programming the \"Employee\" Mindset", description: "You wake up, you go to work, you pay your bills, you wait for the weekend. Repeat until you die. This isn't just a routine; it’s a…"),
+            BookCoreChapter(number: 2, title: "Mastering the Financial Scorecard", description: "Here is the secret that keeps the middle class exhausted: You are looking at the wrong scoreboard. Most professionals believe that…"),
+            BookCoreChapter(number: 3, title: "The Corporate Shield Strategy", description: "Here is the raw deal you signed up for without reading the fine print: You work for money, the government takes a huge bite (taxes…"),
+            BookCoreChapter(number: 4, title: "The Opportunity Hunter", description: "Most people are blind. They walk down the street and see buildings, businesses, and people. A wealthy person walks down the same s…"),
+            BookCoreChapter(number: 5, title: "Trading Security for Skills", description: "Here is the lie that universities sell you: \"Specialize to succeed.\" They tell you to become the best neurosurgeon, the sharpest c…"),
+            BookCoreChapter(number: 6, title: "Conquering the Inner Saboteur", description: "Here is the tragedy: You have the financial literacy. You understand assets vs. liabilities. You see the deal. And then… you freez…"),
+            BookCoreChapter(number: 7, title: "The \"First 3 Steps\" Launchpad", description: "Here is the final, most dangerous trap: You are smarter now. You have read the Cores. You understand the math. And yet, tomorrow m…"),
         ],
         2: [
-            BookCoreChapter(number: 1, title: "Drawing the Battle Lines", description: "1. The Illusion of Competence Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gamb…"),
-            BookCoreChapter(number: 2, title: "The Invisible Enemy", description: "1. The Safety Paradox The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at yo…"),
-            BookCoreChapter(number: 3, title: "Mastering the Manic-Depressive Market", description: "1. The Price Tag Panic Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now…"),
-            BookCoreChapter(number: 4, title: "Building the Fortress (The Defensive Strategy)", description: "1. The Myth of the Mastermind There is a persistent lie in finance that \"effort equals return.\" In your job, if you work 80 hours…"),
+            BookCoreChapter(number: 1, title: "Drawing the Battle Lines", description: "Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gambling with better odds. The fri…"),
+            BookCoreChapter(number: 2, title: "The Invisible Enemy", description: "The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at your bank account, and t…"),
+            BookCoreChapter(number: 3, title: "Mastering the Manic-Depressive Market", description: "Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now imagine a stranger stan…"),
+            BookCoreChapter(number: 4, title: "Building the Fortress (The Defensive Strategy)", description: "There is a persistent lie in finance that \"effort equals return.\" In your job, if you work 80 hours a week, you get a promotion. I…"),
             BookCoreChapter(number: 5, title: "Here is the content for Core 5, where we outline the strict rules for those who want to beat the market.", description: "Here is the seduction: You believe that if you are smarter, faster, and read more news than your neighbor, you will make more mone…"),
             BookCoreChapter(number: 6, title: "The Mutual Fund Maze", description: "The financial industry is built on a single, powerful myth: \"Investing is too complicated for you to do alone; you need an expert.…"),
-            BookCoreChapter(number: 7, title: "1. The Earnings Mirage", description: "The greatest lie on Wall Street is a single number: \"EPS\" (Earnings Per Share). The friction is that you are trained to treat this…"),
+            BookCoreChapter(number: 7, title: "The Earnings Mirage", description: "The greatest lie on Wall Street is a single number: \"EPS\" (Earnings Per Share). The friction is that you are trained to treat this…"),
             BookCoreChapter(number: 8, title: "The Comparison Test", description: "The biggest mistake you make is falling in love with a stock in isolation. You see a company—let's say a popular coffee chain—and…"),
             BookCoreChapter(number: 9, title: "Filtering for Quality (The Defensive Screen)", description: "Most investors suffer from financial obesity. You fill your portfolio with \"empty calories\"—companies that have great stories but…"),
             BookCoreChapter(number: 10, title: "Hunting for Bargains (The Enterprising Screen)", description: "To be an Enterprising Investor, you must be willing to do something that feels physically repulsive: you must buy what others are…"),
@@ -7103,12 +6999,12 @@ extension BookCoreChapter {
             BookCoreChapter(number: 12, title: "The Exit Protocols", description: "Buying a stock is like falling in love—it’s exciting, full of promise, and driven by dopamine. Selling a stock is like a divorce—i…"),
         ],
         5: [
-            BookCoreChapter(number: 1, title: "The 'Scuttlebutt' Investigation", description: "The \"Sanitized\" Trap Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNB…"),
-            BookCoreChapter(number: 2, title: "Auditing the Engine (Sales & Innovation)", description: "The \"Better Mousetrap\" Fallacy Here is the most expensive mistake you will ever make: assuming the best product wins. You find a t…"),
-            BookCoreChapter(number: 3, title: "Decoding Management DNA", description: "The \"Visionary\" Trap You watch the keynote. The CEO strides across the stage in a leather jacket, promising to revolutionize the i…"),
-            BookCoreChapter(number: 4, title: "Sniper Entries & The Myth of Market Timing", description: "The \"Limit Order\" Tragedy Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve do…"),
-            BookCoreChapter(number: 5, title: "The Art of the 'Forever Hold'", description: "The \"Taking Profits\" Fallacy This is the most painful lesson you will ever learn: you will likely make more money from the one sto…"),
-            BookCoreChapter(number: 6, title: "Immunizing Against Noise", description: "The \"Macro\" Illusion Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\" You let a stranger on television…"),
+            BookCoreChapter(number: 1, title: "The 'Scuttlebutt' Investigation", description: "Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNBC headlines, you are…"),
+            BookCoreChapter(number: 2, title: "Auditing the Engine (Sales & Innovation)", description: "Here is the most expensive mistake you will ever make: assuming the best product wins. You find a tech company with faster chips,…"),
+            BookCoreChapter(number: 3, title: "Decoding Management DNA", description: "You watch the keynote. The CEO strides across the stage in a leather jacket, promising to revolutionize the industry with a single…"),
+            BookCoreChapter(number: 4, title: "Sniper Entries & The Myth of Market Timing", description: "Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve done the \"Scuttlebutt.\" You…"),
+            BookCoreChapter(number: 5, title: "The Art of the 'Forever Hold'", description: "This is the most painful lesson you will ever learn: you will likely make more money from the one stock you didn't sell than from…"),
+            BookCoreChapter(number: 6, title: "Immunizing Against Noise", description: "Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\" You let a stranger on television, who has never analy…"),
         ],
         6: [
             BookCoreChapter(number: 1, title: "Escaping the Intermediary Trap", description: "Listen closely. The reason most intelligent people fail at building wealth isn’t that they pick the wrong stocks. It’s that they a…"),
@@ -7126,16 +7022,16 @@ extension BookCoreChapter {
             BookCoreChapter(number: 13, title: "Mastering the Art of Doing Nothing", description: "There is a fatal flaw in human evolution that makes you a terrible investor: the biological bias for action. For two hundred thous…"),
         ],
         7: [
-            BookCoreChapter(number: 1, title: "The Valuation Duel", description: "The Wall Street Civil War There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock…"),
-            BookCoreChapter(number: 2, title: "Spotting Financial Hallucinations", description: "The IQ Trap Here is the embarrassing truth: High IQ does not protect you from financial stupidity. In fact, smart people are often…"),
-            BookCoreChapter(number: 3, title: "The Technical Analysis Trap", description: "The Fortune Teller’s Guild Humans are desperate for patterns. If you stare at clouds long enough, you see faces. If you stare at s…"),
-            BookCoreChapter(number: 4, title: "The Fundamental Illusion", description: "The Trap of \"Doing Your Homework\" Here is the most painful lesson for smart people: You can do everything right and still lose. Yo…"),
-            BookCoreChapter(number: 5, title: "Respecting the Efficiency Engine", description: "The Ego of the Picker Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your eg…"),
-            BookCoreChapter(number: 6, title: "The Art of Risk Engineering", description: "The \"Fake Diversity\" Scam Most investors are walking around with a ticking time bomb in their pockets, and they call it a \"diversi…"),
-            BookCoreChapter(number: 7, title: "Decoding \"Smart\" Strategies", description: "The \"New Coke\" of Finance Wall Street has a massive problem: Simple index funds work too well. They are cheap, effective, and bori…"),
-            BookCoreChapter(number: 8, title: "Conquering Your Inner Ape", description: "The Caveman in the Casino Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed…"),
-            BookCoreChapter(number: 9, title: "The Indexing Manifesto", description: "The Parasite in Your Portfolio Here is the scandal of the century: The financial industry is the only industry on Earth where you…"),
-            BookCoreChapter(number: 10, title: "The Lifecycle Wealth Map", description: "The Sleeping Bag Strategy Here is the most expensive mistake smart people make: They treat investing like a static number. They as…"),
+            BookCoreChapter(number: 1, title: "The Valuation Duel", description: "There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock market is one big casino…"),
+            BookCoreChapter(number: 2, title: "Spotting Financial Hallucinations", description: "Here is the embarrassing truth: High IQ does not protect you from financial stupidity. In fact, smart people are often more suscep…"),
+            BookCoreChapter(number: 3, title: "The Technical Analysis Trap", description: "Humans are desperate for patterns. If you stare at clouds long enough, you see faces. If you stare at stock charts long enough, yo…"),
+            BookCoreChapter(number: 4, title: "The Fundamental Illusion", description: "Here is the most painful lesson for smart people: You can do everything right and still lose. You can read every balance sheet, ca…"),
+            BookCoreChapter(number: 5, title: "Respecting the Efficiency Engine", description: "Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your ego. You believe that be…"),
+            BookCoreChapter(number: 6, title: "The Art of Risk Engineering", description: "Most investors are walking around with a ticking time bomb in their pockets, and they call it a \"diversified portfolio.\" You think…"),
+            BookCoreChapter(number: 7, title: "Decoding \"Smart\" Strategies", description: "Wall Street has a massive problem: Simple index funds work too well. They are cheap, effective, and boring. This is a disaster for…"),
+            BookCoreChapter(number: 8, title: "Conquering Your Inner Ape", description: "Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed to survive on the savanna…"),
+            BookCoreChapter(number: 9, title: "The Indexing Manifesto", description: "Here is the scandal of the century: The financial industry is the only industry on Earth where you get worse service the more you…"),
+            BookCoreChapter(number: 10, title: "The Lifecycle Wealth Map", description: "Here is the most expensive mistake smart people make: They treat investing like a static number. They ask, \"What is the best portf…"),
         ],
         8: [
             BookCoreChapter(number: 1, title: "The Ticker Tape Illusion Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.", description: "The \"Silent Partner\" Letter Buffett flips this dynamic by ignoring the stock market entirely. In his foundational Owner-Related Bu…"),
@@ -7147,8 +7043,8 @@ extension BookCoreChapter {
         ],
         9: [
             BookCoreChapter(number: 1, title: "The Grand Illusion of Wall Street", description: "Listen closely. We are navigating an era of unprecedented financial chaos. Between inflation silently eating away your purchasing…"),
-            BookCoreChapter(number: 2, title: "1. The Hook: The Myth of the Rational Machine", description: "In the realms of computer science and finance, we are trained to search for elegant algorithms and rational models to predict beha…"),
-            BookCoreChapter(number: 3, title: "1. The Hook: The Casino Chip Delusion", description: "Let me pull back the curtain on the greatest psychological trap in modern finance. In today’s hyper-connected, digital world, the…"),
+            BookCoreChapter(number: 2, title: "The Myth of the Rational Machine", description: "In the realms of computer science and finance, we are trained to search for elegant algorithms and rational models to predict beha…"),
+            BookCoreChapter(number: 3, title: "The Casino Chip Delusion", description: "Let me pull back the curtain on the greatest psychological trap in modern finance. In today’s hyper-connected, digital world, the…"),
             BookCoreChapter(number: 4, title: "The Steamroller and the Pennies", description: "Most retail investors fail because they step onto a battlefield where they are mathematically guaranteed to lose. When two compani…"),
             BookCoreChapter(number: 5, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
         ],
@@ -7160,7 +7056,7 @@ extension BookCoreChapter {
             BookCoreChapter(number: 5, title: "The Illusion of the Risk-Reward Contract", description: "Here is the silent trap most investors fall into: they treat risk like a binding contract. They look at a highly speculative asset…"),
             BookCoreChapter(number: 6, title: "The Crystal Ball Delusion", description: "Humans are desperately uncomfortable with uncertainty, which is why the financial industry makes billions selling the illusion of…"),
             BookCoreChapter(number: 7, title: "Combating Emotional Gravity", description: "The greatest threat to your financial survival is not the Federal Reserve, a market crash, or a geopolitical crisis. It is your ow…"),
-            BookCoreChapter(number: 8, title: "The Hook: The Illusion of Safety in Numbers", description: "There is a paradox in investing that breaks the brains of most beginners: The safer an investment feels, the more dangerous it act…"),
+            BookCoreChapter(number: 8, title: "The Illusion of Safety in Numbers", description: "There is a paradox in investing that breaks the brains of most beginners: The safer an investment feels, the more dangerous it act…"),
             BookCoreChapter(number: 9, title: "Scavenging for Neglected Value", description: "There is a dangerous assumption that a \"world-changing company\" automatically makes for a \"great investment.\" The friction here is…"),
             BookCoreChapter(number: 10, title: "The Discipline of Inaction", description: "There is a toxic lie baked into our culture that dictates how we measure success: we worship the \"hustle.\" From the moment you ent…"),
             BookCoreChapter(number: 11, title: "Surviving the Coin Toss", description: "There is a psychological trap in the financial world that quietly bankrupts the smartest people in the room: the asymmetry of ego.…"),
@@ -7174,15 +7070,15 @@ extension BookCoreChapter {
 extension LibraryBook {
     /// Total read time (minutes) per book, computed from the authored core content.
     static let readMinutesByOrder: [Int: Int] = [
-        1: 23,  // Rich Dad Poor Dad
-        2: 39,  // The Intelligent Investor
+        1: 22,  // Rich Dad Poor Dad
+        2: 38,  // The Intelligent Investor
         3: 56,  // The Psychology of Money
-        4: 40,  // One Up On Wall Street
+        4: 39,  // One Up On Wall Street
         5: 19,  // Common Stocks and Uncommon Profits
         6: 48,  // The Little Book of Common Sense Investing
-        7: 33,  // A Random Walk Down Wall Street
+        7: 32,  // A Random Walk Down Wall Street
         8: 19,  // The Essays of Warren Buffett
         9: 24,  // The Little Book that Still Beats the Market
-        10: 59,  // The Most Important Thing
+        10: 58,  // The Most Important Thing
     ]
 }

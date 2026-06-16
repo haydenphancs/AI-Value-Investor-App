@@ -1,16 +1,20 @@
-1. The Earnings Mirage
+The Earnings Mirage
+
 The greatest lie on Wall Street is a single number: "EPS" (Earnings Per Share). The friction is that you are trained to treat this number as a hard fact. When a company "beats earnings estimates," the stock pops, and you feel safe. But in reality, "Net Income" is often an opinion—a flexible figure massaged by accountants to make management look good. Cash, on the other hand, is a fact. Most investors fail because they buy a company based on the headline profit number without realizing the business is actually bleeding cash to keep the lights on. They are buying a beautifully painted car with no engine.
 
-2. The Kitchen Sink Trap
+The Kitchen Sink Trap
+
 The author exposes this by taking us into the dark room of corporate accounting. He tells the story of the "Big Bath"—a trick where a new CEO arrives and immediately writes off every possible bad investment, lawsuit, and mistake in a single quarter. This makes the company look terrible for three months (which the CEO blames on the previous guy), but it clears the decks so that future earnings look artificially explosive.
 
 Graham warns us to ignore "Pro Forma" earnings—earnings that exclude "bad stuff." He likens it to a man saying he saved $1,000 this month, provided you ignore the $5,000 he spent on gambling because that was a "one-time event." The author’s solution is to distrust the Income Statement and focus on the Balance Sheet and the dividend record. If a company says it is making millions but isn't paying dividends or building up cash, the author asks: "Where is the money?"
 
-3. The EBITDA Alibi
+The EBITDA Alibi
+
 In the modern era, this manipulation has evolved into "Adjusted EBITDA" (Earnings Before Interest, Taxes, Depreciation, and Amortization). This is a metric often used by high-growth Tech and AI companies to pretend they are profitable when they are not.
 
 Consider the WeWork debacle, where the company used "Community Adjusted EBITDA" to hide massive losses. Or look at modern software companies that pay their employees in millions of dollars of Stock-Based Compensation (SBC). They claim to be "profitable" on an adjusted basis because they treat that stock issuance as free money. But it isn't free—it dilutes you. It slices the pizza into more pieces, making your slice smaller. If you only look at the "Non-GAAP" earnings promoted in the press release, you are being legally lied to.
 
-4. The Protocol
+The Protocol
+
 
 The Dilution Check: Open Yahoo Finance website, in the income statement, look at the "Weighted Average Shares Outstanding" over the last 3 years. If the number of shares is going up every year, management is funding the company by printing stock—slowly stealing the company from you.

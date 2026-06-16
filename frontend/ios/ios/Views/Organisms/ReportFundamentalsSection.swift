@@ -62,7 +62,7 @@ struct ReportFundamentalsSection: View {
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }
-            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

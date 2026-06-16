@@ -39,7 +39,7 @@ struct ReportThreatLevelBar: View {
                             )
 
                         Text(lvl.rawValue)
-                            .font(AppTypography.captionTiny).fontWeight(lvl == level ? .bold : .regular)
+                            .font(AppTypography.captionSmall).fontWeight(lvl == level ? .bold : .regular)
                             .foregroundColor(lvl == level ? level.color : AppColors.textMuted)
                     }
                 }

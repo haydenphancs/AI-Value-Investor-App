@@ -32,6 +32,10 @@ struct ReportExecutiveSummaryCard: View {
                 .lineSpacing(4)
         }
         .padding(AppSpacing.lg)
+        // Stretch to the container width so it matches the Bull/Bear thesis
+        // cards below — otherwise the VStack sizes to its longest text line
+        // and the card ends up narrower than the rest of the report.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                 .fill(AppColors.cardBackground)

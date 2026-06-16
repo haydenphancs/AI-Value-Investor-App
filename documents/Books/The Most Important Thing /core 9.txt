@@ -1,10 +1,12 @@
 Core 9: Scavenging for Neglected Value
-The Hook: The Glamour Trap
+The Glamour Trap
+
 There is a dangerous assumption that a "world-changing company" automatically makes for a "great investment." The friction here is that the stock market does not reward you for identifying what is brilliant; it rewards you for identifying what is mispriced.
 
 Most people fail because their ego demands they invest in the glamorous, the revolutionary, and the shiny. They want to brag at dinner parties about owning the company curing a disease or building the fastest microchip. It is incredibly tempting to build complex data mining models, running sophisticated cluster analyses to hunt for perfectly mispriced anomalies hiding in the shadows. But the brutal truth of the market is that glamour is expensive. The crowd bids up the price of "revolutionary" companies until the math guarantees a mediocre return. True wealth isn't found in the spotlight; it is scavenged in the neglected, boring, and unsexy corners of the market that everyone else is too impatient to analyze.
 
-The Author's Solution: The Triumph of the Tortoise
+The Triumph of the Tortoise
+
 The author, John Bogle, solved this puzzle by dissecting exactly where stock market money comes from. He revealed that your total return is made of two entirely different beasts: "Speculative Return" and "Fundamental Return."
 
 Speculative Return is the hype. It is the change in the Price-to-Earnings (P/E) ratio based on human emotion. It is the hare—leaping forward one year, collapsing in a panic the next.

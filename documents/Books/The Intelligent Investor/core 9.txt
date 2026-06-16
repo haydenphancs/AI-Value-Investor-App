@@ -1,8 +1,10 @@
 Core 9: Filtering for Quality (The Defensive Screen)
-1. The Junk Food Portfolio
+The Junk Food Portfolio
+
 Most investors suffer from financial obesity. You fill your portfolio with "empty calories"—companies that have great stories but zero nutritional value. You buy the hot EV startup that hasn't sold a car, or the biotech firm with no revenue, because you are hungry for growth. The friction is that in a bull market, junk rises just like quality. You feel smart holding these fragile companies. But when the market turns, the junk crashes 90% and never recovers, while the quality stocks just go on a diet. You fail because you have no standards; you let any stock into your house just because it knocked on the door.
 
-2. The Seven-Point Bouncer
+The Seven-Point Bouncer
+
 The author solves this by hiring a ruthless bouncer for your portfolio. He creates a specific "Defensive Screen"—a checklist of seven strict requirements that a company must meet before you even consider buying it.
 
 The author tells us that a Defensive Investor is not a talent scout looking for the next big thing; he is a quality control inspector. He demands:
@@ -23,7 +25,8 @@ Moderate Price-to-Book: The price should not be more than 1.5 times the book val
 
 If a stock fails even one of these tests, the bouncer throws it out. It doesn't matter if it's the "future of technology"; if it doesn't have the numbers, it doesn't get in.
 
-3. The Zombie Apocalypse
+The Zombie Apocalypse
+
 In the modern era, this screen is your only defense against "Zombie Companies"—firms that don't earn enough profit to cover the interest on their debt. In the last decade of near-zero interest rates, thousands of these zombies have survived by borrowing cheap money. They are the SPACs, the unprofitable tech IPOs, and the "disruptors" that bleed cash.
 
 You can apply Graham’s screen to filter out the noise of the modern tech bubble. While you might relax the P/E ratio slightly for high-quality tech giants (who have asset-light models), the core principle remains: Profits matter. Dividends matter. A company like Uber or Airbnb in their early years would have been rejected by this screen—and Graham would be fine with that. He would rather miss a Google than suffer a WeWork. Today, you can automate this by looking at "Dividend Aristocrats" or "Quality Factor" ETFs, which effectively run this code for you.

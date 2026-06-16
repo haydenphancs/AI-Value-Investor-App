@@ -1,5 +1,6 @@
 Core 4: Defeating the Tyranny of Compounding Costs
-The Hook: The Silent Heist
+The Silent Heist
+
 There is a thief in your portfolio, and he is invisible. You spend hours researching whether "Clean Energy" or "AI" will boom next year, agonizing over getting a 10% return versus an 8% return. But while you are distracted by the upside, the "Silent Heist" is happening on the downside.
 
 The financial industry has mastered the art of presenting fees as "small numbers." They say, "It’s only 2%." You think, "2% is nothing. I’ll still keep 98%." This is the single most expensive math error a human being can make. That "tiny" fee is not a one-time toll; it is a recurring cancer that metastasizes over time, consuming the majority of your wealth before you even retire.
@@ -19,6 +20,6 @@ Wall Street knows you want to invest in "The Future"—AI, Data Centers, Cyberse
 
 Furthermore, in the world of Crypto, the costs are hidden in the "Gas" and the "Spread." You might buy a meme coin thinking it's free, but the bid-ask spread (the difference between the buy and sell price) might be 1% instantly. If you trade in and out of that coin ten times a year, you have voluntarily paid a 10% tax on your own money. The modern "Silent Heist" isn't a check you write to a broker; it is the friction of hyper-activity in a gamified app.
 
-4. The Action Plan
+The Action Plan
 The "Forever" Filter
 Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: "Is this a company I can hold for 10 years without selling?" If the answer is no, think again. The cheapest trade is the one you never have to exit.

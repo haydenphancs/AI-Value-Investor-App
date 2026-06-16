@@ -434,7 +434,7 @@ struct SmartMoneyFlowChart: View {
     private func clippedBarLabel(_ value: Double, arrow: String) -> some View {
         if isClipped(value) {
             Text("\(formatVolumeLabel(value))\(arrow)")
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.white)
                 .fixedSize()
         }

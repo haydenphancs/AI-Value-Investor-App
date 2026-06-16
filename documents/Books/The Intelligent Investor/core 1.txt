@@ -1,7 +1,11 @@
 Core 1: Drawing the Battle Lines
-1. The Illusion of Competence Here is the uncomfortable truth: 90% of people who think they are "investing" are actually just gambling with better odds. The friction in your financial life usually stems from a single category error. You treat the stock market like a casino where the chips are expensive and the rules are vague. You assume that because you bought a stock and held it for a year, you are an investor. You aren't. If you bought it based on a feeling, a tip, or a chart pattern, you are speculating. And the market loves to punish speculators who believe they are investors.
+The Illusion of Competence
 
-2. The Trinity of Safety The author solves this by demanding we sign a mental contract before spending a dime. He strips away the noise and offers a ruthless definition. An operation is only an investment if it meets three specific criteria upon thorough analysis:
+Here is the uncomfortable truth: 90% of people who think they are "investing" are actually just gambling with better odds. The friction in your financial life usually stems from a single category error. You treat the stock market like a casino where the chips are expensive and the rules are vague. You assume that because you bought a stock and held it for a year, you are an investor. You aren't. If you bought it based on a feeling, a tip, or a chart pattern, you are speculating. And the market loves to punish speculators who believe they are investors.
+
+The Trinity of Safety
+
+The author solves this by demanding we sign a mental contract before spending a dime. He strips away the noise and offers a ruthless definition. An operation is only an investment if it meets three specific criteria upon thorough analysis:
 
 Safety of Principal: You are reasonably sure you won't lose your initial cash.
 
@@ -11,9 +15,11 @@ Thorough Analysis: You have done the math on the underlying business, not just t
 
 Imagine a man betting on a horse race. He studies the track record, the jockey, and the weather. He is informed, but he is still gambling because he has no safety of principal—if the horse loses, his money vanishes. The "Intelligent Investor" refuses to bet on the horse; he buys the racetrack.
 
-3. The Gamification Trap In the modern era, this distinction is harder to see because the casino has moved into your pocket. Trading apps shower you with digital confetti when you execute a trade, conditioning you to crave action over analysis. We see this in the "Crypto Craze" or the "AI Gold Rush." Buying a digital token because you hope a billionaire tweets about it is not investing; it is the "Greater Fool Theory"—hoping someone else will pay more for your mistake. The danger today isn't just market volatility; it’s the user interface of your life designed to make speculation feel like strategy. If your asset relies entirely on hype to succeed, you aren't investing in a business; you're investing in a narrative.
+The Gamification Trap
 
-4. Action Plan
+In the modern era, this distinction is harder to see because the casino has moved into your pocket. Trading apps shower you with digital confetti when you execute a trade, conditioning you to crave action over analysis. We see this in the "Crypto Craze" or the "AI Gold Rush." Buying a digital token because you hope a billionaire tweets about it is not investing; it is the "Greater Fool Theory"—hoping someone else will pay more for your mistake. The danger today isn't just market volatility; it’s the user interface of your life designed to make speculation feel like strategy. If your asset relies entirely on hype to succeed, you aren't investing in a business; you're investing in a narrative.
+
+The Action Plan
 
 The 10% Containment Wall: Take your total capital. Segregate a maximum of 10% into a separate "Mad Money" account. This is the only place you are allowed to speculate on high-risk assets, crypto, or hunches.
 

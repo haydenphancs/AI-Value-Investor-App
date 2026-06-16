@@ -1,17 +1,14 @@
 Core 10: Designing the Allocation
-The Hook 
 Watering the Weeds
 You are likely guilty of the most destructive habit in investing: "Cutting the flowers and watering the weeds." You buy a stock, and it goes up 40%. You get nervous. You think, "I better sell and lock in the profit before it disappears." Then you look at your other stock that is down 40%. You think, "I can’t sell this one at a loss; I’ll wait for it to come back."
 
 So, you sell the winner and keep the loser. You have just penalized success and rewarded failure. Over time, this leaves you with a portfolio full of stagnant "weeds" and zero "flowers." You are managing your emotions, not your money.
 
-The Author’s Solution
 The Concentration Edge
  Peter Lynch viewed portfolio management as gardening. He argued that there is no magic number of stocks to own, but there is a magic rule: only own what you can follow. He mocked the idea of "diversification" for its own sake, calling it "diworsification."
 
 If you have a distinct "edge" in only one company, own one. If you find five great situations, own five. But don't buy a 10th stock just to "spread risk" if you don't know anything about it. Lynch’s strategy was to constantly rotate capital based on the "story," not the price. If a "Stalwart" (steady grower) went up 50% and got expensive, he would sell it to buy a "Fast Grower" or a "Turnaround" that was just starting its journey. He didn't sell because the price was up; he sold because the opportunity had shifted to a better category.
 
-The 'Wiser' Analysis
 The "Fake Diversification" Trap
  In the modern ETF era, investors have fooled themselves into thinking they are diversified when they are actually just "closet indexers." You might own an S&P 500 ETF, a "Tech Growth" ETF, and a "US Momentum" ETF. You think you have three distinct assets. In reality, all three are heavily weighted in NVIDIA, Microsoft, and Apple. You haven't diversified; you’ve just tripled your exposure to the same five companies.
 

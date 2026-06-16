@@ -38,7 +38,23 @@ def sw(s: str) -> str:
 
 
 def is_short_heading(line: str) -> bool:
-    return len(line.split()) <= 12 and line[-1] not in ".!?"
+    if not line or line[-1] in ".!?":
+        return False
+    # A line ending in ":" is a heading only if it's a short label/name (e.g. "Final Words:",
+    # "Action Plan:"). A long colon-ending line is an intro SENTENCE, not a title -> paragraph.
+    if line.endswith(":"):
+        return len(line.split()) <= 8
+    return len(line.split()) <= 12
+
+
+def clean_heading(text: str) -> str:
+    """Tidy a heading: normalize action-plan headers and drop a trailing label colon."""
+    t = text.strip()
+    if re.fullmatch(r"(the\s+)?action\s+plan\s*:?", t, re.I):
+        return "The Action Plan"
+    if t.endswith(":"):
+        t = t[:-1].rstrip()
+    return t
 
 
 def core_num(p: Path) -> int:
@@ -68,7 +84,7 @@ def parse_core(path: Path):
             in_action = False
             continue
         if is_short_heading(line):
-            sections.append(("heading", line))
+            sections.append(("heading", clean_heading(line)))
             in_action = bool(ACTION_RE.search(line))
             continue
         if in_action and ": " in line:            # action step "Name: description"

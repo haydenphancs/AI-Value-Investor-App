@@ -1,5 +1,6 @@
 Core 11: Avoiding the "Smart Beta" Trap
-The Hook: The Alchemy of Wall Street
+The Alchemy of Wall Street
+
 There is a term in finance invented purely to make you feel inadequate: "Smart Beta." It implies, rather rudely, that the standard index fund you own is "Dumb Beta." The friction here is intellectual vanity. Wall Street knows you have accepted that stock-picking is hard, so they have pivoted to a new seduction: "Don't pick stocks; pick the perfect algorithm."
 
 They sell you complex ETFs that claim to "optimize" the market. They promise to weight companies not by size, but by "Quality," "Momentum," or "Volatility." It sounds like science. It looks like math. But in reality, it is marketing. It is the modern version of alchemy—trying to turn the lead of market averages into the gold of superior returns without taking on extra risk. Most investors fail here because they confuse a back-tested simulation with future reality.

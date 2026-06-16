@@ -11,15 +11,11 @@ struct BookLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
     @ObservedObject private var progress = BookProgressStore.shared
-    @State private var searchText = ""
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
 
-    private var filteredBooks: [LibraryBook] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ordered = books.sorted { $0.curriculumOrder < $1.curriculumOrder }
-        guard !query.isEmpty else { return ordered }
-        return ordered.filter { $0.matches(query) }
+    private var orderedBooks: [LibraryBook] {
+        books.sorted { $0.curriculumOrder < $1.curriculumOrder }
     }
 
     private var masteredCount: Int {
@@ -47,11 +43,6 @@ struct BookLibraryView: View {
                 BookLibraryHeader(onBackTapped: {
                     dismiss()
                 })
-
-                // Sticky search bar
-                BookLibrarySearchBar(searchText: $searchText)
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.bottom, AppSpacing.md)
 
                 // Scrollable content
                 ScrollView(showsIndicators: false) {
@@ -82,7 +73,7 @@ struct BookLibraryView: View {
                         .padding(.top, AppSpacing.md)
 
                         // Book List
-                        ForEach(filteredBooks) { book in
+                        ForEach(orderedBooks) { book in
                             LibraryBookCard(
                                 book: book,
                                 isMastered: progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount),
@@ -166,39 +157,6 @@ private struct BookLibraryHeader: View {
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.sm)
         .padding(.bottom, AppSpacing.lg)
-    }
-}
-
-// MARK: - Search Bar
-private struct BookLibrarySearchBar: View {
-    @Binding var searchText: String
-
-    var body: some View {
-        HStack(spacing: AppSpacing.sm) {
-            Image(systemName: "magnifyingglass")
-                .font(AppTypography.iconDefault).fontWeight(.medium)
-                .foregroundColor(AppColors.textMuted)
-
-            TextField("Search books, topics, or authors...", text: $searchText)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-                .autocapitalization(.none)
-                .disableAutocorrection(true)
-
-            if !searchText.isEmpty {
-                Button(action: {
-                    searchText = ""
-                }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(AppTypography.iconDefault)
-                        .foregroundColor(AppColors.textMuted)
-                }
-            }
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
     }
 }
 

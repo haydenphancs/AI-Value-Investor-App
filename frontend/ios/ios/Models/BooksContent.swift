@@ -2039,15 +2039,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("Demand the boring version")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Financial news is mathematically engineered to terrify you into clicking. Open your Updates tab and rely strictly on the AI summaries. Let the system strip out the apocalyptic adjectives and give you the cold, boring facts in three simple bullet points.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "Demand the boring version",
+                                description: "Financial news is mathematically engineered to terrify you into clicking. Open your Updates tab and rely strictly on the AI summaries. Let the system strip out the apocalyptic adjectives and give you the cold, boring facts in three simple bullet points.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 250,
                 currentProgress: 0.0
@@ -2119,25 +2120,21 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("Interrogate the Valuation")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't just at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely \"Overvalued\" with a negative margin of safety, and the risk is too high. Think again!")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Chat with the Cold Truth")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("When an internet guru promises a revolutionary new paradigm that \"changes the rules of investing,\" open the Wiser tab to chat with Caudex AI, with a simple question: \"Has this kind of market narrative happened before, and how does it usually end?\". Let the vector-stored logic of history throw cold water on the hot mirage.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "Interrogate the Valuation",
+                                description: "Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't just at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely \"Overvalued\" with a negative margin of safety, and the risk is too high. Think again!",
+                                isCompleted: false
+                            ),
+                            ActionStep(
+                                title: "Chat with the Cold Truth",
+                                description: "When an internet guru promises a revolutionary new paradigm that \"changes the rules of investing,\" open the Wiser tab to chat with Caudex AI, with a simple question: \"Has this kind of market narrative happened before, and how does it usually end?\". Let the vector-stored logic of history throw cold water on the hot mirage.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 289,
                 currentProgress: 0.0
@@ -3663,15 +3660,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The Moat Test")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Before you believe a hype cycle, run a Deep Research Report using the Warren Buffett Persona. If the AI analysis cannot find a durable competitive advantage, you are gambling. Be careful!")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The Moat Test",
+                                description: "Before you believe a hype cycle, run a Deep Research Report using the Warren Buffett Persona. If the AI analysis cannot find a durable competitive advantage, you are gambling. Be careful!",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 200,
                 currentProgress: 0.0
@@ -3738,25 +3736,21 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The \"Whale\" Reality Check")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Go to the Whale Tracking tab  in your app. Look for a stock where one major fund (e.g., a Hedge Fund) is buying and another is selling. Witness the zero-sum game in real-time: two \"geniuses\" betting against each other. Realize that if they can't agree, your odds of outsmarting them are near zero.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Diversify Your Survival")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Check your Portfolio Insights widget for your Diversification Score. If the score warns that you are heavily concentrated in one sector (e.g., \"90% Tech\"), you are trying to beat the dealer. Rebalance until the score indicates you own the \"House\" (the broad economy), not just a few risky tables.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The \"Whale\" Reality Check",
+                                description: "Go to the Whale Tracking tab  in your app. Look for a stock where one major fund (e.g., a Hedge Fund) is buying and another is selling. Witness the zero-sum game in real-time: two \"geniuses\" betting against each other. Realize that if they can't agree, your odds of outsmarting them are near zero.",
+                                isCompleted: false
+                            ),
+                            ActionStep(
+                                title: "Diversify Your Survival",
+                                description: "Check your Portfolio Insights widget for your Diversification Score. If the score warns that you are heavily concentrated in one sector (e.g., \"90% Tech\"), you are trying to beat the dealer. Rebalance until the score indicates you own the \"House\" (the broad economy), not just a few risky tables.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 227,
                 currentProgress: 0.0
@@ -3833,15 +3827,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The \"Forever\" Filter")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: \"Is this a company I can hold for 10 years without selling?\" If the answer is no, think again. The cheapest trade is the one you never have to exit.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The \"Forever\" Filter",
+                                description: "Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: \"Is this a company I can hold for 10 years without selling?\" If the answer is no, think again. The cheapest trade is the one you never have to exit.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 195,
                 currentProgress: 0.0
@@ -4038,15 +4033,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The \"Haystack\" Audit")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Go to your Tracking Tab and look at the Diversification Score widget. The Instruction: If your score is low (e.g., heavily weighted in \"Tech\" or \"Crypto\"), you are holding a handful of grass, not the haystack. You are exposed to the risk of a single fire wiping you out. Aim for a score that reflects the broad economy.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The \"Haystack\" Audit",
+                                description: "Go to your Tracking Tab and look at the Diversification Score widget. The Instruction: If your score is low (e.g., heavily weighted in \"Tech\" or \"Crypto\"), you are holding a handful of grass, not the haystack. You are exposed to the risk of a single fire wiping you out. Aim for a score that reflects the broad economy.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 263,
                 currentProgress: 0.0
@@ -4173,12 +4169,18 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("Search for a Treasury ETF (like SGOV or BIL). Check the Dividend Yield. If this \"risk-free\" number is near 4-5%, ask yourself: \"Is my risky tech portfolio actually beating this guaranteed hurdle after the recent drop?\" If not, you are taking on stress for zero premium.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The Risk-Free Hurdle",
+                                description: "Search for a Treasury ETF (like SGOV or BIL). Check the Dividend Yield. If this \"risk-free\" number is near 4-5%, ask yourself: \"Is my risky tech portfolio actually beating this guaranteed hurdle after the recent drop?\" If not, you are taking on stress for zero premium.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
-                audioDurationSeconds: 217,
+                audioDurationSeconds: 218,
                 currentProgress: 0.0
             ),
             10: CoreChapterContent(
@@ -5223,10 +5225,15 @@ extension CoreChapterContent {
         8: [
             1: CoreChapterContent(
                 chapterNumber: 1,
-                chapterTitle: "The Ticker Tape Illusion Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.",
+                chapterTitle: "The Ticker Tape Illusion",
                 bookTitle: "The Essays of Warren Buffett",
                 bookAuthor: "Warren Buffett",
                 sections: [
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.")
+                    ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
@@ -5264,7 +5271,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 156,
+                audioDurationSeconds: 157,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -6611,15 +6618,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The \"Competence Interrogation\"")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The next time you feel the urge to capitalize on a trending narrative (like a new AI infrastructure company), open your Chat tab. The Instruction: Force yourself to teach the business model to the AI. Type: \"Here is how [Company] generates free cash flow, and here is exactly why their competitors cannot steal their margins. Critique my thesis.\" If you cannot write that prompt clearly, or if the AI instantly demolishes your logic, you are swinging at a pitch outside your zone!")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The \"Competence Interrogation\"",
+                                description: "The next time you feel the urge to capitalize on a trending narrative (like a new AI infrastructure company), open your Chat tab. The Instruction: Force yourself to teach the business model to the AI. Type: \"Here is how [Company] generates free cash flow, and here is exactly why their competitors cannot steal their margins. Critique my thesis.\" If you cannot write that prompt clearly, or if the AI instantly demolishes your logic, you are swinging at a pitch outside your zone!",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 327,
                 currentProgress: 0.0
@@ -6847,15 +6855,16 @@ extension CoreChapterContent {
                         content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .heading,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("The \"Infrastructure\" Check")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Open your Chat tab and ask Caudex to identify the \"unsexy\" infrastructure providers for any hyped sector on your watchlist. Focus on companies that provide the power, land, or basic protocols required for that industry to function, ensuring your floor is supported by physical necessity rather than just sentiment.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "The \"Infrastructure\" Check",
+                                description: "Open your Chat tab and ask Caudex to identify the \"unsexy\" infrastructure providers for any hyped sector on your watchlist. Focus on companies that provide the power, land, or basic protocols required for that industry to function, ensuring your floor is supported by physical necessity rather than just sentiment.",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
                 audioDurationSeconds: 270,
                 currentProgress: 0.0
@@ -7034,7 +7043,7 @@ extension BookCoreChapter {
             BookCoreChapter(number: 10, title: "The Lifecycle Wealth Map", description: "Here is the most expensive mistake smart people make: They treat investing like a static number. They ask, \"What is the best portf…"),
         ],
         8: [
-            BookCoreChapter(number: 1, title: "The Ticker Tape Illusion Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.", description: "The \"Silent Partner\" Letter Buffett flips this dynamic by ignoring the stock market entirely. In his foundational Owner-Related Bu…"),
+            BookCoreChapter(number: 1, title: "The Ticker Tape Illusion", description: "Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over th…"),
             BookCoreChapter(number: 2, title: "Decoding the True Economics", description: "The Profit Mirage Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspi…"),
             BookCoreChapter(number: 3, title: "Determining the Strength of the Moat", description: "The \"Good Product\" Fallacy Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growi…"),
             BookCoreChapter(number: 4, title: "Mastering Market Psychology", description: "You believe the market is an authority figure. When a stock price collapses by 10% in a single morning, your primal brain assumes…"),

@@ -14,6 +14,7 @@ struct MoneyMovesDetailView: View {
     @State private var blueprints: [MoneyMove] = []
     @State private var valueTraps: [MoneyMove] = []
     @State private var battles: [MoneyMove] = []
+    @State private var featured: MoneyMoveArticle?
     @State private var selectedArticle: MoneyMoveArticle?
 
     var body: some View {
@@ -32,16 +33,17 @@ struct MoneyMovesDetailView: View {
                 // Scrollable content
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
-                        // Hero Card - Featured Deep Dive
-                        FeaturedDeepDiveHeroCard(
-                            article: MoneyMoveArticle.sampleDigitalFinance,
-                            onTap: {
-                                // Create a special version with featured flag for the orange gradient
-                                selectedArticle = MoneyMoveArticle.featuredDigitalFinance
-                            }
-                        )
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.top, AppSpacing.md)
+                        // Hero Card - Featured Deep Dive. Dynamic: the isFeatured article served
+                        // by the backend. Flipping isFeatured server-side swaps the hero (e.g. a
+                        // weekly deep dive) with NO app update.
+                        if let featured {
+                            FeaturedDeepDiveHeroCard(
+                                article: featured,
+                                onTap: { selectedArticle = featured }
+                            )
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.top, AppSpacing.md)
+                        }
 
                         // Section 1: The Blueprints
                         MoneyMovesCategorySection(
@@ -101,9 +103,10 @@ struct MoneyMovesDetailView: View {
         let authoredTitles = Set(cards.map { $0.title })
         cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
 
-        blueprints = cards.filter { $0.category == .blueprints }
-        valueTraps = cards.filter { $0.category == .valueTraps }
-        battles = cards.filter { $0.category == .battles }
+        featured = MoneyMovesContentStore.shared.featuredArticle()
+        blueprints = cards.filter { $0.category == .blueprints && !$0.isFeatured }
+        valueTraps = cards.filter { $0.category == .valueTraps && !$0.isFeatured }
+        battles = cards.filter { $0.category == .battles && !$0.isFeatured }
     }
 
     private func handleMoveTap(_ move: MoneyMove) {

@@ -27,6 +27,10 @@ final class MoneyMovesContentStore {
     private var remoteCards: [MoneyMove] = []
     private var didPrefetch = false
 
+    // The featured "deep dive" hero article (isFeatured == true). Remote is authoritative.
+    private var remoteFeatured: MoneyMoveArticle?
+    private var bundledFeatured: MoneyMoveArticle?
+
     private init() {
         loadBundled()
     }
@@ -40,6 +44,13 @@ final class MoneyMovesContentStore {
 
     func hasContent(forTitle title: String) -> Bool {
         remoteByTitle[title] != nil || bundledByTitle[title] != nil
+    }
+
+    /// The featured "deep dive" hero article (isFeatured == true), preferring fresh backend
+    /// content. nil only if no article anywhere is flagged featured. Flipping the flag
+    /// server-side swaps the hero with NO app update.
+    func featuredArticle() -> MoneyMoveArticle? {
+        remoteFeatured ?? bundledFeatured
     }
 
     /// Authored catalog cards, ordered by sortOrder. Remote (backend) takes precedence;
@@ -65,9 +76,12 @@ final class MoneyMovesContentStore {
             let ordered = response.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
             remoteByTitle = [:]
             remoteCards = []
+            remoteFeatured = nil
             for dto in ordered {
-                remoteByTitle[dto.title] = dto.toArticle()
+                let art = dto.toArticle()
+                remoteByTitle[dto.title] = art
                 remoteCards.append(dto.toCard())
+                if dto.isFeatured == true, remoteFeatured == nil { remoteFeatured = art }
             }
         } catch {
             // Stay on bundled content; never block the screen on a network hiccup.
@@ -88,8 +102,10 @@ final class MoneyMovesContentStore {
             let file = try JSONDecoder().decode(MoneyMovesContentFile.self, from: data)
             let ordered = file.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
             for dto in ordered {
-                bundledByTitle[dto.title] = dto.toArticle()
+                let art = dto.toArticle()
+                bundledByTitle[dto.title] = art
                 bundledCards.append(dto.toCard())
+                if dto.isFeatured == true, bundledFeatured == nil { bundledFeatured = art }
             }
         } catch {
             print("[MoneyMovesContentStore] bundled decode failed: \(error)")

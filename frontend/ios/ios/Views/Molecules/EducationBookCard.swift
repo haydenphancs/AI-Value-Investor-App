@@ -100,44 +100,24 @@ struct EducationBookCard: View {
                 onTap?()
             }
 
-            // Action buttons
-            HStack(spacing: AppSpacing.md) {
-                Button(action: {
-                    onChatWithBook?()
-                }) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Image(systemName: "bubble.left.fill")
-                            .font(AppTypography.iconXS)
+            // Action button — Chat with Book (not yet wired; to be developed later)
+            Button(action: {
+                onChatWithBook?()
+            }) {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "bubble.left.fill")
+                        .font(AppTypography.iconXS)
 
-                        Text("Chat with Book")
-                            .font(AppTypography.bodySmallEmphasis)
-                    }
-                    .foregroundColor(AppColors.textPrimary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.cardBackgroundLight)
-                    .cornerRadius(AppCornerRadius.medium)
+                    Text("Chat with Book")
+                        .font(AppTypography.bodySmallEmphasis)
                 }
-                .buttonStyle(PlainButtonStyle())
-
-                Button(action: {
-                    onReadKeyIdeas?()
-                }) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Image(systemName: "lightbulb.fill")
-                            .font(AppTypography.iconXS)
-
-                        Text("Read Key Ideas")
-                            .font(AppTypography.bodySmallEmphasis)
-                    }
-                    .foregroundColor(AppColors.primaryBlue)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.primaryBlue.opacity(0.15))
-                    .cornerRadius(AppCornerRadius.medium)
-                }
-                .buttonStyle(PlainButtonStyle())
+                .foregroundColor(AppColors.primaryBlue)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
+                .background(AppColors.primaryBlue.opacity(0.15))
+                .cornerRadius(AppCornerRadius.medium)
             }
+            .buttonStyle(PlainButtonStyle())
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)

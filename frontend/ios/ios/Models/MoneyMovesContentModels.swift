@@ -95,6 +95,7 @@ struct MoneyMoveArticleDTO: Decodable {
     func toCard() -> MoneyMove {
         MoneyMove(
             slug: slug,
+            isFeatured: isFeatured ?? false,
             title: title,
             subtitle: cardSubtitle ?? subtitle,
             category: MoneyMoveArticleDTO.category(from: category),

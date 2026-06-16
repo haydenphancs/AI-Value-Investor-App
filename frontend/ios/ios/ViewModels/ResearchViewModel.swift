@@ -36,6 +36,20 @@ class ResearchViewModel: ObservableObject {
     }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
 
+    // MARK: - Reports Tab: Search + Multi-Select
+    /// Distinct from `searchText` (which drives the Research-tab stock target
+    /// search + generateAnalysis). This one only filters the Reports list.
+    @Published var reportSearchText: String = ""
+    @Published var isReportSearchActive: Bool = false
+    @Published var isSelectingReports: Bool = false
+    /// Keyed by `backendId` (NOT the per-load `AnalysisReport.id` UUID, which is
+    /// reminted on every `loadReports()`), so a selection survives the 5s poll
+    /// reload. Mock rows have no `backendId` and are therefore not selectable —
+    /// which is fine, they can't be deleted either.
+    @Published var selectedReportIds: Set<String> = []
+    @Published var isDeletingReports: Bool = false
+    @Published var showDeleteConfirm: Bool = false
+
     // Search results (as-you-type)
     @Published var searchResults: [StockSearchResult] = []
     @Published var isSearching: Bool = false
@@ -233,6 +247,7 @@ class ResearchViewModel: ObservableObject {
     }
 
     func refresh() async {
+        guard !isDeletingReports else { return }   // don't race the delete fan-out
         isLoading = true
         await loadBackendData()
         isLoading = false
@@ -257,6 +272,10 @@ class ResearchViewModel: ObservableObject {
                 if !hasInflight {
                     return
                 }
+                // Don't churn the list mid-selection — a reload remints row
+                // UUIDs and can reorder rows under the user. Skip this tick;
+                // the task stays alive and resumes once selection ends.
+                if self.isSelectingReports { continue }
                 await self.loadReports()
             }
         }
@@ -497,6 +516,95 @@ class ResearchViewModel: ObservableObject {
             reports.sort { ($0.rating ?? 0) > ($1.rating ?? 0) }
         case .ratingLow:
             reports.sort { ($0.rating ?? 0) < ($1.rating ?? 0) }
+        }
+    }
+
+    // MARK: - Reports Tab: Derived (search + grouping)
+
+    /// `reports` filtered by the report search query (ticker OR company name,
+    /// case-insensitive). `reports` is already sorted in place by sortReports(),
+    /// so this preserves the chosen sort order.
+    var filteredReports: [AnalysisReport] {
+        let q = reportSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return reports }
+        return reports.filter {
+            $0.ticker.lowercased().contains(q) || $0.companyName.lowercased().contains(q)
+        }
+    }
+
+    /// Filtered reports grouped into time bands, ordered newest → oldest.
+    /// Empty bands are omitted so no stray section header renders. The Sort
+    /// option orders cards WITHIN each band (since `filteredReports` is sorted).
+    var groupedReports: [ReportSectionGroup] {
+        let buckets = Dictionary(grouping: filteredReports) { ReportTimeSection.bucket(for: $0.date) }
+        return ReportTimeSection.allCases.compactMap { section in
+            guard let rows = buckets[section], !rows.isEmpty else { return nil }
+            return ReportSectionGroup(section: section, reports: rows)
+        }
+    }
+
+    var selectedReportCount: Int { selectedReportIds.count }
+
+    // MARK: - Reports Tab: Selection + Delete
+
+    func toggleReportSelection(_ report: AnalysisReport) {
+        guard let bid = report.backendId else { return }   // mock rows aren't selectable
+        if selectedReportIds.contains(bid) {
+            selectedReportIds.remove(bid)
+        } else {
+            selectedReportIds.insert(bid)
+        }
+    }
+
+    func exitSelectionMode() {
+        isSelectingReports = false
+        selectedReportIds.removeAll()
+    }
+
+    /// Delete every selected report. Fans out parallel DELETEs against the
+    /// existing per-report endpoint (soft-delete, idempotent → safe to parallel).
+    /// Rows are removed optimistically and seeded into `dismissedReportIds` so a
+    /// subsequent poll/loadReports() can't resurrect them. On partial failure the
+    /// failed ids are un-dismissed and the list is reconciled via loadReports().
+    func deleteSelectedReports() async {
+        guard !selectedReportIds.isEmpty, !isDeletingReports else { return }
+        isDeletingReports = true
+        defer { isDeletingReports = false }
+
+        let ids = Array(selectedReportIds)
+
+        // Optimistic removal + dismiss-seed (mirrors retryReport's pattern).
+        for id in ids { dismissedReportIds.insert(id) }
+        reports.removeAll { report in
+            guard let bid = report.backendId else { return false }
+            return ids.contains(bid)
+        }
+        exitSelectionMode()
+
+        // Parallel fan-out. Return (rid, success) — a Sendable tuple, so no
+        // `any Error` crosses the task boundary.
+        var failedIds: [String] = []
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for rid in ids {
+                group.addTask { [apiClient] in
+                    do {
+                        try await apiClient.request(endpoint: .deleteReport(reportId: rid))
+                        return (rid, true)
+                    } catch {
+                        return (rid, false)
+                    }
+                }
+            }
+            for await (rid, ok) in group where !ok {
+                failedIds.append(rid)
+                dismissedReportIds.remove(rid)   // allow the failed row to come back
+            }
+        }
+
+        if !failedIds.isEmpty {
+            await loadReports()   // reconcile: rows that failed to delete reappear
+            let n = failedIds.count
+            self.error = "Couldn't delete \(n) report\(n == 1 ? "" : "s"). Please try again."
         }
     }
 

@@ -16,17 +16,22 @@ struct ReportCard: View {
         Button(action: {
             onTap?()
         }) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 // Header: Company name + Status
                 HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                        Text(report.companyName)
-                            .font(AppTypography.headingSmall)
-                            .foregroundColor(AppColors.textPrimary)
+                    HStack(spacing: AppSpacing.sm) {
+                        // Company logo (FMP CDN on a white chip, initials fallback)
+                        CompanyLogoView(ticker: report.ticker, size: 36)
 
-                        Text(report.tickerAndIndustry)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
+                        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                            Text(report.companyName)
+                                .font(AppTypography.headingSmall)
+                                .foregroundColor(AppColors.textPrimary)
+
+                            Text(report.tickerAndIndustry)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
                     }
 
                     Spacer()
@@ -48,27 +53,36 @@ struct ReportCard: View {
                     }
                 }
 
-                // Persona info with score gauge on the right (for ready status)
+                // Persona info with score gauge on the right (for ready status).
+                // The date sits directly under the persona block (left column),
+                // tucked into the gauge's vertical band — so there's no separate
+                // bottom date row and the card stays compact.
                 if report.status == .ready, let rating = report.rating {
                     HStack(spacing: AppSpacing.sm) {
-                        // Left: Persona info
-                        HStack(spacing: AppSpacing.sm) {
-                            PersonaIcon(
-                                persona: report.persona,
-                                size: 32,
-                                isSelected: true
-                            )
+                        // Left: Persona info + date underneath
+                        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                            HStack(spacing: AppSpacing.sm) {
+                                PersonaIcon(
+                                    persona: report.persona,
+                                    size: 32,
+                                    isSelected: true
+                                )
 
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text(report.persona.rawValue)
-                                    .font(AppTypography.labelSmall)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(AppColors.textPrimary)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(report.persona.rawValue)
+                                        .font(AppTypography.labelSmall)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(AppColors.textPrimary)
 
-                                Text(report.persona.tagline)
-                                    .font(AppTypography.caption)
-                                    .foregroundColor(AppColors.textSecondary)
+                                    Text(report.persona.tagline)
+                                        .font(AppTypography.caption)
+                                        .foregroundColor(AppColors.textSecondary)
+                                }
                             }
+
+                            Text(report.formattedDate)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
                         }
 
                         Spacer()
@@ -149,8 +163,10 @@ struct ReportCard: View {
                     }
                 }
 
-                // Date (for ready and failed)
-                if report.status != .processing || report.status == .processing {
+                // Date row for non-ready cards only (processing right-aligned,
+                // failed left-aligned). Ready shows the date under the persona
+                // block above, so it has no bottom row.
+                if report.status != .ready {
                     HStack {
                         if report.status == .processing {
                             Spacer()

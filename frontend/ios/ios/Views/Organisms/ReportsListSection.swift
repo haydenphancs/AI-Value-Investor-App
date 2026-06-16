@@ -2,72 +2,239 @@
 //  ReportsListSection.swift
 //  ios
 //
-//  Organism: List of analysis reports with sort option
+//  Organism: Grouped, searchable, multi-selectable list of analysis reports.
+//  Header row hosts Sort + Search + Edit/Done; the list is grouped into time
+//  bands (Recent / Last Month / Older) with the Sort option ordering cards
+//  within each band.
 //
 
 import SwiftUI
 
 struct ReportsListSection: View {
-    let reports: [AnalysisReport]
+    let sections: [ReportSectionGroup]
     @Binding var sortOption: ReportSortOption
+    @Binding var searchText: String
+    @Binding var isSearchActive: Bool
+    @Binding var isSelecting: Bool
+    let selectedIds: Set<String>
     var onReportTapped: ((AnalysisReport) -> Void)?
     var onRetryTapped: ((AnalysisReport) -> Void)?
+    var onToggleSelect: ((AnalysisReport) -> Void)?
+    /// Enter selection mode (when idle) or exit + clear (when selecting).
+    var onToggleSelectingMode: (() -> Void)?
+
+    @State private var showSortMenu = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Sort header
-            // Pull-down Menu (same component as the report's ••• overflow menu),
-            // so the options render at the compact context-menu size — matching
-            // "Share" — instead of the larger action-sheet buttons a
-            // .confirmationDialog would use.
-            Menu {
-                ForEach(ReportSortOption.allCases, id: \.rawValue) { option in
-                    Button(option.rawValue) {
-                        sortOption = option
-                    }
-                }
-            } label: {
-                HStack(spacing: AppSpacing.xxs) {
-                    Text("Sort")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
+            headerRow
 
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(AppTypography.iconTiny).fontWeight(.medium)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-                .padding(.horizontal, AppSpacing.sm)
-                .padding(.vertical, AppSpacing.xs)
-                .background(
-                    Capsule()
-                        .fill(AppColors.cardBackgroundLight)
-                )
+            if isSearchActive {
+                searchReveal
             }
 
-            // Reports list
-            LazyVStack(spacing: AppSpacing.md) {
-                ForEach(reports) { report in
-                    ReportCard(
-                        report: report,
-                        onTap: {
-                            onReportTapped?(report)
-                        },
-                        onRetry: {
-                            onRetryTapped?(report)
+            if sections.isEmpty && !searchText.isEmpty {
+                emptySearchState
+            } else {
+                list
+            }
+        }
+        // Custom sort dropdown floats above the list, anchored under the Sort
+        // button. Overlay sits BEFORE the horizontal padding so its leading
+        // edge lines up with the Sort capsule's leading edge.
+        .overlay(alignment: .topLeading) {
+            if showSortMenu {
+                sortDropdown
+            }
+        }
+        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    // MARK: - Header
+
+    private var headerRow: some View {
+        HStack(spacing: AppSpacing.sm) {
+            // Sort — opens a custom dropdown (see sortDropdown). Not a system
+            // Menu (can't shrink its ~280pt min width) and not a .popover
+            // (has a beak that isn't the iOS-standard look here).
+            Button {
+                showSortMenu = true
+            } label: {
+                sortCapsule
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Spacer()
+
+            // Search toggle
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isSearchActive.toggle()
+                    if !isSearchActive { searchText = "" }
+                }
+            } label: {
+                iconCapsule(systemName: "magnifyingglass", active: isSearchActive)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            // Edit / Done toggle
+            Button {
+                onToggleSelectingMode?()
+            } label: {
+                if isSelecting {
+                    Text("Done")
+                        .font(AppTypography.caption).fontWeight(.semibold)
+                        .foregroundColor(AppColors.primaryBlue)
+                        .padding(.horizontal, AppSpacing.sm)
+                        .padding(.vertical, AppSpacing.xs)
+                        .background(Capsule().fill(AppColors.cardBackgroundLight))
+                } else {
+                    iconCapsule(systemName: "pencil", active: false)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+
+    private var sortCapsule: some View {
+        HStack(spacing: AppSpacing.xxs) {
+            Text("Sort")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+
+            Image(systemName: "arrow.up.arrow.down")
+                .font(AppTypography.iconTiny).fontWeight(.medium)
+                .foregroundColor(AppColors.textSecondary)
+        }
+        .padding(.horizontal, AppSpacing.sm)
+        .padding(.vertical, AppSpacing.xs)
+        .background(Capsule().fill(AppColors.cardBackgroundLight))
+    }
+
+    // Custom sort dropdown (no popover beak), anchored under the Sort button.
+    // Backdrop catches outside taps to dismiss; rows show a right-aligned
+    // checkmark on the active option, with more left inset than right.
+    private var sortDropdown: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture { showSortMenu = false }
+
+            VStack(spacing: 0) {
+                ForEach(ReportSortOption.allCases, id: \.rawValue) { option in
+                    Button {
+                        sortOption = option
+                        showSortMenu = false
+                    } label: {
+                        HStack(spacing: AppSpacing.md) {
+                            Text(option.rawValue)
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textPrimary)
+                            Spacer(minLength: AppSpacing.md)
+                            Image(systemName: "checkmark")
+                                .font(AppTypography.iconSmall).fontWeight(.semibold)
+                                .foregroundColor(AppColors.primaryBlue)
+                                .opacity(sortOption == option ? 1 : 0)   // reserve space → rows stay aligned
                         }
+                        .padding(.leading, AppSpacing.lg)    // more space at left
+                        .padding(.trailing, AppSpacing.md)   // less space at right
+                        .padding(.vertical, AppSpacing.sm + 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            .frame(width: 178)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackgroundLight)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.4), radius: 16, y: 6)
+            .offset(y: 34)   // drop just below the Sort capsule
+        }
+    }
+
+    private func iconCapsule(systemName: String, active: Bool) -> some View {
+        Image(systemName: systemName)
+            .font(AppTypography.iconSmall).fontWeight(.medium)
+            .foregroundColor(active ? AppColors.primaryBlue : AppColors.textSecondary)
+            .padding(.horizontal, AppSpacing.sm)
+            .padding(.vertical, AppSpacing.xs)
+            .background(Capsule().fill(AppColors.cardBackgroundLight))
+    }
+
+    private var searchReveal: some View {
+        HStack(spacing: AppSpacing.sm) {
+            SearchBar(text: $searchText,
+                      placeholder: "Search ticker or company",
+                      autoFocus: true)
+            Button("Cancel") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isSearchActive = false
+                    searchText = ""
+                }
+            }
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.primaryBlue)
+        }
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    // MARK: - List
+
+    private var list: some View {
+        LazyVStack(alignment: .leading, spacing: AppSpacing.md) {
+            ForEach(sections) { group in
+                ReportTimeSectionHeader(section: group.section)
+                    .padding(.top, AppSpacing.xs)
+
+                ForEach(group.reports) { report in
+                    SelectableReportRow(
+                        report: report,
+                        isSelecting: isSelecting,
+                        isSelected: report.backendId.map { selectedIds.contains($0) } ?? false,
+                        onTap: { onReportTapped?(report) },
+                        onRetry: { onRetryTapped?(report) },
+                        onToggleSelect: { onToggleSelect?(report) }
                     )
                 }
             }
         }
-        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    private var emptySearchState: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 32))
+                .foregroundColor(AppColors.textMuted)
+            Text("No reports match \"\(searchText)\"")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxxl)
     }
 }
 
 #Preview {
     ScrollView {
         ReportsListSection(
-            reports: AnalysisReport.mockReports,
-            sortOption: .constant(.dateNewest)
+            sections: [ReportSectionGroup(section: .recent, reports: AnalysisReport.mockReports)],
+            sortOption: .constant(.dateNewest),
+            searchText: .constant(""),
+            isSearchActive: .constant(false),
+            isSelecting: .constant(false),
+            selectedIds: [],
+            onReportTapped: { _ in },
+            onRetryTapped: { _ in },
+            onToggleSelect: { _ in },
+            onToggleSelectingMode: { }
         )
     }
     .background(AppColors.background)

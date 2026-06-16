@@ -21,5 +21,4 @@ Wall Street knows you want to invest in "The Future"—AI, Data Centers, Cyberse
 Furthermore, in the world of Crypto, the costs are hidden in the "Gas" and the "Spread." You might buy a meme coin thinking it's free, but the bid-ask spread (the difference between the buy and sell price) might be 1% instantly. If you trade in and out of that coin ten times a year, you have voluntarily paid a 10% tax on your own money. The modern "Silent Heist" isn't a check you write to a broker; it is the friction of hyper-activity in a gamified app.
 
 The Action Plan
-The "Forever" Filter
-Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: "Is this a company I can hold for 10 years without selling?" If the answer is no, think again. The cheapest trade is the one you never have to exit.
+The "Forever" Filter: Go to the Research Tab and generate a report using the Warren Buffett Persona. Ask the AI specifically: "Is this a company I can hold for 10 years without selling?" If the answer is no, think again. The cheapest trade is the one you never have to exit.

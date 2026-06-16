@@ -545,6 +545,46 @@ enum ReportSortOption: String, CaseIterable {
     case ratingLow = "Lowest Rated"
 }
 
+// MARK: - Report Time Section
+/// Time bands used to group the Reports list for scannability. `allCases`
+/// order IS the display order (newest → oldest). Bucketing uses lower date
+/// cutoffs so the bands tile the timeline with no gap and no overlap: the
+/// "last 7 days" rolling window and the "previous calendar month" band would
+/// otherwise leave the 8–30-day region homeless — `.lastMonth` absorbs it.
+enum ReportTimeSection: String, CaseIterable {
+    case recent    = "RECENT"      // within the last 7 days (rolling)
+    case lastMonth = "LAST MONTH"  // older than Recent, on/after the 1st of the previous calendar month
+    case older     = "OLDER"       // everything else
+
+    /// Classify a report date. `now` / `calendar` are injectable for tests.
+    static func bucket(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> ReportTimeSection {
+        // Recent: within the last 7 days. Anchored to startOfDay so the window
+        // is stable regardless of the current time-of-day (and future-dated
+        // rows from clock skew fall here, which is correct).
+        let startToday = calendar.startOfDay(for: now)
+        if let recentCutoff = calendar.date(byAdding: .day, value: -7, to: startToday), date >= recentCutoff {
+            return .recent
+        }
+        // Last Month: older than Recent but on/after the 1st of the previous
+        // calendar month (absorbs the 8–30-day "gap" region).
+        let comps = calendar.dateComponents([.year, .month], from: now)
+        if let firstThisMonth = calendar.date(from: comps),
+           let firstPrevMonth = calendar.date(byAdding: .month, value: -1, to: firstThisMonth),
+           date >= firstPrevMonth {
+            return .lastMonth
+        }
+        return .older
+    }
+}
+
+/// One time-grouped section of the Reports list. A struct (not a tuple) so it's
+/// `Identifiable` — SwiftUI `ForEach` can't key off a tuple element.
+struct ReportSectionGroup: Identifiable {
+    let section: ReportTimeSection
+    let reports: [AnalysisReport]
+    var id: ReportTimeSection { section }
+}
+
 // MARK: - Backend → UI Mapping
 
 extension AnalysisReport {

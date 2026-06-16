@@ -181,7 +181,8 @@
     </div>
     <div class="meta">
       Report Date <b>{{ live_date or "—" }}</b><br/>
-      Analysis by <b>{{ persona_name }}</b>
+      Analysis by <b>{{ persona_name }}</b><br/>
+      Data backed by <b>Financial Modeling Prep</b>
     </div>
     <div class="clear"></div>
   </div>
@@ -215,24 +216,25 @@
   </table>
 
   <!-- ═══ Quantitative Scorecard ═══ -->
-  <div class="section-bar">Quantitative Scorecard<span class="hint">8 vitals · 0–100 scale</span></div>
   {% if vitals %}
+  {% set half = (vitals|length + 1) // 2 %}
+  <div class="section-bar">Quantitative Scorecard<span class="hint">{{ vitals|length }} vitals · 0–100 scale</span></div>
   <table class="vitals">
     <td class="col-l">
-      {% for v in vitals[:4] %}
+      {% for v in vitals[:half] %}
       <div class="barrow"><span class="lbl">{{ v.label }}</span><span class="val" style="color:{{ v.color }}">{{ v.score }}</span>
         <div class="track"><div class="fill" style="width:{{ v.score }}%;background:{{ v.color }}"></div></div></div>
       {% endfor %}
     </td>
     <td class="col-r">
-      {% for v in vitals[4:] %}
+      {% for v in vitals[half:] %}
       <div class="barrow"><span class="lbl">{{ v.label }}</span><span class="val" style="color:{{ v.color }}">{{ v.score }}</span>
         <div class="track"><div class="fill" style="width:{{ v.score }}%;background:{{ v.color }}"></div></div></div>
       {% endfor %}
     </td>
   </table>
-  <div class="caption-note">The eight vitals {{ persona_name }} weighs to compute the headline Quality Score — shown as proof behind the rating.</div>
-  {% else %}<div class="no-data">Vital scores unavailable.</div>{% endif %}
+  <div class="caption-note">The vitals {{ persona_name }} weighs to compute the headline Quality Score — shown as proof behind the rating.</div>
+  {% endif %}
 
   <!-- ═══ Executive Summary ═══ -->
   {% if exec_summary %}
@@ -360,7 +362,7 @@
     <td class="col-l">
       <div class="sub-h">Insider Buy / Sell Flow</div>
       {% if charts.insider_flow %}<div class="chart-wrap">{{ charts.insider_flow | safe }}</div>
-      <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>Buys<span class="sw" style="background:#DC2626"></span>Sells</div>{% else %}<div class="no-data">No insider-flow data.</div>{% endif %}
+      <div class="chart-legend"><span class="sw" style="background:#16A34A"></span>Buys<span class="sw" style="background:#DC2626"></span>Sells</div>{% else %}<div class="no-data">No insider-flow data.</div>{% endif %}
       {% if insider.transactions %}
       <table class="kv"><thead><tr><th>Type</th><th class="r">Trades</th><th class="r">Shares</th><th class="r">Value</th></tr></thead><tbody>
       {% for t in insider.transactions %}<tr><td class="name">{{ t.type }}</td><td class="r">{{ t.count }}</td><td class="r">{{ t.shares }}</td><td class="r">{{ t.value }}</td></tr>{% endfor %}
@@ -387,8 +389,8 @@
   </table>
   {% if insider.recent %}
   <div class="sub-h" style="margin-top:8px">Recent Insider Transactions</div>
-  <table class="kv"><thead><tr><th>Insider</th><th>Role</th><th>Date</th><th>Type</th><th class="r">Value ($M)</th></tr></thead><tbody>
-  {% for a in insider.recent[:6] %}<tr><td class="name">{{ a.name }}</td><td class="muted">{{ a.title }}</td><td class="muted">{{ a.date }}</td><td>{{ a.transaction_type }}</td><td class="r">{{ "%.2f"|format(a.change_in_millions) if a.change_in_millions is not none else "—" }}</td></tr>{% endfor %}
+  <table class="kv"><thead><tr><th>Insider</th><th>Role</th><th>Date</th><th>Type</th><th class="r">Shares</th><th class="r">Value</th></tr></thead><tbody>
+  {% for a in insider.recent[:6] %}<tr><td class="name">{{ a.name }}</td><td class="muted">{{ a.title }}</td><td class="muted">{{ a.date }}</td><td>{{ a.transaction_type }}</td><td class="r">{{ a.shares_label }}</td><td class="r">{{ a.value_label }}</td></tr>{% endfor %}
   </tbody></table>{% endif %}
   {% if management.top_holders or management.officers %}
   <table class="two-col" style="margin-top:8px">
@@ -412,7 +414,7 @@
   {% if hidden.congress or hidden.short_interest %}
   <table class="two-col">
     <td class="col-l">
-      <div class="sub-h">Congressional Trading</div>
+      <div class="sub-h">Congressional Trading{% if hidden.congress and hidden.congress.period %} · {{ hidden.congress.period }}{% endif %}</div>
       {% if hidden.congress %}{% set c = hidden.congress %}
       <table class="strip" style="margin-top:0">
         <tr>
@@ -467,7 +469,7 @@
       <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ (md.lifecycle_phase or '').replace('_',' ') }}</div></td>
     </tr>
   </table>
-  {% if md.tam_source_quote or md.tam_source_label %}<div class="src">TAM source: {% if md.tam_source_quote %}“{{ md.tam_source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.tam_scope %} ({{ md.tam_scope|upper }}){% endif %}</div>{% endif %}
+  {% if md.tam_source_quote or md.tam_source_label %}<div class="src">TAM source: {% if md.tam_source_quote %}“{{ md.tam_source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.tam_scope %} ({{ md.tam_scope|upper }}){% endif %}{% if md.projected and md.source_tam %} · base figure {{ tam_money(md.source_tam) }} ({{ md.source_year }}); {{ md.current_year }}/{{ md.future_year }} projected at {{ pct(md.cagr_5yr) }} CAGR{% endif %}</div>{% endif %}
   {% endif %}
   {% if moat.competitors %}
   <div class="sub-h" style="margin-top:8px">Competitive Landscape</div>

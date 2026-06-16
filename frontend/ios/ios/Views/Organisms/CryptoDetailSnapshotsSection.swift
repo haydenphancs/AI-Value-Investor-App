@@ -119,7 +119,7 @@ struct CryptoSnapshotCard: View {
                     } else {
                         ForEach(Array(snapshot.paragraphs.enumerated()), id: \.offset) { _, paragraph in
                             Text(paragraph)
-                                .font(AppTypography.labelSmall)
+                                .font(AppTypography.body)
                                 .foregroundColor(AppColors.textSecondary)
                                 .lineSpacing(4)
                                 .fixedSize(horizontal: false, vertical: true)

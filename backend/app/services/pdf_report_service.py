@@ -50,14 +50,15 @@ def _env() -> Environment:
 # Vital key -> display label, in render order. Keys come from the internal
 # `_scoring_inputs` dict that drives the headline quality score (never sent to iOS).
 _VITAL_LABELS: list[tuple[str, str]] = [
-    ("profitability", "Profitability"),
-    ("health", "Financial Health"),
-    ("growth", "Growth"),
     ("valuation", "Valuation"),
+    ("financial_health", "Financial Health"),
+    ("revenue", "Revenue Quality"),
+    ("forecast", "Forecast"),
+    ("moat", "Competitive Moat"),
+    ("wall_street", "Wall Street"),
     ("insider", "Insider Activity"),
+    ("capital_allocation", "Capital Allocation"),
     ("macro", "Macro Resilience"),
-    ("analyst", "Analyst Sentiment"),
-    ("momentum", "Price Momentum"),
 ]
 
 
@@ -160,6 +161,23 @@ def _fmt_owner_pct(v: Any) -> str:
     return "<0.001%"
 
 
+def _fmt_amount(v: Any, money: bool = False) -> str:
+    """Compact magnitude label with K/M/B units (e.g. 124000 -> '124K';
+    1_840_000 with money -> '$1.8M'). Returns '—' for None."""
+    n = _num(v)
+    if n is None:
+        return "—"
+    a = abs(n)
+    pre = "$" if money else ""
+    if a >= 1e9:
+        return f"{pre}{a / 1e9:.2f}B"
+    if a >= 1e6:
+        return f"{pre}{a / 1e6:.1f}M"
+    if a >= 1e3:
+        return f"{pre}{a / 1e3:.0f}K"
+    return f"{pre}{a:.0f}"
+
+
 def _to_int(v: Any) -> Optional[int]:
     try:
         return int(str(v).strip())
@@ -191,6 +209,11 @@ def _project_market_dynamics(md: dict) -> dict:
         md["future_year"] = str(disp_cur + (fut - src))
     cur_tam = _num(md.get("current_tam"))
     fut_tam = _num(md.get("future_tam"))
+    # Keep the RAW pre-projection figure + year for source attribution, so the
+    # PDF can cite the actual number we calculate from (e.g. Census/FRED 2023).
+    md["source_tam"] = cur_tam
+    md["source_year"] = str(src)
+    md["projected"] = years > 0
     if cur_tam is not None:
         md["current_tam"] = cur_tam * mult
     if fut_tam is not None:
@@ -318,6 +341,16 @@ def build_context(
         "value_label": p.get("revenue_label") or "",
         "is_forecast": bool(p.get("is_forecast")),
     } for p in timeline if isinstance(p, dict)]
+    # Forecast table: use the timeline's FORECAST years so it matches the chart
+    # (which plots annual_timeline through the last analyst year, e.g. 2031).
+    # Fall back to the curated 4-year window when no annual timeline exists.
+    if forecast.get("annual_timeline"):
+        projections_table = [
+            p for p in forecast["annual_timeline"]
+            if isinstance(p, dict) and p.get("is_forecast")
+        ]
+    else:
+        projections_table = forecast.get("projections") or []
 
     # Insider flow + dilution.
     insider = data.get("insider_data") or {}
@@ -341,7 +374,21 @@ def build_context(
         "label": p.get("period") or "",
         "value": (_num(p.get("shares_outstanding")) or 0.0) * 1e6,
     } for p in ca_points if _num(p.get("shares_outstanding"))]
-    recent_tx = ((insider.get("recent_transactions") or {}).get("activities")) or []
+    # Recent insider transactions: change_in_millions is millions of SHARES, and
+    # each row carries price_at_transaction — so derive both a precise share count
+    # and the dollar value (shares × price), matching the iOS Shares/Value columns.
+    recent_tx = []
+    for a in (((insider.get("recent_transactions") or {}).get("activities")) or []):
+        if not isinstance(a, dict):
+            continue
+        shares = abs((_num(a.get("change_in_millions")) or 0.0) * 1e6)
+        price = _num(a.get("price_at_transaction"))
+        value = shares * price if (shares and price) else None
+        recent_tx.append({
+            **a,
+            "shares_label": _fmt_amount(shares) if shares else "—",
+            "value_label": _fmt_amount(value, money=True),
+        })
 
     # Hidden signals.
     hidden = data.get("hidden_market_signals") or {}
@@ -405,7 +452,8 @@ def build_context(
         "sparkline": pdf_charts.price_sparkline(prices, width=700, height=120),
         "earnings_timeline": pdf_charts.bars_actuals_forecast(
             timeline_items, width=700, height=150),
-        "insider_flow": pdf_charts.diverging_bars(insider_flow_items, width=330, height=118),
+        "insider_flow": pdf_charts.diverging_bars(
+            insider_flow_items, width=330, height=118, up_color="#16A34A"),
         "capital_returned": pdf_charts.axed_bars(
             ca_capital_items, colors=["#93C5FD", "#16A34A"], width=300, height=104, fmt="money"),
         "shares_trend": pdf_charts.axed_line(ca_shares_items, width=300, height=94, fmt="num"),
@@ -472,7 +520,7 @@ def build_context(
             "cagr": _num(forecast.get("cagr")),
             "eps_growth": _num(forecast.get("eps_growth")),
             "management_guidance": forecast.get("management_guidance") or "",
-            "projections": forecast.get("projections") or [],
+            "projections": projections_table,
             "track_record": forecast.get("earnings_track_record") or [],
             "beat_summary": forecast.get("beat_summary") or "",
             "guidance_quote": forecast.get("guidance_quote") or "",

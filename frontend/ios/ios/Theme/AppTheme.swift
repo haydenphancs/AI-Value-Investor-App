@@ -116,8 +116,8 @@ struct AppTypography {
 
     // ━━━ BODY (Level 3) ━━━
     // Primary readable content
-    static let bodyEmphasis      = Font.system(size: 15, weight: .semibold)
-    static let body              = Font.system(size: 15, weight: .regular)
+    static let bodyEmphasis      = Font.system(size: 16, weight: .semibold)
+    static let body              = Font.system(size: 16, weight: .regular)
     static let bodySmallEmphasis = Font.system(size: 14, weight: .semibold)
     static let bodySmall         = Font.system(size: 14, weight: .regular)
 

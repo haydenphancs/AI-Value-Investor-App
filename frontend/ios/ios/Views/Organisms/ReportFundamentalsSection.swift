@@ -58,7 +58,7 @@ struct ReportFundamentalsSection: View {
                 }
 
                 Text(assessment.text)
-                    .font(AppTypography.label)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

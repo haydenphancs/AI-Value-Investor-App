@@ -470,7 +470,7 @@ struct ReportConsensusBar: View {
                             startPoint: .topLeading, endPoint: .bottomTrailing))
                 }
                 Text(insight)
-                    .font(AppTypography.label)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)

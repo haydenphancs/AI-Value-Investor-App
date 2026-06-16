@@ -81,7 +81,7 @@ struct ReportPriceMovementSection: View {
                 
                 // Narrative text
                 Text(ctx.narrative)
-                    .font(AppTypography.label)
+                    .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(3)
             }

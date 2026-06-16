@@ -140,7 +140,7 @@ struct ValuationSnapshotCard: View {
 
                     // Story
                     Text(valuation.resolvedStory)
-                        .font(AppTypography.labelSmall)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -296,7 +296,7 @@ struct SectorPerformanceSnapshotCard: View {
 
                     // Story
                     Text(sectorPerformance.resolvedStory)
-                        .font(AppTypography.labelSmall)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -391,7 +391,7 @@ struct MacroForecastSnapshotCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     // Story
                     Text(macroForecast.resolvedStory)
-                        .font(AppTypography.labelSmall)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -442,7 +442,7 @@ struct MacroForecastItemCard: View {
             }
 
             Text(indicator.description)
-                .font(AppTypography.labelSmall)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)

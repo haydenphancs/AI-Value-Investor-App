@@ -175,7 +175,7 @@ struct ETFStrategyCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     // The hook
                     Text("\"\(strategy.hook)\"")
-                        .font(AppTypography.labelSmall)
+                        .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
                         .italic()
                         .lineSpacing(4)

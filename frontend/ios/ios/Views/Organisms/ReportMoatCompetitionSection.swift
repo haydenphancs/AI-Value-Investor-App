@@ -296,7 +296,7 @@ struct ReportMoatCompetitionSection: View {
             }
 
             Text(data.durabilityNote)
-                .font(AppTypography.label)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }
@@ -351,7 +351,7 @@ struct ReportMoatCompetitionSection: View {
             }
 
             Text(data.competitiveInsight)
-                .font(AppTypography.label)
+                .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .lineSpacing(3)
         }

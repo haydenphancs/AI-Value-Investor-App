@@ -13,14 +13,20 @@ struct ReportsListSection: View {
     var onReportTapped: ((AnalysisReport) -> Void)?
     var onRetryTapped: ((AnalysisReport) -> Void)?
 
-    @State private var showSortMenu = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Sort header
-            Button(action: {
-                showSortMenu = true
-            }) {
+            // Pull-down Menu (same component as the report's ••• overflow menu),
+            // so the options render at the compact context-menu size — matching
+            // "Share" — instead of the larger action-sheet buttons a
+            // .confirmationDialog would use.
+            Menu {
+                ForEach(ReportSortOption.allCases, id: \.rawValue) { option in
+                    Button(option.rawValue) {
+                        sortOption = option
+                    }
+                }
+            } label: {
                 HStack(spacing: AppSpacing.xxs) {
                     Text("Sort")
                         .font(AppTypography.caption)
@@ -36,15 +42,6 @@ struct ReportsListSection: View {
                     Capsule()
                         .fill(AppColors.cardBackgroundLight)
                 )
-            }
-            .buttonStyle(PlainButtonStyle())
-            .confirmationDialog("Sort Reports", isPresented: $showSortMenu) {
-                ForEach(ReportSortOption.allCases, id: \.rawValue) { option in
-                    Button(option.rawValue) {
-                        sortOption = option
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
             }
 
             // Reports list

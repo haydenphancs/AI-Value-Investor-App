@@ -27,6 +27,7 @@ final class BookProgressStore: ObservableObject {
     @Published private(set) var completed: Set<String> = []
 
     private static let defaultsKey = "bookLibrary.completedCores"
+    private static let contentType = "book_core"
     private let apiClient: APIClient
 
     private init(apiClient: APIClient = .shared) {
@@ -74,7 +75,7 @@ final class BookProgressStore: ObservableObject {
         guard !completed.contains(k) else { return }
         completed.insert(k)
         persistLocal()
-        Task { await self.pushCompletion(order: order, core: core) }
+        Task { await self.pushCompletion(k) }
     }
 
     /// Clear all progress (debug / "reset" affordances). Local only.
@@ -90,8 +91,8 @@ final class BookProgressStore: ObservableObject {
     func hydrate() async {
         do {
             let resp = try await apiClient.request(
-                endpoint: .getBookProgress,
-                responseType: BookProgressResponse.self
+                endpoint: .getLearnProgress(contentType: Self.contentType),
+                responseType: LearnProgressResponse.self
             )
             merge(resp)
         } catch {
@@ -99,11 +100,11 @@ final class BookProgressStore: ObservableObject {
         }
     }
 
-    private func pushCompletion(order: Int, core: Int) async {
+    private func pushCompletion(_ key: String) async {
         do {
             let resp = try await apiClient.request(
-                endpoint: .completeBookCore(curriculumOrder: order, coreNumber: core),
-                responseType: BookProgressResponse.self
+                endpoint: .completeLearnItem(contentType: Self.contentType, key: key),
+                responseType: LearnProgressResponse.self
             )
             merge(resp)
         } catch {
@@ -111,8 +112,8 @@ final class BookProgressStore: ObservableObject {
         }
     }
 
-    private func merge(_ resp: BookProgressResponse) {
-        let remote = Set(resp.items.map { key($0.curriculumOrder, $0.coreNumber) })
+    private func merge(_ resp: LearnProgressResponse) {
+        let remote = Set(resp.keys)
         guard !remote.isSubset(of: completed) else { return }
         completed.formUnion(remote)
         persistLocal()
@@ -123,20 +124,14 @@ final class BookProgressStore: ObservableObject {
     }
 }
 
-// MARK: - DTOs
+// MARK: - Shared Learn-progress DTOs
+// Used by all three Learn progress stores (Books / Journey / Money Moves) and APIEndpoint.
+// The backend's unified completion log returns a flat list of item_keys per content_type.
 
-struct BookProgressResponse: Decodable {
-    let items: [BookCoreProgressItem]
+struct LearnProgressResponse: Decodable {
+    let keys: [String]
 }
 
-struct BookCoreProgressItem: Decodable {
-    let curriculumOrder: Int
-    let coreNumber: Int
-    let completedAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case curriculumOrder = "curriculum_order"
-        case coreNumber = "core_number"
-        case completedAt = "completed_at"
-    }
+struct CompleteLearnItemRequest: Encodable, Sendable {
+    let key: String
 }

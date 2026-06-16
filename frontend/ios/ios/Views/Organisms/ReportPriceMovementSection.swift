@@ -31,7 +31,7 @@ struct ReportPriceMovementSection: View {
             // Percentage text + time label
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 Text(ctx.displayPercentage)
-                    .font(AppTypography.dataTitle)
+                    .font(AppTypography.dataCompact)
                     .foregroundColor(ctx.trendColor)
 
                 Text(ctx.timeLabel)

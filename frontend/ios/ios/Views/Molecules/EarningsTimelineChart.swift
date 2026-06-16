@@ -236,17 +236,17 @@ struct EarningsTimelineChart: View {
                                 : barTop - labelGap - labelHalfHeight
                             VStack(spacing: 1) {
                                 Text(pt.revenueYoYText ?? " ")
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                     .foregroundColor(pt.revenueYoYColor)
                                 Text(pt.revenueLabel)
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                     .foregroundColor(AppColors.textSecondary)
                             }
                             .fixedSize()
                             .position(x: centerX(i), y: labelCenterY)
 
                             Text(String(pt.year))
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundColor(AppColors.textSecondary)
                                 .position(x: centerX(i), y: plotBottom + labelStripHeight / 2)
                         }

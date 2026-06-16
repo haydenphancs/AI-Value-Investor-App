@@ -252,7 +252,7 @@ struct SignalOfConfidenceChartView: View {
             GeometryReader { geometry in
                 let yPos = newestSharesYPosition * geometry.size.height
                 Text(formatSharesValue(newestShares))
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundColor(AppColors.confidenceSharesOutstanding)
                     .fixedSize()
                     .position(x: geometry.size.width / 2, y: yPos)

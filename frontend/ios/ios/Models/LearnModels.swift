@@ -125,6 +125,8 @@ enum MoneyMoveCategory: String, CaseIterable {
 // MARK: - Money Move
 struct MoneyMove: Identifiable {
     let id = UUID()
+    /// Canonical stable id (article slug) — the completion key. Empty for hardcoded samples.
+    var slug: String = ""
     let title: String
     let subtitle: String
     let category: MoneyMoveCategory
@@ -330,6 +332,18 @@ struct LibraryBook: Identifiable {
     /// Always the count of authored cores — derived from coreChapters so it can never
     /// drift from BooksContent.swift (regenerated from source), and never needs hand-editing.
     var chapterCount: Int { coreChapters.count }
+
+    /// Full-text match for the Book Library search. Matches title and author AND the book's
+    /// CONTENT — description, why-this-book, category tags, key ideas, and core/chapter topics —
+    /// so a search by concept ("margin of safety", "compounding", "value") finds the right book,
+    /// not just exact title/author hits.
+    func matches(_ query: String) -> Bool {
+        var haystacks: [String] = [title, author, description, whyThisBook]
+        haystacks += categoryTags.map { $0.rawValue }
+        haystacks += keyHighlights.flatMap { [$0.title, $0.description] }
+        haystacks += coreChapters.flatMap { [$0.title, $0.description] }
+        return haystacks.contains { $0.localizedCaseInsensitiveContains(query) }
+    }
 
     var formattedChapters: String {
         "\(chapterCount) Cores"

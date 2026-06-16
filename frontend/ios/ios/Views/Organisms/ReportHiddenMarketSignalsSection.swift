@@ -373,7 +373,7 @@ private struct ShortInterestTrendChart: View {
                 AxisValueLabel {
                     if let m = value.as(Double.self) {
                         Text(leftLabel(m))
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -383,7 +383,7 @@ private struct ShortInterestTrendChart: View {
                     AxisValueLabel {
                         if let m = value.as(Double.self) {
                             Text(String(format: "%.1f", yToDtc(m)))
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundColor(AppColors.textMuted)
                         }
                     }
@@ -401,7 +401,7 @@ private struct ShortInterestTrendChart: View {
                 AxisValueLabel(anchor: xLabelAnchor(value.as(Int.self) ?? -1)) {
                     if let i = value.as(Int.self), i >= 0, i < points.count {
                         Text(Self.mmYY.string(from: points[i].date))
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundColor(AppColors.textMuted)
                     }
                 }

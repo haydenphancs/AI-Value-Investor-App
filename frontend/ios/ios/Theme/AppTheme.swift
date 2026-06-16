@@ -100,14 +100,14 @@ extension Color {
 //
 // TWO COMFORT TIERS (the rule that keeps cards balanced — modeled on
 // Robinhood/Webull/Yahoo Finance): READING PROSE breathes, DENSE DATA stays tight.
-//   • Reading prose (insight/narrative/description sentences) → `body` (16).
+//   • Reading prose (insight/narrative/description sentences) → `body` (15, Apple Subheadline — compact, data-dense like Webull).
 //   • De-emphasize metadata with COLOR (textMuted/textSecondary), NOT by
 //     shrinking below ~13 — never render a human-readable sentence at caption
 //     sizes (≤11) or captionTiny (9).
 //   • Chart axes, table cells, badges = the DATA tier → caption/labelSmall
 //     (10–12) is correct; keep them small.
-// Report-card ladder: badge 11 · metadata 13 (label) · prose 16 (body) ·
-//   section title 17 (headingSmall) · hero number 22 (dataTitle). A section
+// Report-card ladder: badge 11 · metadata 13 (label) · prose 15 (body) ·
+//   section title 16 (headingSmall) · hero number 16–20 (dataHeading). A section
 //   header must never be smaller than the prose beneath it.
 //
 
@@ -123,12 +123,12 @@ struct AppTypography {
     // ━━━ HEADING (Level 2) ━━━
     // Section & card headers, emphasized inline content
     static let heading      = Font.system(size: 18, weight: .semibold)
-    static let headingSmall = Font.system(size: 17, weight: .semibold)
+    static let headingSmall = Font.system(size: 16, weight: .semibold)
 
     // ━━━ BODY (Level 3) ━━━
     // Primary readable content
-    static let bodyEmphasis      = Font.system(size: 16, weight: .semibold)
-    static let body              = Font.system(size: 16, weight: .regular)
+    static let bodyEmphasis      = Font.system(size: 15, weight: .semibold)
+    static let body              = Font.system(size: 15, weight: .regular)
     static let bodySmallEmphasis = Font.system(size: 14, weight: .semibold)
     static let bodySmall         = Font.system(size: 14, weight: .regular)
 
@@ -157,6 +157,7 @@ struct AppTypography {
     static let dataTitle   = Font.system(size: 22, weight: .bold, design: .rounded).monospacedDigit()
     static let dataHeading = Font.system(size: 20, weight: .bold, design: .rounded).monospacedDigit()
     static let dataLarge   = Font.system(size: 18, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataCompact = Font.system(size: 16, weight: .bold, design: .rounded).monospacedDigit()
     static let dataMedium  = Font.system(size: 14, weight: .bold, design: .rounded).monospacedDigit()
     static let dataSmall   = Font.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit()
 

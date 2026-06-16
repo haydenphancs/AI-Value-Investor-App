@@ -269,7 +269,7 @@ struct SmartMoneyFlowChart: View {
                     if let stringValue = value.as(String.self) {
                         Text(formatMonthLabel(stringValue))
                             // size 10 to match the Capital Allocation chart axis.
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(AppColors.textMuted)
                     }
                 }
@@ -284,7 +284,7 @@ struct SmartMoneyFlowChart: View {
                         if let doubleValue = value.as(Double.self) {
                             Text(formatVolumeValue(doubleValue))
                                 // size 10 to match the Capital Allocation chart axis.
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundStyle(AppColors.textMuted)
                         }
                     }
@@ -434,7 +434,7 @@ struct SmartMoneyFlowChart: View {
     private func clippedBarLabel(_ value: Double, arrow: String) -> some View {
         if isClipped(value) {
             Text("\(formatVolumeLabel(value))\(arrow)")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.white)
                 .fixedSize()
         }

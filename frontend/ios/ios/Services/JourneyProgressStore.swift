@@ -5,12 +5,14 @@
 //  Single source of truth for Investor Journey lesson completion.
 //
 //  Both the full-screen journey (InvestorJourneyViewModel) and the Learn-tab overview card
-//  (LearnViewModel) read completion from here so they always agree. The store owns the
-//  persistence (UserDefaults) and broadcasts changes via @Published, so any surface that
-//  observes it updates live when a lesson is finished anywhere.
+//  (LearnViewModel) read completion from here so they always agree. HYBRID persistence: a local
+//  UserDefaults cache (instant + offline) that writes through to the backend
+//  (GET/POST /api/v1/learn/journey/...). On launch it union-merges the server's set in, so
+//  progress survives reinstall and syncs across devices without ever losing a local write.
 //
-//  It is model-agnostic: it only knows lesson *titles* (the stable lesson key). Each surface
-//  maps that set onto its own view-model shape.
+//  It is model-agnostic: it only knows lesson *titles* (the stable lesson key — the journey
+//  catalog is static in-app and its Lesson.id is a fresh UUID each launch). Each surface maps
+//  that set onto its own view-model shape.
 //
 
 import Foundation
@@ -24,8 +26,11 @@ final class JourneyProgressStore: ObservableObject {
     @Published private(set) var completedTitles: Set<String> = []
 
     private static let defaultsKey = "investorJourney.completedLessonTitles"
+    private static let contentType = "journey_lesson"
+    private let apiClient: APIClient
 
-    private init() {
+    private init(apiClient: APIClient = .shared) {
+        self.apiClient = apiClient
         let saved = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? []
         completedTitles = Set(saved)
     }
@@ -34,17 +39,59 @@ final class JourneyProgressStore: ObservableObject {
         completedTitles.contains(title)
     }
 
-    /// Record a finished lesson. Idempotent; persists and broadcasts on first insert.
+    /// Record a finished lesson. Idempotent; persists locally and pushes to the backend.
     func markCompleted(_ title: String) {
         guard !completedTitles.contains(title) else { return }
         completedTitles.insert(title)
-        UserDefaults.standard.set(Array(completedTitles), forKey: Self.defaultsKey)
+        persistLocal()
+        Task { await self.pushCompletion(title) }
     }
 
-    /// Clear all progress (debug / "reset journey" affordances).
+    /// Clear all progress (debug / "reset journey" affordances). Local only.
     func reset() {
         guard !completedTitles.isEmpty else { return }
         completedTitles.removeAll()
-        UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+        persistLocal()
+    }
+
+    // MARK: - Backend sync (best-effort; the local cache is the source of truth)
+
+    /// Pull the server's completed set and union it in. Call when the Learn surface opens.
+    func hydrate() async {
+        do {
+            let resp = try await apiClient.request(
+                endpoint: .getLearnProgress(contentType: Self.contentType),
+                responseType: LearnProgressResponse.self
+            )
+            merge(resp)
+        } catch {
+            // Offline or signed out: keep whatever is local.
+        }
+    }
+
+    private func pushCompletion(_ title: String) async {
+        do {
+            let resp = try await apiClient.request(
+                endpoint: .completeLearnItem(contentType: Self.contentType, key: title),
+                responseType: LearnProgressResponse.self
+            )
+            merge(resp)
+        } catch {
+            // Stays in the local cache; re-pushes next time a lesson is marked.
+        }
+    }
+
+    private func merge(_ resp: LearnProgressResponse) {
+        let remote = Set(resp.keys)
+        guard !remote.isSubset(of: completedTitles) else { return }
+        completedTitles.formUnion(remote)
+        persistLocal()
+    }
+
+    private func persistLocal() {
+        UserDefaults.standard.set(Array(completedTitles), forKey: Self.defaultsKey)
     }
 }
+
+// Shared Learn-progress DTOs (LearnProgressResponse / CompleteLearnItemRequest) live in
+// BookProgressStore.swift and are reused here.

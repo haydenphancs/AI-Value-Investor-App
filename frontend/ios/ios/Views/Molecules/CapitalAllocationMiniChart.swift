@@ -60,7 +60,7 @@ struct CapitalAllocationMiniChart: View {
                 AxisValueLabel {
                     if let period = value.as(String.self) {
                         Text(period)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundColor(AppColors.textMuted)
                             .fixedSize()
                     }
@@ -74,7 +74,7 @@ struct CapitalAllocationMiniChart: View {
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
                         Text(leftAxisLabel(v))
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
@@ -85,7 +85,7 @@ struct CapitalAllocationMiniChart: View {
                 AxisValueLabel {
                     if let pos = value.as(Double.self), let tick = sharesTick(at: pos) {
                         Text(tick.label)
-                            .font(.system(size: 10, weight: tick.isCurrent ? .semibold : .regular))
+                            .font(.system(size: 11, weight: tick.isCurrent ? .semibold : .regular))
                             .foregroundColor(tick.isCurrent ? AppColors.textSecondary : AppColors.textMuted)
                     }
                 }

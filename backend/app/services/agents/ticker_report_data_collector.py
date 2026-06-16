@@ -1259,6 +1259,25 @@ class TickerReportDataCollector:
         # ── Monthly closes for the Wall Street chart ──────────────────
         c["monthly_prices"] = _monthly_closes(hist_list, count=12)
 
+        # ── Extra raw signals for the persona style-fit score ─────────
+        # net income + market cap (→ FCF conversion & FCF yield), prior-year
+        # gross margin (→ margin trend), and ROIC (best-effort; None when FMP
+        # doesn't surface it for the focal company). Consumed only by
+        # style_fit_adjustment via _scoring_inputs._style_signals.
+        c["net_income"] = _num_or_none(income[0].get("netIncome")) if income else None
+        c["mkt_cap"] = _num_or_none(profile.get("mktCap") or profile.get("marketCap"))
+        c["gross_margin_prev"] = (
+            _pct_or_none(ratios[1].get("grossProfitMargin"))
+            if ratios and len(ratios) >= 2 else None
+        )
+        _km0 = key_metrics[0] if key_metrics else {}
+        _r0 = ratios[0] if ratios else {}
+        c["roic"] = _pct_or_none(
+            _km0.get("returnOnInvestedCapital")
+            or _r0.get("returnOnInvestedCapital")
+            or _km0.get("roic")
+        )
+
         out.computed = c
 
     # ── Phase 3: deterministic section assembly ───────────────────────
@@ -1857,6 +1876,35 @@ class TickerReportDataCollector:
             "capital_allocation": _build_capital_allocation_vital(
                 out.signal_of_confidence
             ),
+        }
+
+        # Raw signals for the persona STYLE-FIT term, nested INSIDE the internal
+        # scoring substrate so they're stripped from every client response along
+        # with the rest of _scoring_inputs (never a new top-level key → no schema
+        # change). compute_quality_score reads these via _scoring_inputs.
+        # _style_signals, so the collector score and the research_service
+        # re-score compute identically. Units: percentages as percent numbers,
+        # ratios as ratios, dollars for fcf/net_income/mkt_cap, moat 0-10.
+        _c = out.computed or {}
+        _moat_score_obj = (moat_vital or {}).get("score")
+        scoring_inputs["_style_signals"] = {
+            "roe": _c.get("roe"),
+            "roic": _c.get("roic"),
+            "debt_equity": _c.get("debt_equity"),
+            "gross_margin": _c.get("gross_margin"),
+            "gross_margin_prev": _c.get("gross_margin_prev"),
+            "pe_ratio": _c.get("pe_ratio"),
+            "fcf": _c.get("fcf"),
+            "net_income": _c.get("net_income"),
+            "mkt_cap": _c.get("mkt_cap"),
+            "revenue_growth": _c.get("revenue_growth_yoy"),
+            "revenue_cagr": _c.get("revenue_cagr"),
+            "eps_cagr": _c.get("eps_cagr"),
+            "moat_score": (
+                _moat_score_obj.get("value")
+                if isinstance(_moat_score_obj, dict) else None
+            ),
+            "mos_pct": _c.get("upside_pct"),
         }
 
         # Deterministic, persona-weighted headline score — the SINGLE source

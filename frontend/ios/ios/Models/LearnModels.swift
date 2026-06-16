@@ -359,7 +359,18 @@ struct LibraryBook: Identifiable {
         return "Updated \(year)"
     }
 
-    /// Convert to AudioEpisode for playback
+    /// Narration audio for this book — one streamed file + per-core start offsets — if generated.
+    /// nil => no narration yet (the app falls back to no real audio for this book).
+    var bookAudioInfo: BookAudioInfo? { BookAudioInfo.byOrder[curriculumOrder] }
+
+    /// Start offset (seconds) of a core within the single book narration file, if known.
+    func coreStartSeconds(_ coreNumber: Int) -> Int? {
+        bookAudioInfo?.coreStartSeconds[coreNumber]
+    }
+
+    /// Convert to AudioEpisode for playback. The whole book is ONE file; `audioUrl` is set once
+    /// narration is generated (else nil => simulated/no audio). Duration prefers the real measured
+    /// narration length over the word-count estimate.
     var audioEpisode: AudioEpisode {
         AudioEpisode(
             id: "book-\(id.uuidString)",
@@ -367,10 +378,11 @@ struct LibraryBook: Identifiable {
             subtitle: "by \(author)",
             artworkGradientColors: [coverGradientStart, coverGradientEnd],
             artworkIcon: "book.fill",
-            duration: TimeInterval(audioDurationSeconds),
+            duration: TimeInterval(bookAudioInfo?.totalSeconds ?? audioDurationSeconds),
             category: .books,
             authorName: author,
-            sourceId: id.uuidString
+            sourceId: id.uuidString,
+            audioUrl: bookAudioInfo?.audioUrl
         )
     }
 }
@@ -637,7 +649,7 @@ extension LibraryBook {
                 bio: "Robert Kiyosaki is an American businessman and author. He founded the Rich Dad Company which provides personal finance and business education through books and videos.",
                 avatarGradientColors: ["3B82F6", "1E40AF"]
             ),
-            audioDurationSeconds: 1367,   // sum of the 7 cores' narration (~23 min @150wpm)
+            audioDurationSeconds: 1054,   // real measured narration length (17:34) — see BookAudioContent
             readTimeMinutes: 23,          // total read time computed from the authored core content
             viewCount: "4.2M",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 27))!,

@@ -41,6 +41,8 @@ class ResearchViewModel: ObservableObject {
     /// search + generateAnalysis). This one only filters the Reports list.
     @Published var reportSearchText: String = ""
     @Published var isReportSearchActive: Bool = false
+    /// Persona keys selected as filter tags (empty = show all personas).
+    @Published var selectedPersonaKeys: Set<String> = []
     @Published var isSelectingReports: Bool = false
     /// Keyed by `backendId` (NOT the per-load `AnalysisReport.id` UUID, which is
     /// reminted on every `loadReports()`), so a selection survives the 5s poll
@@ -521,19 +523,31 @@ class ResearchViewModel: ObservableObject {
 
     // MARK: - Reports Tab: Derived (search + grouping)
 
-    /// `reports` filtered by the report search query — matches ticker, company
-    /// name, the persona's full name ("Cathie Wood") OR its agent label
+    /// `reports` filtered by the selected persona tags AND the search query.
+    /// Persona tags (if any) restrict to those personas; the search then matches
+    /// ticker, company name, persona full name ("Cathie Wood") or agent label
     /// ("Wood Agent"), case-insensitive. `reports` is already sorted in place by
     /// sortReports(), so this preserves the chosen sort order.
     var filteredReports: [AnalysisReport] {
-        let q = reportSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return reports }
-        return reports.filter {
-            $0.ticker.lowercased().contains(q)
-                || $0.companyName.lowercased().contains(q)
-                || $0.persona.name.lowercased().contains(q)
-                || $0.persona.agentLabel.lowercased().contains(q)
+        var result = reports
+
+        // Persona filter tags (OR across selected personas; empty = all).
+        if !selectedPersonaKeys.isEmpty {
+            result = result.filter { selectedPersonaKeys.contains($0.persona.key) }
         }
+
+        // Search query.
+        let q = reportSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !q.isEmpty {
+            result = result.filter {
+                $0.ticker.lowercased().contains(q)
+                    || $0.companyName.lowercased().contains(q)
+                    || $0.persona.name.lowercased().contains(q)
+                    || $0.persona.agentLabel.lowercased().contains(q)
+            }
+        }
+
+        return result
     }
 
     /// Filtered reports grouped into time bands, ordered newest → oldest.
@@ -548,6 +562,15 @@ class ResearchViewModel: ObservableObject {
     }
 
     var selectedReportCount: Int { selectedReportIds.count }
+
+    /// Toggle a persona filter tag on/off.
+    func togglePersonaTag(_ persona: AnalysisPersona) {
+        if selectedPersonaKeys.contains(persona.key) {
+            selectedPersonaKeys.remove(persona.key)
+        } else {
+            selectedPersonaKeys.insert(persona.key)
+        }
+    }
 
     // MARK: - Reports Tab: Selection + Delete
 

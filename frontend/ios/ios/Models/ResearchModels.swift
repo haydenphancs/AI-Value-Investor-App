@@ -65,6 +65,11 @@ struct AnalysisPersona: Identifiable, Hashable {
         return "\(last) Agent"
     }
 
+    /// Short tag label — surname only ("Buffett", "Wood", "Lynch", "Ackman").
+    var shortName: String {
+        name.split(separator: " ").last.map(String.init) ?? name
+    }
+
     var accentColor: Color { Color(hex: accentColorHex) }
 
     static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {

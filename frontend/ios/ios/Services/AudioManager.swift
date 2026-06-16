@@ -167,6 +167,37 @@ final class AudioManager: ObservableObject {
         }
     }
 
+    /// Play an episode starting at a time offset. Used for one-file book narration that jumps to a
+    /// core's start. Seeks BEFORE playing so the listener doesn't hear a moment of audio from 0:00.
+    func play(_ episode: AudioEpisode, startAt: TimeInterval) {
+        if let current = currentEpisode {
+            addToHistory(current)
+        }
+
+        teardownPlayer()
+        stopPlaybackTimer()
+        currentEpisode = episode
+        duration = episode.duration
+        currentTime = max(0, startAt)
+        playbackState = .loading
+
+        if let urlString = episode.audioUrl, let url = URL(string: urlString) {
+            preparePlayer(url: url)
+            if startAt > 0 {
+                player?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600))
+            }
+            player?.playImmediately(atRate: Float(playbackSpeed.rawValue))
+            playbackState = .playing
+        } else {
+            // No narration URL: simulated progress, advancing from the requested offset.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.player == nil else { return }
+                self.playbackState = .playing
+                self.startPlaybackTimer()
+            }
+        }
+    }
+
     /// Resume playback
     func resume() {
         guard currentEpisode != nil else { return }

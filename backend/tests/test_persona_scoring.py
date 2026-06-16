@@ -20,7 +20,9 @@ import pytest
 from app.services.agents.persona_scoring import (
     _HEALTH_SCALE,
     PERSONA_WEIGHTS,
+    STYLE_FIT_CAP,
     compute_quality_score,
+    style_fit_adjustment,
 )
 from app.services.agents.ticker_report_data_collector import (
     _build_forecast_vital,
@@ -418,3 +420,135 @@ def test_target_counts_many_weak_signals_raise_bear():
     bull, bear = _thesis_target_counts(report)
     assert bear >= 4
     assert bull == 2
+
+
+# ── Persona style-fit modifier ──────────────────────────────────────
+#
+# On top of the weighted vital rollup, each persona nudges the score by a
+# bounded amount using a few RAW signals through its own lens, so the SAME
+# stock diverges more (Wood rewards 45% growth even with no moat; Buffett
+# penalizes it). The nudge is capped at ±STYLE_FIT_CAP and contributes nothing
+# when a signal is absent.
+
+_EXTREME_SIGNAL_GRID = [
+    {},
+    # everything a persona could love
+    {"roe": 40, "roic": 30, "debt_equity": 0.0, "gross_margin": 90, "gross_margin_prev": 10,
+     "pe_ratio": 5, "fcf": 1e9, "net_income": 5e8, "mkt_cap": 1e9,
+     "revenue_growth": 120, "revenue_cagr": 100, "eps_cagr": 90, "moat_score": 10, "mos_pct": 90},
+    # everything a persona could hate
+    {"roe": -50, "roic": -40, "debt_equity": 8.0, "gross_margin": 5, "gross_margin_prev": 60,
+     "pe_ratio": 500, "fcf": -1e9, "net_income": 1e8, "mkt_cap": 1e12,
+     "revenue_growth": -30, "revenue_cagr": -40, "eps_cagr": -50, "moat_score": 0, "mos_pct": -90},
+]
+
+
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_WEIGHTS.keys()))
+@pytest.mark.parametrize("signals", _EXTREME_SIGNAL_GRID)
+def test_style_fit_adjustment_is_bounded(persona_key, signals):
+    adj = style_fit_adjustment(persona_key, signals)
+    assert -STYLE_FIT_CAP <= adj <= STYLE_FIT_CAP
+
+
+def test_style_fit_zero_when_no_signals():
+    for k in PERSONA_WEIGHTS:
+        assert style_fit_adjustment(k, {}) == 0.0
+        assert style_fit_adjustment(k, None) == 0.0
+
+
+def test_style_fit_unknown_persona_zero():
+    assert style_fit_adjustment("nobody", {"roe": 30, "revenue_growth": 50}) == 0.0
+
+
+def test_style_fit_all_none_signals_is_zero():
+    # _style_signals present but every value None (cyclical / pre-profit / no
+    # PEG) → every sub-score drops out → 0.0, never a fabricated penalty.
+    none_signals = {k: None for k in (
+        "roe", "roic", "debt_equity", "gross_margin", "gross_margin_prev",
+        "pe_ratio", "fcf", "net_income", "mkt_cap", "revenue_growth",
+        "revenue_cagr", "eps_cagr", "moat_score", "mos_pct",
+    )}
+    for k in PERSONA_WEIGHTS:
+        assert style_fit_adjustment(k, none_signals) == 0.0
+
+
+def test_buffett_style_fit_rewards_quality_penalizes_junk():
+    good = style_fit_adjustment("warren_buffett",
+                                {"roe": 22, "debt_equity": 0.3, "moat_score": 9, "mos_pct": 35})
+    bad = style_fit_adjustment("warren_buffett",
+                               {"roe": 6, "debt_equity": 2.2, "moat_score": 2, "mos_pct": -25})
+    assert good > 0 > bad
+
+
+def test_wood_style_fit_rewards_hypergrowth():
+    fast = style_fit_adjustment("cathie_wood", {"revenue_growth": 48, "revenue_cagr": 40})
+    slow = style_fit_adjustment("cathie_wood", {"revenue_growth": 8, "revenue_cagr": 6})
+    assert fast > 0 > slow
+
+
+def test_lynch_style_fit_peg_directional():
+    # Low PEG (cheap vs growth) beats high PEG (expensive vs growth).
+    cheap = style_fit_adjustment("peter_lynch",
+                                 {"pe_ratio": 12, "eps_cagr": 25, "revenue_growth": 25, "debt_equity": 0.2})
+    pricey = style_fit_adjustment("peter_lynch",
+                                  {"pe_ratio": 60, "eps_cagr": 10, "revenue_growth": 8, "debt_equity": 1.8})
+    assert cheap > pricey
+
+
+def test_ackman_style_fit_rewards_fcf_quality():
+    # High FCF conversion (0.9) + yield (~7.5%) + ROIC, low leverage beats the
+    # cash-poor, highly levered, low-ROIC case.
+    quality = style_fit_adjustment("bill_ackman",
+                                   {"fcf": 9e8, "net_income": 1e9, "mkt_cap": 1.2e10, "roic": 20, "debt_equity": 0.4})
+    junk = style_fit_adjustment("bill_ackman",
+                                {"fcf": 2e8, "net_income": 1e9, "mkt_cap": 4e10, "roic": 5, "debt_equity": 3.5})
+    assert quality > junk
+
+
+def _growth_archetype(with_signals: bool) -> dict:
+    si = {
+        "revenue": {"score": {"value": 9.0}}, "forecast": {"score": {"value": 9.0}},
+        "moat": {"score": {"value": 3.0}}, "valuation": {"score": {"value": 2.0}},
+        "financial_health": {"score": {"value": 4.0}},
+    }
+    if with_signals:
+        si["_style_signals"] = {
+            "revenue_growth": 45, "revenue_cagr": 38, "roe": 6, "debt_equity": 0.9,
+            "moat_score": 3, "mos_pct": -15, "pe_ratio": 80,
+        }
+    return {"_scoring_inputs": si}
+
+
+def test_style_signals_widen_persona_gap_for_growth_archetype():
+    # Same vitals; adding the raw style signals should WIDEN the Wood-over-Buffett
+    # gap (Wood rewards the 45% growth; Buffett penalizes no-moat / no-MOS / low-ROE).
+    base_gap = (compute_quality_score("cathie_wood", _growth_archetype(False))
+                - compute_quality_score("warren_buffett", _growth_archetype(False)))
+    fit_gap = (compute_quality_score("cathie_wood", _growth_archetype(True))
+               - compute_quality_score("warren_buffett", _growth_archetype(True)))
+    assert fit_gap > base_gap > 0
+
+
+def test_explicit_signals_equal_derived_signals():
+    # The collector scores from {"_scoring_inputs": ...}; research_service
+    # re-scores from the full report dict. Both derive signals from
+    # _scoring_inputs._style_signals, so passing signals explicitly must equal
+    # deriving them — the two scoring sites can't drift.
+    report = _growth_archetype(True)
+    derived = compute_quality_score("cathie_wood", report)
+    explicit = compute_quality_score(
+        "cathie_wood", report, signals=report["_scoring_inputs"]["_style_signals"]
+    )
+    assert derived == explicit
+
+
+def test_extra_top_level_keys_do_not_change_score():
+    # research_service passes the FULL report dict (symbol, quality_score, …);
+    # the collector passes just {"_scoring_inputs": ...}. Extra top-level keys
+    # must not change the computed score.
+    report = _growth_archetype(True)
+    full = dict(report)
+    full["symbol"] = "TST"
+    full["quality_score"] = 99
+    assert (compute_quality_score("warren_buffett", report)
+            == compute_quality_score("warren_buffett", full))

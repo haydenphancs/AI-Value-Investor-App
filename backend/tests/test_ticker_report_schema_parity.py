@@ -734,6 +734,45 @@ def test_every_persona_has_narrative_lens(persona_key):
     )
 
 
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
+def test_every_persona_has_style_fields(persona_key):
+    """Each persona must carry the structured style fields that drive BOTH the
+    style-fit score (persona_scoring) and the narrative lens directives
+    (narrative_prompts). An empty field silently collapses a persona back to
+    generic behavior, so pin them."""
+    p = get_persona_config(persona_key)
+    assert p.key_metrics, f"{persona_key} missing key_metrics"
+    assert p.bull_priority, f"{persona_key} missing bull_priority"
+    assert p.bear_priority, f"{persona_key} missing bear_priority"
+    assert p.red_flags, f"{persona_key} missing red_flags"
+    assert p.score_rules and len(p.score_rules) >= 40, (
+        f"{persona_key} score_rules too short to steer the score"
+    )
+    # The bias block must be wired into the system prompt, AFTER the identity rule.
+    assert p.system_prompt.startswith("CRITICAL IDENTITY RULE"), persona_key
+    assert "HOW TO BIAS YOUR VERDICT" in p.system_prompt, persona_key
+
+
+def test_style_signals_nested_under_scoring_inputs_and_stripped():
+    """The persona style-fit raw signals live nested INSIDE _scoring_inputs
+    (never a new top-level key, which would break the iOS decoder) and are
+    stripped from the serialized response by model_dump — mirroring the
+    _scoring_inputs / _news_headlines strip."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    report = coll.assemble_report(out, stage_a_fallback())
+
+    assert "_style_signals" not in report, "_style_signals must NOT be a top-level key"
+    assert "_style_signals" in report.get("_scoring_inputs", {}), (
+        "_style_signals must be nested inside _scoring_inputs"
+    )
+
+    dumped = TickerReportResponse.model_validate(report).model_dump()
+    blob = json.dumps(dumped, default=str)
+    assert "_style_signals" not in blob, "_style_signals leaked into the iOS response"
+    assert "_scoring_inputs" not in blob, "_scoring_inputs leaked into the iOS response"
+
+
 # ── Error contract tests ──────────────────────────────────────────────
 
 

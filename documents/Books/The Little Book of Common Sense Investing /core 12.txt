@@ -1,10 +1,12 @@
 Core 12: Auditing Your Advisor
-The Hook: The Most Expensive Friend You Have
+The Most Expensive Friend You Have
+
 We often hire financial advisors because we are scared. The stock market feels like a jungle, and we want a guide with a machete to hack through the vines of volatility. The friction is that this guide charges a toll—usually 1% of your assets per year—regardless of whether he leads you to safety or off a cliff.
 
 Most people fail here because they view their advisor as a "Market Beater." You hire them to find the best stocks or time the next crash. But the math says this is a fantasy. If an advisor could reliably beat the market by 2% a year, he wouldn't be managing your account for a 1% fee; he would be managing a hedge fund for billions. By hiring a human to do a job that a simple algorithm does better, you are often paying for a "friend" who slowly drains your retirement.
 
-The Author's Solution: The "Croupier" vs. The Coach
+The "Croupier" vs. The Coach
+
 The author, John Bogle, was ruthless about the "Croupier" class—the intermediaries who take a cut of every transaction. He argued that for 99% of investors, a stock-picking advisor is a net negative. The math of the "Cost Matters Hypothesis" proves that after fees, the average advised client must underperform the market.
 
 However, Bogle offered a nuanced solution. He didn't say never hire an advisor. He said hire them for the right reason. Do not pay for "Investment Management" (picking stocks). Pay for "Wealth Management" (asset allocation, tax planning, and estate planning). But most importantly, pay for "Behavioral Coaching." The only value an advisor truly adds is standing between you and the "Sell" button during a panic. If your advisor is just an expensive indexer who charges you to own the market, fire them. But if they are a psychologist who stops you from making a fatal mistake, they are worth every penny.

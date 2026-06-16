@@ -1,10 +1,12 @@
 Core 10: The Discipline of Inaction
-The Hook: The Myth of the Hustle
+The Myth of the Hustle
+
 There is a toxic lie baked into our culture that dictates how we measure success: we worship the "hustle." From the moment you enter the workforce, you are trained that activity equals progress. If you want to get promoted, you work longer hours. If you want to grow a business, you launch more products. We are conditioned to believe that motion is the only antidote to failure.
 
 When you bring this "hustle" mentality into the financial markets, it becomes a weapon of mass wealth destruction. The friction here is that your brain equates "doing nothing" with laziness and negligence. When the market opens, you feel an overwhelming compulsion to scour the news, run screeners, and execute trades. You feel like you must have an opinion on every macroeconomic event, every earnings report, and every geopolitical crisis. Most people fail at investing because they treat it like a 9-to-5 job where they are paid piecework. They believe that if they are not actively managing, tweaking, and reacting, they are falling behind. The hardest insider secret to accept is that the stock market is the only domain on earth where extreme, bordering-on-lazy inactivity is the ultimate competitive advantage.
 
-The Author's Solution: The Umpire Without a Whistle
+The Umpire Without a Whistle
+
 The author addresses this psychological trap by borrowing a masterclass concept from Warren Buffett, who in turn borrowed it from the greatest baseball hitter of all time, Ted Williams.
 
 In his book The Science of Hitting, Ted Williams carved the strike zone into 77 distinct cells. He calculated that if he only swung at pitches in his absolute "sweet spot" (the center cells), he would bat .400. If he reached for pitches on the lower outside corner, his average would plummet to .230. His secret was not a faster swing; it was the ruthless discipline of inaction. He aggressively waited for the "fat pitch."
@@ -22,6 +24,6 @@ The gamification of modern finance is designed to make you feel stupid for keepi
 
 The modern superpower is looking at a wildly lucrative trend, admitting, "I have absolutely no idea how this technology makes money," and going back to your things. You do not have to conquer every sector. You do not have to have an opinion on the Trade War's impact on microchips. Your edge is letting 99% of the modern noise fly right past you, saving your capital for the rare, boring, undeniable pitch that lands perfectly in your tiny zone of understanding.
 
-4. The Action Plan
+The Action Plan
 The "Competence Interrogation":
 The next time you feel the urge to capitalize on a trending narrative (like a new AI infrastructure company), open your Chat tab. The Instruction: Force yourself to teach the business model to the AI. Type: "Here is how [Company] generates free cash flow, and here is exactly why their competitors cannot steal their margins. Critique my thesis." If you cannot write that prompt clearly, or if the AI instantly demolishes your logic, you are swinging at a pitch outside your zone!

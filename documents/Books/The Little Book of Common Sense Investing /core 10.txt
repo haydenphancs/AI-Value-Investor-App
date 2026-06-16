@@ -1,11 +1,13 @@
 Core 10: Navigating the ETF Minefield
-The Hook: The Weaponization of Access
+The Weaponization of Access
+
 
 There is a paradox in modern finance: You have never had more access, yet you have never been more likely to blow yourself up. In the old days, if you wanted to bet on "Cybersecurity" or "Lithium Mining," you had to call a broker, pay a huge commission, and buy specific stocks. The friction saved you.
 
 Today, the financial industry has removed the friction. They have turned the stock market into a candy store. There is an ETF (Exchange Traded Fund) for everything—"Gen Z Consumption," "Space Exploration," "Obesity Drugs." You see a headline about a Trade War, and within seconds, you can buy a "Deglobalization ETF." The trap is subtle: You think you are "diversifying" because you bought a fund. In reality, you are just speculating on narrow, volatile themes with a product that looks safe but behaves like dynamite. The industry has weaponized access, handing you a bazooka and telling you it’s a water gun.
 
-The Author's Solution: The Double-Edged Sword
+The Double-Edged Sword
+
 The author, John Bogle, had a complicated relationship with the ETF. He actually invented the precursor to it—the index fund. But when the first ETFs launched (like the "Spider" or SPY), he was horrified. He called them a "Purist's Nightmare."
 
 He tells the story of the ETF as a tool that was corrupted by its own utility. Bogle compared the traditional index fund to a "reliable family sedan"—boring, safe, and gets you to your destination (retirement). He compared the ETF to a "sawed-off shotgun." It is a powerful tool if you are a professional hunter (a trader), but if you leave it lying around the house, you are likely to blow your foot off.

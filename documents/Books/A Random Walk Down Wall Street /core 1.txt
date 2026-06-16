@@ -1,13 +1,19 @@
 Core 1: The Valuation Duel
-The Hook: The Wall Street Civil War There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock market is one big casino where everyone is playing the same game. You aren't. There are actually two rival tribes fighting for your money, and they speak completely different languages. If you don't know which tribe you belong to, you will buy for the wrong reason and sell at the wrong time. The friction is confusion: You buy a stock because "it's going up" (Tribe A) but panic when the earnings report is bad (Tribe B). You are mixing oil and water, and your portfolio is the one catching fire.
+The Wall Street Civil War
 
-The Author’s Solution: The Castle vs. The Foundation The author simplifies this chaos into two distinct philosophies.
+There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock market is one big casino where everyone is playing the same game. You aren't. There are actually two rival tribes fighting for your money, and they speak completely different languages. If you don't know which tribe you belong to, you will buy for the wrong reason and sell at the wrong time. The friction is confusion: You buy a stock because "it's going up" (Tribe A) but panic when the earnings report is bad (Tribe B). You are mixing oil and water, and your portfolio is the one catching fire.
+
+The Castle vs. The Foundation
+
+The author simplifies this chaos into two distinct philosophies.
 
 First, there is the "Firm Foundation" theory. Imagine a cynical old appraiser looking at a house. He doesn't care if the house is pretty. He cares about the rent it generates, the cash flow, the dividend. He believes every asset has an intrinsic value—an anchor. If the price drifts too far above the anchor, he sells. If it falls below, he buys. He is playing the long game of math.
 
 Second, there is the "Castle in the Air" theory. This is the psychological game. The author describes this investor as someone building castles in the clouds. They don't care about the cash flow; they care about the crowd. They buy an asset simply because they believe a "Greater Fool" will come along tomorrow and pay more for it. They are surfing the waves of human hope and fear, not analyzing spreadsheets. The author warns that while "Castles" are more fun, they are built on nothing but air, and gravity eventually wins.
 
-The 'Wiser' Analysis: The 2026 Hybrid The lines have blurred, but the danger is higher. The "Castle in the Air" is now turbo-charged by social media. A meme coin or a hyped AI startup with zero revenue can skyrocket simply because a subreddit or a TikTok trend decided it should. This is pure "Castle" building. It works until the music stops.
+The 2026 Hybrid
+
+The lines have blurred, but the danger is higher. The "Castle in the Air" is now turbo-charged by social media. A meme coin or a hyped AI startup with zero revenue can skyrocket simply because a subreddit or a TikTok trend decided it should. This is pure "Castle" building. It works until the music stops.
 
 Conversely, the "Firm Foundation" has become harder to find because algorithms have priced in "intrinsic value" instantly. You can't easily find an undervalued stock just by reading a balance sheet anymore—an AI bot beat you to it by 0.003 seconds. The modern "Wiser" investor knows that Bitcoin is a Castle (pure psychology, no cash flow) while a Dividend ETF is a Foundation. You can own both, but you must never confuse them. If you treat a Castle like a Foundation, you will lose everything waiting for a "bounce back" that never comes.
 

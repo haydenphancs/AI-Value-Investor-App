@@ -1,11 +1,9 @@
 Core 8: Financial Forensics
-The Hook
 The Balance Sheet Blindness
  You are driving a sports car at 150 miles per hour, but you’ve taped over the fuel gauge because "math is boring." You love the speed—the rising stock price, the hype, the revolutionary technology. But you are ignoring the only thing that can kill you instantly: running out of gas.
 
 Most investors treat the Balance Sheet like a terms-and-conditions document—they scroll right past it. They assume that if a company is "changing the world," the money will sort itself out. This is a fatal error. Companies don't go bankrupt because they lack vision; they go bankrupt because they run out of cash. If you cannot spot the difference between a company that is "investing in growth" and one that is bleeding to death, you are not an investor; you are a philanthropist for bad management.
 
-The Author’s Solution
 The Debt Detective
  Peter Lynch approached the balance sheet not like an accountant, but like a detective at a crime scene. He wasn't looking for "perfect" numbers; he was looking for the "murder weapon"—usually Debt.
 
@@ -13,7 +11,6 @@ He tells the story of Chrysler in the early 1980s. Everyone thought the company 
 
 He also obsessed over Inventory. Lynch would look at a company’s sales growth versus its inventory growth. If sales were up 10% but inventory was up 30%, he ran for the exit. Why? Because it meant the company was stuffing warehouses with products nobody wanted. In the retail world, unsold inventory is like rotting fish—the longer it sits, the more it stinks, and eventually, you have to pay someone to take it away (mark it down to zero). He viewed a buildup of inventory as the single most reliable "sell signal" in the market, often appearing months before the stock price collapsed.
 
-The 'Wiser' Analysis
 The ZIRP Zombie Apocalypse
 
  In the last decade, we lived through a "Zero Interest Rate Policy" (ZIRP) fantasy world where debt was free. This created an entire generation of "Zombie Companies"—tech startups and growth stocks that survived only by constantly borrowing cheap money or issuing new shares. They had great revenue growth but terrible balance sheets.

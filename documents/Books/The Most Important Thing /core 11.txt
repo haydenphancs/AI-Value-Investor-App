@@ -1,10 +1,12 @@
 Core 11: Surviving the Coin Toss
-The Hook: The Genius Delusion
+The Genius Delusion
+
 There is a psychological trap in the financial world that quietly bankrupts the smartest people in the room: the asymmetry of ego. When we lose money, we immediately blame external forces—a sudden market crash, a corrupt CEO, or just bad luck. But when we make money, we look in the mirror and see a financial genius.
 
 The friction here is that our brains are desperate to find cause and effect where there is only randomness. We fail at investing because we confuse a good outcome with a good process. You can make a brilliant, mathematically sound decision and still lose your shirt because of a freak geopolitical event. Conversely, you can make a brain-dead, reckless gamble and become a millionaire because you happened to be in the right place at the right time. The secret that Wall Street tries to bury is that a terrifying percentage of success is dictated by pure, unadulterated luck. If you cannot separate your skill from your luck, arrogance will eventually convince you to bet the house on a coin toss you are mathematically guaranteed to lose.
 
-The Author's Solution: The National Coin-Flipping Tournament
+The National Coin-Flipping Tournament
+
 To illustrate the absurdity of confusing luck with skill, imagine a national coin-flipping tournament.
 
 Every single day, 330 million Americans wake up and flip a quarter. If you guess heads or tails correctly, you advance to the next round. If you guess wrong, you are eliminated. By the law of probability, after about 20 days, there will be roughly 315 people who have guessed correctly 20 times in a row.
@@ -20,6 +22,6 @@ You can feed ten years of pristine market data into a deep learning architecture
 
 Your model cannot predict a sudden supply chain embargo on microchips, an overnight Trade War tariff, or a global pandemic that freezes the economy. When a highly leveraged bet on a Clean Energy ETF skyrockets, the investor praises their flawless algorithmic strategy. They completely ignore the alternative history where a single political vote swung the other way and bankrupted the sector. In modern finance, we build incredibly complex tools to predict the future, forgetting that the future is heavily dictated by random, unquantifiable variables. If your strategy relies on absolute precision rather than a massive margin of safety, you are just a coin flipper with a supercomputer.
 
-4. The Action Plan
+The Action Plan
 The "Alternative History" Stress Test: Before taking a heavy position in a company you are certain will succeed, open your Chat tab.
 The Instruction: Prompt the AI: "Give me three highly improbable 'black swan' events that would completely destroy the business model of [Ticker]." Force yourself to look at the alternative histories where your "sure thing" goes to zero. If your portfolio cannot survive those scenarios, do more research!

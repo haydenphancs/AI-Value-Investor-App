@@ -1,5 +1,6 @@
 Core 3: Accepting the Zero-Sum Game
-The Hook: The Alpha Delusion
+The Alpha Delusion
+
 Here is the hardest pill to swallow. You have been told that if you study hard enough, read enough charts, and listen to enough podcasts, you can consistently beat the market. You believe that you can be the "Alpha"—the one who wins while others lose.
 
 But the market is not a classroom where everyone can get an "A" if they study. It is a poker table. For you to win a dollar of "excess" return, someone else must lose a dollar. And that "someone else" isn't a clueless amateur anymore. It is a Goldman Sachs algorithm, a sovereign wealth fund, or a Nobel Laureate. When you click "buy" on a hunch, that means someone else is selling, right? You have to ask: "Who is on the other side of this trade, and why do they think I’m wrong?"

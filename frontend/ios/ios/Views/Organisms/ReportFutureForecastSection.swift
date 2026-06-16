@@ -71,7 +71,7 @@ struct ReportFutureForecastSection: View {
                         .foregroundColor(AppColors.textSecondary)
                         .lineSpacing(3)
                 }
-                .padding(AppSpacing.md)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         // Tap anywhere in this module OUTSIDE the chart dismisses the inspect
@@ -164,12 +164,12 @@ struct ReportFutureForecastSection: View {
                                         )
                                     )
                                 Text(q.surpriseText)
-                                    .font(.system(size: 9, weight: .semibold))
+                                    .font(.system(size: 10, weight: .semibold))
                                     .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.7)
                                 Text(q.period)
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                                     .foregroundColor(AppColors.textMuted)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.7)

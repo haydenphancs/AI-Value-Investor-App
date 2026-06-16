@@ -1,13 +1,19 @@
 Core 5: Respecting the Efficiency Engine
-The Hook: The Ego of the Picker Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your ego. You believe that because you read a few articles or follow a few experts, you have an "edge." You think you can spot the next Apple or avoid the next crash before everyone else. This belief is expensive. Every time you try to outsmart the market by picking winners and losers, you are fighting a collective intelligence of millions of people, banks, and algorithms that have already priced in every piece of news you just read. You are betting against the wisdom of the crowd, and the house almost always wins.
+The Ego of the Picker
 
-The Author’s Solution: The $100 Bill on the Sidewalk The author illustrates this with a classic economist joke. Two economists are walking down the street. One spots a $100 bill lying on the ground. "Look!" he says. "A hundred dollars!" The other economist doesn't even stop walking. "It can't be real," he replies. "If it were a real $100 bill, someone would have already picked it up."
+Here is the hardest pill to swallow: You are not smarter than the market. Nobody is. The friction is your ego. You believe that because you read a few articles or follow a few experts, you have an "edge." You think you can spot the next Apple or avoid the next crash before everyone else. This belief is expensive. Every time you try to outsmart the market by picking winners and losers, you are fighting a collective intelligence of millions of people, banks, and algorithms that have already priced in every piece of news you just read. You are betting against the wisdom of the crowd, and the house almost always wins.
+
+The $100 Bill on the Sidewalk
+
+The author illustrates this with a classic economist joke. Two economists are walking down the street. One spots a $100 bill lying on the ground. "Look!" he says. "A hundred dollars!" The other economist doesn't even stop walking. "It can't be real," he replies. "If it were a real $100 bill, someone would have already picked it up."
 
 [image]
 
 This is the essence of the Efficient Market Hypothesis (EMH). The author explains that news travels so fast—instantly—that prices adjust immediately. By the time you hear good news about a company, the stock price has already gone up to reflect it. There are no "free lunches" (or $100 bills) lying around waiting for you to find them. The market is an "Efficiency Engine" that devours information and spits out the correct price before you can even click "Buy."
 
-The 'Wiser' Analysis: The Speed of Light Now, the Efficiency Engine has gone nuclear. Information doesn't just travel fast; it travels at the speed of light via fiber optic cables directly into the servers of High-Frequency Trading firms. If an AI detects a positive sentiment in a CEO's voice during an earnings call, it buys the stock before the CEO finishes the sentence.
+The Speed of Light
+
+Now, the Efficiency Engine has gone nuclear. Information doesn't just travel fast; it travels at the speed of light via fiber optic cables directly into the servers of High-Frequency Trading firms. If an AI detects a positive sentiment in a CEO's voice during an earnings call, it buys the stock before the CEO finishes the sentence.
 
 The modern investor who tries to "beat the market" is bringing a knife to a laser fight. You might think you found an "undiscovered" gem in the crypto market or a small-cap biotech stock. You didn't. You are just the last person to know. The "Wiser" move is to stop trying to beat the engine and instead hitch a ride on it. If you can't find the needle in the haystack, buy the whole haystack.
 

@@ -1,11 +1,17 @@
 Core 4: Sniper Entries & The Myth of Market Timing
-The Hook: The "Limit Order" Tragedy Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve done the "Scuttlebutt." You know it’s the next big thing. The stock is trading at $50.50. You, trying to be a "smart" trader, put in a limit order at $50.00. You want that psychological win of getting a bargain. The stock dips to $50.05, then turns around and runs to $500. You missed a 1,000% return because you were haggling over 50 cents. Most investors fail not because they pick the wrong stock, but because they treat a generational asset like a used car, refusing to buy unless the sticker price is slashed.
+The "Limit Order" Tragedy
 
-The Author’s Solution: The "Eighths and Quarters" Trap Philip Fisher saw this destroy more wealth than any bear market. He tells the story of an investor who identified a small, high-growth manufacturing company. The stock was trading around $35.50. The investor decided the "fair value" was exactly $35.00. He refused to pay the extra 50 cents—back then, stocks traded in "eighths and quarters."
+Here is how you lose a fortune while trying to save lunch money. You find the perfect company. You’ve done the "Scuttlebutt." You know it’s the next big thing. The stock is trading at $50.50. You, trying to be a "smart" trader, put in a limit order at $50.00. You want that psychological win of getting a bargain. The stock dips to $50.05, then turns around and runs to $500. You missed a 1,000% return because you were haggling over 50 cents. Most investors fail not because they pick the wrong stock, but because they treat a generational asset like a used car, refusing to buy unless the sticker price is slashed.
+
+The "Eighths and Quarters" Trap
+
+Philip Fisher saw this destroy more wealth than any bear market. He tells the story of an investor who identified a small, high-growth manufacturing company. The stock was trading around $35.50. The investor decided the "fair value" was exactly $35.00. He refused to pay the extra 50 cents—back then, stocks traded in "eighths and quarters."
 
 He placed his limit order and waited. The stock hovered, touched $35.25, and then the earnings report came out. It skyrocketed. Decades later, that company had split multiple times and was worth millions. The investor had been "right" about everything—the product, the management, the growth—except the price. Fisher’s rule became absolute: If the company is truly a "Common Stock" compounder, the current price is almost irrelevant in the long run. Buying "at the market" is the only way to ensure you actually get a seat on the rocket.
 
-The 'Wiser' Analysis: Algorithm Food In Fisher’s day, you were competing with other humans. Today, you are competing with High-Frequency Trading (HFT) algorithms that can see your limit order and front-run it. If you are trying to "time" an entry into a volatile asset like Bitcoin or a high-beta AI stock like NVIDIA, you are playing a losing game. These assets don't move in straight lines; they move in violent steps. If you wait for the "perfect pullback" in a parabolic trend (like the AI boom), you will likely be left on the platform. The modern market moves too fast for "sniper" precision on price. The only precision that matters is "sniper" precision on quality.
+Algorithm Food
+
+In Fisher’s day, you were competing with other humans. Today, you are competing with High-Frequency Trading (HFT) algorithms that can see your limit order and front-run it. If you are trying to "time" an entry into a volatile asset like Bitcoin or a high-beta AI stock like NVIDIA, you are playing a losing game. These assets don't move in straight lines; they move in violent steps. If you wait for the "perfect pullback" in a parabolic trend (like the AI boom), you will likely be left on the platform. The modern market moves too fast for "sniper" precision on price. The only precision that matters is "sniper" precision on quality.
 
 The Action Plan
 

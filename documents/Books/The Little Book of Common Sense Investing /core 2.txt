@@ -1,5 +1,6 @@
 Core 2: Separating Business from Speculation
-The Hook: The Optical Illusion of Wealth
+The Optical Illusion of Wealth
+
 There is a dangerous optical illusion that blinds almost everyone who opens a brokerage app. You see a green line going up, and you think you are "winning." You see a red line going down, and you think you are "losing."
 
 This is the friction that destroys portfolios. You have been conditioned to believe that the price of a stock is the same thing as the value of the business. They are not. In fact, in the short term, they are often total opposites. Most investors fail because they are playing a game of psychological warfare against millions of strangers, trying to guess what they will pay for a stock tomorrow, rather than focusing on what the company actually does.

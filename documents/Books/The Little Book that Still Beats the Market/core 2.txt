@@ -1,7 +1,9 @@
-1. The Hook: The Myth of the Rational Machine
+The Myth of the Rational Machine
+
 In the realms of computer science and finance, we are trained to search for elegant algorithms and rational models to predict behavior. We desperately want to believe the financial system is a perfectly calibrated machine. It is a fatal miscalculation. The average retail investor stares at a screen, watches a ticker flash green and red, and assumes those numbers represent the absolute, fundamental truth of a company's worth in real-time. This is exactly why the herd gets slaughtered. When inflation surges or volatility rips through the system, they scramble, treating the stock market like a hyper-efficient calculator. They are chasing the manic highs and panicking during the chaotic lows, convinced the market knows something they don't. It doesn't.
 
-2. The Author's Solution: Meet Your Manic Partner
+Meet Your Manic Partner
+
 Joel Greenblatt shatters this illusion using a brilliant concept originally conceived by Benjamin Graham: imagine you are a partner in a business with a deeply unstable, wildly emotional guy named Mr. Market. Every single day, Mr. Market knocks on your door and offers to acquire your half of the business, or part with his half, at a specific price. Some days, he is absolutely euphoric, convinced the business is invincible, and he names an absurdly high price. Other days, he is profoundly depressed, terrified of the future, and offers to part with his stake for pennies on the dollar.
 
 Greenblatt notes that in a single year, a massive company like General Motors might be valued at $30 billion one month, and $60 billion just a few months later. Did the intrinsic value of GM’s factories, inventory, and global operations magically double in 90 days? Absolutely not. The business didn't change; Mr. Market's mood changed. Your entire edge comes from exploiting these depressive panics to acquire pieces of a business with a massive "margin of safety"—securing your stake at a steep discount to true value. And while Mr. Market is an emotional basket case in the short term, over the long haul, facts and reality take over. Greenblatt promises that if you wait him out—usually within two to three years—Mr. Market will eventually sober up and pay a fair price for that value.

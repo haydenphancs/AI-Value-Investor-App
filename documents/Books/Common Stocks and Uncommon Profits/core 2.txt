@@ -1,11 +1,16 @@
 Core 2: Auditing the Engine (Sales & Innovation)
-The Hook: The "Better Mousetrap" Fallacy Here is the most expensive mistake you will ever make: assuming the best product wins. You find a tech company with faster chips, cleaner code, or a revolutionary drug. You pile in, convinced the world will beat a path to their door. One year later, the stock is flat, and a competitor with inferior tech is eating their lunch. Why? You fell for the "Engineer’s Delusion." You audited the engine (the innovation) but ignored the transmission (the sales force). An engine without a transmission just makes noise; it doesn't move the car.
+The "Better Mousetrap" Fallacy
 
-The Author’s Solution: The Invisible Army Philip Fisher refused to invest in "lab experiments." He tells the story of visiting companies where the R&D department was treated like royalty—pristine labs, unlimited budgets, geniuses in white coats. But when he asked about the sales organization, the executives would wave it off as a necessary evil. Fisher would immediately walk away.
+Here is the most expensive mistake you will ever make: assuming the best product wins. You find a tech company with faster chips, cleaner code, or a revolutionary drug. You pile in, convinced the world will beat a path to their door. One year later, the stock is flat, and a competitor with inferior tech is eating their lunch. Why? You fell for the "Engineer’s Delusion." You audited the engine (the innovation) but ignored the transmission (the sales force). An engine without a transmission just makes noise; it doesn't move the car.
+
+The Invisible Army
+
+Philip Fisher refused to invest in "lab experiments." He tells the story of visiting companies where the R&D department was treated like royalty—pristine labs, unlimited budgets, geniuses in white coats. But when he asked about the sales organization, the executives would wave it off as a necessary evil. Fisher would immediately walk away.
 
 He knew that without a ruthless, efficient mechanism to educate the customer, innovation is just an expensive hobby. He looked for companies that treated their salespeople with the same reverence as their scientists. Fisher realized that a "profit squeeze" rarely comes from high manufacturing costs; it comes from an inefficient sales team that burns cash trying to find customers. The "Common Stock" winner wasn't just an inventor; it was a master storyteller.
 
-The 'Wiser' Analysis: The Distribution Moat
+The Distribution Moat
+
 
 In the digital age, the most effective salesperson often isn’t a human in a suit; it’s the code itself. Fisher’s obsession with the "sales organization" has evolved into what we now call Product-Led Growth (PLG). Look at the battle between Slack and HipChat. HipChat had the first-mover advantage, but Slack didn't just build a chat app; they engineered a viral sales loop directly into the user experience. Fisher would tell you today that if a user needs a manual or a sales call just to start using the software, the engine is already stalling. The product must sell itself before the sales team even picks up the phone.
 

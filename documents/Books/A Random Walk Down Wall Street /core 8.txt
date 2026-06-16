@@ -1,11 +1,17 @@
 Core 8: Conquering Your Inner Ape
-The Hook: The Caveman in the Casino Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed to survive on the savannah, not to trade derivatives on a smartphone. When you see a stock crash, your amygdala—the fear center—lights up exactly as if a tiger were chasing you. You panic and sell. When you see a stock soaring, your dopamine centers light up like you just found a fruit tree. You buy. The friction is that successful investing requires you to do the exact opposite of your survival instincts. You are biologically hardwired to buy high (greed) and sell low (fear). You are not a rational economic actor; you are an emotional ape with a bank account.
+The Caveman in the Casino
 
-The Author’s Solution: The Pain of the Loss The author drags this psychological flaw into the light using Behavioral Finance. He explains a concept called Loss Aversion with a brutal truth: The pain of losing $1,000 is twice as intense as the pleasure of gaining $1,000.
+Here is the biological glitch that destroys portfolios: Your brain is 200,000 years old. It was designed to survive on the savannah, not to trade derivatives on a smartphone. When you see a stock crash, your amygdala—the fear center—lights up exactly as if a tiger were chasing you. You panic and sell. When you see a stock soaring, your dopamine centers light up like you just found a fruit tree. You buy. The friction is that successful investing requires you to do the exact opposite of your survival instincts. You are biologically hardwired to buy high (greed) and sell low (fear). You are not a rational economic actor; you are an emotional ape with a bank account.
+
+The Pain of the Loss
+
+The author drags this psychological flaw into the light using Behavioral Finance. He explains a concept called Loss Aversion with a brutal truth: The pain of losing $1,000 is twice as intense as the pleasure of gaining $1,000.
 
 This imbalance causes a deadly mistake called the "Disposition Effect." Investors tend to sell their winning stocks too early (to "lock in" the good feeling) and hold their losing stocks too long (to avoid the pain of admitting a mistake). He tells the story of the investor who refuses to sell a tanking stock, saying, "I'll sell it when it gets back to even." It rarely does. By refusing to "realize" the loss, the investor turns a small scratch into a fatal wound, anchoring their ship to a sinking rock just to protect their ego.
 
-The 'Wiser' Analysis: The Dopamine dispenser The financial industry has weaponized your biology against you. Trading apps are no longer tools; they are video games. When you buy a stock, confetti explodes on the screen. When you check your crypto portfolio, the numbers flash in bright green or red, specifically designed to trigger a dopamine loop.
+The Dopamine dispenser
+
+The financial industry has weaponized your biology against you. Trading apps are no longer tools; they are video games. When you buy a stock, confetti explodes on the screen. When you check your crypto portfolio, the numbers flash in bright green or red, specifically designed to trigger a dopamine loop.
 
 The modern "Inner Ape" falls for Confirmation Bias on steroids. If you buy a meme coin that crashes, you don't sell. Instead, you go to a Discord server or a Reddit thread full of other bag-holders who tell you to have "Diamond Hands." They reinforce your delusion that the price must come back up. In the 1970s, you had to call a broker to make a mistake. Today, you can ruin your financial future with a single face-ID unlock while sitting on the toilet.
 

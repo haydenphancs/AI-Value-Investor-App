@@ -18,8 +18,8 @@ struct BookCoreDetailView: View {
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
 
-    // Completion tracking
-    @State private var completedCoreNumbers: Set<Int> = []
+    // Completion tracking — real, persisted progress (local cache + backend sync).
+    @ObservedObject private var progress = BookProgressStore.shared
     @State private var audioCompletionCancellable: AnyCancellable?
 
     // Track if user initiated playback from this view or if it was already playing
@@ -51,9 +51,7 @@ struct BookCoreDetailView: View {
     }
 
     private var isCurrentCoreCompleted: Bool {
-        // Check if already completed by user during this session, or previously completed (chapter <= currentChapter)
-        completedCoreNumbers.contains(currentContent.chapterNumber) ||
-        currentContent.chapterNumber < book.currentChapter
+        progress.isCompleted(order: book.curriculumOrder, core: currentContent.chapterNumber)
     }
 
     // Computed property for header opacity based on scroll
@@ -241,9 +239,9 @@ struct BookCoreDetailView: View {
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
 
-        // Mark current core as completed
-        _ = withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            completedCoreNumbers.insert(currentContent.chapterNumber)
+        // Mark current core as completed (persists locally + syncs to backend).
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            progress.markCompleted(order: book.curriculumOrder, core: currentContent.chapterNumber)
         }
 
         // If there's a next core, navigate to it after a delay

@@ -9,6 +9,8 @@ import SwiftUI
 
 struct LibraryBookCard: View {
     let book: LibraryBook
+    /// Whether every core in the book has been completed (real progress, from BookProgressStore).
+    var isMastered: Bool = false
     var onChatWithBook: (() -> Void)?
     var onReadKeyIdeas: (() -> Void)?
     var onReview: (() -> Void)?
@@ -37,7 +39,7 @@ struct LibraryBookCard: View {
                     }
 
                     // Mastered checkmark badge
-                    if book.isMastered {
+                    if isMastered {
                         ZStack {
                             Circle()
                                 .fill(Color(hex: "14A349"))
@@ -133,7 +135,7 @@ struct LibraryBookCard: View {
                 .buttonStyle(PlainButtonStyle())
 
                 // Dynamic button based on mastered state
-                if book.isMastered {
+                if isMastered {
                     Button(action: {
                         onReview?()
                     }) {
@@ -193,7 +195,7 @@ struct LibraryBookCard: View {
     ScrollView {
         VStack(spacing: AppSpacing.lg) {
             // Mastered book
-            LibraryBookCard(book: LibraryBook.sampleData[0])
+            LibraryBookCard(book: LibraryBook.sampleData[0], isMastered: true)
             // Unread book
             LibraryBookCard(book: LibraryBook.sampleData[2])
         }

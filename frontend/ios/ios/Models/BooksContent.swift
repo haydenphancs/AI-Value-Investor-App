@@ -528,221 +528,6 @@ extension CoreChapterContent {
             ),
         ],
         2: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course Title: The Intelligent Investor Protocol",
-                bookTitle: "The Intelligent Investor",
-                bookAuthor: "Benjamin Graham",
-                sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Subtitle: A Modern Masterclass in Value, Psychology, and Risk Control")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase I: The Psychology of Discipline")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 1: Drawing the Battle Lines")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Concepts from the Introduction, Chapter 1 (Investment vs. Speculation), and Chapter 3 (Market History).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: We strip away the gambling mindset by strictly defining the difference between \"investing\" (thorough analysis, safety of principal, adequate return) and \"speculation\" (betting on price movement), proving that history favors the tortoise, not the hare.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: The Invisible Enemy")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 2 (The Investor and Inflation) and Chapter 10 (The Investor and His Advisers).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Cash is not safe; it is a wasting asset. This module teaches you how to construct a portfolio that survives the silent erosion of purchasing power while deciding if you can trust outside help to manage that risk for you.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Mastering the Manic-Depressive Market")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 8 (The Investor and Market Fluctuations) and Chapter 20 (Margin of Safety - Introductory Concepts).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Meet \"Mr. Market,\" your business partner who offers to buy or sell every day at erratic prices. You will learn to view market crashes not as disasters, but as clearance sales for high-quality assets.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase II: The Strategic Frameworks")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Building the Fortress (The Defensive Strategy)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 4 (General Portfolio Policy: The Defensive Investor) and Chapter 5 (The Defensive Investor and Common Stocks).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Designed for the investor who wants freedom from constant monitoring. We build a permanent, semi-automated portfolio split between high-grade bonds and blue-chip stocks that performs well with minimal effort.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Going on the Offensive (The Enterprising Strategy)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 6 (Portfolio Policy for the Enterprising Investor: Negative Approach) and Chapter 7 (Portfolio Policy for the Enterprising Investor: The Positive Side).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: For those willing to treat investing as a business. We outline the rules for aggressive investing: buying in low markets, selling in high ones, and hunting for \"special situations\" that the average market ignores.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: The Mutual Fund Maze")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 9 (Investing in Investment Funds) and Commentary on modern Indexing.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Most active funds underperform the market due to fees and human error. We analyze how to identify the few funds that work—or why you should simply \"buy the market\" via low-cost indexing to guarantee your share of corporate growth.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase III: The Analytical Toolkit")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Decoding the Financials")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 11 (Security Analysis for the Lay Investor) and Chapter 12 (Things to Consider About Per-Share Earnings).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stop looking at the stock price and start looking at the business. We teach you how to read a balance sheet to find hidden strength and how to spot when \"Earnings Per Share\" is being manipulated by clever accounting.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: The Comparison Test")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 13 (A Comparison of Four Listed Companies) and Chapter 18 (A Comparison of Eight Pairs of Companies).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A stock is only cheap relative to something else. By conducting head-to-head comparisons of similar companies, we reveal why a popular stock might be a trap and an unloved stock might be a goldmine.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: Filtering for Quality (The Defensive Screen)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 14 (Stock Selection for the Defensive Investor).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A strict 7-point checklist for buying stocks that lets you sleep at night. We filter for massive size, strong financial condition, earnings stability, and a long record of continuous dividends.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: Hunting for Bargains (The Enterprising Screen)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 15 (Stock Selection for the Enterprising Investor) and Chapter 16 (Convertible Issues and Warrants).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: How to find \"Net-Nets\"—companies trading for less than their liquidation value. This is deep-value hunting, looking for unpopular companies with strong assets that the market has irrationally discarded.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase IV: Advanced Guardianship")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 11: Spotting the Red Flags")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 17 (Four Extremely Instructive Case Histories) and Chapter 19 (Shareholders and Management).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Learning from the disasters of the past. We examine famous corporate failures to identify the warning signs of bad management, excessive debt, and speculative hype before they blow up your portfolio.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 12: The Golden Rule (Margin of Safety)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 20 (Margin of Safety) and the Postscript.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The secret to investment success in three words: Margin of Safety. We synthesize the entire course into this single principle—never paying full price for value—which renders forecasting unnecessary and protects you from the unknown.")
-                    ),
-                ],
-                audioDurationSeconds: 298,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "Drawing the Battle Lines",
@@ -1493,191 +1278,6 @@ extension CoreChapterContent {
             ),
         ],
         3: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Calibrate Your Financial Lens",
-                bookTitle: "The Psychology of Money",
-                bookAuthor: "Morgan Housel",
-                sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 1 (No One's Crazy) & Chapter 11 (Reasonable > Rational)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Your relationship with money was forged by the specific economic era you grew up in, making perfect rationality impossible. Instead of trying to be a cold, calculating machine, aim to make financial decisions that are simply reasonable enough to let you sleep at night.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Respect the Invisible Forces")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 2 (Luck & Risk) & Chapter 6 (Tails, You Win)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Success is never entirely due to hard work, and failure is rarely just laziness; luck and risk are siblings that govern outcomes. By accepting that extreme outliers drive most results, you can stop judging yourself and focus on surviving long enough to catch a lucky break.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Neutralize the Ego Trap")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 3 (Never Enough) & Chapter 8 (Man in the Car Paradox)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The hardest financial skill is getting the goalpost to stop moving. True wealth requires understanding that nobody is as impressed with your possessions as you are, and that comparing yourself to others is a game you can only win by refusing to play.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Ignite the Compounding Engine")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 4 (Confounding Compounding) & Chapter 15 (Nothing's Free)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Massive wealth doesn't come from securing the highest temporary returns, but from sustaining good returns uninterrupted for decades. To unlock this mathematical magic, you must be willing to pay the invisible \"fee\" of market volatility without panic-selling.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Build an Unbreakable Defense")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 5 (Getting Wealthy vs. Staying Wealthy) & Chapter 13 (Room for Error)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Earning money requires risk and optimism, but keeping it demands paranoia and extreme frugality. Building a massive margin of safety into your financial plans ensures you can survive the inevitable downturns and stay in the game long-term.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Buy Your Freedom")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 7 (Freedom) & Chapter 10 (Save Money)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The highest intrinsic value of a dollar is its ability to give you complete control over your own time. Saving money shouldn't just be for a specific purchase; it should be to buy autonomy, flexibility, and the power to wake up and do whatever you want.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Uncover True Wealth")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 9 (Wealth is What You Don't See) & Chapter 20 (Confessions)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Society confuses \"rich\" (current income spent on flashy things) with \"wealth\" (the unspent financial assets that give you options). To actually build wealth, you must embrace the quiet, unglamorous act of leaving money in the bank instead of converting it into outward status symbols.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: Prepare for the Unprecedented")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 12 (Surprise!) & Chapter 14 (You'll Change)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Economic history is a study of unprecedented events, not a reliable map of the future. You must plan for a world that will constantly surprise you, and accept that your own goals, desires, and career aspirations will radically shift over your lifetime.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: Play Your Own Game")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 16 (You & Me)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Most financial mistakes happen when people take cues from investors who are playing an entirely different game with entirely different time horizons. You must clearly define your own financial identity and ruthlessly ignore the noise from day traders or institutional speculators.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: Overcome the Pessimism Bias")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 17 (The Seduction of Pessimism)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Pessimism sounds incredibly smart and urgent, while optimism often sounds naive and oblivious. However, long-term optimism—the belief that things will generally improve despite severe setbacks—is the necessary psychological fuel for any successful investment strategy.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 11: Dismantle Financial Fictions")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 18 (When You'll Believe Anything)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The more desperately you want a financial outcome to be true, the more likely you are to believe a comforting narrative over cold, hard data. Protecting your portfolio means recognizing your own blind spots and acknowledging that you crave a predictable world that doesn't actually exist.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 12: Forge Your Personal Philosophy")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 19 (All Together Now)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: There is no universal, one-size-fits-all secret to money; there is only the strategy that works for your unique psychology. By synthesizing these behavioral lessons, you can build a financial system optimized for peace of mind, independence, and long-term survival.")
-                    ),
-                ],
-                audioDurationSeconds: 289,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The Spreadsheet Delusion",
@@ -2559,231 +2159,6 @@ extension CoreChapterContent {
             ),
         ],
         4: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course Module 1: The Retail Investor’s Psychological Edge",
-                bookTitle: "One Up On Wall Street",
-                bookAuthor: "Peter Lynch",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Building the mental framework required to beat the pros.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 1: Flipping the Script on Wall Street")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 1 (The Amateur), Introduction, and Chapter 18 (The 12 Silliest Things People Say).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Wall Street is shackled by bureaucracy and short-termism; learn how your flexibility and local knowledge are actually competitive moats, while unlearning the dangerous clichés that trap institutional investors.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: The Mirror Test & Risk Tolerance")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 3 (Is This Gambling?), Chapter 4 (Passing the Mirror Test), and Chapter 19 (Options, Futures, and Shorts).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Before buying a single share, you must determine if you have the stomach for volatility and the financial stability to withstand losses, distinguishing true investing from the casino-like behavior of derivatives.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Ignoring the Macro Noise")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 2 (The Oxymorons), Chapter 5 (Is This a Good Market?), and Chapter 16 (Designing a Portfolio - Market Timing section).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stop trying to predict the economy or interest rates; this module teaches you to ignore \"The Great Worry\" and focus entirely on the micro-economics of specific companies.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Course Module 2: The Art of Discovery")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("How to find potential \"Tenbaggers\" in everyday life.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Leveraging Your Daily Routine")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 6 (Stalking the Tenbagger) and Chapter 1 (Specific examples of \"Dunkin' Donuts\" vs. \"High Tech\").")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The best stock tips aren't in magazines but in your shopping mall and workplace; learn to spot shifts in consumer behavior before the analysts do.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: The \"Perfect Stock\" Profile")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 8 (The Perfect Stock) and Chapter 9 (Stocks I'd Avoid).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Hunt for the unsexy, the dull, and the disagreeable—companies that do boring things in niche markets—while avoiding the \"hottest stock in the hottest industry.\"")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: The Six Categories of Opportunity")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 7 (The Six Categories) and Chapter 17 (Selling strategies specific to categories).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Not all stocks move the same way; master the classification of companies into Fast Growers, Stalwarts, Slow Growers, Cyclicals, Asset Plays, and Turnarounds to set the right expectations for each.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Course Module 3: Fundamental Analysis & Valuation")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The specific numbers and narratives that validate a hunch.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: The Earnings Engine")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 10 (Earnings, Earnings, Earnings) and Chapter 11 (The Two-Minute Drill).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stock prices ultimately follow earnings; this theme teaches you how to construct the \"Two-Minute Drill\" monologue that links a company's growth story directly to its earnings potential.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: Financial Forensics")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 13 (Some Famous Numbers) and Chapter 12 (Getting the Facts).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A deep dive into the balance sheet to identify \"The numbers that matter,\" specifically focusing on debt-to-equity ratios, cash positions, and inventory buildup to ensure the company won't go bust.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: Assessing Management & Dividends")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 13 (Section on Dividends/Book Value) and Chapter 6 (Visits to HQ).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: How to evaluate if management is shareholder-friendly (through dividends and buybacks) or wasting capital on \"diworsification.\"")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Course Module 4: Portfolio Management & Exit Strategy")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The mechanics of buying, holding, and selling.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: Designing the Allocation")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 16 (Designing a Portfolio) and Chapter 7 (Risk/Reward by Category).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: How to rotate capital between \"Stalwarts\" for protection and \"Fast Growers\" for gain, aiming for a 12-15% annual return without over-diversifying into ignorance.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 11: The Re-Evaluation Loop")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 14 (Rechecking the Story) and Chapter 15 (The Final Checklist).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Investing is dynamic; this module establishes a routine for periodically checking if the original \"story\" of the stock is still valid or if the fundamentals have deteriorated.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 12: The Exit Protocols")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 17 (The Best Time to Buy and Sell) and Chapter 18 (When prices drop).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Creating rigid rules for when to fold based on category-specific signals (e.g., inventories rising for a Cyclical) rather than selling out of fear during a market correction.")
-                    ),
-                ],
-                audioDurationSeconds: 264,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "Flipping the Script on Wall Street",
@@ -3807,106 +3182,6 @@ extension CoreChapterContent {
             ),
         ],
         5: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course Title: The Fisher Protocol: A Masterclass in Growth Investing",
-                bookTitle: "Common Stocks and Uncommon Profits",
-                bookAuthor: "Philip Fisher",
-                sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 1: The 'Scuttlebutt' Investigation")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"What 'Scuttlebutt' is\" (Chapter 2) combined with concepts from \"Five Don'ts for Investors\" (specifically regarding annual reports and superficial analysis).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stop relying on Wall Street analysts and sanitized annual reports; learn the detective work of cross-referencing competitors, suppliers, and former employees to uncover the unvarnished truth about a company.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Auditing the Engine (Sales & Innovation)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Points 1, 2, 3, 8, and 9 from \"The Fifteen Points.\" Focuses strictly on the product and the mechanism of growth.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A deep dive into determining if a company has a product with \"market runway,\" an R&D department that actually delivers, and a sales organization capable of converting innovation into revenue.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Decoding Management DNA")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Points 4, 5, 6, 7, 10, 11, 12, 13, 14, and 15 from \"The Fifteen Points.\" Focuses strictly on people and culture.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: How to assess the \"integrity factor\"—identifying management teams that treat employees well, talk freely when trouble hits (rather than clamming up), and refuse to sacrifice long-term growth for short-term profit margins.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Sniper Entries & The Myth of Market Timing")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"When to Buy\" (Chapter 3) combined with the \"Don't quibble over eighths and quarters\" concept.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Learn to identify the specific scenarios—such as temporary bad news for a solid company or an operational efficiency lag—that create the rare \"buy window\" for high-quality growth stocks.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: The Art of the 'Forever Hold'")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"When to Sell\" (Chapter 6) combined with \"Don't Over-stress Diversification\" (Chapter 7/Don't #3).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Re-training your brain to resist the urge to \"take profits\" on winners; understanding that true wealth is built by holding a concentrated portfolio of excellent companies through volatility, selling only when the fundamental business model breaks.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Immunizing Against Noise")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: The remaining \"Five Don'ts\" and \"Five More Don'ts\" (e.g., Don't buy because of the annual report tone, Don't follow the crowd, Don't worry about dividends).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A defensive module on behavioral finance, teaching you to ignore the \"optics\" that trap amateur investors—such as flashy dividends, stock splits, or the general market sentiment—to focus purely on earnings power.")
-                    ),
-                ],
-                audioDurationSeconds: 150,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The 'Scuttlebutt' Investigation",
@@ -4345,251 +3620,6 @@ extension CoreChapterContent {
             ),
         ],
         6: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course Title: The Bogle Strategy: Mastering the Mathematics of Wealth",
-                bookTitle: "The Little Book of Common Sense Investing",
-                bookAuthor: "John C. Bogle",
-                sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase 1: The Philosophical Reset")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Establishing the worldview necessary for index investing.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 1: Escaping the Intermediary Trap")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: The \"Parable of the Gotrocks\" (Introduction), The fundamental conflict of interest in finance (Chapter 1), and the \"Croupier\" concept.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The stock market is a closed system where investors as a group earn the market return minus the massive fees paid to helpers; to win, you must eliminate the helpers.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Separating Business from Speculation")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"Rational Exuberance\" (Chapter 2), The distinction between Investment Return (Dividends + Earnings Growth) vs. Speculative Return (P/E Change).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stop betting on how much people will pay for a stock tomorrow (Speculation) and start banking on the actual profits companies generate (Investment).")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Accepting the Zero-Sum Game")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: The Alpha paradox, The comparison of Managed Funds vs. Index Funds (Chapter 4), and the arithmetic of active management.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: For every investor who beats the market, another must lose to it—making active investing a 50/50 gamble before costs, and a loser's game after costs.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase 2: The Silent Killers of Wealth")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Identifying and eliminating the invisible drains on a portfolio.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Defeating the Tyranny of Compounding Costs")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Expense Ratios, Transaction Costs, and \"Castles in the Air\" (Chapter 3 & 4).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: While compound interest is a miracle for your wealth, compound fees are a miracle for Wall Street; a 2% fee doesn't reduce your return by 2%—it can consume 60% of your final nest egg over a lifetime.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Plugging the Tax Leak")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Tax inefficiency in active turnover vs. Tax efficiency in indexing (Chapter 5).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: It isn't what you earn, it's what you keep; high-turnover funds generate massive tax bills that index funds naturally avoid.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Ignoring the Siren Song of \"Stars\"")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"Selecting Long-Term Winners\" (Chapter 8), \"Yesterday's Winners, Tomorrow's Losers\" (Chapter 9), and Morningstar rating pitfalls.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Chasing 5-star funds is a trap because top performance rarely persists; yesterday's \"smart money\" is statistically destined to regress to the mean.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase 3: The Execution Strategy")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Building the portfolio.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Buying the Haystack")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: The Total Market Index Fund concept (Chapter 11), Broad diversification, eliminating single-stock risk.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Don't waste time looking for the needle (the winning stock) in the haystack; simply buy the haystack (the whole market) to guarantee you own every winner.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: Respecting the Law of Gravity")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Reversion to the Mean (Chapter 6 & 7), The history of fund managers failing to beat the market consistently.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: In financial markets, what goes up abnormally fast must eventually come down; betting against \"Reversion to the Mean\" is the most dangerous gamble in finance.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: Anchoring with Bonds")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Asset Allocation (Chapter 10), \"Bond Funds\" (Chapter 14), Managing risk tolerance.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Bonds aren't for aggressive growth, they are the \"anchor\" to windward that prevents you from panic-selling your stocks during a crash.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Phase 4: Modern Pitfalls & Behavioral Mastery")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Navigating new financial products and one's own psychology.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: Navigating the ETF Minefield")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"Exchange Traded Funds\" (Chapter 15), The difference between investing in an index and trading an index.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: ETFs are a great invention that is often used terribly; use them to buy-and-hold the market, not to day-trade sectors or countries.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 11: Avoiding the \"Smart Beta\" Trap")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"What about Index Funds that Promise to Beat the Market?\" (Chapter 16), Fundamental Indexing, The \"New Paradigm\" risks.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Wall Street constantly invents complex new names for active management (like \"Smart Beta\") to charge higher fees—treat them with extreme skepticism.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 12: Auditing Your Advisor")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"What about an Investment Advisor?\" (Chapter 17), Assessing value-add vs. cost.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Only hire an advisor for asset allocation and behavioral coaching, never for stock picking; if they claim they can beat the market, fire them.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 13: Mastering the Art of Doing Nothing")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: \"Stay the Course\" (Chapter 18), Behavioral finance warnings, The emotional cycle of investing.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The hardest part of indexing is not the math, but the discipline to stand still when the world is panicking; your emotions are your portfolio’s greatest enemy.")
-                    ),
-                ],
-                audioDurationSeconds: 286,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "Escaping the Intermediary Trap",
@@ -5564,166 +4594,6 @@ extension CoreChapterContent {
             ),
         ],
         7: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course Title: The Efficient Investor Protocol",
-                bookTitle: "A Random Walk Down Wall Street",
-                bookAuthor: "Burton G. Malkiel",
-                sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 1: The Valuation Duel")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Part I: Stocks and Their Value (The Firm Foundation Theory vs. The Castles in the Air Theory).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Master the two warring philosophies of Wall Street—investing based on intrinsic value vs. speculating on crowd psychology—and learn why you need to understand both to survive.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Spotting Financial Hallucinations")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 2 (The Madness of Crowds), Chapter 3 (Stock Valuation from the Sixties to the Nineties), and Chapter 4 (The Biggest Bubble of All: Surfing on the Internet).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Inoculate yourself against \"Get Rich Quick\" hysteria by analyzing the anatomy of historical bubbles, from Tulipmania to the Dot-Com crash (and modern Crypto parallels).")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: The Technical Analysis Trap")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 5 (Technical and Fundamental Analysis) and specific sections debunking chart patterns and momentum trading.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Why \"predicting\" the market based on past price charts is financially equivalent to reading tea leaves—and how to stop wasting time on patterns that don't exist.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: The Fundamental Illusion")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 6 (Technical Analysis and the Random Walk Theory) and Chapter 7 (How Good Is Fundamental Analysis?).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Even the \"smart\" method of analyzing balance sheets has a fatal flaw: random events. Learn why even the best Wall Street analysts rarely beat a coin flip.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Respecting the Efficiency Engine")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Part III: The New Technology of Investing (The Efficient Market Hypothesis, Semi-Strong vs. Strong Forms).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Accept the \"Random Walk\": Market prices reflect information so quickly that trying to outsmart the collective intelligence of the world is a losing game.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: The Art of Risk Engineering")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 8 (A New Walking Shoe: Modern Portfolio Theory) and concepts of Diversification.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: You cannot eliminate risk, but you can manage it. Learn to use \"Modern Portfolio Theory\" to maximize your returns for every unit of sleep-at-night risk you take.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Decoding \"Smart\" Strategies")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 11 (Potshots at the Efficient-Market Theory) and Chapter 12 (Smart Beta and Risk Parity).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: An unbiased audit of the \"new\" ways Wall Street tries to sell you complexity (Factor Investing, Smart Beta) and whether they are worth the fees.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: Conquering Your Inner Ape")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 10 (Behavioral Finance) and sections on irrational exuberance.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Your own brain is your portfolio's worst enemy. Identify the cognitive biases (overconfidence, loss aversion) that cause you to buy high and sell low.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: The Indexing Manifesto")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Part IV: A Practical Guide and the specific arguments for low-cost Index Funds and ETFs.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The mathematical proof that a boring, low-fee index fund will outperform 90% of professional hedge fund managers over the long run.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: The Lifecycle Wealth Map")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 14 (A Life-Cycle Guide to Investing) and Chapter 15 (Three Giant Steps Down Wall Street).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A customized asset allocation strategy that evolves with your age—shifting from aggressive growth in your 20s to defensive income in your 60s.")
-                    ),
-                ],
-                audioDurationSeconds: 203,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The Valuation Duel",
@@ -6461,101 +5331,6 @@ extension CoreChapterContent {
             ),
         ],
         8: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Adopting the Owner’s Mindset",
-                bookTitle: "The Essays of Warren Buffett",
-                bookAuthor: "Warren Buffett",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Corporate Governance, Owner-Related Business Principles, and selections from Shareholder-Manager Relations.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Stop viewing stocks as electronic tickers and start viewing them as proportional ownership in a living business. You must demand management treat you as a partner, not a source of capital to be exploited.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Decoding the True Economics")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Accounting and Valuation, Look-Through Earnings, Economic Goodwill, and critiques on EBITDA.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: GAAP accounting is often a mask; you must learn to calculate \"Owner Earnings\" to see how much cash a business actually generates, regardless of what the net income line says.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Determining the Strength of the Moat")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Common Stock, Franchises vs. Commodities, and Investment Alternatives.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Learn to distinguish between a \"Franchise\" (pricing power, high return on capital) and a \"Commodity\" business (price competition, capital intensive)—and why buying the former at a fair price is better than buying the latter at a bargain.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Mastering Market Psychology")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Market Fluctuations, Mr. Market, Junk Bonds, and Efficient Market Theory.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Volatility is not risk; it is an opportunity. This module rewires your brain to treat market drops as discounts at your favorite store, decoupling your emotional state from daily price action.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: The Art of Capital Deployment")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Mergers and Acquisitions, Dividends, Share Repurchases, and Capital Allocation.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The CEO’s most important job is allocating capital. We analyze when a company should pay dividends, when it should buy back its own stock, and when it is simply empire-building through wasteful acquisitions.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Escaping the Institutional Trap")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: The Institutional Imperative, Executive Compensation, and Stock Options.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Most corporate managers mindlessly imitate their peers—a force Buffett calls the \"Institutional Imperative.\" Learn to spot (and avoid) companies run by leaders who prioritize size and peer approval over shareholder value.")
-                    ),
-                ],
-                audioDurationSeconds: 126,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The Ticker Tape Illusion Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.",
@@ -6886,247 +5661,6 @@ extension CoreChapterContent {
             ),
         ],
         9: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Escaping the Mediocrity Trap",
-                bookTitle: "The Little Book that Still Beats the Market",
-                bookAuthor: "Joel Greenblatt",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapters 2 and 12 (The Baseline of Wealth & Wall Street's Illusions)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The traditional financial industry is designed to siphon your wealth, not build it. Most stockbrokers are merely paid a fee to sell you products , and mutual funds consistently fail to beat the market after you strip away their exorbitant fees. To survive the coming chaos, your absolute baseline is the risk-free return of a government bond —anything else you do must violently clear that hurdle, or you are simply burning cash. On Wall Street, there is no tooth fairy.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+3")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 2: Exploiting the Market's Madness")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapters 4 and 10 (Mr. Market & The Inevitability of Value)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The stock market is not a rational calculator; it acts like an emotional, manic-depressive partner named \"Mr. Market\" who offers you wildly different prices for the exact same asset day to day. While the TikTok crowd chases his manic highs, your job is to exploit his depressive panics to buy world-class assets at a massive margin of safety. Over the long run, the madness always fades, and Mr. Market eventually pays a fair price for value.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+2")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 3: Uncovering the True Engine of Value")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapters 1 and 3 (Jason’s Gum Shops & Earnings Yield)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A stock is not a blinking ticker symbol or a casino chip; it is an ownership percentage in a living, breathing business. To separate the gold from the gloss, you must master \"Earnings Yield\"—calculating exactly how much cold, hard cash a business generates relative to the price you are paying for it.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+2")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 4: Separating the Empires from the Dusty Garages")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapters 5 and 9 (Return on Capital & The Moat)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Not all businesses are created equal; some are compounding machines, while others are just dusty garages burning cash. You must hunt for a high \"Return on Capital\"—a metric that proves a company can reinvest its profits at exceptional rates. We learn to avoid funding mediocre traps (like Jimbo's 2.5% return broccoli stand) and instead target companies with special competitive advantages that keep rivals from destroying their profit margins.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+2")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Forging the Ultimate Algorithm")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapters 5 and 6 (The Magic Formula & Ranking the Universe)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: By ruthlessly combining high Earnings Yield (cheap prices) with high Return on Capital (elite quality), you create a systematic algorithm that filters out the noise. This formula ignores the subjective hype of analysts and systematically identifies above-average companies selling at below-average prices.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+1")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Disarming the Dynamite of Stock Picking")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 11 (The Illusion of Individual Selection)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Trying to pick individual stocks based on gut feelings, news headlines, or internet trends is like running through a dynamite factory with a burning match. Unless you are a highly trained professional capable of accurately projecting normalized earnings years into the future, you have absolutely no business picking individual stocks on your own. You must rely on a proven, systematic framework.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+1")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Enduring the Wilderness")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 8 (The Psychology of Underperformance)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The formula fails to beat the market for months or even years at a time. This isn't a flaw; it is the ultimate armor. Because the strategy experiences painful periods of underperformance, the weak-handed, meme-chasing herd inevitably abandons it. This mass exodus is exactly what prevents the strategy from being overused and preserves its phenomenal edge for those with iron discipline.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+2")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: Deploying the Arsenal")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 7 and Step-by-Step Instructions (Execution and Diversification)")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Theory is useless without execution. You neutralize systemic chaos by methodically rolling your capital into a diversified portfolio of 20 to 30 top-ranked stocks over the course of a year. By replacing winners and losers on a strict 12-month schedule, you optimize for tax advantages and let the relentless math of the algorithm do the heavy lifting.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("+2")
-                    ),
-                ],
-                audioDurationSeconds: 266,
-                currentProgress: 0.0
-            ),
-            1: CoreChapterContent(
-                chapterNumber: 1,
-                chapterTitle: "The Spreadsheet Delusion",
-                bookTitle: "The Little Book that Still Beats the Market",
-                bookAuthor: "Joel Greenblatt",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Fever of the Era")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Trading the Algorithm for the Human")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Action Plan")
-                    ),
-                    CoreChapterSection(
-                        type: .actionPlan,
-                        title: nil,
-                        content: .actionPlan([
-                            ActionStep(
-                                title: "Audit Your Sleep Factor",
-                                description: "Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: \"If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?\" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive \"no.\"",
-                                isCompleted: false
-                            ),
-                        ])
-                    )
-                ],
-                audioDurationSeconds: 279,
-                currentProgress: 0.0
-            ),
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The Grand Illusion of Wall Street",
@@ -7180,234 +5714,6 @@ extension CoreChapterContent {
                     ),
                 ],
                 audioDurationSeconds: 246,
-                currentProgress: 0.0
-            ),
-            1: CoreChapterContent(
-                chapterNumber: 1,
-                chapterTitle: "The Spreadsheet Delusion",
-                bookTitle: "The Little Book that Still Beats the Market",
-                bookAuthor: "Joel Greenblatt",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Fever of the Era")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Trading the Algorithm for the Human")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Action Plan")
-                    ),
-                    CoreChapterSection(
-                        type: .actionPlan,
-                        title: nil,
-                        content: .actionPlan([
-                            ActionStep(
-                                title: "Audit Your Sleep Factor",
-                                description: "Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: \"If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?\" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive \"no.\"",
-                                isCompleted: false
-                            ),
-                        ])
-                    )
-                ],
-                audioDurationSeconds: 279,
-                currentProgress: 0.0
-            ),
-            1: CoreChapterContent(
-                chapterNumber: 1,
-                chapterTitle: "The Spreadsheet Delusion",
-                bookTitle: "The Little Book that Still Beats the Market",
-                bookAuthor: "Joel Greenblatt",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Fever of the Era")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Trading the Algorithm for the Human")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Action Plan")
-                    ),
-                    CoreChapterSection(
-                        type: .actionPlan,
-                        title: nil,
-                        content: .actionPlan([
-                            ActionStep(
-                                title: "Audit Your Sleep Factor",
-                                description: "Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: \"If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?\" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive \"no.\"",
-                                isCompleted: false
-                            ),
-                        ])
-                    )
-                ],
-                audioDurationSeconds: 279,
-                currentProgress: 0.0
-            ),
-            1: CoreChapterContent(
-                chapterNumber: 1,
-                chapterTitle: "The Spreadsheet Delusion",
-                bookTitle: "The Little Book that Still Beats the Market",
-                bookAuthor: "Joel Greenblatt",
-                sections: [
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Fever of the Era")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Trading the Algorithm for the Human")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("The Action Plan")
-                    ),
-                    CoreChapterSection(
-                        type: .actionPlan,
-                        title: nil,
-                        content: .actionPlan([
-                            ActionStep(
-                                title: "Audit Your Sleep Factor",
-                                description: "Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: \"If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?\" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive \"no.\"",
-                                isCompleted: false
-                            ),
-                        ])
-                    )
-                ],
-                audioDurationSeconds: 279,
                 currentProgress: 0.0
             ),
             2: CoreChapterContent(
@@ -7647,228 +5953,84 @@ extension CoreChapterContent {
                 audioDurationSeconds: 289,
                 currentProgress: 0.0
             ),
-        ],
-        10: [
-            0: CoreChapterContent(
-                chapterNumber: 0,
-                chapterTitle: "Course: The Marks Method (Wiser Hub - Strategist Track)",
-                bookTitle: "The Most Important Thing",
-                bookAuthor: "Howard Marks",
+            5: CoreChapterContent(
+                chapterNumber: 5,
+                chapterTitle: "The Spreadsheet Delusion",
+                bookTitle: "The Little Book that Still Beats the Market",
+                bookAuthor: "Joel Greenblatt",
                 sections: [
                     CoreChapterSection(
-                        type: .heading,
+                        type: .paragraph,
                         title: nil,
-                        content: .text("Core 1: Escaping the Consensus Trap")
+                        content: .text("Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes from a fundamental misunderstanding: we treat finance like it is physics. We believe it operates on immutable laws, formulas, and perfectly rational answers. We assume that if we just build a complex enough system—perhaps engineering intricate data architecture to process market trends and chart the future—we can perfectly conquer the market.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("Synthesizes: Chapter 1 (Second-Level Thinking) & Introduction.")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: To outperform the market, you must hold views that are both different from the consensus and correct; average thinking inevitably leads to average returns.")
+                        content: .text("But human beings aren't code. We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep. When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally. When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates. The perfectly calculated plan shatters against the reality of human emotion. The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Core 2: Exploiting Market Failures")
+                        content: .text("The Fever of the Era")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("Synthesizes: Chapter 2 (Market Efficiency) & Chapter 18 (Reasonable Expectations).")
+                        content: .text("The author tells a compelling story about how our personal history dictates our financial reality. Imagine two different people. One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s. The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Big Idea: Markets are efficient most of the time, but not all the time; your job is to identify the rare moments when human emotion breaks the efficiency machine.")
+                        content: .text("If you ask both of them about risk, you will get two entirely opposite answers. And the fascinating part? No one is crazy. The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced. We are all viewing money through a highly distorted, individualized lens.")
+                    ),
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability. A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive. But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless. You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Core 3: The Price-Value Divergence")
+                        content: .text("Trading the Algorithm for the Human")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("Synthesizes: Chapter 3 (Value) & Chapter 4 (Price and Value).")
+                        content: .text("Let’s drag this into the reality of right now. We are living in an era of overwhelming technological acceleration. AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Big Idea: Value is what an asset is worth, but price is what you pay; the most dangerous investment is a great company bought at the wrong price.")
+                        content: .text("Today, you hold an unprecedented amount of analytical power right in your pocket. You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company. The AI feels no fear. It doesn't sweat. It only sees pure expected value and cold, hard rationality. But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week. When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.")
+                    ),
+                    CoreChapterSection(
+                        type: .paragraph,
+                        title: nil,
+                        content: .text("In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system. It is building a strategy that actively accommodates your own human flaws. If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you. Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.")
                     ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
-                        content: .text("Core 4: Redefining Risk as Permanence")
+                        content: .text("The Action Plan")
                     ),
                     CoreChapterSection(
-                        type: .paragraph,
+                        type: .actionPlan,
                         title: nil,
-                        content: .text("Synthesizes: Chapter 5 (Understanding Risk).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Reject volatility as a measure of risk; true risk is the probability of permanent loss of capital or a lower-than-necessary return.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Insuring Against the Unknown")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 6 (Recognizing Risk) & Chapter 7 (Controlling Risk).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: High risk does not guarantee high returns; you must demand a \"risk premium\" and structure portfolios that can survive scenarios you didn't predict.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 6: Surfing the Macro Tides")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 8 (Cycles) & Chapter 13 (Knowing Where We Are).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: You cannot predict the future, but you can prepare for it by identifying where we currently stand in the inevitable boom-and-bust cycle.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 7: Combating Emotional Gravity")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 9 (The Pendulum).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Market sentiment oscillates violently between flawless greed and paralyzing fear; recognizing these extremes is the key to avoiding emotional capitulation.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 8: The Art of Aggressive Disagreement")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 10 (Contrarianism).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: To buy when others are despondently selling requires the courage to stand alone, but it must be based on analysis, not just a desire to be different.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 9: Scavenging for Neglected Value")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 11 (Finding Bargains).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: The best opportunities are found among things that others won't do, can't do, or refuse to do—look for assets that are controversial or ignored.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 10: The Discipline of Inaction")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 12 (Patient Opportunism) & Chapter 14 (Knowing What You Don't Know).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Do not swing at every pitch; acknowledge the limits of your forecasting ability and wait aggressively for the \"fat pitch\" where the odds are heavily in your favor.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 11: Surviving the Coin Toss")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 15 (Luck).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: Acknowledging that many successful outcomes are the result of luck (alternative histories) prevents hubris and encourages a margin of safety.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 12: Winning by Not Losing")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 16 (Defensive Investing).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: In tennis and investing, amateur matches are won by the player who makes the fewest unforced errors, not the one who hits the most winners.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 13: Designing the Asymmetric Trade")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 17 (Adding Value) & Chapter 19 (Asymmetry).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: True skill (Alpha) is defined by the ability to capture most of the market's upside while participating in very little of its downside.")
-                    ),
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 14: The Final Checkmate")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("Synthesizes: Chapter 20 (Pitfalls) & Chapter 21 (Pulling it Together).")
-                    ),
-                    CoreChapterSection(
-                        type: .paragraph,
-                        title: nil,
-                        content: .text("The Big Idea: A comprehensive checklist of psychological and analytical errors to avoid, ensuring that your portfolio is robust enough to handle any market weather.")
-                    ),
+                        content: .actionPlan([
+                            ActionStep(
+                                title: "Audit Your Sleep Factor",
+                                description: "Open your Tracking tab and review your Watchlist. Look at those assets and ask yourself a ruthless question: \"If the market drops 20% tomorrow, will staring at these red numbers cause me to panic?\" Adjust your exposure until you can sleep.Adjust your exposure until the answer is a definitive \"no.\"",
+                                isCompleted: false
+                            ),
+                        ])
+                    )
                 ],
-                audioDurationSeconds: 229,
+                audioDurationSeconds: 279,
                 currentProgress: 0.0
             ),
+        ],
+        10: [
             1: CoreChapterContent(
                 chapterNumber: 1,
                 chapterTitle: "The Illusion of the Crowded Room",
@@ -8899,7 +7061,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 7, title: "The \"First 3 Steps\" Launchpad", description: "The Knowledge Coma Here is the final, most dangerous trap: You are smarter now. You have read the Cores. You understand the math.…"),
         ],
         2: [
-            BookCoreChapter(number: 0, title: "Course Title: The Intelligent Investor Protocol", description: "Synthesizes: Concepts from the Introduction, Chapter 1 (Investment vs. Speculation), and Chapter 3 (Market History)."),
             BookCoreChapter(number: 1, title: "Drawing the Battle Lines", description: "1. The Illusion of Competence Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gamb…"),
             BookCoreChapter(number: 2, title: "The Invisible Enemy", description: "1. The Safety Paradox The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at yo…"),
             BookCoreChapter(number: 3, title: "Mastering the Manic-Depressive Market", description: "1. The Price Tag Panic Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now…"),
@@ -8914,7 +7075,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 12, title: "The Golden Rule (Margin of Safety)", description: "The biggest lie you tell yourself is that you can predict the future. You build complex spreadsheets projecting revenue for the ne…"),
         ],
         3: [
-            BookCoreChapter(number: 0, title: "Calibrate Your Financial Lens", description: "The Big Idea: Your relationship with money was forged by the specific economic era you grew up in, making perfect rationality impo…"),
             BookCoreChapter(number: 1, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
             BookCoreChapter(number: 2, title: "The Illusion of Complete Control", description: "Listen closely. The financial world is obsessed with the myth of the self-made visionary. When we see someone accumulate massive w…"),
             BookCoreChapter(number: 3, title: "The Moving Goalpost Syndrome", description: "Have you ever noticed that hitting your financial targets rarely feels as good as you thought it would? You hustle, you scrape, yo…"),
@@ -8929,7 +7089,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 12, title: "The Myth of the Master Key", description: "Walk into any bookstore or log onto any financial forum, and you will immediately notice a common delusion: everyone is desperatel…"),
         ],
         4: [
-            BookCoreChapter(number: 0, title: "Course Module 1: The Retail Investor’s Psychological Edge", description: "Building the mental framework required to beat the pros."),
             BookCoreChapter(number: 1, title: "Flipping the Script on Wall Street", description: "Come closer. Let’s be honest about why you’re nervous. You think the game is rigged. You look at the guys in the glass towers with…"),
             BookCoreChapter(number: 2, title: "The Mirror Test & Risk Tolerance", description: "Most people treat the stock market like a casino, hoping for a lucky spin, but panicking the moment the dealer takes a chip. They…"),
             BookCoreChapter(number: 3, title: "Ignoring the Macro Noise", description: "The single biggest waste of time for any investor is trying to predict the economy. You sit there, paralyzed, watching CNBC, terri…"),
@@ -8944,7 +7103,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 12, title: "The Exit Protocols", description: "Buying a stock is like falling in love—it’s exciting, full of promise, and driven by dopamine. Selling a stock is like a divorce—i…"),
         ],
         5: [
-            BookCoreChapter(number: 0, title: "Course Title: The Fisher Protocol: A Masterclass in Growth Investing", description: "Synthesizes: \"What 'Scuttlebutt' is\" (Chapter 2) combined with concepts from \"Five Don'ts for Investors\" (specifically regarding a…"),
             BookCoreChapter(number: 1, title: "The 'Scuttlebutt' Investigation", description: "The \"Sanitized\" Trap Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNB…"),
             BookCoreChapter(number: 2, title: "Auditing the Engine (Sales & Innovation)", description: "The \"Better Mousetrap\" Fallacy Here is the most expensive mistake you will ever make: assuming the best product wins. You find a t…"),
             BookCoreChapter(number: 3, title: "Decoding Management DNA", description: "The \"Visionary\" Trap You watch the keynote. The CEO strides across the stage in a leather jacket, promising to revolutionize the i…"),
@@ -8953,7 +7111,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 6, title: "Immunizing Against Noise", description: "The \"Macro\" Illusion Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\" You let a stranger on television…"),
         ],
         6: [
-            BookCoreChapter(number: 0, title: "Course Title: The Bogle Strategy: Mastering the Mathematics of Wealth", description: "Establishing the worldview necessary for index investing."),
             BookCoreChapter(number: 1, title: "Escaping the Intermediary Trap", description: "Listen closely. The reason most intelligent people fail at building wealth isn’t that they pick the wrong stocks. It’s that they a…"),
             BookCoreChapter(number: 2, title: "Separating Business from Speculation", description: "There is a dangerous optical illusion that blinds almost everyone who opens a brokerage app. You see a green line going up, and yo…"),
             BookCoreChapter(number: 3, title: "Accepting the Zero-Sum Game", description: "Here is the hardest pill to swallow. You have been told that if you study hard enough, read enough charts, and listen to enough po…"),
@@ -8969,7 +7126,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 13, title: "Mastering the Art of Doing Nothing", description: "There is a fatal flaw in human evolution that makes you a terrible investor: the biological bias for action. For two hundred thous…"),
         ],
         7: [
-            BookCoreChapter(number: 0, title: "Course Title: The Efficient Investor Protocol", description: "Synthesizes: Part I: Stocks and Their Value (The Firm Foundation Theory vs. The Castles in the Air Theory)."),
             BookCoreChapter(number: 1, title: "The Valuation Duel", description: "The Wall Street Civil War There is a secret war happening on Wall Street, and you are the casualty. Most investors think the stock…"),
             BookCoreChapter(number: 2, title: "Spotting Financial Hallucinations", description: "The IQ Trap Here is the embarrassing truth: High IQ does not protect you from financial stupidity. In fact, smart people are often…"),
             BookCoreChapter(number: 3, title: "The Technical Analysis Trap", description: "The Fortune Teller’s Guild Humans are desperate for patterns. If you stare at clouds long enough, you see faces. If you stare at s…"),
@@ -8982,7 +7138,6 @@ extension BookCoreChapter {
             BookCoreChapter(number: 10, title: "The Lifecycle Wealth Map", description: "The Sleeping Bag Strategy Here is the most expensive mistake smart people make: They treat investing like a static number. They as…"),
         ],
         8: [
-            BookCoreChapter(number: 0, title: "Adopting the Owner’s Mindset", description: "Synthesizes: Corporate Governance, Owner-Related Business Principles, and selections from Shareholder-Manager Relations."),
             BookCoreChapter(number: 1, title: "The Ticker Tape Illusion Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent. When the \"chip\" value drops, they panic and fold. This is the \"Renter’s Mentality\"—you are just renting a position on a chart, hoping to pass it to a greater fool for a profit. This detachment is the single greatest cause of wealth destruction. You cannot weather a storm if you don't even know what house you are living in.", description: "The \"Silent Partner\" Letter Buffett flips this dynamic by ignoring the stock market entirely. In his foundational Owner-Related Bu…"),
             BookCoreChapter(number: 2, title: "Decoding the True Economics", description: "The Profit Mirage Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspi…"),
             BookCoreChapter(number: 3, title: "Determining the Strength of the Moat", description: "The \"Good Product\" Fallacy Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growi…"),
@@ -8991,18 +7146,13 @@ extension BookCoreChapter {
             BookCoreChapter(number: 6, title: "Escaping the Institutional Trap", description: "The Boardroom Blind Spot We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a…"),
         ],
         9: [
-            BookCoreChapter(number: 0, title: "Escaping the Mediocrity Trap", description: "Synthesizes: Chapters 2 and 12 (The Baseline of Wealth & Wall Street's Illusions)"),
-            BookCoreChapter(number: 1, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
             BookCoreChapter(number: 1, title: "The Grand Illusion of Wall Street", description: "Listen closely. We are navigating an era of unprecedented financial chaos. Between inflation silently eating away your purchasing…"),
-            BookCoreChapter(number: 1, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
-            BookCoreChapter(number: 1, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
-            BookCoreChapter(number: 1, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
             BookCoreChapter(number: 2, title: "1. The Hook: The Myth of the Rational Machine", description: "In the realms of computer science and finance, we are trained to search for elegant algorithms and rational models to predict beha…"),
             BookCoreChapter(number: 3, title: "1. The Hook: The Casino Chip Delusion", description: "Let me pull back the curtain on the greatest psychological trap in modern finance. In today’s hyper-connected, digital world, the…"),
             BookCoreChapter(number: 4, title: "The Steamroller and the Pennies", description: "Most retail investors fail because they step onto a battlefield where they are mathematically guaranteed to lose. When two compani…"),
+            BookCoreChapter(number: 5, title: "The Spreadsheet Delusion", description: "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions? The friction comes f…"),
         ],
         10: [
-            BookCoreChapter(number: 0, title: "Course: The Marks Method (Wiser Hub - Strategist Track)", description: "Synthesizes: Chapter 1 (Second-Level Thinking) & Introduction."),
             BookCoreChapter(number: 1, title: "The Illusion of the Crowded Room", description: "Here is the uncomfortable truth most retail investors never figure out: the market is a giant, ruthlessly efficient weighing machi…"),
             BookCoreChapter(number: 2, title: "The Perfect Machine Fallacy", description: "Most people walk into the financial markets believing a very dangerous academic lie: that the market is a perfectly calibrated mac…"),
             BookCoreChapter(number: 3, title: "The Fatal Halo Effect", description: "Most people conflate a great company with a great investment. It is the most expensive mistake in finance. You see a business with…"),
@@ -9025,14 +7175,14 @@ extension LibraryBook {
     /// Total read time (minutes) per book, computed from the authored core content.
     static let readMinutesByOrder: [Int: Int] = [
         1: 23,  // Rich Dad Poor Dad
-        2: 44,  // The Intelligent Investor
-        3: 61,  // The Psychology of Money
-        4: 44,  // One Up On Wall Street
-        5: 22,  // Common Stocks and Uncommon Profits
-        6: 53,  // The Little Book of Common Sense Investing
-        7: 36,  // A Random Walk Down Wall Street
-        8: 21,  // The Essays of Warren Buffett
-        9: 43,  // The Little Book that Still Beats the Market
-        10: 62,  // The Most Important Thing
+        2: 39,  // The Intelligent Investor
+        3: 56,  // The Psychology of Money
+        4: 40,  // One Up On Wall Street
+        5: 19,  // Common Stocks and Uncommon Profits
+        6: 48,  // The Little Book of Common Sense Investing
+        7: 33,  // A Random Walk Down Wall Street
+        8: 19,  // The Essays of Warren Buffett
+        9: 24,  // The Little Book that Still Beats the Market
+        10: 59,  // The Most Important Thing
     ]
 }

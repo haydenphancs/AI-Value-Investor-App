@@ -97,7 +97,18 @@ extension Color {
 //
 // 5 Semantic Levels: Title → Heading → Body → Label → Caption
 // Plus specialized tiers for financial data (rounded) and SF Symbol icons.
-// All point sizes preserved from the original design for layout stability.
+//
+// TWO COMFORT TIERS (the rule that keeps cards balanced — modeled on
+// Robinhood/Webull/Yahoo Finance): READING PROSE breathes, DENSE DATA stays tight.
+//   • Reading prose (insight/narrative/description sentences) → `body` (16).
+//   • De-emphasize metadata with COLOR (textMuted/textSecondary), NOT by
+//     shrinking below ~13 — never render a human-readable sentence at caption
+//     sizes (≤11) or captionTiny (9).
+//   • Chart axes, table cells, badges = the DATA tier → caption/labelSmall
+//     (10–12) is correct; keep them small.
+// Report-card ladder: badge 11 · metadata 13 (label) · prose 16 (body) ·
+//   section title 17 (headingSmall) · hero number 22 (dataTitle). A section
+//   header must never be smaller than the prose beneath it.
 //
 
 struct AppTypography {
@@ -137,14 +148,17 @@ struct AppTypography {
     static let captionTiny          = Font.system(size: 9, weight: .regular)
 
     // ━━━ DATA (Financial numerics) ━━━
-    // Rounded design for numeric emphasis in financial context
-    static let dataHero    = Font.system(size: 32, weight: .bold, design: .rounded)
-    static let dataDisplay = Font.system(size: 28, weight: .bold, design: .rounded)
-    static let dataTitle   = Font.system(size: 22, weight: .bold, design: .rounded)
-    static let dataHeading = Font.system(size: 20, weight: .bold, design: .rounded)
-    static let dataLarge   = Font.system(size: 18, weight: .bold, design: .rounded)
-    static let dataMedium  = Font.system(size: 14, weight: .bold, design: .rounded)
-    static let dataSmall   = Font.system(size: 10, weight: .semibold, design: .rounded)
+    // Rounded design for numeric emphasis in financial context.
+    // .monospacedDigit() = tabular figures so prices/%/columns align and digits
+    // don't jitter as values update — the fintech-standard treatment used by
+    // Robinhood / Webull / Yahoo Finance. Numerals only (these tokens never back prose).
+    static let dataHero    = Font.system(size: 32, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataDisplay = Font.system(size: 28, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataTitle   = Font.system(size: 22, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataHeading = Font.system(size: 20, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataLarge   = Font.system(size: 18, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataMedium  = Font.system(size: 14, weight: .bold, design: .rounded).monospacedDigit()
+    static let dataSmall   = Font.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit()
 
     // ━━━ ICONS (SF Symbol sizing) ━━━
     // Size-only tokens — add .fontWeight() modifier for weight control

@@ -292,14 +292,12 @@ struct LibraryBook: Identifiable {
     let publishedYear: Int
     let rating: Double
     let curriculumOrder: Int
-    let isMastered: Bool
     let keyIdeasCount: Int
     let coverGradientStart: String
     let coverGradientEnd: String
 
     // Detail view properties
     let level: BookLevel
-    let chapterCount: Int
     let categoryTags: [BookCategoryTag]
     let whyThisBook: String
     let authorDetail: BookAuthor
@@ -312,9 +310,6 @@ struct LibraryBook: Identifiable {
     let keyHighlights: [BookKeyHighlight]
     let coreChapters: [BookCoreChapter]
     let discussions: [BookDiscussion]
-
-    // User progress - which chapter the user is currently on (1-indexed)
-    let currentChapter: Int
 
     var formattedRating: String {
         String(format: "%.1f", rating)
@@ -331,6 +326,10 @@ struct LibraryBook: Identifiable {
     var formattedKeyIdeas: String {
         "\(keyIdeasCount) Key Ideas"
     }
+
+    /// Always the count of authored cores — derived from coreChapters so it can never
+    /// drift from BooksContent.swift (regenerated from source), and never needs hand-editing.
+    var chapterCount: Int { coreChapters.count }
 
     var formattedChapters: String {
         "\(chapterCount) Cores"
@@ -622,12 +621,10 @@ extension LibraryBook {
             publishedYear: 1997,
             rating: 4.7,
             curriculumOrder: 1,
-            isMastered: true,
             keyIdeasCount: 12,
             coverGradientStart: "7C3AED",
             coverGradientEnd: "4C1D95",
             level: .starter,
-            chapterCount: 7,
             categoryTags: [.mindset, .finance],
             whyThisBook: "Rich Dad Poor Dad is Robert Kiyosaki's best-selling book about the difference in mindset between the poor, middle class, and rich. It advocates the importance of financial literacy, financial independence and building wealth through investing in assets.\n\nThe book is largely based on Kiyosaki's upbringing and education in Hawaii. It highlights the different attitudes toward money, work, and life between his biological father and the father of his best friend.",
             authorDetail: BookAuthor(
@@ -647,8 +644,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Take Risks", description: "Playing it safe is actually the riskiest thing you can do. Learn to manage risk and take calculated chances.", iconName: "bolt.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[1] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 2
+            discussions: sampleDiscussions
         ),
 
         // Book 2 - The Intelligent Investor - MASTERED
@@ -660,12 +656,10 @@ extension LibraryBook {
             publishedYear: 1949,
             rating: 4.8,
             curriculumOrder: 2,
-            isMastered: true,
             keyIdeasCount: 18,
             coverGradientStart: "1E3A5F",
             coverGradientEnd: "0F1F35",
             level: .intermediate,
-            chapterCount: 13,
             categoryTags: [.investing, .analysis, .strategy],
             whyThisBook: "The Intelligent Investor is widely considered the bible of value investing. Benjamin Graham's timeless wisdom on how to think about investing has guided generations of the world's most successful investors.\n\nThe book teaches the concept of 'Mr. Market,' margin of safety, and the distinction between investing and speculation. Warren Buffett credits this book for shaping his investment philosophy.",
             authorDetail: BookAuthor(
@@ -685,8 +679,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Defensive Investing", description: "Build a diversified portfolio that doesn't require constant attention.", iconName: "lock.shield.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[2] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 6
+            discussions: sampleDiscussions
         ),
 
         // Book 3 - The Psychology of Money
@@ -698,12 +691,10 @@ extension LibraryBook {
             publishedYear: 2020,
             rating: 4.9,
             curriculumOrder: 3,
-            isMastered: false,
             keyIdeasCount: 15,
             coverGradientStart: "059669",
             coverGradientEnd: "064E3B",
             level: .starter,
-            chapterCount: 13,
             categoryTags: [.psychology, .mindset, .finance],
             whyThisBook: "Morgan Housel explores the strange ways people think about money and teaches you how to make better sense of one of life's most important topics.\n\nThrough 19 short stories, the book demonstrates that financial success is not about what you know technically but how you behave. It's about soft skills that are often overlooked in financial education.",
             authorDetail: BookAuthor(
@@ -723,8 +714,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Reasonable > Rational", description: "Being reasonable is more sustainable than being coldly rational with money.", iconName: "heart.fill", iconColor: "EC4899")
             ],
             coreChapters: BookCoreChapter.listsByOrder[3] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 4 - One Up On Wall Street
@@ -736,12 +726,10 @@ extension LibraryBook {
             publishedYear: 1989,
             rating: 4.5,
             curriculumOrder: 4,
-            isMastered: false,
             keyIdeasCount: 14,
             coverGradientStart: "2D4A3E",
             coverGradientEnd: "1A2D25",
             level: .intermediate,
-            chapterCount: 13,
             categoryTags: [.investing, .strategy, .analysis],
             whyThisBook: "Peter Lynch ran the Magellan Fund at Fidelity, achieving an average annual return of 29.2% over 13 years. In this book, he shares his investment approach of finding 'tenbaggers' - stocks that increase tenfold in value.\n\nLynch teaches investors to use their everyday experiences to find investment opportunities, categorizing stocks into six types to help identify the best opportunities.",
             authorDetail: BookAuthor(
@@ -761,8 +749,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Do Your Homework", description: "Research the company's story, financials, and competitive position.", iconName: "doc.text.magnifyingglass", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[4] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 5 - Common Stocks and Uncommon Profits
@@ -774,12 +761,10 @@ extension LibraryBook {
             publishedYear: 1958,
             rating: 4.7,
             curriculumOrder: 5,
-            isMastered: false,
             keyIdeasCount: 16,
             coverGradientStart: "4A1E1E",
             coverGradientEnd: "2D1212",
             level: .intermediate,
-            chapterCount: 7,
             categoryTags: [.investing, .strategy, .analysis],
             whyThisBook: "Philip Fisher pioneered growth investing and developed the 'scuttlebutt' method of research. This book presents Fisher's 15 points to look for in a common stock.\n\nWarren Buffett describes himself as '85% Graham and 15% Fisher,' highlighting the profound impact this book had on his transition from pure value investing to quality-focused investing.",
             authorDetail: BookAuthor(
@@ -799,8 +784,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Management Quality", description: "The caliber of management is crucial to long-term success.", iconName: "person.3.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[5] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 6 - The Little Book of Common Sense Investing
@@ -812,12 +796,10 @@ extension LibraryBook {
             publishedYear: 2007,
             rating: 4.6,
             curriculumOrder: 6,
-            isMastered: false,
             keyIdeasCount: 10,
             coverGradientStart: "1E40AF",
             coverGradientEnd: "1E3A8A",
             level: .starter,
-            chapterCount: 14,
             categoryTags: [.investing, .strategy],
             whyThisBook: "John Bogle, founder of Vanguard, revolutionized investing by creating the first index fund. This book makes the case for passive investing and demonstrates why most active managers fail to beat the market.\n\nThe book teaches the importance of low costs, broad diversification, and staying the course through market volatility.",
             authorDetail: BookAuthor(
@@ -837,8 +819,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: "sparkles", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[6] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 7 - A Random Walk Down Wall Street
@@ -850,12 +831,10 @@ extension LibraryBook {
             publishedYear: 1973,
             rating: 4.4,
             curriculumOrder: 7,
-            isMastered: false,
             keyIdeasCount: 13,
             coverGradientStart: "7C2D12",
             coverGradientEnd: "451A03",
             level: .intermediate,
-            chapterCount: 11,
             categoryTags: [.economics, .investing, .analysis],
             whyThisBook: "Burton Malkiel's classic introduces the efficient market hypothesis and challenges the notion that expert stock pickers can consistently beat the market.\n\nThe book covers both fundamental and technical analysis, exploring their limitations, and makes the case for a diversified, low-cost investment strategy.",
             authorDetail: BookAuthor(
@@ -875,8 +854,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Buy and Hold", description: "Time in the market beats timing the market.", iconName: "hand.raised.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[7] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 8 - The Essays of Warren Buffett
@@ -888,12 +866,10 @@ extension LibraryBook {
             publishedYear: 1997,
             rating: 4.8,
             curriculumOrder: 8,
-            isMastered: false,
             keyIdeasCount: 20,
             coverGradientStart: "B45309",
             coverGradientEnd: "78350F",
             level: .advanced,
-            chapterCount: 7,
             categoryTags: [.investing, .business, .strategy],
             whyThisBook: "This collection compiles Warren Buffett's annual shareholder letters into a coherent philosophy of investing and business management.\n\nThe essays cover corporate governance, finance, investing, and common stock, providing direct insight into the mind of the world's most successful investor.",
             authorDetail: BookAuthor(
@@ -913,8 +889,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Long-term Focus", description: "Our favorite holding period is forever.", iconName: "infinity", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[8] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 9 - The Little Book that Still Beats the Market (replaces Security Analysis)
@@ -926,12 +901,10 @@ extension LibraryBook {
             publishedYear: 2010,
             rating: 4.5,
             curriculumOrder: 9,
-            isMastered: false,
             keyIdeasCount: 9,
             coverGradientStart: "10B981",
             coverGradientEnd: "065F46",
             level: .intermediate,
-            chapterCount: 9,
             categoryTags: [.investing, .strategy, .finance],
             whyThisBook: "Joel Greenblatt distills value investing into a two-factor 'Magic Formula': buy above-average companies (high return on capital) at below-average prices (high earnings yield), and hold them systematically.\n\nThe book argues the edge isn't secret — it's behavioral. The formula underperforms often enough that most investors abandon it, which is exactly why it keeps working for those who don't.",
             authorDetail: BookAuthor(
@@ -951,8 +924,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Discipline Over Emotion", description: "The formula works over years precisely because most can't stick with it.", iconName: "brain.head.profile", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[9] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         ),
 
         // Book 10 - The Most Important Thing
@@ -964,12 +936,10 @@ extension LibraryBook {
             publishedYear: 2011,
             rating: 4.7,
             curriculumOrder: 10,
-            isMastered: false,
             keyIdeasCount: 17,
             coverGradientStart: "581C87",
             coverGradientEnd: "3B0764",
             level: .advanced,
-            chapterCount: 15,
             categoryTags: [.investing, .psychology, .strategy],
             whyThisBook: "Howard Marks distills 40 years of investment wisdom into the essential principles that separate successful investors from the rest.\n\nThe book covers second-level thinking, understanding market cycles, managing risk, and the importance of contrarian thinking in achieving superior returns.",
             authorDetail: BookAuthor(
@@ -989,8 +959,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Contrarian Thinking", description: "The best opportunities come from disagreeing with consensus.", iconName: "arrow.left.arrow.right", iconColor: "22C55E")
             ],
             coreChapters: BookCoreChapter.listsByOrder[10] ?? [],
-            discussions: sampleDiscussions,
-            currentChapter: 1
+            discussions: sampleDiscussions
         )
     ]
 }

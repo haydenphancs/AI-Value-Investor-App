@@ -156,6 +156,10 @@ enum APIEndpoint: Sendable {
     // MARK: - Learn / Money Moves
     case getMoneyMoves
 
+    // MARK: - Learn / Book Library progress
+    case getBookProgress
+    case completeBookCore(curriculumOrder: Int, coreNumber: Int)
+
     // MARK: - Personas
     case getPersonas
 
@@ -368,6 +372,12 @@ enum APIEndpoint: Sendable {
         case .getMoneyMoves:
             return "/api/v1/learn/money-moves"
 
+        // Learn / Book Library progress
+        case .getBookProgress:
+            return "/api/v1/learn/books/progress"
+        case .completeBookCore(let curriculumOrder, let coreNumber):
+            return "/api/v1/learn/books/\(curriculumOrder)/cores/\(coreNumber)/complete"
+
         // Personas
         case .getPersonas:
             return "/api/v1/research/personas"
@@ -385,7 +395,7 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport,
+             .chatWithTickerReport, .completeBookCore,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .createPortfolio, .regenerateResearchReportPDF:
             return .POST
@@ -583,6 +593,9 @@ enum APIEndpoint: Sendable {
             return false
         // Money Moves article content is public
         case .getMoneyMoves:
+            return false
+        // Book Library progress uses optional auth (token sent if signed in; guests still work)
+        case .getBookProgress, .completeBookCore:
             return false
         // Personas are public
         case .getPersonas:

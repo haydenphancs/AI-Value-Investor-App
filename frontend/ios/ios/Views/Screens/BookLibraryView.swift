@@ -10,6 +10,7 @@ import SwiftUI
 struct BookLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var progress = BookProgressStore.shared
     @State private var searchText = ""
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
@@ -25,7 +26,7 @@ struct BookLibraryView: View {
     }
 
     private var masteredCount: Int {
-        books.filter { $0.isMastered }.count
+        books.filter { progress.isMastered(order: $0.curriculumOrder, totalCores: $0.chapterCount) }.count
     }
 
     private var totalCount: Int {
@@ -87,6 +88,7 @@ struct BookLibraryView: View {
                         ForEach(filteredBooks) { book in
                             LibraryBookCard(
                                 book: book,
+                                isMastered: progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount),
                                 onChatWithBook: { handleChatWithBook(book) },
                                 onReadKeyIdeas: { handleReadKeyIdeas(book) },
                                 onReview: { handleReview(book) }
@@ -106,6 +108,10 @@ struct BookLibraryView: View {
         .navigationBarHidden(true)
         .onAppear {
             loadBooks()
+        }
+        .task {
+            // Pull server-side progress and union it into the local cache (best-effort).
+            await progress.hydrate()
         }
         .fullScreenCover(item: $selectedBook) { book in
             BookDetailView(book: book)

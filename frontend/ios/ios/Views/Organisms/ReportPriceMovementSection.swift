@@ -44,7 +44,7 @@ struct ReportPriceMovementSection: View {
                 // that anchors the move to the stock's own baseline.
                 if let sub = ctx.volatilitySubLabel {
                     Text(sub)
-                        .font(AppTypography.captionTiny)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textMuted)
                 }
             }

@@ -124,7 +124,20 @@ read_min = []
 summary = []
 for order, dirname, btitle, bauthor in BOOKS:
     d = BD / dirname
-    cores = sorted([p for p in d.glob("*.txt") if re.match(r"core", p.name, re.I)], key=core_num)
+    # Only ingest strictly-named "core <N>.txt" files. This excludes the course-index
+    # "cores.txt" (which has no number -> would land as a bogus "Core 0") and accidental
+    # Finder duplicates like "core 1 copy 5.txt" (which all collapse to the same number).
+    cores = sorted([p for p in d.glob("*.txt") if re.fullmatch(r"core\s+\d+", p.stem, re.I)], key=core_num)
+    # Fail fast on duplicate core numbers: a Swift dictionary literal with duplicate keys
+    # traps at runtime ("Dictionary literal contains duplicate keys") the first time
+    # booksByOrder is accessed — i.e. when the user opens any core. Catch it at gen time.
+    _nums = [core_num(p) for p in cores]
+    _dupes = sorted({n for n in _nums if _nums.count(n) > 1})
+    if _dupes:
+        raise SystemExit(
+            f"[{dirname}] duplicate core numbers {_dupes} from files "
+            f"{[p.name for p in cores]} — fix the source filenames before regenerating"
+        )
     core_entries = []
     list_entries = []
     total_words = 0

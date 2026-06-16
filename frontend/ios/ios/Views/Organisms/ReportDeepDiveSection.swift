@@ -29,7 +29,7 @@ struct ReportDeepDiveSection<Content: View>: View {
                         .frame(width: module.iconName == "dollarsign.circle" ? 36 : 28, alignment: module.iconName == "dollarsign.circle" ? .leading : .center)
 
                     Text(module.title)
-                        .font(AppTypography.bodySmallEmphasis)
+                        .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textPrimary)
                         .offset(x: module.iconName == "dollarsign.circle" ? -8 : 0)
 

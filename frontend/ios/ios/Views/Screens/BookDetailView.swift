@@ -328,6 +328,7 @@ private struct BookDetailBadge: View {
 // MARK: - Listen Row
 private struct BookDetailListenRow: View {
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var progress = BookProgressStore.shared
     let book: LibraryBook
 
     // Check if this is the current book being played (any core)
@@ -342,14 +343,14 @@ private struct BookDetailListenRow: View {
         return currentEpisode.id == resumeCoreAudioEpisode.id && audioManager.isPlaying
     }
 
-    // User has progress if currentChapter > 1 (they've completed at least core 1)
+    // User has progress if they've completed at least one core.
     private var hasProgress: Bool {
-        book.currentChapter > 1
+        progress.hasProgress(order: book.curriculumOrder)
     }
 
-    // The core to resume from (currentChapter is the one they're working on)
+    // The core to resume from: the first one they haven't finished yet.
     private var resumeCoreNumber: Int {
-        book.currentChapter
+        progress.resumeCore(order: book.curriculumOrder, totalCores: book.chapterCount)
     }
 
     // Get the audio episode for the resume core
@@ -580,7 +581,7 @@ private struct BookDetailCoreContent: View {
             // Core Chapters Section (with progress tracking)
             CoreChaptersSection(
                 chapters: book.coreChapters,
-                currentChapter: book.currentChapter,
+                curriculumOrder: book.curriculumOrder,
                 onChapterTapped: { chapter in
                     selectedChapter = chapter
                 }
@@ -658,8 +659,9 @@ private struct KeyHighlightCard: View {
 
 // MARK: - Core Chapters Section (Timeline Style)
 private struct CoreChaptersSection: View {
+    @ObservedObject private var progress = BookProgressStore.shared
     let chapters: [BookCoreChapter]
-    let currentChapter: Int
+    let curriculumOrder: Int
     var onChapterTapped: ((BookCoreChapter) -> Void)?
 
     var body: some View {
@@ -670,7 +672,7 @@ private struct CoreChaptersSection: View {
                     CoreChapterTimelineRow(
                         chapter: chapter,
                         isLast: index == chapters.count - 1,
-                        isCompleted: chapter.number <= currentChapter,
+                        isCompleted: progress.isCompleted(order: curriculumOrder, core: chapter.number),
                         onTapped: {
                             onChapterTapped?(chapter)
                         }

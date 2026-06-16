@@ -88,6 +88,7 @@ def build_row(sb, article: dict, sort_order: int) -> dict:
         "is_featured": bool(article.get("isFeatured", False)),
         "has_audio_version": bool(audio_url),
         "audio_url": audio_url,
+        "audio_duration_seconds": article.get("audioDurationSeconds"),
         "sort_order": sort_order,
         "content": article,                       # full iOS MoneyMoveArticleDTO passthrough
         "updated_at": datetime.now(timezone.utc).isoformat(),

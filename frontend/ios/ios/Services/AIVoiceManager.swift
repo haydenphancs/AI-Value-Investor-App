@@ -116,12 +116,14 @@ class AIVoiceManager: NSObject, ObservableObject {
 
         let interval = CMTime(seconds: 0.05, preferredTimescale: 600)
         timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.tickClip() }
+            guard let self else { return }
+            Task { @MainActor in self.tickClip() }
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.handleClipFinished() }
+            guard let self else { return }
+            Task { @MainActor in self.handleClipFinished() }
         }
 
         isPlaying = true

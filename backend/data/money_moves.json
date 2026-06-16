@@ -12,7 +12,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 9,
+      "readTimeMinutes": 6,
       "viewCount": "3.1M",
       "learnerCount": "2.1k",
       "sortOrder": 0,
@@ -251,7 +251,8 @@
           ]
         }
       ],
-      "cardSubtitle": "The strategy behind unstoppable dominance."
+      "cardSubtitle": "The strategy behind unstoppable dominance.",
+      "audioDurationSeconds": 408
     },
     {
       "slug": "warren-buffetts-early-days",
@@ -264,7 +265,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 8,
+      "readTimeMinutes": 6,
       "viewCount": "2.4M",
       "learnerCount": "1.8k",
       "sortOrder": 1,
@@ -492,7 +493,8 @@
           ]
         }
       ],
-      "cardSubtitle": "The moves that built a fortune."
+      "cardSubtitle": "The moves that built a fortune.",
+      "audioDurationSeconds": 391
     },
     {
       "slug": "apples-services-revolution",
@@ -505,7 +507,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 6,
+      "readTimeMinutes": 4,
       "viewCount": "2.0M",
       "learnerCount": "1.6k",
       "sortOrder": 2,
@@ -706,7 +708,8 @@
           ]
         }
       ],
-      "cardSubtitle": "How Apple transformed from hardware to ecosystem."
+      "cardSubtitle": "How Apple transformed from hardware to ecosystem.",
+      "audioDurationSeconds": 254
     },
     {
       "slug": "costcos-membership-magic",
@@ -720,7 +723,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 8,
+      "readTimeMinutes": 5,
       "viewCount": "1.7M",
       "learnerCount": "1.2k",
       "sortOrder": 3,
@@ -916,7 +919,8 @@
             "B45309"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 321
     },
     {
       "slug": "the-fall-of-enron",
@@ -930,7 +934,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 9,
+      "readTimeMinutes": 4,
       "viewCount": "2.6M",
       "learnerCount": "1.5k",
       "sortOrder": 4,
@@ -1118,7 +1122,8 @@
             "9F1239"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 284
     },
     {
       "slug": "netflix-vs-disney-plus",
@@ -1132,7 +1137,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 7,
+      "readTimeMinutes": 4,
       "viewCount": "2.3M",
       "learnerCount": "2.3k",
       "sortOrder": 5,
@@ -1314,7 +1319,8 @@
             "6D28D9"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 256
     },
     {
       "slug": "tesla-vs-traditional-auto",
@@ -1328,7 +1334,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 8,
+      "readTimeMinutes": 4,
       "viewCount": "2.1M",
       "learnerCount": "1.9k",
       "sortOrder": 6,
@@ -1510,7 +1516,8 @@
             "6D28D9"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 261
     },
     {
       "slug": "weworks-unraveling",
@@ -1524,7 +1531,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 7,
+      "readTimeMinutes": 4,
       "viewCount": "1.9M",
       "learnerCount": "1.3k",
       "sortOrder": 7,
@@ -1710,7 +1717,8 @@
             "9F1239"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 249
     },
     {
       "slug": "the-ftx-collapse",
@@ -1724,7 +1732,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 7,
+      "readTimeMinutes": 3,
       "viewCount": "2.8M",
       "learnerCount": "3.2k",
       "sortOrder": 8,
@@ -1896,7 +1904,8 @@
             "7F1D1D"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 225
     },
     {
       "slug": "theranos-blood-and-lies",
@@ -1910,7 +1919,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 7,
+      "readTimeMinutes": 3,
       "viewCount": "2.5M",
       "learnerCount": "2.8k",
       "sortOrder": 9,
@@ -2088,7 +2097,8 @@
             "7F1D1D"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 235
     },
     {
       "slug": "visa-vs-mastercard",
@@ -2102,7 +2112,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 6,
+      "readTimeMinutes": 3,
       "viewCount": "1.7M",
       "learnerCount": "1.7k",
       "sortOrder": 10,
@@ -2274,7 +2284,8 @@
             "5B21B6"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 229
     },
     {
       "slug": "google-vs-microsoft-ai-wars",
@@ -2288,7 +2299,7 @@
         "isVerified": true,
         "followerCount": "45.2k"
       },
-      "readTimeMinutes": 7,
+      "readTimeMinutes": 3,
       "viewCount": "2.4M",
       "learnerCount": "2.5k",
       "sortOrder": 11,
@@ -2470,7 +2481,8 @@
             "5B21B6"
           ]
         }
-      ]
+      ],
+      "audioDurationSeconds": 246
     }
   ]
 }

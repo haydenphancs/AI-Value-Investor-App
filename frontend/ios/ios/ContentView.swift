@@ -33,7 +33,7 @@ struct ContentView: View {
                 .allowsHitTesting(selectedTab == .updates)
 
             ResearchViewWithBinding(
-                selectedTab: $selectedTab,
+                selectedTab: $selectedTab,  
                 prefilledTicker: researchTickerSymbol,
                 initialSubTab: researchSubTab
             )

@@ -35,25 +35,61 @@ struct CompanyLogoView: View {
         )
     }
 
+    /// FMP serves a per-ticker logo PNG (public CDN, no API key). Used when no
+    /// real bundled asset is supplied; falls back to initials on load/failure.
+    private var remoteLogoURL: URL? {
+        let symbol = ticker.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !symbol.isEmpty else { return nil }
+        return URL(string: "https://images.financialmodelingprep.com/symbol/\(symbol).png")
+    }
+
+    /// Only resolves when `imageName` names a real asset in the catalog. Several
+    /// `icon_*` names referenced elsewhere don't exist, so this guards against
+    /// rendering a blank `Image("missing")` instead of falling through to the logo.
+    private var bundledImage: Image? {
+        guard let imageName, UIImage(named: imageName) != nil else { return nil }
+        return Image(imageName)
+    }
+
+    private var initialsView: some View {
+        Text(String(ticker.prefix(1)))
+            .font(.system(size: size * 0.4, weight: .bold))
+            .foregroundColor(.white)
+            .frame(width: size, height: size)
+            .background(fallbackGradient)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+    }
+
     var body: some View {
         ZStack {
-            if let imageName = imageName {
-                // Try to load asset image
-                Image(imageName)
+            if let bundledImage {
+                // A real bundled asset wins.
+                bundledImage
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: size * 0.6, height: size * 0.6)
                     .frame(width: size, height: size)
                     .background(fallbackGradient)
                     .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+            } else if let remoteLogoURL {
+                // Remote FMP logo on a white chip (logos are often dark/transparent,
+                // which would vanish on the dark UI). Initials show while loading
+                // or if the symbol has no logo.
+                AsyncImage(url: remoteLogoURL) { phase in
+                    if case .success(let image) = phase {
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(size * 0.16)
+                            .frame(width: size, height: size)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+                    } else {
+                        initialsView
+                    }
+                }
             } else {
-                // Fallback to initials
-                Text(String(ticker.prefix(1)))
-                    .font(.system(size: size * 0.4, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: size, height: size)
-                    .background(fallbackGradient)
-                    .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+                initialsView
             }
         }
     }

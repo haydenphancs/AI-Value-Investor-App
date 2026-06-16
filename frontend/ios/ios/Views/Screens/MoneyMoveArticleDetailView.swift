@@ -31,7 +31,7 @@ struct MoneyMoveArticleDetailView: View {
             subtitle: article.subtitle,
             artworkGradientColors: article.heroGradientColors,
             artworkIcon: article.category.iconName,
-            duration: TimeInterval(article.readTimeMinutes * 60),
+            duration: TimeInterval(article.audioDurationSeconds ?? article.readTimeMinutes * 60),
             category: .moneyMoves,
             authorName: article.author.name,
             sourceId: article.id.uuidString,
@@ -79,16 +79,15 @@ struct MoneyMoveArticleDetailView: View {
                         // counts as read (markCompleted is idempotent).
                         Color.clear
                             .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
-                            .background(
-                                GeometryReader { geo -> Color in
-                                    if geo.frame(in: .global).minY < UIScreen.main.bounds.height {
-                                        DispatchQueue.main.async {
-                                            MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
-                                        }
+                            // onScrollVisibilityChange replaces a GeometryReader + UIScreen.main
+                            // bounds check (UIScreen.main is deprecated in iOS 26).
+                            .onScrollVisibilityChange(threshold: 0.01) { visible in
+                                if visible {
+                                    DispatchQueue.main.async {
+                                        MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
                                     }
-                                    return Color.clear
                                 }
-                            )
+                            }
                     }
                     .background(
                         GeometryReader { proxy in

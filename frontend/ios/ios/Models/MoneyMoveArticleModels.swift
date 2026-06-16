@@ -41,6 +41,9 @@ struct MoneyMoveArticle: Identifiable {
 
     // Narration audio (Supabase Storage URL); nil until narration is generated.
     var audioUrl: String? = nil
+    /// Real narration length in seconds (from the generated clip). Drives the "Listen" time;
+    /// nil for articles without audio (falls back to readTimeMinutes).
+    var audioDurationSeconds: Int? = nil
 
     var formattedDate: String {
         let formatter = DateFormatter()

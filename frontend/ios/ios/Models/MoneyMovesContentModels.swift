@@ -51,6 +51,7 @@ struct MoneyMoveArticleDTO: Decodable {
     let isFeatured: Bool?
     let hasAudioVersion: Bool?
     let audioUrl: String?
+    let audioDurationSeconds: Int?    // real narration length (sec) — drives the Listen time
     let heroGradientColors: [String]
     let keyHighlights: [ArticleHighlightDTO]
     let sections: [ArticleSectionDTO]
@@ -84,7 +85,8 @@ struct MoneyMoveArticleDTO: Decodable {
             statistics: (statistics ?? []).map { $0.toStatistic() },
             comments: mappedComments,
             relatedArticles: (relatedArticles ?? []).map { $0.toRelated() },
-            audioUrl: audioUrl
+            audioUrl: audioUrl,
+            audioDurationSeconds: audioDurationSeconds
         )
     }
 

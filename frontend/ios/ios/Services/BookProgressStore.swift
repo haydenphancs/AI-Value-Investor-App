@@ -132,6 +132,6 @@ struct LearnProgressResponse: Decodable {
     let keys: [String]
 }
 
-struct CompleteLearnItemRequest: Encodable, Sendable {
+nonisolated struct CompleteLearnItemRequest: Encodable, Sendable {
     let key: String
 }

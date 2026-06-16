@@ -33,15 +33,8 @@ struct ReportHeaderBar: View {
 
             // Company logo placeholder + info
             HStack(spacing: AppSpacing.md) {
-                // Logo placeholder
-                RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                    .fill(AppColors.cardBackgroundLight)
-                    .frame(width: 36, height: 36)
-                    .overlay(
-                        Text(String(companyName.prefix(1)))
-                            .font(AppTypography.headingSmall)
-                            .foregroundColor(AppColors.textPrimary)
-                    )
+                // Company logo (real FMP logo by ticker, initials fallback)
+                CompanyLogoView(ticker: ticker, size: 36)
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(companyName)

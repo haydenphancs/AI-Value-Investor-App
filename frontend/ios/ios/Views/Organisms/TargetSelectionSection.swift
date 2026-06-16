@@ -21,8 +21,8 @@ struct TargetSelectionSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Select Your Target:")
-                .font(AppTypography.heading)
+            Text("Your Target:")
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
             if let target = selectedTarget {

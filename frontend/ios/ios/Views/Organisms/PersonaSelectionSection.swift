@@ -15,8 +15,8 @@ struct PersonaSelectionSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section header
-            Text("Select Analysis Persona:")
-                .font(AppTypography.heading)
+            Text("Analysis Persona:")
+                .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 

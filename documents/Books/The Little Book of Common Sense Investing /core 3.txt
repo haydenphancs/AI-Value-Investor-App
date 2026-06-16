@@ -18,7 +18,5 @@ In the modern context, "Alpha" has been eaten by code. High-frequency trading (H
 When you try to trade in and out of hot sectors like AI or Semiconductors, you are bringing a knife to a nuclear gunfight. The "Smart Money" isn't just smart; it's faster, richer, and more ruthless than you. The only way to win a rigged game is to refuse to play by their rules.
 
 The Action Plan
-The "Whale" Reality Check
-Go to the Whale Tracking tab  in your app. Look for a stock where one major fund (e.g., a Hedge Fund) is buying and another is selling. Witness the zero-sum game in real-time: two "geniuses" betting against each other. Realize that if they can't agree, your odds of outsmarting them are near zero.
-Diversify Your Survival
-Check your Portfolio Insights widget for your Diversification Score. If the score warns that you are heavily concentrated in one sector (e.g., "90% Tech"), you are trying to beat the dealer. Rebalance until the score indicates you own the "House" (the broad economy), not just a few risky tables.
+The "Whale" Reality Check: Go to the Whale Tracking tab  in your app. Look for a stock where one major fund (e.g., a Hedge Fund) is buying and another is selling. Witness the zero-sum game in real-time: two "geniuses" betting against each other. Realize that if they can't agree, your odds of outsmarting them are near zero.
+Diversify Your Survival: Check your Portfolio Insights widget for your Diversification Score. If the score warns that you are heavily concentrated in one sector (e.g., "90% Tech"), you are trying to beat the dealer. Rebalance until the score indicates you own the "House" (the broad economy), not just a few risky tables.

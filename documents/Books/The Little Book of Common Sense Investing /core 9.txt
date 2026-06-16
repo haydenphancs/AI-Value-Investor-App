@@ -19,4 +19,4 @@ Similarly, "High Yield" fintech savings accounts or "Stablecoin" lending protoco
 
 Action Plan:
 
-Search for a Treasury ETF (like SGOV or BIL). Check the Dividend Yield. If this "risk-free" number is near 4-5%, ask yourself: "Is my risky tech portfolio actually beating this guaranteed hurdle after the recent drop?" If not, you are taking on stress for zero premium.
+The Risk-Free Hurdle: Search for a Treasury ETF (like SGOV or BIL). Check the Dividend Yield. If this "risk-free" number is near 4-5%, ask yourself: "Is my risky tech portfolio actually beating this guaranteed hurdle after the recent drop?" If not, you are taking on stress for zero premium.

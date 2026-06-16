@@ -20,5 +20,4 @@ In the last few years, if you tried to be clever and pick "undervalued" small-ca
 This applies perfectly to the current "AI Super Cycle." You might be tempted to pick the specific startup making the cooling fans for data centers. That is a gamble. But if you buy the Total Market Index (the Haystack), you automatically own the chip designer (NVIDIA), the cloud provider (Microsoft), and the energy company powering the grid. You capitalize on the trend of AI without betting your life savings on which specific CEO will win the war. You turn the chaotic casino of "stock picking" into the reliable utility of "capitalism capturing."
 
 The Action Plan
-The "Haystack" Audit
-Go to your Tracking Tab and look at the Diversification Score widget. The Instruction: If your score is low (e.g., heavily weighted in "Tech" or "Crypto"), you are holding a handful of grass, not the haystack. You are exposed to the risk of a single fire wiping you out. Aim for a score that reflects the broad economy.
+The "Haystack" Audit: Go to your Tracking Tab and look at the Diversification Score widget. The Instruction: If your score is low (e.g., heavily weighted in "Tech" or "Crypto"), you are holding a handful of grass, not the haystack. You are exposed to the risk of a single fire wiping you out. Aim for a score that reflects the broad economy.

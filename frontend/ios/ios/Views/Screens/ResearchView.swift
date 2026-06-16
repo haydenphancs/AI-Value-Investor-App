@@ -75,6 +75,15 @@ struct ResearchContentView: View {
             } message: {
                 Text("Please sign in to generate research reports.")
             }
+            .alert("Delete \(viewModel.selectedReportCount) report\(viewModel.selectedReportCount == 1 ? "" : "s")?",
+                   isPresented: $viewModel.showDeleteConfirm) {
+                Button("Delete", role: .destructive) {
+                    Task { await viewModel.deleteSelectedReports() }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This can't be undone.")
+            }
             .sheet(isPresented: $viewModel.showCreditsSheet) {
                 CreditsPricingSheet(currentBalance: viewModel.creditBalance.credits)
             }
@@ -178,10 +187,16 @@ struct ResearchContentView: View {
             LazyVStack(spacing: AppSpacing.xxl) {
                 // Reports List Section
                 ReportsListSection(
-                    reports: viewModel.reports,
+                    sections: viewModel.groupedReports,
                     sortOption: $viewModel.reportSortOption,
+                    searchText: $viewModel.reportSearchText,
+                    isSearchActive: $viewModel.isReportSearchActive,
+                    isSelecting: $viewModel.isSelectingReports,
+                    selectedIds: viewModel.selectedReportIds,
                     onReportTapped: handleReportTapped,
-                    onRetryTapped: handleRetryTapped
+                    onRetryTapped: handleRetryTapped,
+                    onToggleSelect: handleToggleSelect,
+                    onToggleSelectingMode: handleToggleSelectingMode
                 )
                 .padding(.top, AppSpacing.sm)
 
@@ -192,11 +207,31 @@ struct ResearchContentView: View {
                 // Bottom padding for tab bar
                 Spacer()
                     .frame(height: AppSpacing.xxxl)
+
+                // Extra inset while selecting so the last card scrolls clear
+                // of the floating selection bar.
+                if viewModel.isSelectingReports {
+                    Spacer().frame(height: 72)
+                }
             }
         }
         .refreshable {
             await viewModel.refresh()
         }
+        // Floating selection bar — lives here (not in the scrolling organism)
+        // so it pins to the bottom above the tab bar. Scoped to the Reports
+        // tab because reportsTabContent is only built for that tab.
+        .overlay(alignment: .bottom) {
+            if viewModel.isSelectingReports {
+                ReportsSelectionBar(
+                    selectedCount: viewModel.selectedReportCount,
+                    isDeleting: viewModel.isDeletingReports,
+                    onDelete: { viewModel.showDeleteConfirm = true }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: viewModel.isSelectingReports)
     }
 
     // MARK: - Research Tab Action Handlers
@@ -231,6 +266,18 @@ struct ResearchContentView: View {
 
     private func handleRetryTapped(_ report: AnalysisReport) {
         viewModel.retryReport(report)
+    }
+
+    private func handleToggleSelect(_ report: AnalysisReport) {
+        viewModel.toggleReportSelection(report)
+    }
+
+    private func handleToggleSelectingMode() {
+        if viewModel.isSelectingReports {
+            viewModel.exitSelectionMode()
+        } else {
+            viewModel.isSelectingReports = true
+        }
     }
 }
 

@@ -25,10 +25,6 @@ The fiction is that a necessary global transition automatically equals a profita
 
 The Action Plan
 
-Interrogate the Valuation
+Interrogate the Valuation: Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't just at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely "Overvalued" with a negative margin of safety, and the risk is too high. Think again!
 
-Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't just at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely "Overvalued" with a negative margin of safety, and the risk is too high. Think again!
-
-Chat with the Cold Truth
-
-When an internet guru promises a revolutionary new paradigm that "changes the rules of investing," open the Wiser tab to chat with Caudex AI, with a simple question: "Has this kind of market narrative happened before, and how does it usually end?". Let the vector-stored logic of history throw cold water on the hot mirage.
+Chat with the Cold Truth: When an internet guru promises a revolutionary new paradigm that "changes the rules of investing," open the Wiser tab to chat with Caudex AI, with a simple question: "Has this kind of market narrative happened before, and how does it usually end?". Let the vector-stored logic of history throw cold water on the hot mirage.

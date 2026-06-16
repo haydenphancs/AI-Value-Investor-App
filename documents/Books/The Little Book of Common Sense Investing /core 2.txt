@@ -20,5 +20,4 @@ The "Real Market" for AI is tangible: companies are building massive server farm
 This applies perfectly to the crypto ecosystem or the "clean energy" boom. Often, the business of clean energy is growing steadily (solar panel installations are up), but the stocks are volatile wrecks because speculators piled in, drove the P/E ratios to the moon, and then fled. If you cannot distinguish the business (the solar panel sales) from the speculation (the stock price), you will panic when the price drops, even if the business is healthier than ever.
 
 The Action Plan
-The Moat Test
-Before you believe a hype cycle, run a Deep Research Report using the Warren Buffett Persona. If the AI analysis cannot find a durable competitive advantage, you are gambling. Be careful!
+The Moat Test: Before you believe a hype cycle, run a Deep Research Report using the Warren Buffett Persona. If the AI analysis cannot find a durable competitive advantage, you are gambling. Be careful!

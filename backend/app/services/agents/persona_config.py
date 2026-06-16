@@ -38,8 +38,51 @@ class PersonaConfig:
     # specific length brief.
     narrative_lens: str = ""
 
+    # ── Structured style: the single source of truth for BOTH the persona-weighted
+    # score (persona_scoring.py) and the narrative prompts (narrative_prompts.py).
+    # Internal only — never serialized into any response.
+    key_metrics: List[str] = field(default_factory=list)    # signature metrics to cite
+    bull_priority: List[str] = field(default_factory=list)  # what the bull case leads with
+    bear_priority: List[str] = field(default_factory=list)  # what the bear case leads with
+    red_flags: List[str] = field(default_factory=list)      # disqualifiers / avoid triggers
+    score_rules: str = ""                                   # explicit scoring heuristics + thresholds
+
     def __post_init__(self):
-        self.system_prompt = _IDENTITY_RULE + self.system_prompt
+        # _IDENTITY_RULE first (never break it), then the philosophy, then a
+        # programmatic "how to bias" block built from the structured fields so the
+        # prompt and the fields can never drift apart.
+        self.system_prompt = _IDENTITY_RULE + self.system_prompt + self._bias_block()
+
+    def _bias_block(self) -> str:
+        """Explicit, persona-specific steering for the score, bull/bear, and
+        summary, assembled from the structured style fields. Stays analytical:
+        it never instructs a buy/sell/hold (compliance)."""
+        if not (self.score_rules or self.bull_priority or self.bear_priority
+                or self.key_metrics or self.red_flags):
+            return ""
+        lines = ["\n\nHOW TO BIAS YOUR VERDICT (scoring, bull/bear, executive summary):"]
+        if self.score_rules:
+            lines.append(self.score_rules)
+        if self.bull_priority:
+            lines.append("Lead your BULL case with: " + "; ".join(self.bull_priority) + ".")
+        if self.bear_priority:
+            lines.append("Lead your BEAR case with: " + "; ".join(self.bear_priority) + ".")
+        if self.key_metrics:
+            lines.append(
+                "When the data supports it, cite these signature metrics: "
+                + ", ".join(self.key_metrics) + "."
+            )
+        if self.red_flags:
+            lines.append(
+                "Treat these as disqualifiers that should sink the read: "
+                + "; ".join(self.red_flags) + "."
+            )
+        lines.append(
+            "Frame everything as analysis and education. Never tell the user to buy, "
+            "sell, or hold; lay out the bull and bear arguments and the evidence, not "
+            "an instruction to trade."
+        )
+        return "\n".join(lines)
 
     @property
     def agent_label(self) -> str:
@@ -111,6 +154,37 @@ _BUFFETT_CONFIG = PersonaConfig(
     narrative_lens=(
         "moat durability, owner earnings, predictability, decade-long compounding"
     ),
+    key_metrics=[
+        "ROE/ROIC above 15%", "owner earnings and free cash flow",
+        "debt-to-equity below 0.5", "gross margin durability",
+        "margin of safety versus intrinsic value",
+    ],
+    bull_priority=[
+        "a durable moat and pricing power",
+        "high, stable ROE/ROIC above 15%",
+        "low leverage and strong interest coverage",
+        "predictable owner earnings and free cash flow",
+        "a margin of safety of 25% or more",
+    ],
+    bear_priority=[
+        "moat erosion or commoditization",
+        "overvaluation with no margin of safety",
+        "high leverage",
+        "unpredictable or cyclical earnings",
+        "poor capital allocation",
+    ],
+    red_flags=[
+        "no identifiable moat", "debt-to-equity above 1.0",
+        "persistent unprofitability", "a business too complex to explain simply",
+        "ROE below 10%",
+    ],
+    score_rules=(
+        "Reward a wide, durable moat, ROE/ROIC above 15%, debt-to-equity below 0.5, "
+        "predictable owner earnings, and a margin of safety of at least 25%. Penalize "
+        "no moat, leverage above 1.0, persistent unprofitability, and rich multiples "
+        "with no safety margin. A wonderful business at a fair price beats a fair "
+        "business at a wonderful price."
+    ),
 )
 
 
@@ -176,6 +250,36 @@ _WOOD_CONFIG = PersonaConfig(
     },
     narrative_lens=(
         "platform convergence, Wright's Law cost curves, S-curve adoption, TAM expansion"
+    ),
+    key_metrics=[
+        "revenue growth rate", "revenue growth acceleration",
+        "total addressable market expansion", "gross margin trajectory",
+        "R&D intensity",
+    ],
+    bull_priority=[
+        "exponential revenue growth of 30 to 50 percent or more",
+        "a large and expanding addressable market",
+        "Wright's Law cost declines and S-curve adoption",
+        "improving gross margins as the model scales",
+        "platform convergence or a first-mover data advantage",
+    ],
+    bear_priority=[
+        "decelerating growth below 20 percent",
+        "a saturating or invalidated addressable market",
+        "margin compression with no path to scale",
+        "commoditization",
+        "a rate-sensitive valuation reset",
+    ],
+    red_flags=[
+        "revenue growth below 20 percent", "a mature or declining end market",
+        "commodity economics", "no credible path to a much larger market",
+    ],
+    score_rules=(
+        "Reward revenue growth of 30 to 50 percent or more, accelerating growth, an "
+        "expanding addressable market, and improving gross margins, even when the "
+        "company is unprofitable or richly valued. Penalize decelerating growth, a "
+        "saturated market, and commodity economics. Traditional P/E and leverage "
+        "matter far less than the growth trajectory and the size of the opportunity."
     ),
 )
 
@@ -255,6 +359,36 @@ _LYNCH_CONFIG = PersonaConfig(
     narrative_lens=(
         "stock category (fast-grower / stalwart / cyclical), PEG, what you understand"
     ),
+    key_metrics=[
+        "PEG ratio", "earnings and revenue growth rate",
+        "P/E relative to growth", "net cash position", "insider buying",
+    ],
+    bull_priority=[
+        "a PEG below 1 (cheap relative to growth)",
+        "earnings growth of 15 to 30 percent",
+        "a simple story you can explain in two minutes",
+        "a net-cash balance sheet",
+        "insider buying or a fast-grower category tailwind",
+    ],
+    bear_priority=[
+        "a PEG above 1.5 to 2 (expensive relative to growth)",
+        "decelerating earnings growth",
+        "a weak or over-levered balance sheet",
+        "a cyclical trading at peak earnings",
+        "inventory building faster than sales",
+    ],
+    red_flags=[
+        "a PEG above 2", "a cyclical bought at a trough P/E on peak earnings",
+        "high debt with slowing growth",
+        "a story too complex to explain in two minutes",
+    ],
+    score_rules=(
+        "Classify the stock (fast grower, stalwart, slow grower, cyclical, turnaround, "
+        "asset play) and judge it by PEG: below 1 is attractive, below 0.5 very "
+        "attractive, above 2 avoid; a high-quality name can justify up to about 1.5. "
+        "Reward 15 to 30 percent earnings growth, a net-cash balance sheet, and insider "
+        "buying. For cyclicals, invert the P/E read (a low P/E on peak earnings is a warning)."
+    ),
 )
 
 
@@ -330,6 +464,36 @@ _ACKMAN_CONFIG = PersonaConfig(
     },
     narrative_lens=(
         "FCF quality, downside protection, activist catalysts, capital allocation"
+    ),
+    key_metrics=[
+        "free cash flow yield", "FCF conversion (FCF to net income)",
+        "ROIC", "leverage and interest coverage", "pricing power",
+    ],
+    bull_priority=[
+        "a simple, predictable, free-cash-flow-generative business",
+        "FCF yield above 5 percent and FCF conversion above 80 percent",
+        "ROIC above 15 percent with real pricing power",
+        "high barriers to entry",
+        "a capital-allocation or activist catalyst",
+    ],
+    bear_priority=[
+        "unpredictable or cyclical free cash flow",
+        "high leverage or refinancing risk",
+        "capital intensity that eats free cash flow",
+        "commoditization or no pricing power",
+        "weak downside protection",
+    ],
+    red_flags=[
+        "FCF conversion below 60 percent", "commodity or cyclical cash flows",
+        "high leverage with thin interest coverage",
+        "capital intensity with low ROIC",
+    ],
+    score_rules=(
+        "Reward simple, predictable, free-cash-flow-generative businesses: FCF yield "
+        "above 5 percent, FCF conversion above 80 percent, ROIC above 15 percent, low "
+        "leverage, real pricing power, and a credible capital-allocation catalyst. "
+        "Penalize unpredictable or cyclical free cash flow, capital intensity, high "
+        "leverage, and commoditization. Demand downside protection."
     ),
 )
 

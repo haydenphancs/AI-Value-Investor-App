@@ -17,11 +17,14 @@ struct ReportsListSection: View {
     @Binding var isSearchActive: Bool
     @Binding var isSelecting: Bool
     let selectedIds: Set<String>
+    let personaTags: [AnalysisPersona]
+    let selectedPersonaKeys: Set<String>
     var onReportTapped: ((AnalysisReport) -> Void)?
     var onRetryTapped: ((AnalysisReport) -> Void)?
     var onToggleSelect: ((AnalysisReport) -> Void)?
     /// Enter selection mode (when idle) or exit + clear (when selecting).
     var onToggleSelectingMode: (() -> Void)?
+    var onTogglePersonaTag: ((AnalysisPersona) -> Void)?
 
     @State private var showSortMenu = false
 
@@ -64,7 +67,16 @@ struct ReportsListSection: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            Spacer()
+            // Persona filter tags — horizontally scrollable, fills the middle
+            // between Sort (left) and Search/Edit (right).
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: AppSpacing.xs) {
+                    ForEach(personaTags) { persona in
+                        personaTagChip(persona)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
 
             // Search toggle
             Button {
@@ -168,6 +180,27 @@ struct ReportsListSection: View {
             .background(Capsule().fill(AppColors.cardBackgroundLight))
     }
 
+    // Persona filter chip — tinted with the persona's accent color. Selected =
+    // solid accent + white text; unselected = faint accent tint + accent text.
+    private func personaTagChip(_ persona: AnalysisPersona) -> some View {
+        let isOn = selectedPersonaKeys.contains(persona.key)
+        return Button {
+            onTogglePersonaTag?(persona)
+        } label: {
+            Text(persona.shortName)
+                .font(AppTypography.caption).fontWeight(.semibold)
+                .foregroundColor(isOn ? .white : persona.accentColor)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.vertical, AppSpacing.xs)
+                .background(
+                    Capsule().fill(isOn ? persona.accentColor
+                                        : persona.accentColor.opacity(0.15))
+                )
+                .fixedSize(horizontal: true, vertical: false)   // keep natural width in the scroll
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+
     private var searchReveal: some View {
         HStack(spacing: AppSpacing.sm) {
             SearchBar(text: $searchText,
@@ -231,10 +264,13 @@ struct ReportsListSection: View {
             isSearchActive: .constant(false),
             isSelecting: .constant(false),
             selectedIds: [],
+            personaTags: AnalysisPersona.allCases,
+            selectedPersonaKeys: [],
             onReportTapped: { _ in },
             onRetryTapped: { _ in },
             onToggleSelect: { _ in },
-            onToggleSelectingMode: { }
+            onToggleSelectingMode: { },
+            onTogglePersonaTag: { _ in }
         )
     }
     .background(AppColors.background)

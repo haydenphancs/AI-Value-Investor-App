@@ -34,53 +34,53 @@ PERSONA_WEIGHTS: Dict[str, Dict[str, float]] = {
     # Quality-at-a-fair-price: moat + balance-sheet durability dominate;
     # capital-allocation discipline (buybacks/dividends) matters to Buffett.
     "warren_buffett": {
-        "moat":              0.24,
+        "moat":              0.26,
         "financial_health":  0.20,
-        "valuation":         0.16,
-        "capital_allocation": 0.12,
-        "insider":           0.10,
-        "revenue":           0.07,
-        "macro":             0.05,
-        "forecast":          0.03,
-        "wall_street":       0.03,
+        "valuation":         0.15,
+        "capital_allocation": 0.13,
+        "insider":           0.08,
+        "revenue":           0.06,
+        "forecast":          0.04,
+        "wall_street":       0.04,
+        "macro":             0.04,
     },
     # Innovation/growth: revenue + forward forecast lead; value, balance-sheet
     # and capital-return weight is light; macro/secular regime matters.
     "cathie_wood": {
-        "revenue":           0.23,
-        "forecast":          0.23,
-        "moat":              0.14,
+        "revenue":           0.26,
+        "forecast":          0.24,
+        "moat":              0.13,
         "macro":             0.08,
-        "valuation":         0.08,
-        "insider":           0.07,
         "wall_street":       0.07,
+        "valuation":         0.06,
+        "financial_health":  0.06,
+        "insider":           0.05,
         "capital_allocation": 0.05,
-        "financial_health":  0.05,
     },
     # GARP: growth (forecast/revenue) balanced against price (valuation) and
     # a solid balance sheet — Lynch's "buy what you know, at a sane price".
     "peter_lynch": {
-        "forecast":          0.20,
-        "revenue":           0.17,
-        "valuation":         0.17,
-        "financial_health":  0.13,
-        "capital_allocation": 0.08,
-        "insider":           0.07,
-        "moat":              0.07,
-        "wall_street":       0.06,
+        "forecast":          0.21,
+        "revenue":           0.18,
+        "valuation":         0.18,
+        "financial_health":  0.12,
+        "insider":           0.08,
+        "capital_allocation": 0.07,
+        "moat":              0.06,
+        "wall_street":       0.05,
         "macro":             0.05,
     },
-    # Concentrated activist value: balance-sheet quality + valuation + moat +
-    # capital-allocation discipline carry the thesis; insider noise is minimal.
+    # Concentrated activist value: balance-sheet quality (FCF proxy) + valuation
+    # + capital-allocation discipline + moat carry the thesis; insider minimal.
     "bill_ackman": {
-        "financial_health":  0.20,
-        "valuation":         0.20,
-        "moat":              0.16,
-        "capital_allocation": 0.12,
-        "forecast":          0.10,
-        "revenue":           0.10,
-        "macro":             0.07,
-        "wall_street":       0.03,
+        "financial_health":  0.22,
+        "valuation":         0.18,
+        "capital_allocation": 0.16,
+        "moat":              0.15,
+        "forecast":          0.09,
+        "revenue":           0.08,
+        "wall_street":       0.05,
+        "macro":             0.05,
         "insider":           0.02,
     },
 }
@@ -171,8 +171,116 @@ def _vital_score(
     return None
 
 
+# ── Persona Style-Fit Adjustment ────────────────────────────────────
+#
+# The weighted vital rollup re-weights the SAME 9 sub-scores per persona.
+# The style-fit term goes one step further: it nudges the score using a few
+# RAW signals through each persona's own lens, so the same stock diverges more
+# (Wood rewards 40% growth even if unprofitable; Buffett penalizes a no-moat,
+# richly-valued name). It is a bounded NUDGE on top of the weighted base, not a
+# second engine.
+#
+# UNITS (enforced by the collector that builds `_style_signals`):
+#   percentages are PERCENT numbers — roe/roic/gross_margin/gross_margin_prev/
+#   revenue_growth/revenue_cagr/eps_cagr/mos_pct (e.g. 18.0 == 18%);
+#   debt_equity is a ratio (0.4); fcf/net_income/mkt_cap are dollars;
+#   moat_score is 0-10. Missing signals contribute nothing (never a penalty for
+#   unmeasured data) — mirrors the renormalize-over-present rule below.
+
+STYLE_FIT_CAP: float = 10.0   # max |adjustment| in score points
+
+
+def _lin(value: Optional[float], bad: float, good: float) -> Optional[float]:
+    """Map `value` onto [-1, +1]: at `bad` → -1, at `good` → +1, linear between
+    and clamped outside. `good` may be below `bad` for "lower is better" metrics
+    (e.g. debt-to-equity). None in → None out (signal absent)."""
+    if value is None or good == bad:
+        return None if value is None else 0.0
+    frac = (value - bad) / (good - bad)
+    return max(-1.0, min(1.0, frac * 2.0 - 1.0))
+
+
+def _clamp(x: Optional[float], lo: float, hi: float) -> Optional[float]:
+    return None if x is None else max(lo, min(hi, x))
+
+
+def _avg_present(subs) -> float:
+    """Average the sub-scores that are present; 0.0 if none."""
+    present = [s for s in subs if s is not None]
+    return sum(present) / len(present) if present else 0.0
+
+
+def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) -> float:
+    """Bounded persona nudge in [-STYLE_FIT_CAP, +STYLE_FIT_CAP].
+
+    Each persona maps its signature raw signals to sub-scores in [-1, +1],
+    averages the ones present, and scales by the cap. Deterministic; returns
+    0.0 when `signals` is empty or the persona is unknown."""
+    if not signals:
+        return 0.0
+
+    def num(key: str) -> Optional[float]:
+        v = signals.get(key)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    roe = num("roe"); roic = num("roic"); de = num("debt_equity")
+    gm = num("gross_margin"); gm_prev = num("gross_margin_prev")
+    pe = num("pe_ratio"); fcf = num("fcf"); ni = num("net_income"); mcap = num("mkt_cap")
+    rev_g = num("revenue_growth"); rev_cagr = num("revenue_cagr"); eps_cagr = num("eps_cagr")
+    moat = num("moat_score"); mos = num("mos_pct")
+
+    # Derived ratios (kept here so the collector only ships raw metrics).
+    fcf_yield = (fcf / mcap) if (fcf is not None and mcap not in (None, 0)) else None
+    fcf_conv = (fcf / ni) if (fcf is not None and ni is not None and ni > 0) else None
+    growth = next((c for c in (eps_cagr, rev_cagr, rev_g) if c is not None and c > 0), None)
+    peg = (pe / growth) if (pe is not None and pe > 0 and growth) else None
+
+    subs = []
+    if persona_key == "warren_buffett":
+        subs.append(_lin(roe, 10.0, 20.0))          # ROE 10% → -1, 20% → +1
+        subs.append(_lin(de, 1.5, 0.5))             # D/E 1.5 → -1, 0.5 → +1
+        m = _lin(moat, 4.0, 8.0)                     # moat 0-10
+        if m is not None and m > 0 and roe is not None and roe < 15:
+            m *= 0.3                                 # a moat with weak returns isn't a Buffett moat
+        subs.append(m)
+        subs.append(_lin(mos, 0.0, 25.0))           # margin of safety 0% → -1, 25% → +1
+    elif persona_key == "cathie_wood":
+        subs.append(_lin(rev_g, 20.0, 40.0))        # trailing growth
+        subs.append(_lin(rev_cagr, 15.0, 30.0))     # forward CAGR
+        if rev_cagr is not None and rev_g is not None:
+            subs.append(_clamp(_lin(rev_cagr - rev_g, -15.0, 15.0), -0.5, 0.5))  # acceleration
+        if gm is not None and gm_prev is not None:
+            subs.append(_clamp(_lin(gm - gm_prev, -3.0, 3.0), -0.4, 0.4))        # margin trend
+    elif persona_key == "peter_lynch":
+        subs.append(_lin(peg, 2.0, 0.5))            # PEG 2 → -1, 0.5 → +1
+        subs.append(_clamp(_lin(growth, 8.0, 22.0), -0.5, 0.5))   # earnings/revenue growth band
+        subs.append(_clamp(_lin(de, 1.5, 0.3), -0.3, 0.3))        # net-cash lean
+    elif persona_key == "bill_ackman":
+        subs.append(_lin(fcf_conv, 0.6, 0.9))       # FCF conversion 60% → -1, 90% → +1
+        subs.append(_lin(fcf_yield, 0.02, 0.06))    # FCF yield 2% → -1, 6% → +1
+        quality = roic if roic is not None else roe
+        subs.append(_clamp(_lin(quality, 8.0, 15.0), -0.5, 0.5))  # ROIC/ROE
+        subs.append(_clamp(_lin(de, 2.5, 0.8), -0.5, 0.5))        # leverage
+    else:
+        return 0.0
+
+    return round(_avg_present(subs) * STYLE_FIT_CAP, 2)
+
+
+def _signals_from_inputs(vitals: Dict[str, Any]) -> Dict[str, Any]:
+    """Raw style signals nested under `_scoring_inputs._style_signals` (the
+    collector writes them there; the block is stripped before reaching iOS).
+    Empty dict if absent — old cached reports get a 0.0 style-fit."""
+    if not isinstance(vitals, dict):
+        return {}
+    sig = vitals.get("_style_signals")
+    return sig if isinstance(sig, dict) else {}
+
+
 def compute_quality_score(
-    persona_key: str, ticker_report_data: Dict[str, Any]
+    persona_key: str,
+    ticker_report_data: Dict[str, Any],
+    signals: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Persona-weighted overall score in [0, 100].
 
@@ -214,7 +322,15 @@ def compute_quality_score(
     if present_weight <= 0.0:
         return 0.0
 
-    # Renormalize over the measured weight mass (≤ 1.0), scale 0-10 → 0-100,
-    # clip, round to one decimal so iOS sees stable, non-jittering numbers.
+    # Renormalize over the measured weight mass (≤ 1.0), scale 0-10 → 0-100.
     overall = (weighted_sum / present_weight) * 10.0
+
+    # Persona style-fit nudge (bounded ±STYLE_FIT_CAP). Default the signals from
+    # `_scoring_inputs._style_signals` so BOTH scoring sites (the collector and
+    # the research_service re-score) compute identically without extra plumbing.
+    if signals is None:
+        signals = _signals_from_inputs(vitals)
+    overall += style_fit_adjustment(persona_key, signals)
+
+    # Clip, round to one decimal so iOS sees stable, non-jittering numbers.
     return round(max(0.0, min(100.0, overall)), 1)

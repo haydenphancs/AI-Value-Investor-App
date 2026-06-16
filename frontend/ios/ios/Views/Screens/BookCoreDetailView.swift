@@ -63,19 +63,15 @@ struct BookCoreDetailView: View {
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
     }
 
-    // Audio episode for the current chapter
-    private var currentAudioEpisode: AudioEpisode {
-        AudioEpisode(
-            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
-            title: content.chapterTitle,
-            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
-            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
-            artworkIcon: "book.fill",
-            duration: TimeInterval(content.audioDurationSeconds),
-            category: .books,
-            authorName: content.bookAuthor,
-            sourceId: book.id.uuidString
-        )
+    // The whole book is ONE narration file; a core is just a seek offset within it.
+    private var currentAudioEpisode: AudioEpisode { book.audioEpisode }
+
+    // Load the book narration only if it isn't already the active episode — so navigating between
+    // cores (or arriving while it's already playing) doesn't tear down and restart playback.
+    private func ensureBookEpisodeLoaded() {
+        if audioManager.currentEpisode?.id != currentAudioEpisode.id {
+            audioManager.load(currentAudioEpisode)
+        }
     }
 
     var body: some View {
@@ -184,8 +180,8 @@ struct BookCoreDetailView: View {
                 shouldShowPlayer = true
             }
 
-            // Load the audio episode when view appears (paused)
-            audioManager.load(currentAudioEpisode)
+            // Load the book narration when view appears (paused), unless already active
+            ensureBookEpisodeLoaded()
 
             // Subscribe to audio completion events
             audioCompletionCancellable = audioManager.playbackDidComplete
@@ -205,8 +201,9 @@ struct BookCoreDetailView: View {
             audioCompletionCancellable = nil
         }
         .onChange(of: currentContent.chapterNumber) {
-            // Load new episode when navigating between chapters (paused)
-            audioManager.load(currentAudioEpisode)
+            // Same single book file across cores — only load if it isn't already active, so
+            // swiping between cores never interrupts ongoing playback.
+            ensureBookEpisodeLoaded()
         }
     }
 
@@ -319,24 +316,23 @@ private struct CoreDetailHeaderSection: View {
     let book: LibraryBook
     var onPlayStarted: (() -> Void)?
 
-    // Audio episode for this chapter
-    private var audioEpisode: AudioEpisode {
-        AudioEpisode(
-            id: "book-\(book.id.uuidString)-core-\(content.chapterNumber)",
-            title: content.chapterTitle,
-            subtitle: "\(content.bookTitle) - Core \(content.chapterNumber)",
-            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
-            artworkIcon: "book.fill",
-            duration: TimeInterval(content.audioDurationSeconds),
-            category: .books,
-            authorName: content.bookAuthor,
-            sourceId: book.id.uuidString
-        )
+    // One narration file for the whole book; this core is the segment starting at coreStart.
+    private var bookEpisode: AudioEpisode { book.audioEpisode }
+
+    private var coreStart: TimeInterval { TimeInterval(book.coreStartSeconds(content.chapterNumber) ?? 0) }
+
+    private var coreEnd: TimeInterval {
+        if let next = book.coreStartSeconds(content.chapterNumber + 1) { return TimeInterval(next) }
+        return TimeInterval(book.bookAudioInfo?.totalSeconds ?? Int(coreStart))
     }
 
+    // "This core" is playing when the book narration is the active episode, it's playing, and the
+    // playhead sits within this core's [start, nextStart) window.
     private var isThisCoreAudioPlaying: Bool {
-        guard let currentEpisode = audioManager.currentEpisode else { return false }
-        return currentEpisode.id == audioEpisode.id && audioManager.isPlaying
+        guard let current = audioManager.currentEpisode,
+              current.id == bookEpisode.id, audioManager.isPlaying else { return false }
+        let t = audioManager.currentTime
+        return t >= coreStart - 0.5 && t < coreEnd
     }
 
     var body: some View {
@@ -381,11 +377,11 @@ private struct CoreDetailHeaderSection: View {
 
     private func handleDirectPlay() {
         if isThisCoreAudioPlaying {
-            // Pause if already playing this core
+            // Pause if this core is currently playing
             audioManager.togglePlayPause()
         } else {
-            // Start playing this core's audio
-            audioManager.play(audioEpisode)
+            // Play the whole-book narration, seeking to this core's start offset
+            audioManager.play(bookEpisode, startAt: coreStart)
             // Force show the global audio player
             audioManager.resetScrollHiding()
             // Notify parent that playback started

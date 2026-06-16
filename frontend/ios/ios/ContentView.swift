@@ -397,10 +397,13 @@ struct ResearchViewWithBinding: View {
                     isSearchActive: $viewModel.isReportSearchActive,
                     isSelecting: $viewModel.isSelectingReports,
                     selectedIds: viewModel.selectedReportIds,
+                    personaTags: viewModel.personas,
+                    selectedPersonaKeys: viewModel.selectedPersonaKeys,
                     onReportTapped: handleReportTapped,
                     onRetryTapped: handleRetryTapped,
                     onToggleSelect: handleToggleSelect,
-                    onToggleSelectingMode: handleToggleSelectingMode
+                    onToggleSelectingMode: handleToggleSelectingMode,
+                    onTogglePersonaTag: { viewModel.togglePersonaTag($0) }
                 )
                 .padding(.top, AppSpacing.sm)
 

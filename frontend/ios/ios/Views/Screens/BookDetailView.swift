@@ -337,10 +337,10 @@ private struct BookDetailListenRow: View {
         return currentEpisode.sourceId == book.id.uuidString && audioManager.isPlaying
     }
 
-    // Check if the specific core we would resume is playing
+    // Check if this book's narration is currently playing (one file for the whole book)
     private var isResumeCorePlaying: Bool {
         guard let currentEpisode = audioManager.currentEpisode else { return false }
-        return currentEpisode.id == resumeCoreAudioEpisode.id && audioManager.isPlaying
+        return currentEpisode.id == bookAudioEpisode.id && audioManager.isPlaying
     }
 
     // User has progress if they've completed at least one core.
@@ -353,20 +353,11 @@ private struct BookDetailListenRow: View {
         progress.resumeCore(order: book.curriculumOrder, totalCores: book.chapterCount)
     }
 
-    // Get the audio episode for the resume core
-    private var resumeCoreAudioEpisode: AudioEpisode {
-        let coreChapter = book.coreChapters[safe: resumeCoreNumber - 1] ?? book.coreChapters[0]
-        return AudioEpisode(
-            id: "book-\(book.id.uuidString)-core-\(resumeCoreNumber)",
-            title: coreChapter.title,
-            subtitle: "\(book.title) - Core \(resumeCoreNumber)",
-            artworkGradientColors: [book.coverGradientStart, book.coverGradientEnd],
-            artworkIcon: "book.fill",
-            duration: TimeInterval(book.audioDurationSeconds / book.coreChapters.count),
-            category: .books,
-            authorName: book.author,
-            sourceId: book.id.uuidString
-        )
+    // The whole book plays as ONE narration file; we just resume at the right core's start offset.
+    private var bookAudioEpisode: AudioEpisode { book.audioEpisode }
+
+    private var resumeStartSeconds: TimeInterval {
+        TimeInterval(book.coreStartSeconds(resumeCoreNumber) ?? 0)
     }
 
     // Button label based on state
@@ -452,8 +443,8 @@ private struct BookDetailListenRow: View {
         if isResumeCorePlaying {
             audioManager.togglePlayPause()
         } else {
-            // Play the resume core (or Core 1 for new users)
-            audioManager.play(resumeCoreAudioEpisode)
+            // Play the whole-book narration, seeking to the resume core's start (Core 1 = 0:00).
+            audioManager.play(bookAudioEpisode, startAt: resumeStartSeconds)
         }
     }
 }
@@ -671,6 +662,7 @@ private struct CoreChaptersSection: View {
                 ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
                     CoreChapterTimelineRow(
                         chapter: chapter,
+                        startTimeLabel: startTimeLabel(for: chapter),
                         isLast: index == chapters.count - 1,
                         isCompleted: progress.isCompleted(order: curriculumOrder, core: chapter.number),
                         onTapped: {
@@ -681,11 +673,21 @@ private struct CoreChaptersSection: View {
             }
         }
     }
+
+    /// Where this core starts within the single book narration ("M:SS"), or nil if the book has
+    /// no narration yet. Shown under the core number in the timeline.
+    private func startTimeLabel(for chapter: BookCoreChapter) -> String? {
+        guard let secs = BookAudioInfo.byOrder[curriculumOrder]?.coreStartSeconds[chapter.number] else {
+            return nil
+        }
+        return String(format: "%d:%02d", secs / 60, secs % 60)
+    }
 }
 
 // MARK: - Core Chapter Timeline Row
 private struct CoreChapterTimelineRow: View {
     let chapter: BookCoreChapter
+    var startTimeLabel: String? = nil
     let isLast: Bool
     let isCompleted: Bool
     var onTapped: (() -> Void)?
@@ -698,50 +700,45 @@ private struct CoreChapterTimelineRow: View {
     var body: some View {
         Button(action: { onTapped?() }) {
             HStack(alignment: .top, spacing: AppSpacing.lg) {
-                // Timeline column with badge and connecting line
-                ZStack(alignment: .top) {
-                    // Connecting line (starts from bottom edge of badge)
-                    if !isLast {
-                        VStack(spacing: 0) {
-                            // Spacer for badge height
-                            Color.clear
-                                .frame(width: 2, height: 32)
-
-                            // Actual line
-                            Rectangle()
-                                .fill(lineColor)
-                                .frame(width: 1)
-                        }
-                    }
-
+                // Timeline column: number badge, its start timestamp, then the connecting line.
+                VStack(spacing: AppSpacing.xxs) {
                     // Number badge - filled or outline based on completion
-                    HStack {
-                        Spacer(minLength: 0)
-
-                        ZStack {
-                            if isCompleted {
-                                // Filled badge for completed/current chapters
-                                Circle()
-                                    .fill(completedColor)
-                                    .frame(width: 32, height: 32)
-                            } else {
-                                // Outline-only badge for unread chapters
-                                Circle()
-                                    .strokeBorder(uncompletedColor, lineWidth: 1)
-                                    .frame(width: 32, height: 32)
-                            }
-
-                            Text("\(chapter.number)")
-                                .font(AppTypography.label).fontWeight(.bold)
-                                .foregroundColor(isCompleted ? .white : uncompletedColor)
+                    ZStack {
+                        if isCompleted {
+                            // Filled badge for completed/current chapters
+                            Circle()
+                                .fill(completedColor)
+                                .frame(width: badgeSize, height: badgeSize)
+                        } else {
+                            // Outline-only badge for unread chapters
+                            Circle()
+                                .strokeBorder(uncompletedColor, lineWidth: 1)
+                                .frame(width: badgeSize, height: badgeSize)
                         }
-                        .frame(width: 32, height: 32)
 
-                        Spacer(minLength: 0)
+                        Text("\(chapter.number)")
+                            .font(AppTypography.label).fontWeight(.bold)
+                            .foregroundColor(isCompleted ? .white : uncompletedColor)
                     }
-                    .frame(width: 32)
+                    .frame(width: badgeSize, height: badgeSize)
+
+                    // Where this core starts in the book narration (e.g. "2:37")
+                    if let startTimeLabel {
+                        Text(startTimeLabel)
+                            .font(AppTypography.captionTiny)
+                            .monospacedDigit()
+                            .foregroundColor(isCompleted ? completedColor : AppColors.textMuted)
+                    }
+
+                    // Connecting line fills the remaining height down to the next badge
+                    if !isLast {
+                        Rectangle()
+                            .fill(lineColor)
+                            .frame(width: 1)
+                            .frame(maxHeight: .infinity)
+                    }
                 }
-                .frame(width: 32)
+                .frame(width: 44)
 
                 // Content column
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {

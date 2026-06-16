@@ -94,6 +94,41 @@ def _style_block(persona: PersonaConfig) -> str:
     )
 
 
+def _lens_directive(
+    persona: PersonaConfig,
+    *,
+    want_bull: bool = False,
+    want_bear: bool = False,
+    want_metrics: bool = True,
+    want_flags: bool = False,
+) -> str:
+    """Compact, persona-specific steering built from the structured style fields
+    (bull/bear priorities, signature metrics, red flags). Injected ONLY into the
+    few builders where the persona genuinely reorders the evidence, so each
+    persona leads with different points and cites its own metrics. Stays
+    analytical — never a buy/sell directive. Returns "" when the persona carries
+    no structured fields (fallback safety)."""
+    lines = []
+    if want_bull and persona.bull_priority:
+        lines.append("Lead the bull read with: " + "; ".join(persona.bull_priority[:3]) + ".")
+    if want_bear and persona.bear_priority:
+        lines.append("Lead the bear read with: " + "; ".join(persona.bear_priority[:3]) + ".")
+    if want_metrics and persona.key_metrics:
+        lines.append(
+            "When a number fits, anchor on one of your signature metrics: "
+            + ", ".join(persona.key_metrics[:4]) + "."
+        )
+    if want_flags and persona.red_flags:
+        lines.append("Give weight to your red flags: " + "; ".join(persona.red_flags[:3]) + ".")
+    if not lines:
+        return ""
+    return (
+        "LENS PRIORITIES (rank persona-relevant signals above generic ones of "
+        "equal magnitude; stay analytical, never a buy/sell/hold call):\n"
+        + "\n".join(lines)
+    )
+
+
 def _length_brief(sentences: int, word_cap: int) -> str:
     s = "1 sentence" if sentences == 1 else f"exactly {sentences} sentences"
     return f"LENGTH: Write {s}, total under {word_cap} words."
@@ -256,7 +291,7 @@ LENGTH: Write 3-4 sentences, total under 65 words.
 Cover, in order:
 1. What the company is and does — its business and sector, in one plain sentence (use the company profile/description above).
 2. How it's doing overall — the big-picture trajectory and financial health, in broad strokes.
-3. The report's bottom-line take — the overall verdict in general terms.
+3. The report's bottom-line take — the overall verdict in general terms, framed through your lens (what a {persona.display_name} investor concludes about how well this fits your style). This is a characterization, never a buy, sell, or hold call.
 
 Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps."""
 
@@ -364,6 +399,7 @@ WHERE IT TRAILS PEERS: {gap_str}
 KEY COMPETITORS: {comp_str}
 
 {_style_block(persona)}
+{_lens_directive(persona, want_metrics=True)}
 LENGTH: Write 2-3 sentences, total under 55 words.
 
 Sentence 1 — judge how durable the moat is (its staying power or the specific threat to it); weave the moat-strength tone naturally, don't just restate the score.
@@ -789,6 +825,7 @@ EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
+{_lens_directive(persona, want_metrics=True)}
 LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every clause must earn its place; do not pad to hit the count.
 
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
@@ -2084,6 +2121,7 @@ MODULE DIGEST (final verdicts the user sees in each Deep Dive section — verifi
 {digest}
 
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
+{_lens_directive(persona, want_bull=True, want_bear=True, want_metrics=True)}
 
 YOUR JOB — think hard, then surface ONLY the most important points:
 Pick the {bull_target} STRONGEST reasons to OWN this stock (bull_case) and the {bear_target} STRONGEST reasons to AVOID/worry about it (bear_case). Imagine a portfolio manager with 30 seconds: what actually moves the buy/hold/sell decision?
@@ -2287,6 +2325,7 @@ MACRO / GEOPOLITICAL (current threat level + active risk events, incl. web-groun
 {macro_watch}
 
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
+{_lens_directive(persona, want_flags=True, want_metrics=False)}
 
 Produce 2-3 critical factors. STRICT rules:
 - DIVERSITY — each factor MUST cover a DIFFERENT area. NEVER two on the same theme (do NOT give two debt / free-cash-flow factors). Spread across the areas that actually matter here: balance-sheet / fundamentals · competitive moat · macro / geopolitical / Fed · growth / forecast · valuation / Wall-Street · insider activity · price / catalyst. Pick the 2-3 most decision-relevant DISTINCT areas.

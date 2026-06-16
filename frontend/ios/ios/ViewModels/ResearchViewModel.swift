@@ -521,14 +521,18 @@ class ResearchViewModel: ObservableObject {
 
     // MARK: - Reports Tab: Derived (search + grouping)
 
-    /// `reports` filtered by the report search query (ticker OR company name,
-    /// case-insensitive). `reports` is already sorted in place by sortReports(),
-    /// so this preserves the chosen sort order.
+    /// `reports` filtered by the report search query — matches ticker, company
+    /// name, the persona's full name ("Cathie Wood") OR its agent label
+    /// ("Wood Agent"), case-insensitive. `reports` is already sorted in place by
+    /// sortReports(), so this preserves the chosen sort order.
     var filteredReports: [AnalysisReport] {
         let q = reportSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return reports }
         return reports.filter {
-            $0.ticker.lowercased().contains(q) || $0.companyName.lowercased().contains(q)
+            $0.ticker.lowercased().contains(q)
+                || $0.companyName.lowercased().contains(q)
+                || $0.persona.name.lowercased().contains(q)
+                || $0.persona.agentLabel.lowercased().contains(q)
         }
     }
 

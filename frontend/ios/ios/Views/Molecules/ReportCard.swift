@@ -59,25 +59,17 @@ struct ReportCard: View {
                 // bottom date row and the card stays compact.
                 if report.status == .ready, let rating = report.rating {
                     HStack(spacing: AppSpacing.sm) {
-                        // Left: Persona info + date underneath
+                        // Left: Persona info + date underneath (no persona icon)
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                            HStack(spacing: AppSpacing.sm) {
-                                PersonaIcon(
-                                    persona: report.persona,
-                                    size: 32,
-                                    isSelected: true
-                                )
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(report.persona.agentLabel)
+                                    .font(AppTypography.labelSmall)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(AppColors.textPrimary)
 
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text(report.persona.rawValue)
-                                        .font(AppTypography.labelSmall)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(AppColors.textPrimary)
-
-                                    Text(report.persona.tagline)
-                                        .font(AppTypography.caption)
-                                        .foregroundColor(AppColors.textSecondary)
-                                }
+                                Text(report.persona.tagline)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(report.persona.accentColor)
                             }
 
                             Text(report.formattedDate)
@@ -101,25 +93,15 @@ struct ReportCard: View {
                     // end of this row (below the Failed badge), not on a
                     // separate row underneath.
                     HStack(spacing: AppSpacing.sm) {
-                        PersonaIcon(
-                            persona: report.persona,
-                            size: 32,
-                            isSelected: true
-                        )
-
                         VStack(alignment: .leading, spacing: 0) {
-                            // While running, show "Buffett Agent" instead of the
-                            // full name; failed keeps the full name.
-                            Text(report.status == .processing
-                                 ? report.persona.agentLabel
-                                 : report.persona.rawValue)
+                            Text(report.persona.agentLabel)
                                 .font(AppTypography.labelSmall)
                                 .fontWeight(.semibold)
                                 .foregroundColor(AppColors.textPrimary)
 
                             Text(report.persona.tagline)
                                 .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textSecondary)
+                                .foregroundColor(report.persona.accentColor)
                         }
 
                         if report.status == .failed {

@@ -65,6 +65,7 @@ struct MoneyMoveArticleDTO: Decodable {
         ) ?? Date()
         let mappedComments = (comments ?? []).map { $0.toComment() }
         return MoneyMoveArticle(
+            slug: slug,
             title: title,
             subtitle: subtitle,
             category: MoneyMoveArticleDTO.category(from: category),
@@ -91,6 +92,7 @@ struct MoneyMoveArticleDTO: Decodable {
     /// catalog can be served from the backend/bundle instead of hardcoded in Swift.
     func toCard() -> MoneyMove {
         MoneyMove(
+            slug: slug,
             title: title,
             subtitle: cardSubtitle ?? subtitle,
             category: MoneyMoveArticleDTO.category(from: category),

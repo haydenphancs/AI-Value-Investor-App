@@ -410,7 +410,7 @@ struct ReportConsensusBar: View {
                 .foregroundColor(AppColors.textPrimary)
 
             Text(percent)
-                .font(AppTypography.captionSmall).fontWeight(.bold)
+                .font(AppTypography.caption).fontWeight(.bold)
                 .foregroundColor(color)
         }
     }

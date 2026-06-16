@@ -16,13 +16,10 @@ struct BookLibraryView: View {
     @State private var selectedBook: LibraryBook?
 
     private var filteredBooks: [LibraryBook] {
-        if searchText.isEmpty {
-            return books.sorted { $0.curriculumOrder < $1.curriculumOrder }
-        }
-        return books.filter { book in
-            book.title.localizedCaseInsensitiveContains(searchText) ||
-            book.author.localizedCaseInsensitiveContains(searchText)
-        }.sorted { $0.curriculumOrder < $1.curriculumOrder }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ordered = books.sorted { $0.curriculumOrder < $1.curriculumOrder }
+        guard !query.isEmpty else { return ordered }
+        return ordered.filter { $0.matches(query) }
     }
 
     private var masteredCount: Int {
@@ -182,7 +179,7 @@ private struct BookLibrarySearchBar: View {
                 .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
 
-            TextField("Search by title or author...", text: $searchText)
+            TextField("Search books, topics, or authors...", text: $searchText)
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textPrimary)
                 .autocapitalization(.none)

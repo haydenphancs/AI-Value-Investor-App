@@ -156,9 +156,9 @@ enum APIEndpoint: Sendable {
     // MARK: - Learn / Money Moves
     case getMoneyMoves
 
-    // MARK: - Learn / Book Library progress
-    case getBookProgress
-    case completeBookCore(curriculumOrder: Int, coreNumber: Int)
+    // MARK: - Learn progress (unified completion log; contentType = book_core|journey_lesson|money_move)
+    case getLearnProgress(contentType: String)
+    case completeLearnItem(contentType: String, key: String)
 
     // MARK: - Personas
     case getPersonas
@@ -373,10 +373,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/learn/money-moves"
 
         // Learn / Book Library progress
-        case .getBookProgress:
-            return "/api/v1/learn/books/progress"
-        case .completeBookCore(let curriculumOrder, let coreNumber):
-            return "/api/v1/learn/books/\(curriculumOrder)/cores/\(coreNumber)/complete"
+        case .getLearnProgress(let contentType):
+            return "/api/v1/learn/progress/\(contentType)"
+        case .completeLearnItem(let contentType, _):
+            return "/api/v1/learn/progress/\(contentType)"
 
         // Personas
         case .getPersonas:
@@ -395,7 +395,7 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport, .completeBookCore,
+             .chatWithTickerReport, .completeLearnItem,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .createPortfolio, .regenerateResearchReportPDF:
             return .POST
@@ -509,6 +509,9 @@ enum APIEndpoint: Sendable {
         case .addToWatchlist(let stockId):
             return AddToWatchlistRequest(stockId: stockId)
 
+        case .completeLearnItem(_, let key):
+            return CompleteLearnItemRequest(key: key)
+
         case .removeFromWatchlist(let stockId):
             return RemoveFromWatchlistRequest(stockId: stockId)
 
@@ -594,8 +597,8 @@ enum APIEndpoint: Sendable {
         // Money Moves article content is public
         case .getMoneyMoves:
             return false
-        // Book Library progress uses optional auth (token sent if signed in; guests still work)
-        case .getBookProgress, .completeBookCore:
+        // Learn progress uses optional auth (token sent if signed in; guests still work via cache)
+        case .getLearnProgress, .completeLearnItem:
             return false
         // Personas are public
         case .getPersonas:

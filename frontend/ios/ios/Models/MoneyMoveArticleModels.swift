@@ -11,6 +11,9 @@ import SwiftUI
 // MARK: - Money Move Article (Full Detail)
 struct MoneyMoveArticle: Identifiable {
     let id = UUID()
+    /// Canonical stable id (matches money_move_articles.slug) — used as the completion key.
+    /// Empty for hardcoded sample/featured placeholders.
+    var slug: String = ""
     let title: String
     let subtitle: String
     let category: MoneyMoveCategory

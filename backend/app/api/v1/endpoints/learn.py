@@ -1,17 +1,19 @@
 """
 Learn Endpoints
 Frontend:
-  - GET  /api/v1/learn/journey                                  (public content)
-  - GET  /api/v1/learn/money-moves                              (public content)
-  - GET  /api/v1/learn/books/progress                           (user book progress)
-  - POST /api/v1/learn/books/{curriculum_order}/cores/{n}/complete
+  - GET  /api/v1/learn/journey                       (public content)
+  - GET  /api/v1/learn/money-moves                   (public content)
+  - GET  /api/v1/learn/progress/{content_type}       (user completion log)
+  - POST /api/v1/learn/progress/{content_type}       (mark an item completed)
 
 Serves authored learning content from Supabase:
   - Investor Journey lessons (skeleton + story content with media URLs) from `lessons`.
   - Money Moves case-study articles (full article + narration URL) from
     `money_move_articles`.
-Content endpoints are public. The Book Library progress endpoints are user-scoped
-(optional auth: a guest still works, backed by the shared guest user id).
+Content endpoints are public. Progress is one unified completion log (user_learn_progress):
+content_type ∈ {book_core, journey_lesson, money_move}, item_key is that feature's stable key
+(book "<order>-<core>", journey lesson title, money-move slug). User-scoped, optional auth
+(a guest still works, backed by the shared guest user id).
 """
 
 import logging
@@ -21,11 +23,14 @@ from supabase import Client
 
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
-from app.schemas.book_progress import BookCoreProgressItem, BookProgressResponse
 from app.schemas.journey import JourneyResponse
+from app.schemas.learn_progress import CompleteLearnItemRequest, LearnProgressResponse
 from app.schemas.money_moves import MoneyMovesResponse
 from app.services.journey_content_service import get_journey_content_service
 from app.services.money_moves_content_service import get_money_moves_content_service
+
+# Stable discriminators for the unified completion log.
+LEARN_CONTENT_TYPES = {"book_core", "journey_lesson", "money_move"}
 
 logger = logging.getLogger(__name__)
 
@@ -57,65 +62,63 @@ async def get_money_moves():
     return await service.get_money_moves()
 
 
-@router.get("/books/progress", response_model=BookProgressResponse)
-async def get_book_progress(
+@router.get("/progress/{content_type}", response_model=LearnProgressResponse)
+async def get_learn_progress(
+    content_type: str,
     user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """
-    Every (book, core) the current user has completed.
+    Keys of every item the current user has completed for one Learn feature.
 
-    Drives the Book Library's "Continue Core N", per-book mastery, and the library %.
-    Degrades to an empty list on a backend hiccup — the iOS local cache is the source of
-    truth, so a failed read here just means "no server augmentation this time".
+    content_type in {book_core, journey_lesson, money_move}; the returned `keys` are that
+    feature's item_keys (book "<order>-<core>", journey lesson title, money-move slug).
+    Degrades to an empty list on a backend hiccup — the iOS local cache is the source of truth.
     """
+    if content_type not in LEARN_CONTENT_TYPES:
+        return LearnProgressResponse(keys=[])
     user_id = user["id"]
     try:
         result = (
-            supabase.table("user_book_progress")
-            .select("curriculum_order, core_number, completed_at")
+            supabase.table("user_learn_progress")
+            .select("item_key")
             .eq("user_id", user_id)
+            .eq("content_type", content_type)
             .execute()
         )
-        items = [BookCoreProgressItem(**row) for row in (result.data or [])]
-        return BookProgressResponse(items=items)
+        return LearnProgressResponse(keys=[row["item_key"] for row in (result.data or [])])
     except Exception as exc:
-        logger.error("[Learn] book progress fetch failed for user=%s: %s", user_id, exc)
-        return BookProgressResponse(items=[])
+        logger.error(
+            "[Learn] progress fetch failed (user=%s type=%s): %s", user_id, content_type, exc
+        )
+        return LearnProgressResponse(keys=[])
 
 
-@router.post(
-    "/books/{curriculum_order}/cores/{core_number}/complete",
-    response_model=BookProgressResponse,
-)
-async def complete_book_core(
-    curriculum_order: int,
-    core_number: int,
+@router.post("/progress/{content_type}", response_model=LearnProgressResponse)
+async def complete_learn_item(
+    content_type: str,
+    request: CompleteLearnItemRequest,
     user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
 ):
     """
-    Mark one core of one book as completed for the current user (idempotent insert).
-
-    Returns the user's full, current progress so the client can self-heal / sync.
+    Mark one Learn item completed (idempotent). Returns the full key set for that content_type.
     """
     user_id = user["id"]
-    try:
-        supabase.table("user_book_progress").upsert(
-            {
-                "user_id": user_id,
-                "curriculum_order": curriculum_order,
-                "core_number": core_number,
-            },
-            on_conflict="user_id,curriculum_order,core_number",
-            ignore_duplicates=True,
-        ).execute()
-    except Exception as exc:
-        logger.error(
-            "[Learn] mark core complete failed (user=%s order=%s core=%s): %s",
-            user_id,
-            curriculum_order,
-            core_number,
-            exc,
-        )
-    return await get_book_progress(user=user, supabase=supabase)
+    key = (request.key or "").strip()
+    if content_type in LEARN_CONTENT_TYPES and key:
+        try:
+            supabase.table("user_learn_progress").upsert(
+                {"user_id": user_id, "content_type": content_type, "item_key": key},
+                on_conflict="user_id,content_type,item_key",
+                ignore_duplicates=True,
+            ).execute()
+        except Exception as exc:
+            logger.error(
+                "[Learn] mark complete failed (user=%s type=%s key=%r): %s",
+                user_id,
+                content_type,
+                key,
+                exc,
+            )
+    return await get_learn_progress(content_type=content_type, user=user, supabase=supabase)

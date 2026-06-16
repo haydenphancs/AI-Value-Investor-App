@@ -41,7 +41,7 @@ struct ReportRevenueEngineSection: View {
 
             HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
                 Text(data.formattedTotalRevenue)
-                    .font(AppTypography.dataLarge)
+                    .font(AppTypography.dataCompact)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(data.period)
@@ -62,7 +62,7 @@ struct ReportRevenueEngineSection: View {
                 // Role badge
                 HStack(spacing: AppSpacing.xs) {
                     Text(role.rawValue.uppercased())
-                        .font(AppTypography.captionSmall)
+                        .font(AppTypography.caption)
                         .foregroundColor(role.color)
                 }
                 .padding(.horizontal, AppSpacing.sm)

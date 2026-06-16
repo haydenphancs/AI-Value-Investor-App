@@ -12,6 +12,7 @@ struct MoneyMoveCard: View {
     var showIcon: Bool = true
     var onTap: (() -> Void)?
     var onBookmark: (() -> Void)?
+    @ObservedObject private var progress = MoneyMovesProgressStore.shared
 
     var body: some View {
         Button {
@@ -34,6 +35,13 @@ struct MoneyMoveCard: View {
                     }
 
                     Spacer()
+
+                    // Completed indicator (real progress, once the article has been read/heard)
+                    if progress.isCompleted(slug: moneyMove.slug) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(AppTypography.iconSmall).fontWeight(.semibold)
+                            .foregroundColor(AppColors.bullish)
+                    }
 
                     // Bookmark button
                     BookmarkButton(isBookmarked: moneyMove.isBookmarked) {

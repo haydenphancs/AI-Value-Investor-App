@@ -8,10 +8,12 @@
 //
 
 import SwiftUI
+import Combine
 
 struct MoneyMoveArticleDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
+    @State private var audioCompletionCancellable: AnyCancellable?
     @State private var isBookmarked: Bool = false
     @State private var isFollowing: Bool = false
     @State private var showShareSheet: Bool = false
@@ -72,9 +74,21 @@ struct MoneyMoveArticleDetailView: View {
                         MoneyMoveArticleContent(article: article)
                         .padding(.top, AppSpacing.lg)
 
-                        // Bottom padding (extra space for mini player)
+                        // Bottom padding (extra space for mini player). Doubles as a
+                        // "reached the end" sentinel: once it scrolls into view, the article
+                        // counts as read (markCompleted is idempotent).
                         Color.clear
                             .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
+                            .background(
+                                GeometryReader { geo -> Color in
+                                    if geo.frame(in: .global).minY < UIScreen.main.bounds.height {
+                                        DispatchQueue.main.async {
+                                            MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
+                                        }
+                                    }
+                                    return Color.clear
+                                }
+                            )
                     }
                     .background(
                         GeometryReader { proxy in
@@ -123,6 +137,18 @@ struct MoneyMoveArticleDetailView: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .onAppear {
             isBookmarked = article.isBookmarked
+            // Finishing the narration also completes the article.
+            audioCompletionCancellable = audioManager.playbackDidComplete
+                .receive(on: DispatchQueue.main)
+                .sink { completed in
+                    if completed.id == audioEpisode.id {
+                        MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
+                    }
+                }
+        }
+        .onDisappear {
+            audioCompletionCancellable?.cancel()
+            audioCompletionCancellable = nil
         }
         .confirmationDialog("Options", isPresented: $showMoreOptions) {
             Button("Share Article") { handleShareTapped() }

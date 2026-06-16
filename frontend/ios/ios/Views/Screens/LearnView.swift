@@ -89,6 +89,9 @@ struct LearnContentView: View {
             // Upgrade the Wiser-screen Money Moves row to fresh backend content so it matches
             // the See-All screen. Bundled content already painted synchronously from the store.
             await viewModel.prefetchMoneyMoves()
+            // Pull server-side progress into the local caches (best-effort; books/journey/money moves).
+            await JourneyProgressStore.shared.hydrate()
+            await MoneyMovesProgressStore.shared.hydrate()
         }
         }
     }

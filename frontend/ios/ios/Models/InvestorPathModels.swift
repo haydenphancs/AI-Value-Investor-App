@@ -462,6 +462,10 @@ struct LessonTopicCard: Identifiable {
     // Common properties
     var audioText: String?  // Text for AI voice to read
     var audioClip: String?  // Optional pre-recorded narration resource name (bundled .m4a). When set, played instead of on-device TTS.
+    /// Per-word read-along timings (forced-aligned, clip-relative seconds). readAlongWords[i]
+    /// corresponds to the i-th whitespace word of `audioText`, so the narration's current word can
+    /// be highlighted accurately. nil => fall back to the character-fraction estimate.
+    var readAlongWords: [ReadAlongWord]?
 }
 
 /// Destination for the CTA button on completion card
@@ -506,7 +510,8 @@ extension LessonTopicCard {
         subtitle: [HighlightedTextSegment],
         audioText: String? = nil,
         audioClip: String? = nil,
-        imageName: String? = nil
+        imageName: String? = nil,
+        readAlongWords: [ReadAlongWord]? = nil
     ) -> LessonTopicCard {
         LessonTopicCard(
             cardType: .title,
@@ -514,7 +519,8 @@ extension LessonTopicCard {
             subtitleSegments: subtitle,
             imageName: imageName,
             audioText: audioText,
-            audioClip: audioClip
+            audioClip: audioClip,
+            readAlongWords: readAlongWords
         )
     }
 
@@ -523,14 +529,16 @@ extension LessonTopicCard {
         imageName: String? = nil,
         content: [HighlightedTextSegment],
         audioText: String? = nil,
-        audioClip: String? = nil
+        audioClip: String? = nil,
+        readAlongWords: [ReadAlongWord]? = nil
     ) -> LessonTopicCard {
         LessonTopicCard(
             cardType: .content,
             imageName: imageName,
             contentSegments: content,
             audioText: audioText,
-            audioClip: audioClip
+            audioClip: audioClip,
+            readAlongWords: readAlongWords
         )
     }
 

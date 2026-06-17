@@ -354,8 +354,8 @@ struct ResearchViewWithBinding: View {
                 GenerateAnalysisSection(
                     cost: viewModel.analysisCost,
                     remainingCredits: viewModel.creditBalance.credits,
-                    isEnabled: viewModel.canGenerateAnalysis,
-                    isLoading: viewModel.isGeneratingAnalysis,
+                    isEnabled: viewModel.canStartNewGeneration,
+                    isLoading: viewModel.isAtConcurrencyCap,
                     onGenerate: handleGenerateAnalysis
                 )
 

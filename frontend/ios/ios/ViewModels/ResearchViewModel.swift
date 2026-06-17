@@ -22,10 +22,20 @@ class ResearchViewModel: ObservableObject {
     @Published var trendingAnalyses: [TrendingAnalysis] = TrendingAnalysis.mockTrending
     @Published var analysisCost: AnalysisCost = .standard
     @Published var isLoading: Bool = false
-    @Published var isGeneratingAnalysis: Bool = false
-    @Published var generationProgress: Int = 0
-    @Published var generationStep: String = ""
+    /// Backend ids of reports this session has launched that are still in
+    /// flight (pending/processing). Bounded by `maxConcurrentGenerations` —
+    /// drives the Generate button's enable/spinner state and gates new runs.
+    @Published var inFlightReportIds: Set<String> = []
+    /// Per-report live progress (percent + step) streamed from each
+    /// generation's /status poll and mirrored onto its processing card.
+    /// Keyed by backend report id.
+    @Published var liveProgress: [String: (progress: Int, step: String)] = [:]
     @Published var error: String?
+
+    /// Max reports one user may run at once. Mirrors the backend
+    /// `MAX_CONCURRENT_REPORTS_PER_USER` cap (the server is the source of truth,
+    /// enforcing it atomically pre-charge); this is the client-side gate.
+    let maxConcurrentGenerations = 4
 
     // Reports Tab Properties
     @Published var reports: [AnalysisReport] = []
@@ -77,10 +87,6 @@ class ResearchViewModel: ObservableObject {
     private var isAuthenticated: () -> Bool = { false }
     private var searchTask: Task<Void, Never>?
     private var reportsPollTask: Task<Void, Never>?
-    /// Backend id of the report currently being generated, so the live
-    /// progress stream can mirror its % + step onto the matching list row
-    /// (the GET /reports list query lags the per-report /status poll).
-    private var generatingReportId: String?
     private var cancellables = Set<AnyCancellable>()
 
     /// Backend report IDs the client has locally given up on because they've
@@ -294,12 +300,14 @@ class ResearchViewModel: ObservableObject {
     /// without this the card freezes at the last list-refreshed value (e.g. 5%
     /// while the stream is already at 20%). No-op once the row goes ready/failed.
     private func applyLiveProgress() {
-        guard let rid = generatingReportId, generationProgress > 0,
-              let idx = reports.firstIndex(where: { $0.backendId == rid }),
-              reports[idx].status == .processing else { return }
-        reports[idx].progress = Double(generationProgress) / 100.0
-        if !generationStep.isEmpty {
-            reports[idx].currentStep = generationStep
+        guard !reports.isEmpty else { return }
+        for (rid, lp) in liveProgress where lp.progress > 0 {
+            guard let idx = reports.firstIndex(where: { $0.backendId == rid }),
+                  reports[idx].status == .processing else { continue }
+            reports[idx].progress = Double(lp.progress) / 100.0
+            if !lp.step.isEmpty {
+                reports[idx].currentStep = lp.step
+            }
         }
     }
 
@@ -398,10 +406,13 @@ class ResearchViewModel: ObservableObject {
     func generateAnalysis() {
         print("🔬 ResearchVM: generateAnalysis() tapped — searchText='\(searchText)', persona=\(selectedPersona.backendKey), credits=\(creditBalance.credits)")
 
-        // Debounce: a single fast double-tap on Generate (or Retry) would
-        // otherwise post /research/generate twice and create two rows.
-        guard !isGeneratingAnalysis else {
-            print("⚠️ ResearchVM: generation already in flight, ignoring duplicate tap.")
+        // Bounded concurrency: a user may run up to `maxConcurrentGenerations`
+        // reports at once (e.g. 4 personas on one ticker, or 1 persona on 4
+        // tickers). The backend enforces the same cap atomically pre-charge;
+        // this is the client gate + a debounce against a tap double-firing.
+        guard activeGenerationCount < maxConcurrentGenerations else {
+            print("⚠️ ResearchVM: at concurrency cap (\(maxConcurrentGenerations)), ignoring tap.")
+            error = "You can run up to \(maxConcurrentGenerations) analyses at once — wait for one to finish."
             return
         }
 
@@ -419,18 +430,21 @@ class ResearchViewModel: ObservableObject {
             return
         }
 
-        isGeneratingAnalysis = true
         selectedTab = .reports
-        generationProgress = 0
-        generationStep = "Starting analysis..."
         error = nil
 
         let personaKey = selectedPersona.backendKey
 
         print("🔬 ResearchVM: Generating analysis for \(ticker) with persona \(personaKey)...")
 
+        // Each generation runs its OWN monitor Task + stream so up to
+        // `maxConcurrentGenerations` can run concurrently without cross-talk.
+        // `startedId` is captured per-Task so terminal cleanup targets the
+        // right report id. TaskPollingManager is an actor handing back an
+        // independent stream per call, so concurrent monitors are safe.
         Task { [weak self] in
             guard let self = self else { return }
+            var startedId: String?
 
             do {
                 let stream = await self.pollingManager.generateAndMonitorResearch(
@@ -446,18 +460,20 @@ class ResearchViewModel: ObservableObject {
                     switch progress {
                     case .started(let taskId):
                         print("🔬 ResearchVM: Research started — report ID: \(taskId)")
-                        self.generatingReportId = taskId
-                        self.generationStep = "Research initiated..."
+                        startedId = taskId
+                        self.inFlightReportIds.insert(taskId)
+                        self.liveProgress[taskId] = (progress: 0, step: "Research initiated...")
                         // Surface the new pending row in the Reports list
-                        // immediately so the Tesla-style processing card
-                        // appears the moment the user switches tabs.
+                        // immediately so the processing card appears the
+                        // moment the user switches tabs.
                         await self.loadReports()
 
                     case .progress(let percent, let step):
                         print("🔬 ResearchVM: Progress \(percent)% — \(step)")
-                        self.generationProgress = percent
-                        self.generationStep = step
-                        self.applyLiveProgress()   // update the processing card now
+                        if let id = startedId {
+                            self.liveProgress[id] = (progress: percent, step: step)
+                        }
+                        self.applyLiveProgress()   // update this card now
                         // Refresh the list at 25% boundaries so the card
                         // animates without spamming Supabase. The poller
                         // in startReportsPolling() is the steady-state
@@ -470,17 +486,19 @@ class ResearchViewModel: ObservableObject {
 
                     case .completed(let report):
                         print("✅ ResearchVM: Research complete for \(ticker) — \(report.title ?? "Untitled")")
-                        self.isGeneratingAnalysis = false
-                        self.generationProgress = 100
-                        self.generationStep = "Complete!"
-                        self.generatingReportId = nil
+                        if let id = startedId {
+                            self.inFlightReportIds.remove(id)
+                            self.liveProgress[id] = nil
+                        }
                         // Reload reports and credits from backend to get fresh data
                         await self.loadReports()
                         await self.loadCredits()
 
                     case .failed(let appError):
-                        self.isGeneratingAnalysis = false
-                        self.generatingReportId = nil
+                        if let id = startedId {
+                            self.inFlightReportIds.remove(id)
+                            self.liveProgress[id] = nil
+                        }
                         if case .timeout = appError {
                             // CLIENT-side poll timeout only — NOT a real
                             // failure. The backend keeps generating; the
@@ -491,7 +509,6 @@ class ResearchViewModel: ObservableObject {
                             // in-flight card and point the user at the Reports
                             // tab.
                             print("⏳ ResearchVM: client poll timed out — report continues on the server")
-                            self.generationStep = "Still working — check the Reports tab"
                             await self.loadReports()
                             self.startReportsPolling()
                         } else {
@@ -504,7 +521,10 @@ class ResearchViewModel: ObservableObject {
                 }
             } catch {
                 print("❌ ResearchVM: Research stream error — \(type(of: error)): \(error)")
-                self.isGeneratingAnalysis = false
+                if let id = startedId {
+                    self.inFlightReportIds.remove(id)
+                    self.liveProgress[id] = nil
+                }
                 self.error = error.localizedDescription
             }
         }
@@ -652,11 +672,12 @@ class ResearchViewModel: ObservableObject {
 
     func retryReport(_ report: AnalysisReport) {
         guard report.status == .failed else { return }
-        // Same debounce as generateAnalysis() — if another generation is
-        // already in flight, don't dismiss the failed card pre-emptively
-        // (otherwise the card would vanish with no replacement).
-        guard !isGeneratingAnalysis else {
-            print("⚠️ ResearchVM: another generation in flight, ignoring retry tap.")
+        // Same cap as generateAnalysis() — only block the retry (and the
+        // pre-emptive dismissal of the failed card) when already AT the
+        // concurrency cap; otherwise the card would vanish with no replacement.
+        guard activeGenerationCount < maxConcurrentGenerations else {
+            print("⚠️ ResearchVM: at concurrency cap, ignoring retry tap.")
+            error = "You can run up to \(maxConcurrentGenerations) analyses at once — wait for one to finish."
             return
         }
         print("🔄 ResearchVM: Retrying report for \(report.ticker)...")
@@ -692,6 +713,19 @@ class ResearchViewModel: ObservableObject {
     // MARK: - Computed Properties
     var canGenerateAnalysis: Bool {
         !searchText.isEmpty && creditBalance.credits >= analysisCost.credits
+    }
+
+    /// Number of reports this session currently has in flight.
+    var activeGenerationCount: Int { inFlightReportIds.count }
+
+    /// True once the user hits the concurrency cap — the Generate button shows
+    /// a spinner and can't start another until one finishes.
+    var isAtConcurrencyCap: Bool { activeGenerationCount >= maxConcurrentGenerations }
+
+    /// Gate for STARTING a new generation: under the cap, a ticker chosen, and
+    /// enough credits for one more run.
+    var canStartNewGeneration: Bool {
+        activeGenerationCount < maxConcurrentGenerations && canGenerateAnalysis
     }
 
     var selectedPersonaDescription: String {

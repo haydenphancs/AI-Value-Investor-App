@@ -11,6 +11,9 @@ struct ArticleCalloutBox: View {
     let icon: String
     let text: String
     let style: CalloutStyle
+    /// Per-sentence timings + narration playhead for read-along highlighting (nil => plain text).
+    var readAlong: [ReadAlongSentence]? = nil
+    var activeTime: Double? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
@@ -20,12 +23,18 @@ struct ArticleCalloutBox: View {
                 .foregroundColor(style.borderColor)
                 .frame(width: 24)
 
-            // Text
-            Text(text)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
+            // Text (read-along highlight when timings are present)
+            Group {
+                if let readAlong {
+                    Text(ReadAlongText.attributed(spans: readAlong, activeTime: activeTime, base: AppColors.textPrimary))
+                } else {
+                    Text(text)
+                }
+            }
+            .font(AppTypography.body)
+            .foregroundColor(AppColors.textPrimary)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(AppSpacing.lg)
         .frame(maxWidth: .infinity, alignment: .leading)

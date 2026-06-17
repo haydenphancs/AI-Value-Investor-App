@@ -43,6 +43,7 @@ private struct JourneyAPICard: Decodable {
     let imageUrl: String?
     let videoUrl: String?
     let cta: String?
+    let readAlongWords: [ReadAlongWord]?   // per-word narration timings (forced-aligned)
 }
 
 // MARK: - Bundled DTOs (journey_lessons.json)
@@ -63,6 +64,7 @@ private struct JourneyBundleCard: Decodable {
     let audioClip: String?   // bundle resource basename (legacy / offline)
     let hasImage: Bool?
     let cta: String?
+    let readAlongWords: [ReadAlongWord]?   // baked in by align_journey_audio.py
 }
 
 // MARK: - Store
@@ -139,7 +141,8 @@ final class JourneyContentStore {
                         text: $0.text ?? "",
                         audio: $0.audioUrl,
                         image: $0.imageUrl,
-                        cta: $0.cta
+                        cta: $0.cta,
+                        readAlong: $0.readAlongWords
                     )
                 }
             }
@@ -172,7 +175,8 @@ final class JourneyContentStore {
                         text: card.text ?? "",
                         audio: card.audioClip,
                         image: image ?? (isCorner ? "journey_\(slug)_\(card.type)" : nil),
-                        cta: card.cta
+                        cta: card.cta,
+                        readAlong: card.readAlongWords
                     )
                 }
             }
@@ -184,7 +188,8 @@ final class JourneyContentStore {
     // MARK: - DTO -> LessonTopicCard (shared by both sources)
 
     private func makeCard(title lessonTitle: String, type: String, headline: String?,
-                          text: String, audio: String?, image: String?, cta: String?) -> LessonTopicCard {
+                          text: String, audio: String?, image: String?, cta: String?,
+                          readAlong: [ReadAlongWord]? = nil) -> LessonTopicCard {
         let slug = Self.slug(lessonTitle)
         switch type {
         case "title":
@@ -193,7 +198,8 @@ final class JourneyContentStore {
                 subtitle: Self.segments(from: text),
                 audioText: Self.spoken(from: text),
                 audioClip: audio,
-                imageName: image ?? "journey_\(slug)_title"
+                imageName: image ?? "journey_\(slug)_title",
+                readAlongWords: readAlong
             )
         case "completion":
             return .completionCard(
@@ -207,7 +213,8 @@ final class JourneyContentStore {
                 imageName: image,
                 content: Self.segments(from: text),
                 audioText: Self.spoken(from: text),
-                audioClip: audio
+                audioClip: audio,
+                readAlongWords: readAlong
             )
         }
     }

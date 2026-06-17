@@ -37,9 +37,10 @@ OUT = REPO / "frontend/ios/ios/Models/BookReadAlong.swift"
 WPM = gba.TARGET_WPM
 BREAK = gba.BREAK_SECONDS
 
-# Split a paragraph into sentences: a sentence terminator (. ! ?) optionally followed by a closing
-# quote, then whitespace, then the start of the next sentence. Good enough for narration prose.
-_SENT = re.compile(r'(?<=[.!?])["”’]?\s+(?=["“‘A-Z0-9])')
+# Split a paragraph into sentences at the whitespace following a sentence terminator (. ! ?),
+# optionally preceded by a closing quote — the quote stays in the LEFT sentence (lookbehind; only
+# the whitespace is consumed) so the spans rejoin to the original text. Good enough for prose.
+_SENT = re.compile(r'(?:(?<=[.!?])|(?<=[.!?]["”’]))\s+(?=["“‘A-Z0-9])')
 
 
 def split_sentences(text: str) -> list[str]:
@@ -180,16 +181,8 @@ def main():
 
 import Foundation
 
-struct ReadAlongSentence {{
-    let text: String
-    let start: Double
-    let end: Double
-}}
-
-struct ReadAlongBlock {{
-    let isHeading: Bool
-    let sentences: [ReadAlongSentence]
-}}
+// ReadAlongSentence / ReadAlongBlock are defined in ReadAlongModels.swift (shared across the
+// Book Library, Money Moves, and Investor Journey read-along features).
 
 extension ReadAlongBlock {{
     /// [curriculumOrder: [coreNumber: [blocks in narration order]]].

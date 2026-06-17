@@ -134,6 +134,16 @@ class Settings(BaseSettings):
     # caller's existing sentinel fallback returns instead of hanging.
     GEMINI_REQUEST_TIMEOUT_SECONDS: int = 90
 
+    # Bounded concurrency for research-report generation. A single user may
+    # have at most MAX_CONCURRENT_REPORTS_PER_USER reports in flight
+    # (pending/processing) at once — e.g. 4 personas on one ticker, or 1
+    # persona on 4 tickers. Enforced pre-charge in the /research/generate
+    # endpoint (no credits burned on rejection). MAX_CONCURRENT_AGENT_RUNS is
+    # a global ceiling for the optional defense-in-depth semaphore around the
+    # agent run (added now; wired only if Gemini/Railway load demands it).
+    MAX_CONCURRENT_REPORTS_PER_USER: int = 4
+    MAX_CONCURRENT_AGENT_RUNS: int = 8
+
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
 

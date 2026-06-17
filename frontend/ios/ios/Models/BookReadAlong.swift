@@ -13,16 +13,8 @@
 
 import Foundation
 
-struct ReadAlongSentence {
-    let text: String
-    let start: Double
-    let end: Double
-}
-
-struct ReadAlongBlock {
-    let isHeading: Bool
-    let sentences: [ReadAlongSentence]
-}
+// ReadAlongSentence / ReadAlongBlock are defined in ReadAlongModels.swift (shared across the
+// Book Library, Money Moves, and Investor Journey read-along features).
 
 extension ReadAlongBlock {
     /// [curriculumOrder: [coreNumber: [blocks in narration order]]].
@@ -47,7 +39,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "The 10-Cent Lesson", start: 60.69, end: 61.79),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
-                    ReadAlongSentence(text: "The author tells the story of being nine years old and making a deal with his \"Rich Dad.", start: 62.85, end: 66.77),
+                    ReadAlongSentence(text: "The author tells the story of being nine years old and making a deal with his \"Rich Dad.\"", start: 62.85, end: 66.77),
                     ReadAlongSentence(text: "He agrees to work in a convenience store for 10 cents an hour.", start: 67.41, end: 70.23),
                     ReadAlongSentence(text: "He slaves away for three weeks, dusting cans, hating the work, and feeling exploited.", start: 70.57, end: 75.79),
                     ReadAlongSentence(text: "Finally, he marches to his Rich Dad to quit, demanding a raise.", start: 76.43, end: 79.91),
@@ -56,7 +48,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "Rich Dad smiles.", start: 80.93, end: 81.85),
                     ReadAlongSentence(text: "\"Now you sound like most of my employees,\" he says.", start: 82.35, end: 84.99),
                     ReadAlongSentence(text: "He explains that if he had just given the boy a raise, he would have learned nothing but how to be a better employee.", start: 85.85, end: 90.71),
-                    ReadAlongSentence(text: "Instead, Rich Dad offers him a new deal: \"I’ll teach you, but I won’t pay you at all.", start: 91.17, end: 95.73),
+                    ReadAlongSentence(text: "Instead, Rich Dad offers him a new deal: \"I’ll teach you, but I won’t pay you at all.\"", start: 91.17, end: 95.73),
                     ReadAlongSentence(text: "By taking the paycheck away, the boy was forced to stop thinking like a worker looking for a wage and start thinking like an owner looking for an opportunity.", start: 96.57, end: 103.77),
                     ReadAlongSentence(text: "His brain, no longer sedated by a salary, eventually spotted a business opportunity right in the store—a comic book library—that made him far more than 10 cents.", start: 104.29, end: 113.63),
                 ]),
@@ -68,8 +60,8 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "It’s no longer just about paying bills; it’s about the \"Golden Handcuffs\" of remote work comfort and the subtle threat of AI displacement.", start: 120.32, end: 128.1),
                     ReadAlongSentence(text: "The \"safe job\" is a myth.", start: 128.62, end: 130.42),
                     ReadAlongSentence(text: "If your primary income relies on trading hours for dollars, you are essentially shorting your own future.", start: 130.96, end: 136.54),
-                    ReadAlongSentence(text: "The modern employee mindset says, \"I need to learn prompt engineering so I don't get fired.", start: 137.18, end: 141.78),
-                    ReadAlongSentence(text: "The wealthy mindset says, \"I will build an AI agent that does the work for me while I sleep.", start: 142.26, end: 147.2),
+                    ReadAlongSentence(text: "The modern employee mindset says, \"I need to learn prompt engineering so I don't get fired.\"", start: 137.18, end: 141.78),
+                    ReadAlongSentence(text: "The wealthy mindset says, \"I will build an AI agent that does the work for me while I sleep.\"", start: 142.26, end: 147.2),
                     ReadAlongSentence(text: "The trap today is thinking that \"upskilling\" for a salary is freedom.", start: 147.96, end: 151.42),
                     ReadAlongSentence(text: "It is not.", start: 151.84, end: 152.4),
                     ReadAlongSentence(text: "It is just a shinier wheel.", start: 152.7, end: 154.2),
@@ -93,7 +85,7 @@ extension ReadAlongBlock {
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
                     ReadAlongSentence(text: "The author illustrates this with a simple, brutal truth that shattered the worldview of a young couple.", start: 210.72, end: 215.62),
-                    ReadAlongSentence(text: "They celebrate a pay raise by buying their \"dream home.", start: 216.16, end: 218.72),
+                    ReadAlongSentence(text: "They celebrate a pay raise by buying their \"dream home.\"", start: 216.16, end: 218.72),
                     ReadAlongSentence(text: "They proudly list this house under the \"Asset\" column of their financial statement.", start: 219.18, end: 222.62),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
@@ -136,7 +128,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "Most people think tax law is a punishment for making money.", start: 340.05, end: 342.57),
                     ReadAlongSentence(text: "It isn’t.", start: 343.17, end: 343.55),
                     ReadAlongSentence(text: "It’s an incentive system designed by the wealthy to reward the wealthy.", start: 344.13, end: 347.35),
-                    ReadAlongSentence(text: "If you are an employee, you are playing the game on \"Hard Mode.", start: 348.13, end: 351.05),
+                    ReadAlongSentence(text: "If you are an employee, you are playing the game on \"Hard Mode.\"", start: 348.13, end: 351.05),
                     ReadAlongSentence(text: "You earn, you get taxed, and then you spend.", start: 351.49, end: 354.11),
                     ReadAlongSentence(text: "You are paying the bill for everyone else's roads and schools before you even buy your own groceries.", start: 354.81, end: 359.41),
                 ]),
@@ -144,7 +136,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "The Magic Folder", start: 361.93, end: 362.79),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
-                    ReadAlongSentence(text: "The author reveals a secret that completely demystifies the word \"Corporation.", start: 363.75, end: 367.53),
+                    ReadAlongSentence(text: "The author reveals a secret that completely demystifies the word \"Corporation.\"", start: 363.75, end: 367.53),
                     ReadAlongSentence(text: "He explains that a corporation isn't a factory with smokestacks or a skyscraper with a logo.", start: 368.17, end: 372.89),
                     ReadAlongSentence(text: "It is simply a file folder with some legal documents in it.", start: 373.47, end: 376.33),
                     ReadAlongSentence(text: "It is a legal entity that creates a body without a soul.", start: 376.89, end: 379.61),
@@ -230,7 +222,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "The Specialist's Curse", start: 617.27, end: 618.59),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
-                    ReadAlongSentence(text: "Here is the lie that universities sell you: \"Specialize to succeed.", start: 619.75, end: 623.31),
+                    ReadAlongSentence(text: "Here is the lie that universities sell you: \"Specialize to succeed.\"", start: 619.75, end: 623.31),
                     ReadAlongSentence(text: "They tell you to become the best neurosurgeon, the sharpest coder, or the most nuanced accountant.", start: 623.89, end: 628.75),
                     ReadAlongSentence(text: "The friction is that specialization is a form of dependency.", start: 629.47, end: 632.49),
                     ReadAlongSentence(text: "When you know more and more about less and less, you become a cog that only fits into one specific machine.", start: 633.09, end: 639.03),
@@ -250,7 +242,7 @@ extension ReadAlongBlock {
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
                     ReadAlongSentence(text: "She was insulted.", start: 673.44, end: 674.48),
-                    ReadAlongSentence(text: "She packed her briefcase, snapping, \"I am a serious writer, not a used-car salesman.", start: 674.86, end: 679.4),
+                    ReadAlongSentence(text: "She packed her briefcase, snapping, \"I am a serious writer, not a used-car salesman.\"", start: 674.86, end: 679.4),
                     ReadAlongSentence(text: "The author gently pointed to a book on the table.", start: 680.08, end: 682.06),
                     ReadAlongSentence(text: "He said, \"Look at the cover.", start: 682.46, end: 683.84),
                     ReadAlongSentence(text: "It says 'Best-Selling Author,' not 'Best-Writing Author'.\"", start: 684.26, end: 687.64),
@@ -287,10 +279,10 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "You understand assets vs. liabilities.", start: 782.87, end: 784.81),
                     ReadAlongSentence(text: "You see the deal.", start: 785.13, end: 785.99),
                     ReadAlongSentence(text: "And then… you freeze.", start: 786.45, end: 787.97),
-                    ReadAlongSentence(text: "The friction isn't the market; it’s the voice in your head screaming, \"What if the tenant leaves?", start: 788.43, end: 792.61),
-                    ReadAlongSentence(text: "\"What if the crypto market crashes?", start: 792.97, end: 794.39),
-                    ReadAlongSentence(text: "\"What if I lose my job?", start: 794.75, end: 795.81),
-                    ReadAlongSentence(text: "This is the \"Inner Saboteur.", start: 796.37, end: 797.97),
+                    ReadAlongSentence(text: "The friction isn't the market; it’s the voice in your head screaming, \"What if the tenant leaves?\"", start: 788.43, end: 792.61),
+                    ReadAlongSentence(text: "\"What if the crypto market crashes?\"", start: 792.97, end: 794.39),
+                    ReadAlongSentence(text: "\"What if I lose my job?\"", start: 794.75, end: 795.81),
+                    ReadAlongSentence(text: "This is the \"Inner Saboteur.\"", start: 796.37, end: 797.97),
                     ReadAlongSentence(text: "It turns smart people into cowards and keeps the middle class safely poor.", start: 798.43, end: 802.25),
                     ReadAlongSentence(text: "The problem is that your brain is wired to survive, not to thrive.", start: 802.87, end: 806.11),
                     ReadAlongSentence(text: "It treats a financial risk like a saber-toothed tiger.", start: 806.45, end: 808.91),
@@ -310,7 +302,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "He contrasts this with the \"Chicken Littles\" of the world—the cynics who run around yelling, \"The sky is falling!\" whenever there is a rumor of a recession.", start: 830.89, end: 837.18),
                     ReadAlongSentence(text: "He explains that cynics criticize, but winners analyze.", start: 837.76, end: 840.74),
                     ReadAlongSentence(text: "Criticism blinds you; analysis opens your eyes.", start: 841.14, end: 843.82),
-                    ReadAlongSentence(text: "He tells the story of finding a great real estate deal, only to have a \"smart\" friend talk him out of it because \"prices might drop.", start: 844.36, end: 849.64),
+                    ReadAlongSentence(text: "He tells the story of finding a great real estate deal, only to have a \"smart\" friend talk him out of it because \"prices might drop.\"", start: 844.36, end: 849.64),
                     ReadAlongSentence(text: "The prices went up, and the friend stayed poor.", start: 850.08, end: 852.02),
                     ReadAlongSentence(text: "The lesson?", start: 853.32, end: 853.72),
                     ReadAlongSentence(text: "\"Don't let the noise of the world drown out the whisper of opportunity.\"", start: 854.26, end: 857.5),
@@ -325,9 +317,9 @@ extension ReadAlongBlock {
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
                     ReadAlongSentence(text: "Laziness has also evolved.", start: 877.52, end: 878.86),
-                    ReadAlongSentence(text: "Today, laziness doesn't look like sleeping on the couch; it looks like \"busyness.", start: 879.22, end: 883.14),
+                    ReadAlongSentence(text: "Today, laziness doesn't look like sleeping on the couch; it looks like \"busyness.\"", start: 879.22, end: 883.14),
                     ReadAlongSentence(text: "You are too busy answering emails, checking Slack, and \"researching\" (watching tutorials) to actually do anything.", start: 883.62, end: 889.24),
-                    ReadAlongSentence(text: "This is \"productive procrastination.", start: 889.72, end: 891.62),
+                    ReadAlongSentence(text: "This is \"productive procrastination.\"", start: 889.72, end: 891.62),
                     ReadAlongSentence(text: "The modern winner ignores the comment section.", start: 892.28, end: 894.16),
                     ReadAlongSentence(text: "They realize that if an investment feels \"safe\" to the herd, it’s already too late.", start: 894.62, end: 898.58),
                     ReadAlongSentence(text: "The Saboteur tells you to wait for certainty.", start: 899.12, end: 901.08),
@@ -343,7 +335,7 @@ extension ReadAlongBlock {
                     ReadAlongSentence(text: "You have read the Cores.", start: 924.94, end: 925.8),
                     ReadAlongSentence(text: "You understand the math.", start: 926.14, end: 927.16),
                     ReadAlongSentence(text: "And yet, tomorrow morning, you will likely wake up and do exactly what you did today.", start: 927.6, end: 932.0),
-                    ReadAlongSentence(text: "This is the \"Knowledge Coma.", start: 932.62, end: 933.94),
+                    ReadAlongSentence(text: "This is the \"Knowledge Coma.\"", start: 932.62, end: 933.94),
                     ReadAlongSentence(text: "The friction isn't ignorance anymore; it is inertia.", start: 934.62, end: 937.48),
                     ReadAlongSentence(text: "Most people collect financial advice like baseball cards—they categorize it, admire it, and show it off, but they never play the game.", start: 938.46, end: 945.47),
                     ReadAlongSentence(text: "They are waiting for the \"perfect time\" or the \"perfect deal,\" unaware that perfection is just procrastination in a tuxedo.", start: 946.07, end: 952.19),
@@ -354,13 +346,13 @@ extension ReadAlongBlock {
                 ReadAlongBlock(isHeading: false, sentences: [
                     ReadAlongSentence(text: "The author shatters this paralysis not with a spreadsheet, but with a piece of paper.", start: 956.23, end: 960.45),
                     ReadAlongSentence(text: "He tells the story of how he found his \"Why\"—the fuel that outlasted his fear.", start: 961.11, end: 965.53),
-                    ReadAlongSentence(text: "He didn't start by writing down \"I want to be rich.", start: 966.13, end: 968.41),
+                    ReadAlongSentence(text: "He didn't start by writing down \"I want to be rich.\"", start: 966.13, end: 968.41),
                     ReadAlongSentence(text: "That was too vague.", start: 968.81, end: 969.59),
                     ReadAlongSentence(text: "Instead, he sat down and ruthlessly listed what he didn't want.", start: 969.95, end: 973.47),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [
-                    ReadAlongSentence(text: "\"I don't want to work for someone else for the rest of my life.", start: 974.19, end: 976.53),
-                    ReadAlongSentence(text: "\"I don't want to be told when I can go on vacation.", start: 976.95, end: 978.97),
+                    ReadAlongSentence(text: "\"I don't want to work for someone else for the rest of my life.\"", start: 974.19, end: 976.53),
+                    ReadAlongSentence(text: "\"I don't want to be told when I can go on vacation.\"", start: 976.95, end: 978.97),
                     ReadAlongSentence(text: "\"I don't want to miss my child’s soccer game because of a conference call.\"", start: 979.41, end: 982.19),
                 ]),
                 ReadAlongBlock(isHeading: false, sentences: [

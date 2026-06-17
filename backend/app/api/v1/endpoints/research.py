@@ -42,13 +42,17 @@ from app.schemas.research import (
     RateReportRequest,
     TrendingAnalysisResponse,
 )
+from app.config import settings
 from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
 from app.services.credit_service import CreditService
 from app.services.research_reconciliation_service import claim_and_mark_failed
-from app.services.ticker_report_cache import patch_legacy_price_action
+from app.services.ticker_report_cache import (
+    current_close_cycle_start,
+    patch_legacy_price_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,37 @@ async def generate_research_report(
             ErrorCode.INVALID_PERSONA,
             message=f"Unknown persona key: {request.investor_persona!r}",
             details={"persona": request.investor_persona},
+        )
+
+    # ── Per-user concurrency cap (pre-charge: a caller error like the persona
+    #    check above, so it must NOT burn credits). At most
+    #    MAX_CONCURRENT_REPORTS_PER_USER reports may be in flight
+    #    (pending/processing) within the current close cycle — e.g. 4 personas
+    #    on one ticker, or 1 persona on 4 tickers. The persona-neutral FMP
+    #    collection cache (_INFLIGHT, keyed by ticker) keeps a same-ticker
+    #    fan-out to ONE fetch, so this only bounds the count. Returns 409 (NOT
+    #    429 — iOS swallows 429 bodies) so the cap user_message is surfaced.
+    cap = settings.MAX_CONCURRENT_REPORTS_PER_USER
+    cycle_start = current_close_cycle_start().isoformat()
+    inflight = (
+        supabase.table("research_reports")
+        .select("id", count="exact")
+        .eq("user_id", user["id"])
+        .in_("status", ["pending", "processing"])
+        .gte("created_at", cycle_start)
+        .execute()
+    )
+    inflight_count = inflight.count or 0
+    if inflight_count >= cap:
+        return make_error_response(
+            ErrorCode.TOO_MANY_CONCURRENT_REPORTS,
+            status_code=409,
+            user_message=(
+                f"You can run up to {cap} analyses at once — "
+                f"wait for one to finish, then try again."
+            ),
+            message=f"user {user['id']} has {inflight_count} reports in flight (cap {cap})",
+            details={"in_flight": inflight_count, "max": cap},
         )
 
     # Atomic 5-credit charge. The Postgres function returns the new

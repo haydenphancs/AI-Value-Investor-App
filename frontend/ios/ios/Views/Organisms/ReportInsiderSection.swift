@@ -16,11 +16,17 @@ struct ReportInsiderSection: View {
     // column dismisses the popup (mirrors the Institutions chart in Wall Street
     // Consensus). The chart's own tap wins for taps on a column.
     @State private var selectedChartPeriod: String?
+    // The Insider Activity chart's tapped month (a separate popup from Capital
+    // Allocation's). Owned here too so a tap anywhere in the section dismisses it.
+    @State private var selectedInsiderPeriod: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
             // Insider Activity
-            ReportInsiderActivityTable(insiderData: insiderData)
+            ReportInsiderActivityTable(
+                insiderData: insiderData,
+                selectedInsiderPeriod: $selectedInsiderPeriod
+            )
 
             // Capital Allocation (buybacks + dividends) — shown when available.
             if let ca = insiderData.capitalAllocation {
@@ -31,7 +37,10 @@ struct ReportInsiderSection: View {
             ReportKeyManagementTable(management: management)
         }
         .contentShape(Rectangle())
-        .onTapGesture { selectedChartPeriod = nil }
+        .onTapGesture {
+            selectedChartPeriod = nil
+            selectedInsiderPeriod = nil
+        }
     }
 
     // MARK: - Capital Allocation

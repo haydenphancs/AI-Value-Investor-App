@@ -10,6 +10,8 @@ import Charts
 
 struct MoneyMoveArticleSectionContent: View {
     let section: ArticleSection
+    /// Narration playhead (seconds) when this article's audio is active, else nil (no highlight).
+    var activeTime: Double? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -26,8 +28,8 @@ struct MoneyMoveArticleSectionContent: View {
 
             // Content blocks
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                ForEach(section.content) { content in
-                    renderContent(content)
+                ForEach(Array(section.content.enumerated()), id: \.element.id) { index, content in
+                    renderContent(content, readAlong: readAlongGroup(at: index))
                 }
             }
         }
@@ -35,49 +37,76 @@ struct MoneyMoveArticleSectionContent: View {
         .background(Color(hex: "171B26"))
     }
 
+    /// Read-along timings for the block at `index` (nil when none / not yet aligned).
+    private func readAlongGroup(at index: Int) -> ReadAlongGroup? {
+        index < section.readAlong.count ? section.readAlong[index] : nil
+    }
+
     @ViewBuilder
-    private func renderContent(_ content: ArticleSectionContent) -> some View {
+    private func renderContent(_ content: ArticleSectionContent, readAlong: ReadAlongGroup?) -> some View {
         switch content {
         case .paragraph(let text):
-            Text(text)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-                .lineSpacing(6)
-                .fixedSize(horizontal: false, vertical: true)
+            if case let .sentences(spans) = readAlong {
+                ReadAlongText(spans: spans, activeTime: activeTime, font: AppTypography.body, base: AppColors.textPrimary)
+            } else {
+                Text(text)
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineSpacing(6)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
         case .bulletList(let items):
+            let itemSpans: [[ReadAlongSentence]]? = { if case let .items(s) = readAlong { return s } else { return nil } }()
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(items, id: \.self) { item in
+                ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                     HStack(alignment: .top, spacing: AppSpacing.md) {
                         Circle()
                             .fill(AppColors.primaryBlue)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
 
-                        Text(item)
-                            .font(AppTypography.body)
-                            .foregroundColor(AppColors.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        if let spans = itemSpans, i < spans.count {
+                            ReadAlongText(spans: spans[i], activeTime: activeTime, font: AppTypography.body, base: AppColors.textPrimary)
+                        } else {
+                            Text(item)
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
             .padding(.leading, AppSpacing.sm)
 
         case .subheading(let text):
-            Text(text)
-                .font(AppTypography.headingSmall)
-                .foregroundColor(AppColors.textPrimary)
-                .padding(.top, AppSpacing.sm)
+            if case let .sentences(spans) = readAlong {
+                ReadAlongText(spans: spans, activeTime: activeTime, font: AppTypography.headingSmall, base: AppColors.textPrimary)
+                    .padding(.top, AppSpacing.sm)
+            } else {
+                Text(text)
+                    .font(AppTypography.headingSmall)
+                    .foregroundColor(AppColors.textPrimary)
+                    .padding(.top, AppSpacing.sm)
+            }
 
         case .quote(let text, let attribution):
-            ArticleQuoteBlock(text: text, attribution: attribution)
+            ArticleQuoteBlock(text: text, attribution: attribution,
+                              readAlong: sentenceSpans(readAlong), activeTime: activeTime)
 
         case .callout(let icon, let text, let style):
-            ArticleCalloutBox(icon: icon, text: text, style: style)
+            ArticleCalloutBox(icon: icon, text: text, style: style,
+                              readAlong: sentenceSpans(readAlong), activeTime: activeTime)
 
         case .chart(let data):
             ArticleChartView(chartData: data)
         }
+    }
+
+    /// Unwrap a `.sentences` group (text blocks); nil otherwise.
+    private func sentenceSpans(_ group: ReadAlongGroup?) -> [ReadAlongSentence]? {
+        if case let .sentences(spans) = group { return spans }
+        return nil
     }
 }
 

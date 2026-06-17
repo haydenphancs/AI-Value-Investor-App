@@ -9,12 +9,40 @@ import SwiftUI
 
 struct ReportInsiderActivityTable: View {
     let insiderData: ReportInsiderData
+    /// Tapped insider-chart month, owned by the parent section so a tap outside
+    /// the column dismisses the popup (mirrors the Capital Allocation chart).
+    @Binding var selectedInsiderPeriod: String?
     @State private var showAllTransactions = false
+
+    init(insiderData: ReportInsiderData, selectedInsiderPeriod: Binding<String?> = .constant(nil)) {
+        self.insiderData = insiderData
+        self._selectedInsiderPeriod = selectedInsiderPeriod
+    }
 
     // When expanded, the recent-transactions list scrolls INSIDE this bounded
     // height instead of stretching the whole report (mirrors the Holders tab's
     // RecentActivitiesSection, which caps its expanded list and scrolls in place).
     private let expandedListHeight: CGFloat = 420
+
+    /// Per-month informative buy/sell transaction counts, keyed to match the
+    /// insider flow bars' "MM/YYYY" months. Derived from `recentTransactions`
+    /// (the SAME full, 365-day, informative-only set the bars aggregate, per the
+    /// report collector), so the popup counts line up with the columns. UTC
+    /// bucketing matches the backend's date-string month key.
+    private var monthlyInsiderCounts: [String: (buy: Int, sell: Int)] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+        var counts: [String: (buy: Int, sell: Int)] = [:]
+        for tx in insiderData.recentTransactions {
+            let c = cal.dateComponents([.year, .month], from: tx.date)
+            guard let y = c.year, let m = c.month else { continue }
+            let key = String(format: "%02d/%04d", m, y)
+            var entry = counts[key] ?? (buy: 0, sell: 0)
+            if tx.changeInMillions >= 0 { entry.buy += 1 } else { entry.sell += 1 }
+            counts[key] = entry
+        }
+        return counts
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -105,7 +133,9 @@ struct ReportInsiderActivityTable: View {
                     dailyPrices: flow.dailyPrices,
                     flowData: flow.flowData,
                     showPriceChart: true,
-                    showVolumeYAxis: true
+                    showVolumeYAxis: true,
+                    monthlyCounts: monthlyInsiderCounts,
+                    selectedMonth: $selectedInsiderPeriod
                 )
                 SmartMoneyFlowLegend(buyLabel: "Bought", sellLabel: "Sold")
             }

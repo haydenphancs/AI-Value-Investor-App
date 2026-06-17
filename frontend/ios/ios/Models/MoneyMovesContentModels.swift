@@ -152,11 +152,21 @@ struct ArticleSectionDTO: Decodable {
     let content: [ArticleSectionContentDTO]
 
     func toSection() -> ArticleSection {
-        ArticleSection(
+        // Build content and its parallel read-along array in lockstep, so dropped (unknown-type)
+        // blocks don't misalign the timings index.
+        var blocks: [ArticleSectionContent] = []
+        var timings: [ReadAlongGroup?] = []
+        for dto in content {
+            guard let block = dto.toContent() else { continue }
+            blocks.append(block)
+            timings.append(dto.readAlongGroup())
+        }
+        return ArticleSection(
             title: title,
             icon: icon,
-            content: content.compactMap { $0.toContent() },
-            hasGlowEffect: hasGlowEffect ?? false
+            content: blocks,
+            hasGlowEffect: hasGlowEffect ?? false,
+            readAlong: timings
         )
     }
 }
@@ -170,6 +180,16 @@ struct ArticleSectionContentDTO: Decodable {
     let attribution: String?
     let icon: String?
     let style: String?
+    let readAlong: [ReadAlongSentence]?          // per-sentence timings (text blocks)
+    let itemsReadAlong: [[ReadAlongSentence]]?   // per-item sentence timings (bulletList)
+
+    /// Read-along timings for this block, shaped to match its type (nil => none yet).
+    func readAlongGroup() -> ReadAlongGroup? {
+        if type == "bulletList" {
+            return itemsReadAlong.map { .items($0) }
+        }
+        return readAlong.map { .sentences($0) }
+    }
 
     func toContent() -> ArticleSectionContent? {
         switch type {

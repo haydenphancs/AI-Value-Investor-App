@@ -206,6 +206,13 @@ struct AnalysisFeature: Identifiable {
             iconColor: Color(hex: "F97316")
         ),
         AnalysisFeature(
+            title: "Hidden Market Signals",
+            subtitle: "Congressional trades, short interest, and smart-money positioning",
+            iconName: "icon_feature_signals",
+            systemIconName: "antenna.radiowaves.left.and.right",
+            iconColor: Color(hex: "14B8A6")
+        ),
+        AnalysisFeature(
             title: "AI Chat with Report",
             subtitle: "Ask follow-up questions and get instant answers",
             iconName: "icon_feature_ai",

@@ -266,7 +266,7 @@ struct LessonTopicCardView: View {
         // Prefer pre-recorded AI narration (Achird) when this card has a bundled clip;
         // otherwise fall back to on-device speech synthesis.
         if let clip = currentCard.audioClip, !clip.isEmpty {
-            voiceManager.playClip(named: clip, text: textToRead) { [self] in
+            voiceManager.playClip(named: clip, text: textToRead, readAlong: currentCard.readAlongWords) { [self] in
                 scheduleAutoAdvance(delay: 1.5)
             }
         } else {

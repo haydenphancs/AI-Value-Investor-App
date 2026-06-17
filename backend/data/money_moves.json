@@ -57,13 +57,13 @@
               "readAlong": [
                 {
                   "text": "Decentralized finance, or DeFi, represents a fundamental shift in how financial services are delivered.",
-                  "start": 9.42,
-                  "end": 14.02
+                  "start": 10.68,
+                  "end": 15.89
                 },
                 {
                   "text": "By removing intermediaries through blockchain technology and smart contracts, DeFi platforms are offering users direct access to financial instruments that were once the exclusive domain of institutions.",
-                  "start": 14.48,
-                  "end": 22.88
+                  "start": 16.41,
+                  "end": 25.93
                 }
               ]
             },
@@ -73,13 +73,13 @@
               "readAlong": [
                 {
                   "text": "The implications are profound.",
-                  "start": 23.32,
-                  "end": 24.38
+                  "start": 26.43,
+                  "end": 27.63
                 },
                 {
                   "text": "Users can now access loans, trade assets, and earn yields on their digital assets without needing to seek permission or provide extensive documentation.",
-                  "start": 24.88,
-                  "end": 31.34
+                  "start": 28.2,
+                  "end": 35.52
                 }
               ]
             },
@@ -91,8 +91,8 @@
               "readAlong": [
                 {
                   "text": "DeFi protocols have processed over $180B in total value locked, representing a 340% increase from last year.",
-                  "start": 31.9,
-                  "end": 38.1
+                  "start": 36.16,
+                  "end": 43.18
                 }
               ]
             },
@@ -108,29 +108,29 @@
                 [
                   {
                     "text": "Permissionless lending and borrowing",
-                    "start": 38.56,
-                    "end": 39.74
+                    "start": 43.71,
+                    "end": 45.04
                   }
                 ],
                 [
                   {
                     "text": "Automated market makers (AMMs)",
-                    "start": 40.22,
-                    "end": 41.86
+                    "start": 45.59,
+                    "end": 47.45
                   }
                 ],
                 [
                   {
                     "text": "Yield farming and liquidity mining",
-                    "start": 42.28,
-                    "end": 43.58
+                    "start": 47.92,
+                    "end": 49.4
                   }
                 ],
                 [
                   {
                     "text": "Cross-chain interoperability",
-                    "start": 43.94,
-                    "end": 45.1
+                    "start": 49.8,
+                    "end": 51.12
                   }
                 ]
               ]
@@ -147,18 +147,18 @@
               "readAlong": [
                 {
                   "text": "Traditional banks are not standing still.",
-                  "start": 47.28,
-                  "end": 48.66
+                  "start": 53.59,
+                  "end": 55.15
                 },
                 {
                   "text": "The integration of artificial intelligence and machine learning has revolutionized everything from fraud detection to customer service.",
-                  "start": 49.0,
-                  "end": 54.04
+                  "start": 55.54,
+                  "end": 61.25
                 },
                 {
                   "text": "AI-powered chatbots now handle over 70% of customer inquiries, while advanced algorithms identify suspicious transactions in milliseconds.",
-                  "start": 54.5,
-                  "end": 60.52
+                  "start": 61.77,
+                  "end": 68.6
                 }
               ]
             },
@@ -168,8 +168,8 @@
               "readAlong": [
                 {
                   "text": "Enhanced Security",
-                  "start": 60.96,
-                  "end": 61.66
+                  "start": 69.1,
+                  "end": 69.89
                 }
               ]
             },
@@ -179,13 +179,13 @@
               "readAlong": [
                 {
                   "text": "Biometric authentication, combined with behavioral analysis, has reduced fraud rates by 45% across major financial institutions.",
-                  "start": 62.18,
-                  "end": 67.76
+                  "start": 70.48,
+                  "end": 76.8
                 },
                 {
                   "text": "Banks are investing heavily in zero-trust security architectures.",
-                  "start": 68.18,
-                  "end": 70.58
+                  "start": 77.28,
+                  "end": 80.0
                 }
               ]
             },
@@ -195,8 +195,8 @@
               "readAlong": [
                 {
                   "text": "Personalized Experiences",
-                  "start": 71.04,
-                  "end": 72.08
+                  "start": 80.52,
+                  "end": 81.7
                 }
               ]
             },
@@ -206,8 +206,8 @@
               "readAlong": [
                 {
                   "text": "Machine learning models analyze spending patterns to provide personalized financial advice, automatically categorize transactions, and predict future expenses with remarkable accuracy.",
-                  "start": 72.48,
-                  "end": 79.38
+                  "start": 82.15,
+                  "end": 89.97
                 }
               ]
             }
@@ -223,13 +223,13 @@
               "readAlong": [
                 {
                   "text": "The boundaries between financial services and other digital experiences are dissolving.",
-                  "start": 81.58,
-                  "end": 85.34
+                  "start": 92.47,
+                  "end": 96.73
                 },
                 {
                   "text": "Embedded finance allows non-financial companies to offer banking, lending, and payment services seamlessly within their platforms.",
-                  "start": 85.74,
-                  "end": 91.14
+                  "start": 97.18,
+                  "end": 103.3
                 }
               ]
             },
@@ -240,8 +240,8 @@
               "readAlong": [
                 {
                   "text": "The future of finance isn't about going to the bank—it's about banking coming to you, wherever you are.",
-                  "start": 91.68,
-                  "end": 95.98
+                  "start": 103.92,
+                  "end": 108.79
                 }
               ]
             },
@@ -251,13 +251,13 @@
               "readAlong": [
                 {
                   "text": "Super apps like WeChat in China have already demonstrated the power of consolidating multiple services.",
-                  "start": 96.54,
-                  "end": 100.8
+                  "start": 109.42,
+                  "end": 114.25
                 },
                 {
                   "text": "Western markets are now seeing similar evolution, with ride-sharing apps offering banking, e-commerce platforms providing credit, and social media enabling peer-to-peer payments.",
-                  "start": 101.28,
-                  "end": 108.45
+                  "start": 114.8,
+                  "end": 122.92
                 }
               ]
             }
@@ -273,13 +273,13 @@
               "readAlong": [
                 {
                   "text": "The transformation of finance through technology is not a distant future speculation—it's happening now.",
-                  "start": 111.43,
-                  "end": 115.69
+                  "start": 126.3,
+                  "end": 131.13
                 },
                 {
                   "text": "From the way we pay for groceries to how global corporations manage treasury operations, every aspect of our financial lives is being reimagined.",
-                  "start": 116.13,
-                  "end": 122.17
+                  "start": 131.63,
+                  "end": 138.47
                 }
               ]
             },
@@ -291,13 +291,13 @@
               "readAlong": [
                 {
                   "text": "Investors should remain vigilant.",
-                  "start": 122.65,
-                  "end": 123.97
+                  "start": 139.02,
+                  "end": 140.51
                 },
                 {
                   "text": "While opportunities abound, the regulatory landscape is still evolving, and not all innovations will survive.",
-                  "start": 124.29,
-                  "end": 128.73
+                  "start": 140.88,
+                  "end": 145.91
                 }
               ]
             },
@@ -307,8 +307,8 @@
               "readAlong": [
                 {
                   "text": "The journey ahead promises to be transformative—reshaping not just how we manage money, but how we think about value, ownership, and economic participation in an increasingly connected world.",
-                  "start": 129.15,
-                  "end": 137.77
+                  "start": 146.39,
+                  "end": 156.16
                 }
               ]
             }
@@ -335,7 +335,7 @@
           "trendValue": "89%"
         }
       ],
-      "audioDurationSeconds": 138
+      "audioDurationSeconds": 156
     },
     {
       "slug": "how-amazon-built-its-moat",

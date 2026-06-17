@@ -2956,3 +2956,63 @@ def test_guidance_overlay_maintained_status_clears_attribution():
     assert rf["guidance_quote"] is None
     assert rf["guidance_speaker"] is None
     assert rf["guidance_period"] is None
+
+
+# ── Persona isolation: collect() must not alias the shared neutral base ──
+
+
+@pytest.mark.asyncio
+async def test_collect_deepcopies_shared_base_across_personas(monkeypatch):
+    """Concurrent same-ticker callers share ONE persona-neutral base via the
+    ticker-keyed _INFLIGHT dedup. collect() must hand each persona its OWN deep
+    copy so an in-place mutation in one persona's assemble_report (e.g. the
+    grounded moat-pillar `source` / `peer_score` writes) can never bleed into a
+    concurrent persona's report — guards the shallow-`dataclasses.replace`
+    aliasing footgun.
+    """
+    from app.services.agents.ticker_report_data_collector import (
+        CollectedTickerData,
+        TickerReportDataCollector,
+        _AGENT_MAP,
+    )
+
+    # One base instance, exactly as the _INFLIGHT future hands to every
+    # concurrent first-caller for the same ticker.
+    shared_base = CollectedTickerData(
+        ticker="AAPL",
+        persona_key="warren_buffett",
+        profile={"symbol": "AAPL"},
+        computed={"roe": 0.5},
+        moat_grounded_pillars={"Brand": {"score": 7.0}},
+        meta={"symbol": "AAPL"},
+    )
+
+    async def _fake_get_or_collect(ticker, fetch_fresh):
+        return shared_base
+
+    monkeypatch.setattr(
+        "app.services.ticker_data_cache.get_or_collect", _fake_get_or_collect
+    )
+
+    collector = TickerReportDataCollector(fmp=object())
+    a = await collector.collect("AAPL", "warren_buffett")
+    b = await collector.collect("AAPL", "cathie_wood")
+
+    # Persona correctly stamped on each independent copy.
+    assert a.persona_key == "warren_buffett"
+    assert b.persona_key == "cathie_wood"
+    assert a.meta["agent"] == _AGENT_MAP.get("warren_buffett", "buffett")
+    assert b.meta["agent"] == _AGENT_MAP.get("cathie_wood", "buffett")
+
+    # Each persona owns its object graph — no aliasing to the base or each other.
+    assert a is not shared_base and b is not shared_base
+    assert a.moat_grounded_pillars is not shared_base.moat_grounded_pillars
+    assert a.moat_grounded_pillars is not b.moat_grounded_pillars
+    assert a.moat_grounded_pillars["Brand"] is not b.moat_grounded_pillars["Brand"]
+    assert a.computed is not b.computed
+
+    # Concrete proof: the exact in-place write assemble_report does on a grounded
+    # pillar must NOT leak to the shared base or the other persona.
+    a.moat_grounded_pillars["Brand"]["source"] = "grounded"
+    assert "source" not in shared_base.moat_grounded_pillars["Brand"]
+    assert "source" not in b.moat_grounded_pillars["Brand"]

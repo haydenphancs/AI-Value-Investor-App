@@ -22,6 +22,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from app.database import get_supabase
 
@@ -118,6 +119,80 @@ TABLE_NAME = "ticker_report_cache"
 #     granularity (timeline_prices: monthly → last close per ISO week) for a
 #     smoother, more detailed price line.
 CACHE_SCHEMA_FLOOR = datetime(2026, 6, 13, 0, 0, 0, tzinfo=timezone.utc)
+
+
+# ── Close-aligned cache freshness ───────────────────────────────────
+# Reports pin to the LAST COMPLETED market close, so a cached entry is fresh
+# only until the NEXT close has settled — not a rolling wall-clock TTL (which
+# would freeze "the last close as of first generation" and miss a close that
+# lands mid-window). We treat a close as "settled" at a weekday 6pm ET (4pm ET
+# close + a buffer so FMP's EOD bar is reliably available). The first viewer
+# after that boundary regenerates with the new close; everyone that session
+# shares it. Used by ticker_report_cache, ticker_data_cache, and
+# research_service._lookup_shared_cache so all three layers refresh together.
+_CLOSE_REFRESH_HOUR_ET = 18
+
+try:
+    _ET: Optional[ZoneInfo] = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - slim image without the tz database
+    logger.warning(
+        "tzdata/America/New_York unavailable — close-cycle cache boundary will "
+        "use a DST-aware fixed-offset approximation (exact except within the "
+        "twice-a-year transition hour). Add `tzdata` for full correctness."
+    )
+    _ET = None
+
+
+def _us_eastern_is_dst(dt_utc: datetime) -> bool:
+    """Approximate whether `dt_utc` falls in US Eastern Daylight Time.
+
+    Only used for the fixed-offset fallback when tzdata is unavailable. US
+    DST (post-2007): 2nd Sunday of March 07:00 UTC (02:00 EST) → 1st Sunday
+    of November 06:00 UTC (02:00 EDT). Correct except within the transition
+    hour itself, where the cache boundary may be ≤1h off twice a year.
+    """
+    year = dt_utc.year
+    march1 = datetime(year, 3, 1, tzinfo=timezone.utc)
+    first_sun_mar = march1 + timedelta(days=(6 - march1.weekday()) % 7)
+    dst_start = first_sun_mar + timedelta(days=7, hours=7)  # 2nd Sun, 07:00 UTC
+    nov1 = datetime(year, 11, 1, tzinfo=timezone.utc)
+    first_sun_nov = nov1 + timedelta(days=(6 - nov1.weekday()) % 7)
+    dst_end = first_sun_nov + timedelta(hours=6)  # 1st Sun, 06:00 UTC
+    return dst_start <= dt_utc < dst_end
+
+
+def _eastern_fallback_tz(now_utc: datetime) -> timezone:
+    """DST-aware fixed offset (EDT=-4 / EST=-5) for the no-tzdata fallback."""
+    offset = -4 if _us_eastern_is_dst(now_utc) else -5
+    return timezone(timedelta(hours=offset))
+
+
+def current_close_cycle_start(now: Optional[datetime] = None) -> datetime:
+    """The most recent weekday 6pm ET at or before `now`, as a UTC-aware
+    datetime. A cache row written before this is stale (a newer close has
+    settled since). `now` is injectable for tests."""
+    now = now or datetime.now(timezone.utc)
+    # Prefer the real tz database; fall back to a DST-aware fixed offset only
+    # when tzdata is missing from the deploy image.
+    tz = _ET or _eastern_fallback_tz(now)
+    local = now.astimezone(tz)
+    boundary = local.replace(
+        hour=_CLOSE_REFRESH_HOUR_ET, minute=0, second=0, microsecond=0
+    )
+    if boundary > local:
+        boundary -= timedelta(days=1)
+    while boundary.weekday() >= 5:  # Sat(5)/Sun(6) → step back to Friday's close
+        boundary -= timedelta(days=1)
+    return boundary.astimezone(timezone.utc)
+
+
+def is_cache_fresh(cached_at: datetime, now: Optional[datetime] = None) -> bool:
+    """True if a row cached at `cached_at` is still fresh: on/after the schema
+    floor AND within the current trading-close cycle (written after the most
+    recent settled close). Replaces the old rolling-TTL check."""
+    if cached_at < CACHE_SCHEMA_FLOOR:
+        return False
+    return cached_at >= current_close_cycle_start(now)
 
 
 def _short_interest_payload_stale(report: Any) -> bool:
@@ -258,18 +333,13 @@ async def get_cached_report(
             cached_at = datetime.fromisoformat(
                 cached_at_str.replace("Z", "+00:00")
             )
-            if cached_at < CACHE_SCHEMA_FLOOR:
+            # Close-aligned freshness (not a rolling TTL): stale once a newer
+            # market close has settled, so the first post-close viewer regenerates.
+            if not is_cache_fresh(cached_at):
                 logger.info(
-                    f"ticker_report_cache PRE-FLOOR for {ticker}/{persona} "
-                    f"(cached_at={cached_at.isoformat()} < "
-                    f"floor={CACHE_SCHEMA_FLOOR.isoformat()})"
-                )
-                return None
-            age = datetime.now(timezone.utc) - cached_at
-            if age > timedelta(hours=CACHE_TTL_HOURS):
-                logger.info(
-                    f"ticker_report_cache STALE for {ticker}/{persona} "
-                    f"(age={age.total_seconds() / 3600:.1f}h)"
+                    f"ticker_report_cache STALE/PRE-FLOOR for {ticker}/{persona} "
+                    f"(cached_at={cached_at.isoformat()}, "
+                    f"cycle_start={current_close_cycle_start().isoformat()})"
                 )
                 return None
 

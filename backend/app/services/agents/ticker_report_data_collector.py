@@ -1148,8 +1148,18 @@ class TickerReportDataCollector:
         key_metrics = out.key_metrics
 
         # ── Current price ─────────────────────────────────────────────
-        current_price = _safe_float(quote, "price")
+        # Last COMPLETED market close (EOD-only /historical, newest-first → first
+        # valid bar). Stable for the whole trading day and identical for every
+        # viewer that session; NOT the live intraday tick. Fallback chain:
+        # last close → previousClose → live price → 0.
+        close_date, last_close = _latest_completed_close(out.historical)
+        current_price = (
+            last_close
+            if last_close is not None
+            else (_num_or_none(quote.get("previousClose")) or _safe_float(quote, "price"))
+        )
         c["current_price"] = current_price
+        c["price_close_date"] = close_date.isoformat() if close_date else None
 
         # ── Altman Z-Score (manufacturing formula) ────────────────────
         c["altman_z"] = _altman_z(balance, income, profile)
@@ -1336,7 +1346,7 @@ class TickerReportDataCollector:
                 or ""
             ),
             "logo_url": profile.get("image"),
-            "live_date": _format_live_date(now),
+            "live_date": _format_close_date(c.get("price_close_date"), now),
             "agent": _AGENT_MAP.get(out.persona_key, "buffett"),
         }
 
@@ -2202,6 +2212,24 @@ def _hist_list(historical: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _latest_completed_close(historical: Any) -> Tuple[Optional[date], Optional[float]]:
+    """Most recent COMPLETED daily close from FMP /historical (newest-first +
+    EOD-only, so during market hours this is the prior session's close — exactly
+    the 'last close' the report anchors to). Returns (close_date, close_price),
+    or (None, None) when no usable bar exists."""
+    for p in _hist_list(historical):
+        close = p.get("close")
+        date_str = p.get("date") or ""
+        if close is None or not date_str:
+            continue
+        try:
+            d = date.fromisoformat(date_str[:10])
+            return d, float(close)
+        except (TypeError, ValueError):
+            continue
+    return None, None
+
+
 def _monthly_closes(
     hist_list: List[Dict[str, Any]], count: int = 12
 ) -> List[Dict[str, Any]]:
@@ -2238,6 +2266,19 @@ def _format_live_date(now: datetime) -> str:
     hour = now.hour % 12 or 12
     ampm = "AM" if now.hour < 12 else "PM"
     return f"Live Data as of {now.strftime('%b')} {day}, {hour}:{now.strftime('%M')} {ampm}"
+
+
+def _format_close_date(close_date_iso: Optional[str], now: datetime) -> str:
+    """Label the report's price as the last market close (the report is anchored
+    to the last completed close, not the live tick). Falls back to the
+    generation timestamp only when no close date is available."""
+    if close_date_iso:
+        try:
+            d = date.fromisoformat(close_date_iso)
+            return f"As of {d.strftime('%b')} {d.day}, {d.year} close"
+        except ValueError:
+            pass
+    return _format_live_date(now)
 
 
 def _format_revenue(rev: Optional[float]) -> str:

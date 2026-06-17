@@ -78,6 +78,30 @@ final class BookProgressStore: ObservableObject {
         Task { await self.pushCompletion(k) }
     }
 
+    /// During continuous audio playback, auto-complete each core once the playhead crosses out of
+    /// it (into the next core, or near the end for the last). Ignores seeks / large jumps so
+    /// skipping ahead never marks cores the learner didn't actually listen through. Idempotent;
+    /// returns the cores newly completed by this step (for a one-shot success haptic).
+    @discardableResult
+    func markListenedThrough(order: Int, from: Double, to: Double,
+                             coreStarts: [Int: Int], totalSeconds: Int) -> [Int] {
+        guard to > from, to - from < 2.0 else { return [] }   // continuous playback only
+        let ordered = coreStarts.sorted { $0.value < $1.value }.map(\.key)
+        var newly: [Int] = []
+        for (i, core) in ordered.enumerated() {
+            let isLast = i + 1 == ordered.count
+            // Interior core finishes exactly when the next core begins; the last core may stop a
+            // tick short of the exact end, so trigger a hair before totalSeconds.
+            let trigger = isLast ? Double(totalSeconds) - 0.6
+                                 : Double(coreStarts[ordered[i + 1]] ?? totalSeconds)
+            if from < trigger, trigger <= to, !isCompleted(order: order, core: core) {
+                markCompleted(order: order, core: core)
+                newly.append(core)
+            }
+        }
+        return newly
+    }
+
     /// Clear all progress (debug / "reset" affordances). Local only.
     func reset() {
         guard !completed.isEmpty else { return }

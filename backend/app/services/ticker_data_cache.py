@@ -36,9 +36,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.database import get_supabase
-# Shared schema floor: a payload-shape change invalidates this cache exactly
-# like it invalidates ticker_report_cache, so we never reuse a stale-shape blob.
-from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR
+# Shared close-aligned freshness (schema floor + trading-close cycle) so this
+# collection cache refreshes on the SAME boundary as ticker_report_cache —
+# critical, else a post-close report regen would reuse stale historical here.
+from app.services.ticker_report_cache import is_cache_fresh
 
 # Typed objects carried on CollectedTickerData, reconstructed on read.
 from app.schemas.analyst import AnalystAnalysisResponse
@@ -217,11 +218,8 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
             if not cached_at_str:
                 return None
             cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
-            if cached_at < CACHE_SCHEMA_FLOOR:
-                logger.info("ticker_data_cache PRE-FLOOR for %s", ticker)
-                return None
-            if datetime.now(timezone.utc) - cached_at > timedelta(hours=CACHE_TTL_HOURS):
-                logger.info("ticker_data_cache STALE for %s", ticker)
+            if not is_cache_fresh(cached_at):
+                logger.info("ticker_data_cache STALE/PRE-FLOOR for %s", ticker)
                 return None
             data = entry.get("collected_data")
             return data if isinstance(data, dict) else None

@@ -8,8 +8,11 @@ Each persona defines:
   - analysis_focus: What to emphasize in the final report
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict
+
+logger = logging.getLogger(__name__)
 
 
 PERSONA_KEYS = {"warren_buffett", "cathie_wood", "peter_lynch", "bill_ackman"}
@@ -509,5 +512,18 @@ _PERSONA_REGISTRY = {
 
 
 def get_persona_config(key: str) -> PersonaConfig:
-    """Get persona config by key. Falls back to Buffett."""
-    return _PERSONA_REGISTRY.get(key, _BUFFETT_CONFIG)
+    """Get persona config by key. Falls back to Buffett.
+
+    The endpoints validate persona against PERSONA_KEYS before reaching
+    here, so an unknown key signals an internal caller passing an
+    unvalidated value — a load-bearing default that should be loud, not
+    silent (it would score/narrate as Buffett otherwise).
+    """
+    config = _PERSONA_REGISTRY.get(key)
+    if config is None:
+        logger.warning(
+            "get_persona_config: unknown persona key %r — falling back to "
+            "warren_buffett. Caller bypassed PERSONA_KEYS validation.", key,
+        )
+        return _BUFFETT_CONFIG
+    return config

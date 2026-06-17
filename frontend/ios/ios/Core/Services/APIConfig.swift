@@ -82,8 +82,12 @@ enum APIConfig: Sendable {
     /// Interval for polling research status (seconds)
     nonisolated static let researchPollInterval: TimeInterval = 3.0
 
-    /// Maximum polling duration before timeout (seconds)
-    nonisolated static let researchPollTimeout: TimeInterval = 180.0 // 3 minutes
+    /// Maximum duration the CLIENT keeps polling before it stops (seconds).
+    /// The backend keeps generating past this — the report still resolves in
+    /// the Reports list (startReportsPolling), and if it never delivers the
+    /// server-side reconciliation sweep refunds the credits. Raised from 180s
+    /// so a normal slow generation no longer surfaces a spurious "timeout".
+    nonisolated static let researchPollTimeout: TimeInterval = 300.0 // 5 minutes
 
     // MARK: - Cache Configuration
 

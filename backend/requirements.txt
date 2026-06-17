@@ -38,13 +38,11 @@ jinja2>=3.1.4
 
 # Utilities
 python-dotenv==1.0.1
+# Timezone database — ZoneInfo("America/New_York") for the close-aligned cache
+# boundary. Slim deploy images (Railway) don't ship the system tzdb; without
+# this the cache falls back to a fixed UTC-5 approximation.
+tzdata>=2024.1
 
 # Dev/Test
 pytest==8.3.4
 pytest-asyncio==0.24.0
-
-# PDF report generation. 
-
-weasyprint==62.3
-pydyf==0.10.0      
-jinja2>=3.1.4

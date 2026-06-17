@@ -70,6 +70,11 @@ async def lifespan(app: FastAPI):
         # Start background whale hydration jobs
         asyncio.create_task(_run_whale_hydration_job())
 
+        # Refund safety net: reconcile research reports stranded in
+        # pending/processing (killed worker) so charged-but-undelivered
+        # reports get their credits back.
+        asyncio.create_task(_run_research_reconciliation_job())
+
     yield
 
     # Graceful shutdown: close live price WebSocket connections
@@ -109,6 +114,31 @@ async def _run_news_pre_warmer():
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
+
+
+async def _run_research_reconciliation_job():
+    """Background task: refund research reports orphaned charged-but-undelivered.
+
+    Generate Analysis charges 5 credits upfront then runs in a fire-and-forget
+    task. If the worker is killed mid-run (deploy / OOM / crash) the row is
+    stranded in pending/processing and never refunded. This sweep reconciles
+    such rows on a fixed interval. Idempotent (claim-then-refund on
+    `is_refunded`), so it's safe even if multiple workers run it.
+    """
+    from app.services.research_reconciliation_service import (
+        sweep_once,
+        RECON_SWEEP_INTERVAL_SECONDS,
+    )
+
+    await asyncio.sleep(90)  # let app fully start
+
+    while True:
+        try:
+            await sweep_once()
+        except Exception as e:
+            logger.error(f"Research reconciliation sweep failed: {e}", exc_info=True)
+
+        await asyncio.sleep(RECON_SWEEP_INTERVAL_SECONDS)
 
 
 async def _run_sector_benchmark_job():

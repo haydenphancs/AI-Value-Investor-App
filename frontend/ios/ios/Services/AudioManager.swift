@@ -343,7 +343,10 @@ final class AudioManager: ObservableObject {
     }
 
     private func startSleepTimer() {
-        sleepTimerInstance = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Use .common run-loop mode so the countdown keeps firing while the user scrolls/interacts;
+        // a plain scheduledTimer runs only in .default mode and would stall during UI tracking,
+        // making the timer fire late (or appear not to stop).
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
@@ -356,6 +359,8 @@ final class AudioManager: ObservableObject {
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        sleepTimerInstance = timer
     }
 
     private func stopSleepTimer() {

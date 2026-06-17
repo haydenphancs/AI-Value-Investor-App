@@ -212,7 +212,7 @@ struct BookCoreDetailView: View {
                 Spacer()
 
                 // Global Mini Player (show if audio was playing or user started playback)
-                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll {
+                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll && !audioManager.showFullScreenPlayer {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -222,8 +222,19 @@ struct BookCoreDetailView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shouldShowPlayer)
+
+            // Full Screen Player (modal overlay) — presented here because this screen is shown as a
+            // fullScreenCover above RootContainerView, whose own full-screen player would be hidden.
+            if audioManager.showFullScreenPlayer {
+                FullScreenAudioPlayer(onNavigateToCore: { coreNumber in
+                    jumpReadingToCore(coreNumber)
+                })
+                    .transition(.move(edge: .bottom))
+                    .zIndex(100)
+            }
         }
         .navigationBarHidden(true)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .onAppear {
             // If audio is already playing, show the player
             if audioManager.hasActiveEpisode && audioManager.isPlaying {
@@ -233,13 +244,12 @@ struct BookCoreDetailView: View {
             // Load the book narration when view appears (paused), unless already active
             ensureBookEpisodeLoaded()
 
-            // Subscribe to audio completion events
+            // When the single book file finishes, the final core is done.
             audioCompletionCancellable = audioManager.playbackDidComplete
                 .receive(on: DispatchQueue.main)
                 .sink { [self] completedEpisode in
-                    // Check if the completed episode matches the current core's audio
-                    if completedEpisode.id == currentAudioEpisode.id {
-                        handleCoreCompletion()
+                    if completedEpisode.id == book.audioEpisode.id {
+                        autoCompleteFinalCore()
                     }
                 }
         }
@@ -254,6 +264,12 @@ struct BookCoreDetailView: View {
             // Same single book file across cores — only load if it isn't already active, so
             // swiping between cores never interrupts ongoing playback.
             ensureBookEpisodeLoaded()
+        }
+        .onChange(of: audioManager.currentTime) { oldTime, newTime in
+            // Auto-complete cores as the narration plays through them (no button tap needed).
+            autoCompleteListenedCores(from: oldTime, to: newTime)
+            // Follow the audio: if it leaves the core we're viewing, open the next one.
+            autoAdvanceReading(from: oldTime, to: newTime)
         }
     }
 
@@ -281,6 +297,54 @@ struct BookCoreDetailView: View {
         }
 
         scrollOffset = newOffset
+    }
+
+    // MARK: - Audio-driven Completion
+
+    /// Mark cores complete as the narration plays past them. No-op when this book isn't the active
+    /// audio, or on seeks (markListenedThrough guards continuity). Fires a success haptic per core.
+    private func autoCompleteListenedCores(from old: Double, to new: Double) {
+        guard audioManager.currentEpisode?.id == book.audioEpisode.id,
+              let info = book.bookAudioInfo else { return }
+        var newly: [Int] = []
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            newly = progress.markListenedThrough(
+                order: book.curriculumOrder, from: old, to: new,
+                coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
+        }
+        if !newly.isEmpty {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+    }
+
+    /// While playing, if the narration crosses out of the core currently on screen, advance the
+    /// reading view to the next core so the highlight keeps following the voice.
+    ///
+    /// It ONLY advances when the playhead leaves the core being viewed — so if the learner has
+    /// navigated elsewhere (another core, or any other screen) it never snaps them back. It resumes
+    /// naturally: once the playhead reaches whatever core they're on, the highlight shows, and when
+    /// it then passes that core, auto-advance picks up again.
+    private func autoAdvanceReading(from old: Double, to new: Double) {
+        guard audioManager.isPlaying,
+              audioManager.currentEpisode?.id == book.audioEpisode.id,
+              let info = book.bookAudioInfo,
+              new > old, new - old < 2.0 else { return }
+        let shown = currentContent.chapterNumber
+        // End of the core on screen == start of the next core. nil => it's the last core.
+        guard let nextStart = info.coreStartSeconds[shown + 1].map(Double.init) else { return }
+        if old < nextStart, nextStart <= new {
+            navigateToNextCore()
+        }
+    }
+
+    /// The book file played to the very end → mark the last core complete.
+    private func autoCompleteFinalCore() {
+        guard let last = allCores.last,
+              !progress.isCompleted(order: book.curriculumOrder, core: last.number) else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            progress.markCompleted(order: book.curriculumOrder, core: last.number)
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
     // MARK: - Completion Handling
@@ -333,6 +397,20 @@ struct BookCoreDetailView: View {
             currentContent = newContent
         }
         // Reset scroll position and show audio player
+        scrollOffset = 0
+        previousScrollOffset = 0
+        audioManager.resetScrollHiding()
+    }
+
+    /// Jump the reading view to a specific core — used by the full-screen player's "Read" button to
+    /// snap back to the core the narration is currently in (the read-along highlight resumes there).
+    private func jumpReadingToCore(_ number: Int) {
+        guard number != currentContent.chapterNumber,
+              let chapter = allCores.first(where: { $0.number == number }),
+              let content = chapter.getDetailContent(for: book) else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            currentContent = content
+        }
         scrollOffset = 0
         previousScrollOffset = 0
         audioManager.resetScrollHiding()

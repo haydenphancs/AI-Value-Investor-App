@@ -21,6 +21,7 @@ struct AudioEpisode: Identifiable, Equatable {
     let authorName: String
     let sourceId: String // Original article/book ID for navigation
     var audioUrl: String? = nil // Remote narration URL (Supabase Storage); nil => no real audio (simulated fallback)
+    var bookCurriculumOrder: Int? = nil // For Book narration: the book's curriculumOrder, so the player can resolve the current core (title + jump-to-reading) from the playhead. nil for non-book audio.
 
     var formattedDuration: String {
         let minutes = Int(duration) / 60

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import copy
 import json
 import logging
 import re
@@ -393,10 +394,17 @@ class TickerReportDataCollector:
         from app.services.ticker_data_cache import get_or_collect
 
         base = await get_or_collect(ticker, lambda: self._collect_fresh(ticker))
-        # Apply the requesting persona to the neutral base. New instance + a new
-        # meta dict so the shared/cached base object is never mutated.
+        # DEEP-copy the neutral base before stamping the persona. Under the
+        # ticker-keyed _INFLIGHT dedup, concurrent same-ticker callers all
+        # receive the SAME base instance; a shallow dataclasses.replace would
+        # leave every nested mutable (computed, the *_vital/*_partial dicts,
+        # moat_grounded_pillars, raw FMP lists) ALIASED across personas, so an
+        # in-place mutation in assemble_report (today: the grounded moat-pillar
+        # dicts) could bleed across concurrent reports. A deep copy gives this
+        # request its own object graph; cost is sub-ms vs. the Gemini Stage A/B
+        # seconds that follow.
         return replace(
-            base,
+            copy.deepcopy(base),
             persona_key=persona_key,
             meta={**(base.meta or {}), "agent": _AGENT_MAP.get(persona_key, "buffett")},
         )

@@ -10,12 +10,28 @@ import SwiftUI
 
 struct FullScreenAudioPlayer: View {
     @EnvironmentObject private var audioManager: AudioManager
+    /// Book context: jump the reading view to the given core number. nil for non-book players.
+    var onNavigateToCore: ((Int) -> Void)? = nil
+
     @State private var dragOffset: CGFloat = 0
     @State private var showSpeedPicker: Bool = false
     @State private var showSleepTimer: Bool = false
-    @State private var showQueue: Bool = false
 
     private let dismissThreshold: CGFloat = 150
+
+    /// The core the narration is currently inside (number + title), for book audio only.
+    private var currentBookCore: (number: Int, title: String)? {
+        guard let episode = audioManager.currentEpisode,
+              let order = episode.bookCurriculumOrder,
+              let info = BookAudioInfo.byOrder[order] else { return nil }
+        let t = audioManager.currentTime
+        let num = info.coreStartSeconds.filter { Double($0.value) <= t }
+            .max(by: { $0.value < $1.value })?.key
+            ?? info.coreStartSeconds.min(by: { $0.value < $1.value })?.key
+        guard let n = num else { return nil }
+        let title = BookCoreChapter.listsByOrder[order]?.first { $0.number == n }?.title ?? ""
+        return (n, title)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -28,6 +44,11 @@ struct FullScreenAudioPlayer: View {
                 VStack(spacing: 0) {
                     // Drag indicator and header
                     headerSection
+
+                    // Current core being narrated (book audio only)
+                    if let core = currentBookCore {
+                        currentCoreLabel(number: core.number, title: core.title)
+                    }
 
                     Spacer()
 
@@ -86,11 +107,6 @@ struct FullScreenAudioPlayer: View {
             SleepTimerSheet()
                 .environmentObject(audioManager)
                 .presentationDetents([.height(400)])
-        }
-        .sheet(isPresented: $showQueue) {
-            AudioQueueSheet()
-                .environmentObject(audioManager)
-                .presentationDetents([.medium, .large])
         }
     }
 
@@ -165,6 +181,24 @@ struct FullScreenAudioPlayer: View {
                 .offset(x: -7)
             }
         }
+    }
+
+    // MARK: - Current Core Label (book narration)
+    private func currentCoreLabel(number: Int, title: String) -> some View {
+        VStack(spacing: AppSpacing.xxs) {
+            Text("CORE \(number)")
+                .font(AppTypography.captionTiny).fontWeight(.bold)
+                .foregroundColor(AppColors.textMuted)
+                .tracking(1.0)
+
+            Text(title)
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, AppSpacing.xl)
+        .padding(.top, AppSpacing.lg)
     }
 
     // MARK: - Artwork Section
@@ -309,21 +343,27 @@ struct FullScreenAudioPlayer: View {
 
             Spacer()
 
-            // Queue
-            Button(action: { showQueue = true }) {
-                VStack(spacing: AppSpacing.xxs) {
-                    Image(systemName: "list.bullet")
-                        .font(AppTypography.iconMedium).fontWeight(.medium)
-                        .foregroundColor(AppColors.textPrimary)
-                    Text("Queue")
-                        .font(AppTypography.captionTiny).fontWeight(.medium)
-                        .foregroundColor(AppColors.textSecondary)
+            // Go to the current core's reading view (book narration only) — replaces Queue.
+            // Snaps the reader to the core the audio is in; the read-along highlight resumes there.
+            if onNavigateToCore != nil, let core = currentBookCore {
+                Button(action: {
+                    onNavigateToCore?(core.number)
+                    audioManager.collapsePlayer()
+                }) {
+                    VStack(spacing: AppSpacing.xxs) {
+                        Image(systemName: "book.fill")
+                            .font(AppTypography.iconMedium).fontWeight(.medium)
+                            .foregroundColor(AppColors.textPrimary)
+                        Text("Read")
+                            .font(AppTypography.captionTiny).fontWeight(.medium)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .frame(width: 56)
                 }
-                .frame(width: 56)
-            }
-            .buttonStyle(PlainButtonStyle())
+                .buttonStyle(PlainButtonStyle())
 
-            Spacer()
+                Spacer()
+            }
 
             // Share
             Button(action: {

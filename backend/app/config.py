@@ -114,7 +114,17 @@ class Settings(BaseSettings):
     RAG_TOP_K_RESULTS: int = 5
 
     # Research
-    DEEP_RESEARCH_TIMEOUT_SECONDS: int = 120
+    DEEP_RESEARCH_TIMEOUT_SECONDS: int = 120  # legacy/unused (pinned to 30 in .env)
+    # Hard ceiling on a single deep-research agent run (Stage A collect →
+    # agentic rounds → Stage B narratives). research_service wraps
+    # `agent.run` in asyncio.wait_for(this) so a hung pipeline raises
+    # TimeoutError → the failure path refunds the user's credits instead of
+    # leaving the report stranded in "processing" forever. A DEDICATED new
+    # setting (NOT DEEP_RESEARCH_TIMEOUT_SECONDS above, which an existing .env
+    # pins to 30s). Kept STRICTLY below the reconciliation sweep's 900s
+    # stuck-threshold so a live worker always wins the refund race with a
+    # clean, specific error.
+    RESEARCH_PIPELINE_TIMEOUT_SECONDS: int = 600
     # Per-call timeout for individual Gemini SDK requests. The SDK's
     # default is unbounded — without this guard a hung network read
     # parks the whole report-generation task forever (seen as a card

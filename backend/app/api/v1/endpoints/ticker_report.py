@@ -36,6 +36,7 @@ from app.api.error_response import (
 )
 from app.database import get_supabase
 from app.schemas.ticker_report import TickerReportResponse
+from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
@@ -50,7 +51,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-VALID_PERSONAS = {"warren_buffett", "cathie_wood", "peter_lynch", "bill_ackman"}
+# Single source of truth for valid persona keys — alias the research agent's
+# registry (persona_config.PERSONA_KEYS) so this endpoint and
+# /research/generate can never validate against diverging sets when a new
+# persona is added. Parity is guarded by tests/test_persona_set_parity.py.
+VALID_PERSONAS = PERSONA_KEYS
 
 # Legacy cache TTL (kept for back-compat with older research_reports rows
 # that pre-date the dedicated `ticker_report_cache` table).

@@ -382,7 +382,8 @@ struct LibraryBook: Identifiable {
             category: .books,
             authorName: author,
             sourceId: id.uuidString,
-            audioUrl: bookAudioInfo?.audioUrl
+            audioUrl: bookAudioInfo?.audioUrl,
+            bookCurriculumOrder: bookAudioInfo == nil ? nil : curriculumOrder
         )
     }
 }

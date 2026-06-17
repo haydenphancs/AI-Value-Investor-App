@@ -47,6 +47,7 @@ from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
 from app.services.credit_service import CreditService
+from app.services.research_reconciliation_service import claim_and_mark_failed
 from app.services.ticker_report_cache import patch_legacy_price_action
 
 logger = logging.getLogger(__name__)
@@ -719,30 +720,11 @@ async def _run_research_task(
             step="research_task",
             extra_details={"report_id": report_id},
         )
-        # Refund + mark failed in one row update so the iOS UI flips
-        # to "Failed [Refunded]" atomically. Refund call is wrapped
-        # because a Supabase outage during refund must not mask the
-        # original research error.
-        try:
-            credit_service = CreditService()
-            credit_service.refund(user_id, CreditService.DEEP_RESEARCH_COST)
-        except Exception as refund_err:
-            logger.error(
-                f"Refund failed for {report_id} (user {user_id}): "
-                f"{type(refund_err).__name__}: {refund_err}"
-            )
-        try:
-            from app.database import get_supabase
-
-            supabase = get_supabase()
-            supabase.table("research_reports").update({
-                "status": "failed",
-                "error_message": json.dumps(body),
-                "progress": 0,
-                "is_refunded": True,
-            }).eq("id", report_id).execute()
-        except Exception as inner:
-            logger.error(
-                f"Failed to update error status for {report_id}: "
-                f"{type(inner).__name__}: {inner}"
-            )
+        # Mark failed + refund through the shared claim-then-refund primitive.
+        # ONE atomic compare-and-set on `is_refunded` flips the row and
+        # decides the refund, so this worker path and the reconciliation
+        # sweep can never double-refund the same report. (Note:
+        # ResearchService.generate_report may have already stamped
+        # status='failed' before re-raising — 'failed' is a claimable status,
+        # so the refund still fires exactly once.)
+        await claim_and_mark_failed(report_id, body)

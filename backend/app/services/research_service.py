@@ -18,13 +18,19 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 
+from app.config import settings
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
 from app.integrations.fmp import get_fmp_client
 from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
 from app.services.agents.persona_scoring import compute_quality_score
-from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR, upsert_cached_report
+from app.services.ticker_report_cache import (
+    CACHE_SCHEMA_FLOOR,
+    current_close_cycle_start,
+    upsert_cached_report,
+    _normalize_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +112,17 @@ class ResearchService:
                 async def on_progress(progress: int, step: str):
                     self._update_status(report_id, "processing", progress, step)
 
-                # Run the full agentic pipeline
-                ticker_report_data = await agent.run(
-                    ticker=ticker,
-                    progress_cb=on_progress,
+                # Run the full agentic pipeline under a hard ceiling. A hung
+                # Gemini/FMP read would otherwise park this task forever,
+                # leaving the report stuck in "processing" — charged but never
+                # refunded. On timeout, asyncio.TimeoutError propagates to the
+                # except below → _run_research_task refunds the user's credits.
+                ticker_report_data = await asyncio.wait_for(
+                    agent.run(
+                        ticker=ticker,
+                        progress_cb=on_progress,
+                    ),
+                    timeout=settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS,
                 )
 
             # Extract legacy fields for backward compatibility
@@ -241,16 +254,24 @@ class ResearchService:
         Runs the synchronous Supabase call in a thread to avoid blocking
         the event loop.
         """
+        # Normalize the lookup key the same way the write side
+        # (upsert_cached_report / the inserted research_reports row) does, so
+        # a non-normalized caller can never miss a cache row that exists under
+        # the canonical (UPPER ticker, lower persona) key. No-op for the
+        # current callers (ticker is already .upper(), persona validated
+        # lowercase) — purely defensive.
+        ticker, persona_key = _normalize_key(ticker, persona_key)
         # Honor the same schema floor as ticker_report_cache so a payload-
         # shape change (e.g. new required price_action fields) invalidates
         # cross-user reuse just like it invalidates the dedicated cache.
         # Without this gate, a stale report from a pre-deploy user would
         # be silently served to every subsequent caller until TTL expiry.
-        ttl_cutoff = (
-            datetime.now(timezone.utc)
-            - timedelta(hours=SHARED_CACHE_TTL_HOURS)
-        )
-        cutoff = max(ttl_cutoff, CACHE_SCHEMA_FLOOR).isoformat()
+        # Close-aligned (not rolling): reuse only reports completed in the
+        # current trading-close cycle, so the first viewer after a new close
+        # regenerates instead of inheriting a prior-close report.
+        cutoff = max(
+            current_close_cycle_start(), CACHE_SCHEMA_FLOOR
+        ).isoformat()
 
         def _query():
             try:

@@ -479,12 +479,27 @@ class ResearchViewModel: ObservableObject {
                         await self.loadCredits()
 
                     case .failed(let appError):
-                        print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
                         self.isGeneratingAnalysis = false
                         self.generatingReportId = nil
-                        self.error = appError.message
-                        // Refresh so the failed card appears in the list
-                        await self.loadReports()
+                        if case .timeout = appError {
+                            // CLIENT-side poll timeout only — NOT a real
+                            // failure. The backend keeps generating; the
+                            // report still resolves in the Reports list
+                            // (startReportsPolling), and if it never delivers
+                            // the server-side reconciliation sweep refunds the
+                            // credits. Don't surface a hard error — keep the
+                            // in-flight card and point the user at the Reports
+                            // tab.
+                            print("⏳ ResearchVM: client poll timed out — report continues on the server")
+                            self.generationStep = "Still working — check the Reports tab"
+                            await self.loadReports()
+                            self.startReportsPolling()
+                        } else {
+                            print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
+                            self.error = appError.message
+                            // Refresh so the failed card appears in the list
+                            await self.loadReports()
+                        }
                     }
                 }
             } catch {

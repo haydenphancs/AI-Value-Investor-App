@@ -65,8 +65,13 @@ class CreditService:
         """Increment-back `amount` credits for `user_id`.
 
         Returns the new `remaining` balance, or None on RPC failure.
-        Idempotency for double-calls is guarded server-side via
-        GREATEST(0, used - amount) — never drives `used` negative.
+
+        NOT idempotent. The RPC's GREATEST(0, used - amount) only stops
+        `used` going negative — calling refund twice when used >= amount
+        hands the credits back TWICE. Callers MUST prevent double-refund at
+        the row level (see
+        research_reconciliation_service.claim_and_mark_failed, which flips
+        research_reports.is_refunded atomically and refunds only the winner).
         """
         try:
             result = self.supabase.rpc(

@@ -18,6 +18,7 @@ enum BookDetailTab: String, CaseIterable {
 struct BookDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var progress = BookProgressStore.shared
     @State private var selectedTab: BookDetailTab = .core
     @State private var isBookmarked: Bool = false
     @State private var showShareSheet: Bool = false
@@ -26,10 +27,11 @@ struct BookDetailView: View {
 
     let book: LibraryBook
 
-    // Computed property for header opacity based on scroll
+    // Computed property for header opacity based on scroll. Fades the sticky header in right as the
+    // hero's own nav bar scrolls away (~50px), so a header is pinned throughout scrolling.
     private var headerOpacity: Double {
-        let fadeStart: CGFloat = 280
-        let fadeEnd: CGFloat = 360
+        let fadeStart: CGFloat = 70
+        let fadeEnd: CGFloat = 150
         if scrollOffset < fadeStart { return 0 }
         if scrollOffset > fadeEnd { return 1 }
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
@@ -87,24 +89,25 @@ struct BookDetailView: View {
                 scrollOffset = value
             }
 
-            // Sticky mini header (appears on scroll)
-            if headerOpacity > 0 {
-                BookDetailMiniHeader(
-                    book: book,
-                    isBookmarked: isBookmarked,
-                    onBackTapped: { dismiss() },
-                    onBookmarkTapped: { isBookmarked.toggle() },
-                    onShareTapped: { showShareSheet = true }
-                )
-                .opacity(headerOpacity)
-            }
+            // Sticky mini header — always present, fading in as the hero scrolls away so a header is
+            // pinned at the top throughout scrolling (invisible + non-interactive at the very top, so
+            // the hero's own nav bar receives taps there).
+            BookDetailMiniHeader(
+                book: book,
+                isBookmarked: isBookmarked,
+                onBackTapped: { dismiss() },
+                onBookmarkTapped: { isBookmarked.toggle() },
+                onShareTapped: { showShareSheet = true }
+            )
+            .opacity(headerOpacity)
+            .allowsHitTesting(headerOpacity > 0.5)
 
             // Bottom Ask AI bar
             VStack {
                 Spacer()
 
                 // Global Mini Player (for fullScreenCover presentation)
-                if audioManager.hasActiveEpisode {
+                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -112,7 +115,16 @@ struct BookDetailView: View {
                 CaydexAIChatBar(inputText: $aiInputText)
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
+
+            // Full Screen Player (modal overlay) — presented here because this screen is shown as a
+            // fullScreenCover above RootContainerView, whose own full-screen player would be hidden.
+            if audioManager.showFullScreenPlayer {
+                FullScreenAudioPlayer()
+                    .transition(.move(edge: .bottom))
+                    .zIndex(100)
+            }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .navigationBarHidden(true)
         .sheet(isPresented: $showShareSheet) {
             if let url = URL(string: "https://app.example.com/book/\(book.id)") {
@@ -122,6 +134,21 @@ struct BookDetailView: View {
         .onDisappear {
             // Reset scroll hiding when leaving to ensure main screen player shows
             audioManager.resetScrollHiding()
+        }
+        .onChange(of: audioManager.currentTime) { oldTime, newTime in
+            // Auto-complete cores (the numbered badges) as the narration plays through them, so the
+            // learner doesn't have to tap "Complete & Continue" while listening.
+            guard audioManager.currentEpisode?.id == book.audioEpisode.id,
+                  let info = book.bookAudioInfo else { return }
+            var newly: [Int] = []
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                newly = progress.markListenedThrough(
+                    order: book.curriculumOrder, from: oldTime, to: newTime,
+                    coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
+            }
+            if !newly.isEmpty {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
         }
     }
 }

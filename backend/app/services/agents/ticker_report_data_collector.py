@@ -40,7 +40,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -379,8 +379,33 @@ class TickerReportDataCollector:
     async def collect(
         self, ticker: str, persona_key: str
     ) -> CollectedTickerData:
+        """Persona-neutral collection, cached by ticker (24h).
+
+        The expensive FMP fan-out + deterministic assembly run ONCE per ticker;
+        every persona reuses that base, and only the per-persona layer (score +
+        Stage B narratives) differs downstream. persona_key affects ONLY
+        out.persona_key and out.meta["agent"] during collection, so we apply the
+        requesting persona to the (possibly cached) neutral base here.
+        """
         ticker = ticker.upper().strip()
-        out = CollectedTickerData(ticker=ticker, persona_key=persona_key)
+        # Lazy import breaks the import cycle (the cache module needs the
+        # CollectedTickerData type from this module).
+        from app.services.ticker_data_cache import get_or_collect
+
+        base = await get_or_collect(ticker, lambda: self._collect_fresh(ticker))
+        # Apply the requesting persona to the neutral base. New instance + a new
+        # meta dict so the shared/cached base object is never mutated.
+        return replace(
+            base,
+            persona_key=persona_key,
+            meta={**(base.meta or {}), "agent": _AGENT_MAP.get(persona_key, "buffett")},
+        )
+
+    async def _collect_fresh(self, ticker: str) -> CollectedTickerData:
+        """The actual persona-NEUTRAL collection — FMP fan-out + deterministic
+        assembly. Built under a canonical default persona; collect() applies the
+        real requesting persona afterward. This is what get_or_collect caches."""
+        out = CollectedTickerData(ticker=ticker, persona_key="warren_buffett")
 
         await self._fetch_all(out)
         if not out.profile:

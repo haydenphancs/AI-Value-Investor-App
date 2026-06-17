@@ -19,11 +19,39 @@ struct SmartMoneyFlowChart: View {
     /// top) — for a caller that already shows the price right alongside.
     /// Defaults true; the Holders tab and the Ticker Report's insider chart
     /// both overlay the price line on the bars.
-    var showPriceChart: Bool = true
+    let showPriceChart: Bool
     /// When false, the volume bars hide their trailing magnitude y-axis (the
     /// net-flow badge conveys the totals instead). Lets the report align the
     /// bars under the analyst price line. Defaults true for the Holders tab.
-    var showVolumeYAxis: Bool = true
+    let showVolumeYAxis: Bool
+    /// Per-month informative buy/sell transaction COUNTS, keyed by the SAME
+    /// "MM/YYYY" month string as `flowData`. When provided, tapping a month
+    /// column shows a value popup (month + buy/sell counts + shares). nil → no
+    /// popup, no tap overlay (the Holders tab passes nothing, so its behavior
+    /// is unchanged).
+    let monthlyCounts: [String: (buy: Int, sell: Int)]?
+    /// Tapped month → drives the popup. nil = hidden. Bound by the parent so a
+    /// tap elsewhere in the section dismisses it (mirrors the Capital
+    /// Allocation chart). Defaults to a constant when no popup is wanted.
+    @Binding var selectedMonth: String?
+
+    init(
+        priceData: [StockPriceDataPoint],
+        dailyPrices: [DailyPricePoint],
+        flowData: [SmartMoneyFlowDataPoint],
+        showPriceChart: Bool = true,
+        showVolumeYAxis: Bool = true,
+        monthlyCounts: [String: (buy: Int, sell: Int)]? = nil,
+        selectedMonth: Binding<String?> = .constant(nil)
+    ) {
+        self.priceData = priceData
+        self.dailyPrices = dailyPrices
+        self.flowData = flowData
+        self.showPriceChart = showPriceChart
+        self.showVolumeYAxis = showVolumeYAxis
+        self.monthlyCounts = monthlyCounts
+        self._selectedMonth = selectedMonth
+    }
 
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
@@ -261,6 +289,22 @@ struct SmartMoneyFlowChart: View {
                 .foregroundStyle(AppColors.textMuted.opacity(0.55))
                 .cornerRadius(1)
             }
+
+            // Selected-month indicator + value popup (insider report chart
+            // only; gated on monthlyCounts so the Holders tab is unaffected).
+            if monthlyCounts != nil, let sel = selectedMonth,
+               flowData.contains(where: { $0.month == sel }) {
+                RuleMark(x: .value("Month", sel))
+                    .foregroundStyle(AppColors.textMuted.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+                    .annotation(
+                        position: .top,
+                        spacing: 2,
+                        overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
+                    ) {
+                        insiderPopup(month: sel)
+                    }
+            }
         }
         .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
         .chartXAxis {
@@ -295,7 +339,70 @@ struct SmartMoneyFlowChart: View {
         .chartPlotStyle { plotArea in
             plotArea.background(Color.clear)
         }
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                if monthlyCounts != nil {
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            // Discrete tap (not a drag) so it coexists with the
+                            // report ScrollView. Tap a month to show the popup;
+                            // tap it again (or elsewhere in the section) to hide.
+                            SpatialTapGesture().onEnded { tap in
+                                guard let plot = proxy.plotFrame else { return }
+                                let x = tap.location.x - geo[plot].origin.x
+                                let hit = proxy.value(atX: x, as: String.self)
+                                selectedMonth = (hit == selectedMonth) ? nil : hit
+                            }
+                        )
+                }
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: selectedMonth)
         .frame(height: volumeChartHeight)
+    }
+
+    // MARK: - Insider value popup (tap a month)
+
+    private func insiderPopup(month: String) -> some View {
+        let counts = monthlyCounts?[month]
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(formatPopupMonth(month))
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            insiderPopupRow(color: HoldersColors.buyVolume, label: "Bought", count: counts?.buy ?? 0)
+            insiderPopupRow(color: HoldersColors.sellVolume, label: "Sold", count: counts?.sell ?? 0)
+        }
+        .padding(.horizontal, AppSpacing.sm)
+        .padding(.vertical, AppSpacing.xs)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .fill(AppColors.cardBackground)
+                .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: 3)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .strokeBorder(AppColors.cardBackgroundLight, lineWidth: 1)
+        )
+        .fixedSize()
+    }
+
+    /// One popup row: "{count} Bought" / "{count} Sold", color-coded by direction
+    /// to match the bars (green = bought, red = sold).
+    private func insiderPopupRow(color: Color, label: String, count: Int) -> some View {
+        Text("\(count) \(label)")
+            .font(AppTypography.captionEmphasis)
+            .foregroundColor(color)
+    }
+
+    /// "MM/YYYY" → "MMM yyyy" (e.g. "06/2025" → "Jun 2025") for the popup header.
+    private func formatPopupMonth(_ month: String) -> String {
+        let parts = month.split(separator: "/")
+        guard parts.count == 2, let m = Int(parts[0]), (1...12).contains(m) else { return month }
+        let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return "\(names[m - 1]) \(parts[1])"
     }
 
     // MARK: - Computed Properties

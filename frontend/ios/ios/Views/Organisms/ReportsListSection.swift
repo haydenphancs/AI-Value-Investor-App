@@ -124,8 +124,10 @@ struct ReportsListSection: View {
     }
 
     // Custom sort dropdown (no popover beak), anchored under the Sort button.
-    // Backdrop catches outside taps to dismiss; rows show a right-aligned
-    // checkmark on the active option, with more left inset than right.
+    // iOS-style: a "Sort By" section header on top, then the options with a
+    // right-aligned checkmark on the active one (kept right, not the system
+    // menu's left). Backdrop catches outside taps to dismiss. Width is fixed;
+    // height grows by the header row.
     private var sortDropdown: some View {
         ZStack(alignment: .topLeading) {
             Color.clear
@@ -133,7 +135,16 @@ struct ReportsListSection: View {
                 .contentShape(Rectangle())
                 .onTapGesture { showSortMenu = false }
 
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Section header — mirrors the iOS "Sort By" menu caption.
+                Text("Sort By")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .padding(.leading, AppSpacing.lg)
+                    .padding(.trailing, AppSpacing.md)
+                    .padding(.top, AppSpacing.sm + 2)
+                    .padding(.bottom, AppSpacing.xs)
+
                 ForEach(ReportSortOption.allCases, id: \.rawValue) { option in
                     Button {
                         sortOption = option

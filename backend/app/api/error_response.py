@@ -57,6 +57,7 @@ class ErrorCode(str, Enum):
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
     REPORT_NOT_READY = "REPORT_NOT_READY"
     INSUFFICIENT_CREDITS = "INSUFFICIENT_CREDITS"
+    TOO_MANY_CONCURRENT_REPORTS = "TOO_MANY_CONCURRENT_REPORTS"
 
 
 # Default user-facing copy per code. Endpoints can override per-call.
@@ -97,6 +98,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: (
         "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
     ),
+    # Number-free default so the cap value never drifts here; the endpoint
+    # overrides user_message with the live cap (e.g. "up to 4 at once").
+    ErrorCode.TOO_MANY_CONCURRENT_REPORTS: (
+        "You're already running the maximum number of analyses at once. "
+        "Wait for one to finish, then try again."
+    ),
 }
 
 
@@ -109,6 +116,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.GEMINI_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
+    ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
 }
 
 
@@ -126,6 +134,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.REPORT_NOT_FOUND: 404,
     ErrorCode.REPORT_NOT_READY: 409,
     ErrorCode.INSUFFICIENT_CREDITS: 403,
+    # 409 (NOT 429): iOS APIClient intercepts 429 before decoding the body and
+    # shows a generic "wait 60s", discarding our user_message. 409 falls
+    # through to the structured-body decode so the cap copy is surfaced.
+    ErrorCode.TOO_MANY_CONCURRENT_REPORTS: 409,
 }
 
 

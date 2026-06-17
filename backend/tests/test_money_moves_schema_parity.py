@@ -73,6 +73,19 @@ def _worst_case_article() -> dict:
     }
 
 
+def _assert_spans(spans, where: str) -> None:
+    """A read-along span list must be [{text, start, end}] with start <= end, monotonic-ish."""
+    assert isinstance(spans, list), f"{where}: readAlong not a list"
+    last = -1.0
+    for sp in spans:
+        assert {"text", "start", "end"} <= sp.keys(), f"{where}: span missing text/start/end ({sp})"
+        s, e = sp["start"], sp["end"]
+        assert isinstance(s, (int, float)) and isinstance(e, (int, float)), f"{where}: non-numeric span"
+        assert s <= e + 1e-6, f"{where}: span start>{s} end {e}"
+        assert s >= last - 1e-6, f"{where}: spans not monotonic ({s} < {last})"
+        last = s
+
+
 def _assert_article_shape(article: dict) -> None:
     missing = _REQUIRED_ARTICLE_KEYS - article.keys()
     assert not missing, f"article missing iOS-required keys: {missing}"
@@ -95,14 +108,42 @@ def _assert_article_shape(article: dict) -> None:
             assert t in _SUPPORTED_CONTENT_TYPES, f"unsupported content type: {t!r}"
             if t in ("paragraph", "subheading", "quote", "callout"):
                 assert block.get("text") is not None, f"{t} block missing text"
+                # read-along is optional (additive); validate shape when present.
+                if block.get("readAlong") is not None:
+                    _assert_spans(block["readAlong"], f"{t}.readAlong")
             if t == "bulletList":
                 assert isinstance(block.get("items"), list), "bulletList missing items"
+                if block.get("itemsReadAlong") is not None:
+                    items_ra = block["itemsReadAlong"]
+                    assert isinstance(items_ra, list), "itemsReadAlong not a list"
+                    assert len(items_ra) == len(block["items"]), "itemsReadAlong/items length mismatch"
+                    for spans in items_ra:
+                        _assert_spans(spans, "bulletList.itemsReadAlong[]")
 
 
 def test_worst_case_article_validates_and_has_ios_keys():
     article = _worst_case_article()
     resp = MoneyMovesResponse(articles=[article])
     assert len(resp.articles) == 1
+    _assert_article_shape(resp.articles[0])
+
+
+def test_readalong_present_validates_and_is_optional():
+    """A block carrying read-along timings validates; the worst case (none) also validates."""
+    article = _worst_case_article()
+    article["sections"][0]["content"] = [
+        {"type": "paragraph", "text": "First sentence. Second sentence.",
+         "readAlong": [
+             {"text": "First sentence.", "start": 0.0, "end": 1.5},
+             {"text": "Second sentence.", "start": 1.5, "end": 3.0},
+         ]},
+        {"type": "bulletList", "items": ["Alpha point.", "Beta point."],
+         "itemsReadAlong": [
+             [{"text": "Alpha point.", "start": 3.0, "end": 4.0}],
+             [{"text": "Beta point.", "start": 4.0, "end": 5.0}],
+         ]},
+    ]
+    resp = MoneyMovesResponse(articles=[article])
     _assert_article_shape(resp.articles[0])
 
 

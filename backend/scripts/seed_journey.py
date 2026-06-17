@@ -92,6 +92,8 @@ def build_story_content(sb, lesson: dict) -> dict:
             "imageUrl": None,                  # filled in later when artwork exists
             "videoUrl": None,
             "cta": card.get("cta"),
+            # Per-word read-along timings (from align_journey_audio.py); null until aligned.
+            "readAlongWords": card.get("readAlongWords"),
         })
     return {
         "lessonLabel": f"LESSON {sort_order}: {title.upper()}",

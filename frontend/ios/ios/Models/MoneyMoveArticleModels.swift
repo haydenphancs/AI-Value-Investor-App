@@ -81,18 +81,31 @@ struct ArticleHighlight: Identifiable {
 }
 
 // MARK: - Article Section
+
+/// Per-block read-along timings, parallel to `ArticleSection.content`. Kept alongside the content
+/// (rather than inside the `ArticleSectionContent` enum) so the enum's many sample call sites stay
+/// unchanged. A `nil` entry means "no timings for that block" (renders as plain text).
+enum ReadAlongGroup {
+    case sentences([ReadAlongSentence])      // paragraph / subheading / quote / callout
+    case items([[ReadAlongSentence]])        // bulletList: one sentence list per item
+}
+
 struct ArticleSection: Identifiable {
     let id = UUID()
     let title: String
     let icon: String?
     let content: [ArticleSectionContent]
     let hasGlowEffect: Bool
+    /// Read-along timings aligned 1:1 with `content` (empty => none). Built from the backend DTO.
+    let readAlong: [ReadAlongGroup?]
 
-    init(title: String, icon: String? = nil, content: [ArticleSectionContent], hasGlowEffect: Bool = false) {
+    init(title: String, icon: String? = nil, content: [ArticleSectionContent],
+         hasGlowEffect: Bool = false, readAlong: [ReadAlongGroup?] = []) {
         self.title = title
         self.icon = icon
         self.content = content
         self.hasGlowEffect = hasGlowEffect
+        self.readAlong = readAlong
     }
 }
 

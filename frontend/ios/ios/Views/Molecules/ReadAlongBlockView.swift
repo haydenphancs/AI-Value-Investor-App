@@ -16,40 +16,17 @@ struct ReadAlongBlockView: View {
     let block: ReadAlongBlock
     let activeTime: Double?
 
-    /// Index of the sentence currently being read, if the playhead is inside this block.
-    private var activeIndex: Int? {
-        guard let t = activeTime else { return nil }
-        return block.sentences.firstIndex { t >= $0.start && t < $0.end }
-    }
-
     var body: some View {
         if block.isHeading {
-            Text(attributed(base: AppColors.textPrimary))
+            Text(ReadAlongText.attributed(spans: block.sentences, activeTime: activeTime, base: AppColors.textPrimary))
                 .font(AppTypography.titleCompact)
                 .padding(.top, AppSpacing.md)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Text(attributed(base: AppColors.textSecondary))
+            Text(ReadAlongText.attributed(spans: block.sentences, activeTime: activeTime, base: AppColors.textSecondary))
                 .font(AppTypography.body)
                 .lineSpacing(6)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    /// Build the block's text, lighting up the active sentence with a brighter color + highlight.
-    private func attributed(base: Color) -> AttributedString {
-        let active = activeIndex
-        var result = AttributedString()
-        for (i, sentence) in block.sentences.enumerated() {
-            var piece = AttributedString(i == 0 ? sentence.text : " " + sentence.text)
-            if i == active {
-                piece.foregroundColor = AppColors.textPrimary
-                piece.backgroundColor = AppColors.primaryBlue.opacity(0.28)
-            } else {
-                piece.foregroundColor = base
-            }
-            result.append(piece)
-        }
-        return result
     }
 }

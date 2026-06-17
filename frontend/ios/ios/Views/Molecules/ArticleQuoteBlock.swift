@@ -10,6 +10,9 @@ import SwiftUI
 struct ArticleQuoteBlock: View {
     let text: String
     let attribution: String?
+    /// Per-sentence timings + narration playhead for read-along highlighting (nil => plain text).
+    var readAlong: [ReadAlongSentence]? = nil
+    var activeTime: Double? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -34,13 +37,21 @@ struct ArticleQuoteBlock: View {
                     .font(AppTypography.iconLarge).fontWeight(.bold)
                     .foregroundColor(AppColors.primaryBlue.opacity(0.5))
 
-                // Quote text
-                Text(text)
-                    .font(AppTypography.body)
-                    .foregroundColor(AppColors.textPrimary)
-                    .italic()
-                    .lineSpacing(6)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Quote text (read-along highlight when timings are present)
+                Group {
+                    if let readAlong {
+                        Text(ReadAlongText.attributed(spans: readAlong, activeTime: activeTime, base: AppColors.textPrimary))
+                            .lineSpacing(6)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(text)
+                            .lineSpacing(6)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textPrimary)
+                .italic()
 
                 // Attribution
                 if let attribution = attribution {

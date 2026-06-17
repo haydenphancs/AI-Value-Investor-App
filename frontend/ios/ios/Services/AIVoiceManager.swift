@@ -28,6 +28,9 @@ class AIVoiceManager: NSObject, ObservableObject {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var clipDuration: Double = 0
+    // Forced-aligned per-word timings for the current clip. When present (and index-aligned with
+    // `wordRanges`), the active word is chosen by playhead time instead of a character estimate.
+    private var readAlongWords: [ReadAlongWord]?
 
     // MARK: - Singleton
     static let shared = AIVoiceManager()
@@ -84,7 +87,7 @@ class AIVoiceManager: NSObject, ObservableObject {
     /// Play a pre-recorded narration clip bundled with the app (e.g. an Achird voice .m4a),
     /// driving the same word-highlight + progress as the synthesizer path via estimated timing.
     /// Falls back to on-device speech if the clip is missing.
-    func playClip(named name: String, text: String, onComplete: (() -> Void)? = nil) {
+    func playClip(named name: String, text: String, readAlong: [ReadAlongWord]? = nil, onComplete: (() -> Void)? = nil) {
         // Stop anything currently playing
         synthesizer?.stopSpeaking(at: .immediate)
         teardownPlayer()
@@ -105,6 +108,9 @@ class AIVoiceManager: NSObject, ObservableObject {
         currentText = text
         self.onComplete = onComplete
         wordRanges = calculateWordRanges(for: text)
+        // Use the aligned timings only if they line up 1:1 with the tokenized words (they're built
+        // from strip_markup(text).split(), the same tokenization as wordRanges); otherwise ignore.
+        readAlongWords = (readAlong?.count == wordRanges.count) ? readAlong : nil
         currentWordIndex = 0
         currentWordRange = NSRange(location: 0, length: 0)
         progress = 0.0
@@ -158,6 +164,7 @@ class AIVoiceManager: NSObject, ObservableObject {
         currentWordIndex = 0
         currentWordRange = NSRange(location: 0, length: 0)
         progress = 0.0
+        readAlongWords = nil
     }
 
     /// Toggle between play and pause
@@ -187,21 +194,31 @@ class AIVoiceManager: NSObject, ObservableObject {
         clipDuration = 0
     }
 
-    /// Periodic tick: map elapsed time to a word index (estimated by character position).
+    /// Periodic tick: map the playhead to the active word. Prefers forced-aligned per-word timings
+    /// (accurate); falls back to a character-position estimate when timings aren't available.
     private func tickClip() {
         guard let player = player, let item = player.currentItem else { return }
         if item.duration.isNumeric {
             let seconds = CMTimeGetSeconds(item.duration)
             if seconds.isFinite && seconds > 0 { clipDuration = seconds }
         }
+        let elapsed = CMTimeGetSeconds(player.currentTime())
+        if clipDuration > 0 { progress = min(1.0, max(0.0, elapsed / clipDuration)) }
+
+        // Accurate path: the word whose [start, end) contains the playhead.
+        if let words = readAlongWords {
+            if let index = words.firstIndex(where: { elapsed >= $0.start && elapsed < $0.end }),
+               index < wordRanges.count {
+                currentWordIndex = index
+                currentWordRange = wordRanges[index]
+            }
+            return
+        }
+
+        // Fallback: estimate the word index from the elapsed fraction of the clip.
         let totalChars = Double(currentText.count)
         guard clipDuration > 0, totalChars > 0 else { return }
-
-        let elapsed = CMTimeGetSeconds(player.currentTime())
-        let fraction = min(1.0, max(0.0, elapsed / clipDuration))
-        progress = fraction
-
-        let targetChar = Int(fraction * totalChars)
+        let targetChar = Int(min(1.0, max(0.0, elapsed / clipDuration)) * totalChars)
         var index = 0
         for (i, range) in wordRanges.enumerated() {
             if range.location <= targetChar { index = i } else { break }

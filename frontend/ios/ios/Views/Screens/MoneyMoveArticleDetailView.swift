@@ -39,6 +39,13 @@ struct MoneyMoveArticleDetailView: View {
         )
     }
 
+    /// The narration playhead (seconds) when THIS article's audio is the active episode, else nil
+    /// — drives per-sentence read-along highlighting. Mirrors BookCoreDetailView.readAlongActiveTime.
+    private var readAlongActiveTime: Double? {
+        guard audioManager.currentEpisode?.id == audioEpisode.id else { return nil }
+        return audioManager.currentTime
+    }
+
     // Computed property for header opacity based on scroll
     private var headerOpacity: Double {
         let fadeStart: CGFloat = 200
@@ -71,7 +78,7 @@ struct MoneyMoveArticleDetailView: View {
                         )
 
                         // Content
-                        MoneyMoveArticleContent(article: article)
+                        MoneyMoveArticleContent(article: article, activeTime: readAlongActiveTime)
                         .padding(.top, AppSpacing.lg)
 
                         // Bottom padding (extra space for mini player). Doubles as a

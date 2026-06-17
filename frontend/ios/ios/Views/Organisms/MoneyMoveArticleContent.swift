@@ -9,6 +9,8 @@ import SwiftUI
 
 struct MoneyMoveArticleContent: View {
     let article: MoneyMoveArticle
+    /// Narration playhead (seconds) when this article's audio is active, else nil (no highlight).
+    var activeTime: Double? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
@@ -21,7 +23,7 @@ struct MoneyMoveArticleContent: View {
             // Article sections
             VStack(spacing: AppSpacing.lg) {
                 ForEach(article.sections) { section in
-                    MoneyMoveArticleSectionContent(section: section)
+                    MoneyMoveArticleSectionContent(section: section, activeTime: activeTime)
                 }
             }
 

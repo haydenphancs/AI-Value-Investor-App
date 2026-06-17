@@ -50,12 +50,16 @@ _EXISTING_AUDIO: set[str] = set()   # objects already in money-moves-media/audio
 
 
 def upload_audio(sb, slug: str) -> str | None:
-    """Upload <slug>.m4a to money-moves-media/audio/ (skip if already there); return public URL."""
+    """Public URL for <slug>.m4a. Reuses the bucket object when it already exists — even if the
+    local clip is absent — so a re-seed from an env without backend/data/money_moves_audio/ never
+    wipes a previously-published audio_url. Uploads from the local clip otherwise."""
+    path = f"audio/{slug}.m4a"
     local = AUDIO_DIR / f"{slug}.m4a"
+    if f"{slug}.m4a" in _EXISTING_AUDIO:
+        return sb.storage.from_(BUCKET).get_public_url(path)
     if not local.exists():
         return None
-    path = f"audio/{slug}.m4a"
-    if f"{slug}.m4a" not in _EXISTING_AUDIO and not DRY:
+    if not DRY:
         sb.storage.from_(BUCKET).upload(
             path,
             local.read_bytes(),

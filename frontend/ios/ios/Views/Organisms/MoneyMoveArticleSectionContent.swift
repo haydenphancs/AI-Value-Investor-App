@@ -28,7 +28,7 @@ struct MoneyMoveArticleSectionContent: View {
 
             // Content blocks
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                ForEach(Array(section.content.enumerated()), id: \.element.id) { index, content in
+                ForEach(Array(section.content.enumerated()), id: \.offset) { index, content in
                     renderContent(content, readAlong: readAlongGroup(at: index))
                 }
             }

@@ -246,6 +246,10 @@ struct SmartMoneyFlowChart: View {
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.buyVolume)
+                // Dim the non-selected months while a month is tapped (mirrors
+                // the Institutions chart). selectedMonth stays nil on the
+                // Holders tab, so those bars never dim.
+                .opacity(selectedMonth == nil || selectedMonth == point.month ? 1.0 : 0.4)
                 .cornerRadius(2)
                 // Outlier label sits ABOVE a (positive) buy bar — outside the
                 // column, not overlapping it — with the ↑ pointing to the
@@ -263,6 +267,7 @@ struct SmartMoneyFlowChart: View {
                     width: .fixed(barWidth)
                 )
                 .foregroundStyle(HoldersColors.sellVolume)
+                .opacity(selectedMonth == nil || selectedMonth == point.month ? 1.0 : 0.4)
                 .cornerRadius(2)
                 // Outlier label sits BELOW a (negative) sell bar — at the bottom
                 // of the column, above the month axis label, not overlapping the
@@ -288,22 +293,6 @@ struct SmartMoneyFlowChart: View {
                 )
                 .foregroundStyle(AppColors.textMuted.opacity(0.55))
                 .cornerRadius(1)
-            }
-
-            // Selected-month indicator + value popup (insider report chart
-            // only; gated on monthlyCounts so the Holders tab is unaffected).
-            if monthlyCounts != nil, let sel = selectedMonth,
-               flowData.contains(where: { $0.month == sel }) {
-                RuleMark(x: .value("Month", sel))
-                    .foregroundStyle(AppColors.textMuted.opacity(0.35))
-                    .lineStyle(StrokeStyle(lineWidth: 1))
-                    .annotation(
-                        position: .top,
-                        spacing: 2,
-                        overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
-                    ) {
-                        insiderPopup(month: sel)
-                    }
             }
         }
         .chartXScale(domain: allMonths, range: .plotDimension(padding: barWidth / 2))
@@ -359,8 +348,20 @@ struct SmartMoneyFlowChart: View {
                 }
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: selectedMonth)
         .frame(height: volumeChartHeight)
+        // Value popup FLOATED over the chart's top-left (like the Institutions
+        // chart) — an overlay, NOT a chart annotation, so it never reserves
+        // space above the bars / shifts the layout. Card content unchanged.
+        .overlay(alignment: .topLeading) {
+            if monthlyCounts != nil, let sel = selectedMonth,
+               flowData.contains(where: { $0.month == sel }) {
+                insiderPopup(month: sel)
+                    .padding(.top, 4)
+                    .padding(.leading, 8)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: selectedMonth)
     }
 
     // MARK: - Insider value popup (tap a month)

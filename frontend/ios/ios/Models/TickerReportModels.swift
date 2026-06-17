@@ -175,7 +175,8 @@ struct DeepDiveMetricCard: Identifiable {
     /// average (and therefore renders with a trailing " *"). Drives the
     /// asterisk footnote below the 2x2 grid.
     var hasSectorComparison: Bool {
-        metrics.contains { $0.displayLabel.hasSuffix(" *") }
+        // Matches the non-breaking-space suffix `displayLabel` appends (U+00A0).
+        metrics.contains { $0.displayLabel.hasSuffix("\u{00A0}*") }
     }
 }
 
@@ -223,7 +224,10 @@ struct DeepDiveMetric: Identifiable {
         }
 
         result = result.trimmingCharacters(in: .whitespaces)
-        return hadSectorSuffix ? "\(result) *" : result
+        // Non-breaking space (U+00A0) before the "*" so the asterisk never word-
+        // wraps onto its own line in the narrow 2-col card (e.g. "Interest
+        // Coverage *"). It always travels with the last word of the label.
+        return hadSectorSuffix ? "\(result)\u{00A0}*" : result
     }
 
     enum MetricTrend {

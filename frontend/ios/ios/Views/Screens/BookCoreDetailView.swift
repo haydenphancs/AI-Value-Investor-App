@@ -25,6 +25,10 @@ struct BookCoreDetailView: View {
     // Track if user initiated playback from this view or if it was already playing
     @State private var shouldShowPlayer: Bool = false
 
+    // True while we're programmatically scrolling to follow the narration, so the scroll-driven
+    // player hide/show logic ignores it (read-along auto-scroll shouldn't hide the mini player).
+    @State private var isAutoScrolling: Bool = false
+
     let book: LibraryBook
     let allCores: [BookCoreChapter]
     
@@ -48,6 +52,29 @@ struct BookCoreDetailView: View {
 
     private var content: CoreChapterContent {
         currentContent
+    }
+
+    // MARK: - Read-along (sentence highlighting synced to the narration)
+
+    /// Timed narrated blocks (headings + paragraphs, in render order) for the current core. These
+    /// align 1:1 with the LEADING narrated sections; the action plan (last) has no entry.
+    private var readAlongBlocks: [ReadAlongBlock] {
+        ReadAlongBlock.byBook[book.curriculumOrder]?[currentContent.chapterNumber] ?? []
+    }
+
+    /// The narration playhead (seconds) when THIS book's audio is the active episode, else nil
+    /// (no highlight). Passed to each block so only the sentence under the playhead lights up.
+    private var readAlongActiveTime: Double? {
+        guard audioManager.currentEpisode?.id == book.audioEpisode.id else { return nil }
+        return audioManager.currentTime
+    }
+
+    /// Index of the narrated block currently being read (drives auto-scroll), if any.
+    private var activeReadAlongBlock: Int? {
+        guard let t = readAlongActiveTime else { return nil }
+        return readAlongBlocks.firstIndex { blk in
+            blk.sentences.contains { t >= $0.start && t < $0.end }
+        }
     }
 
     private var isCurrentCoreCompleted: Bool {
@@ -81,6 +108,7 @@ struct BookCoreDetailView: View {
                 .ignoresSafeArea()
 
             // Main scrollable content
+            ScrollViewReader { scrollProxy in
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
                     // Header spacer for back button area
@@ -95,10 +123,21 @@ struct BookCoreDetailView: View {
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
-                    // Content sections
+                    // Content sections — the leading narrated blocks render with live sentence
+                    // highlighting (ReadAlongBlockView); the action plan (and anything past the
+                    // narrated prefix) renders normally. readAlongBlocks aligns 1:1 with the
+                    // narrated sections, so index < count == "this section is narrated".
                     LazyVStack(alignment: .leading, spacing: AppSpacing.xxl) {
-                        ForEach(content.sections) { section in
-                            CoreSectionView(section: section)
+                        ForEach(Array(content.sections.enumerated()), id: \.element.id) { index, section in
+                            if index < readAlongBlocks.count {
+                                ReadAlongBlockView(
+                                    block: readAlongBlocks[index],
+                                    activeTime: readAlongActiveTime
+                                )
+                                .id("readAlongBlock-\(index)")
+                            } else {
+                                CoreSectionView(section: section)
+                            }
                         }
                     }
                     .padding(.horizontal, AppSpacing.lg)
@@ -129,6 +168,17 @@ struct BookCoreDetailView: View {
             .coordinateSpace(name: "coreDetailScroll")
             .onPreferenceChange(CoreDetailScrollOffsetKey.self) { value in
                 handleScrollChange(newOffset: value)
+            }
+            .onChange(of: activeReadAlongBlock) { _, newValue in
+                // Follow the narration: gently center the block being read, without tripping the
+                // scroll-driven player hide. Only while actually playing.
+                guard audioManager.isPlaying, let idx = newValue else { return }
+                isAutoScrolling = true
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    scrollProxy.scrollTo("readAlongBlock-\(idx)", anchor: .center)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { isAutoScrolling = false }
+            }
             }
 
             // Sticky mini header (appears on scroll)
@@ -209,6 +259,12 @@ struct BookCoreDetailView: View {
 
     // MARK: - Scroll Handling
     private func handleScrollChange(newOffset: CGFloat) {
+        // Ignore programmatic read-along scrolling so it doesn't hide the mini player.
+        if isAutoScrolling {
+            previousScrollOffset = newOffset
+            scrollOffset = newOffset
+            return
+        }
         let scrollDelta = newOffset - previousScrollOffset
 
         // Update global audio player visibility based on scroll direction

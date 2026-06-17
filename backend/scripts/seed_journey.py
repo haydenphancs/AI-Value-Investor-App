@@ -59,12 +59,13 @@ def upload_audio(sb, clip: str) -> str | None:
     """Upload <clip>.m4a to journey-media/audio/ (skipping if already there) and return its public URL."""
     path = f"audio/{clip}.m4a"
     local = AUDIO_DIR / f"{clip}.m4a"
+    if f"{clip}.m4a" in _EXISTING_AUDIO:
+        # Already in the bucket from a prior run — reuse its URL even if the local clip is absent,
+        # so a re-seed from an env without backend/data/journey_audio/ never wipes a good audioUrl.
+        return sb.storage.from_(BUCKET).get_public_url(path)
     if not local.exists():
         print(f"    ! missing audio {local.name} — skipping (audioUrl will be null)")
         return None
-    if f"{clip}.m4a" in _EXISTING_AUDIO:
-        # Already uploaded on a prior run — just reuse the URL.
-        return sb.storage.from_(BUCKET).get_public_url(path)
     if not DRY:
         sb.storage.from_(BUCKET).upload(
             path,

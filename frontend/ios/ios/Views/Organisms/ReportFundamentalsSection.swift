@@ -16,8 +16,8 @@ struct ReportFundamentalsSection: View {
             // 2x2 metric grid
             LazyVGrid(
                 columns: [
-                    GridItem(.flexible(), spacing: AppSpacing.md),
-                    GridItem(.flexible(), spacing: AppSpacing.md)
+                    GridItem(.flexible(), spacing: AppSpacing.sm),
+                    GridItem(.flexible(), spacing: AppSpacing.sm)
                 ],
                 spacing: AppSpacing.md
             ) {

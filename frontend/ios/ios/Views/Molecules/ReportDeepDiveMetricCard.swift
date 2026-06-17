@@ -93,7 +93,11 @@ struct ReportDeepDiveMetricCard: View {
                 .minimumScaleFactor(0.9)
                 .italic()
         }
-        .padding(AppSpacing.md)
+        // Tighter horizontal padding gives the label/value rows more room (so
+        // "Interest Coverage *" fits on one line and big values have headroom);
+        // vertical rhythm unchanged.
+        .padding(.horizontal, AppSpacing.sm)
+        .padding(.vertical, AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)

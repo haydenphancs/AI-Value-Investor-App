@@ -64,16 +64,33 @@ assert KEY, "GEMINI_API_KEY not found in env or backend/.env"
 
 MODEL = "gemini-2.5-flash-preview-tts"
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={KEY}"
-VOICE = "Achird"
-TARGET_WPM = 170
+TARGET_WPM = 170                 # default pace; per-book overrides live in BOOK_VOICES
 MAX_CHUNK_CHARS = 1800           # keep each TTS request comfortably under the model's input cap
 BREAK_SECONDS = 2.5              # silence between cores ("a short break for each core")
-STYLE = (
-    "You are a warm, articulate audiobook narrator guiding a curious learner through the key "
-    "ideas of a classic investing book. Speak in a clear, engaging, conversational tone, never "
-    "robotic. Use natural pauses at the periods, and let the transitions between chapters "
-    "breathe. Read the following:\n\n"
-)
+
+# Common narration directive appended after each book's persona style.
+_NARRATOR = ("Use natural pauses at the periods, and let the transitions between chapters breathe. "
+             "Read the following:\n\n")
+
+# Per-book "author voice": Gemini prebuilt voice + persona narration style + pace (WPM) + optional
+# pitch shift (semitones; negative = lower). Keyed by curriculum order; unlisted books fall back to
+# DEFAULT_BOOK. Chosen via the voice auditions in scripts/gen_voice_samples.py.
+DEFAULT_BOOK = {"voice": "Achird", "wpm": TARGET_WPM,
+                "style": "You are a warm, articulate audiobook narrator guiding a curious learner "
+                         "through a classic investing book. Speak in a clear, engaging, "
+                         "conversational tone, never robotic. "}
+BOOK_VOICES: dict[int, dict] = {
+    1:  {**DEFAULT_BOOK},  # Rich Dad Poor Dad — Kiyosaki (already shipped on Achird)
+    2:  {"voice": "Iapetus",       "wpm": 150, "style": "Narrate as Benjamin Graham, an erudite, classically-educated finance professor — precise, measured and dignified, with dry wit and calm authority. "},
+    3:  {"voice": "Puck",          "wpm": 172, "style": "Narrate as Morgan Housel, a calm, thoughtful modern essayist — reflective and intimate, with gentle, understated pacing. "},
+    4:  {"voice": "Enceladus",     "wpm": 170, "style": "Narrate as Peter Lynch, a seasoned, sharp stock-picker — engaging and lively, but in a mature, refined older man's voice; not folksy, not regional. "},
+    5:  {"voice": "Schedar",       "wpm": 160, "style": "Narrate as Philip Fisher, a meticulous, reserved, scholarly analyst — even, careful, methodical and precise, slightly formal. "},
+    6:  {"voice": "Alnilam",       "wpm": 160, "style": "Narrate as John Bogle, a principled elder statesman of investing — steady, firm, full of conviction, plain and direct. "},
+    7:  {"voice": "Orus",          "wpm": 160, "style": "Narrate as Burton Malkiel, a witty professor emeritus and a normal older man — clear and plain-spoken, in a low, measured register, lightly amused. "},
+    8:  {"voice": "Zubenelgenubi", "wpm": 160, "style": "Narrate as Warren Buffett, a warm, wise, plain-spoken older man — patient and unhurried, with gentle good humor, in a neutral American accent, not a strong regional or folksy twang. "},
+    9:  {"voice": "Achird",        "wpm": 160, "pitch": -1, "style": "Narrate as Joel Greenblatt, a friendly, patient teacher explaining a clever idea simply to a curious beginner — warm and a touch playful. "},
+    10: {"voice": "Sadaltager",    "wpm": 160, "style": "Narrate as Howard Marks, a seasoned, contemplative investor weighing each idea — calm gravitas, thoughtful and measured. "},
+}
 
 # Deliberately slow and steady to stay under the free-tier rate limits. Override with TTS_THROTTLE.
 THROTTLE_SECONDS = float(os.environ.get("TTS_THROTTLE", "20"))
@@ -157,6 +174,21 @@ def body_blocks(title: str, sections: list[tuple[str, str]]) -> list[str]:
     return [b for b in blocks if b]
 
 
+def action_recap(action: list[tuple[str, str]]) -> str:
+    """A brief, naturally-phrased spoken close listing the core's action-step TITLES (not their full
+    descriptions) — gives audio listeners the actionable payoff. Spoken at the end of the core but
+    NOT part of the read-along (the action plan renders as on-screen checklist cards). Returns ''
+    when the core has no action plan. align_book_audio feeds this same text to the aligner as
+    discarded context so the body-sentence timings stay accurate."""
+    titles = [strip_markup(t).strip().rstrip(".") for t, _ in action if t and t.strip()]
+    if not titles:
+        return ""
+    if len(titles) == 1:
+        return f"To put this into practice, here's your action step: {titles[0]}."
+    joined = "; ".join(titles[:-1]) + f"; and {titles[-1]}"
+    return f"To put this into practice, here are your action steps: {joined}."
+
+
 def chunk_blocks(blocks: list[str], limit: int = MAX_CHUNK_CHARS) -> list[str]:
     """Group blocks into chunks under `limit` chars, never splitting a single block."""
     chunks, cur, cur_len = [], [], 0
@@ -171,12 +203,12 @@ def chunk_blocks(blocks: list[str], limit: int = MAX_CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def synth_pcm(text: str):
+def synth_pcm(text: str, voice: str, style: str):
     body = {
-        "contents": [{"parts": [{"text": STYLE + text}]}],
+        "contents": [{"parts": [{"text": style + text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}},
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
         },
     }
     for attempt in range(8):
@@ -199,20 +231,20 @@ def synth_pcm(text: str):
     raise RuntimeError("TTS request failed after repeated 429s (likely a daily quota cap)")
 
 
-def synth_segment(blocks: list[str], tmp: Path, name: str) -> tuple[bytes, int]:
-    """Synthesize one core segment (bridge + body) to NORMALIZED (170 WPM) mono 16-bit PCM."""
+def synth_segment(blocks: list[str], tmp: Path, name: str, voice: str, style: str, wpm: int) -> tuple[bytes, int]:
+    """Synthesize one core segment (bridge + body) to NORMALIZED (`wpm`) mono 16-bit PCM."""
     chunks = chunk_blocks(blocks)
     words = sum(len(b.split()) for b in blocks)
     pcm_all, rate = b"", 24000
     for i, chunk in enumerate(chunks):
-        pcm, rate = synth_pcm(chunk)
+        pcm, rate = synth_pcm(chunk, voice, style)
         pcm_all += pcm
         if i < len(chunks) - 1:
             time.sleep(THROTTLE_SECONDS)
 
     native_secs = len(pcm_all) / 2 / rate
-    native_wpm = (words / native_secs * 60) if native_secs else TARGET_WPM
-    atempo = max(0.5, min(2.0, TARGET_WPM / native_wpm))
+    native_wpm = (words / native_secs * 60) if native_secs else wpm
+    atempo = max(0.5, min(2.0, wpm / native_wpm))
 
     raw = tmp / f"{name}.raw.wav"
     norm = tmp / f"{name}.norm.wav"
@@ -234,6 +266,11 @@ def render_book(order: int, force: bool) -> None:
         raise SystemExit(f"No book with curriculum order {order} in gen_books_swift.BOOKS")
     _, dirname, btitle, bauthor = entry
     slug = slugify(btitle)
+    cfg = BOOK_VOICES.get(order, DEFAULT_BOOK)
+    voice = cfg["voice"]
+    wpm = cfg["wpm"]
+    pitch = cfg.get("pitch", 0)
+    style = cfg["style"] + _NARRATOR
     m4a = OUT / f"{order}_{slug}.m4a"
     manifest_path = OUT / f"{order}_{slug}.manifest.json"
     if m4a.exists() and not force:
@@ -249,18 +286,22 @@ def render_book(order: int, force: bool) -> None:
     if len(bridges) != len(parsed):
         raise SystemExit(f"bridge count {len(bridges)} != core count {len(parsed)} for order {order}")
 
-    print(f"\n[{btitle}] {len(parsed)} cores -> {m4a.name}")
+    print(f"\n[{btitle}] {len(parsed)} cores · voice={voice} @ {wpm} WPM"
+          f"{f' · pitch {pitch}st' if pitch else ''} -> {m4a.name}")
     tmp = OUT / f".tmp_{order}"
     tmp.mkdir(exist_ok=True)
 
     final_pcm, rate = b"", 24000
     silence = b""
     cores_manifest = []
-    for idx, (num, title, sections, *_rest) in enumerate(parsed):
+    for idx, (num, title, sections, action, *_rest) in enumerate(parsed):
         blocks = [bridges[idx]] + body_blocks(title, sections)
+        recap = action_recap(action)            # brief spoken action-plan close (not highlighted)
+        if recap:
+            blocks.append(recap)
         words = sum(len(b.split()) for b in blocks)
-        print(f"  core {num} '{title}' (~{words} words incl. bridge)")
-        seg_pcm, rate = synth_segment(blocks, tmp, f"core{num}")
+        print(f"  core {num} '{title}' (~{words} words incl. bridge + action recap)")
+        seg_pcm, rate = synth_segment(blocks, tmp, f"core{num}", voice, style, wpm)
         if not silence:
             silence = b"\x00\x00" * int(rate * BREAK_SECONDS)
 
@@ -281,7 +322,12 @@ def render_book(order: int, force: bool) -> None:
     with wave.open(str(final_wav), "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
         w.writeframes(final_pcm)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(final_wav), str(m4a)], check=True)
+    enc = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(final_wav)]
+    if pitch:                                   # shift the whole book's pitch (semitones), keep duration
+        f = 2 ** (pitch / 12)
+        enc += ["-af", f"asetrate={rate}*{f:.6f},aresample={rate},atempo={1 / f:.6f}"]
+    enc += [str(m4a)]
+    subprocess.run(enc, check=True)
     final_wav.unlink(missing_ok=True)
     with contextlib.suppress(OSError):
         tmp.rmdir()
@@ -292,8 +338,9 @@ def render_book(order: int, force: bool) -> None:
         "author": bauthor,
         "slug": slug,
         "audio_file": m4a.name,
-        "voice": VOICE,
-        "target_wpm": TARGET_WPM,
+        "voice": voice,
+        "target_wpm": wpm,
+        "pitch_semitones": pitch,
         "break_seconds": BREAK_SECONDS,
         "total_seconds": round(total_seconds, 2),
         "total_label": fmt_ts(total_seconds),

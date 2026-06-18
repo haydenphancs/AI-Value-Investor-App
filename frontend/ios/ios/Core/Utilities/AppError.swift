@@ -192,6 +192,14 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code.starts(with: "BIZ_2001") || code.starts(with: "BIZ_2002") {
                 return .insufficientCredits(required: 1, available: 0)
             }
+            // Capacity / back-pressure codes (HTTP 409). SYSTEM_BUSY = the whole
+            // service is at capacity; TOO_MANY_CONCURRENT_REPORTS = this user's
+            // own cap. Both carry a specific backend user_message and want a
+            // retry — surface that message verbatim via .apiError (whose
+            // suggestedAction is .retry) rather than a generic fallback.
+            if code == "SYSTEM_BUSY" || code == "TOO_MANY_CONCURRENT_REPORTS" {
+                return .apiError(code: code, message: message)
+            }
             return .apiError(code: code, message: message)
         case .decodingError:
             return .unknown(message: "Failed to process server response")

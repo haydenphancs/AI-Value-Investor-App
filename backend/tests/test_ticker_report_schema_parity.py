@@ -184,6 +184,7 @@ def test_assemble_report_top_level_keys_match_swift_codable():
 
     expected = {
         "symbol", "company_name", "exchange", "logo_url", "live_date",
+        "price_close_date",
         "agent", "quality_score", "executive_summary_text",
         "executive_summary_bullets", "core_thesis",
         "fundamental_metrics", "overall_assessment", "revenue_forecast",

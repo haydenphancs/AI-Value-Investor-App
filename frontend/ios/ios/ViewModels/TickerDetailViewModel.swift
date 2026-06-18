@@ -173,6 +173,14 @@ class TickerDetailViewModel: ObservableObject {
                 _ = try? await self.stockRepository.getSentimentAnalysis(ticker: ticker)
             }
 
+            // Fire-and-forget: warm the report's persona-neutral collection cache
+            // for this ticker so a later Generate Analysis skips the FMP fan-out.
+            // Best-effort — must never block or affect the detail view.
+            Task { [weak self] in
+                guard let self else { return }
+                try? await self.stockRepository.prewarmReportCollection(ticker: ticker)
+            }
+
             // Phase 1: Get price/chart data — show UI as soon as this arrives
             do {
                 let useExtendedHours = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday

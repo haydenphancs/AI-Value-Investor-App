@@ -69,9 +69,10 @@ def decode_to_wav(m4a: Path) -> Path:
     return wav
 
 
-def spoken_units(bridge: str, blocks):
+def spoken_units(bridge: str, blocks, recap: str = ""):
     """Ordered (normalized_word, tag) for a core segment. tag = (block_idx, sentence_idx) for body
-    words, or None for bridge words. Drops words that normalize to empty (rare: pure numbers)."""
+    words, or None for bridge / action-recap words (spoken but not highlighted). Drops words that
+    normalize to empty (rare: pure numbers)."""
     units = []
     for w in bridge.split():
         n = normalize_word(w)
@@ -84,14 +85,18 @@ def spoken_units(bridge: str, blocks):
                 n = normalize_word(w)
                 if n:
                     units.append((n, (bi, si)))
+    for w in recap.split():                                # spoken action-plan close — context only
+        n = normalize_word(w)
+        if n:
+            units.append((n, None))
     return units
 
 
-def align_core(waveform, sr, core_start, core_end, bridge, blocks):
+def align_core(waveform, sr, core_start, core_end, bridge, blocks, recap=""):
     model, tokenizer, aligner = _load_model()
     s0, s1 = int(round(core_start * sr)), int(round(core_end * sr))
     seg = waveform[:, s0:s1]
-    units = spoken_units(bridge, blocks)
+    units = spoken_units(bridge, blocks, recap)
     words = [n for n, _ in units]
     with torch.inference_mode():
         emission, _ = model(seg)
@@ -121,13 +126,14 @@ def build_book(order: int, dirname: str, manifest: dict, waveform, sr):
     nums = sorted(starts)
 
     out_cores = {}
-    for idx, (num, title, sections, *_rest) in enumerate(parsed):
+    for idx, (num, title, sections, action, *_rest) in enumerate(parsed):
         core_start = starts[num]
         # Slice through to the next core start (or end) so the last word is never truncated; the
         # inter-core break is silence and doesn't disturb word alignment.
         core_end = starts[nums[idx + 1]] if idx + 1 < len(nums) else total
         blocks = gra.narrated_blocks(sections)
-        bounds = align_core(waveform, sr, core_start, core_end, bridges[idx], blocks)
+        recap = gba.action_recap(action)        # spoken at the core's end (context, not highlighted)
+        bounds = align_core(waveform, sr, core_start, core_end, bridges[idx], blocks, recap)
 
         out_blocks = []
         for bi, (is_heading, text) in enumerate(blocks):

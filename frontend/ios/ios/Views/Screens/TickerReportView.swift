@@ -151,16 +151,49 @@ struct TickerReportView: View {
                 canExportPDF: viewModel.canExportPDF
             )
 
-            Text(report.liveDate)
+            Text(closeDateLabel(report))
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, AppSpacing.lg)
-                // Breathing room so the Live Data line isn't kissing the
+                // Breathing room so the close-date line isn't kissing the
                 // separator / next section below.
                 .padding(.bottom, AppSpacing.md)
         }
     }
+
+    /// Header date label, formatted RENDER-TIME from the report's actual
+    /// last-completed-close date (e.g. "Previous Close · Jun 16"). Same calendar
+    /// year → "MMM d"; a past year (a report opened in a later year) →
+    /// "MMM d, yyyy" so the data's age is explicit. Falls back to the baked
+    /// `liveDate` string for legacy reports that predate `priceCloseDate`.
+    private func closeDateLabel(_ report: TickerReportData) -> String {
+        guard let iso = report.priceCloseDate,
+              let date = Self.isoDateParser.date(from: iso) else {
+            return report.liveDate
+        }
+        let cal = Self.utcCalendar
+        let sameYear = cal.component(.year, from: date) == cal.component(.year, from: Date())
+        let formatter = sameYear ? Self.monthDayFormatter : Self.monthDayYearFormatter
+        return "Previous Close · \(formatter.string(from: date))"
+    }
+
+    private static let utcCalendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC") ?? .current
+        return c
+    }()
+
+    private static func utcFormatter(_ fmt: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")  // stable English month abbr.
+        f.dateFormat = fmt
+        return f
+    }
+    private static let isoDateParser = utcFormatter("yyyy-MM-dd")
+    private static let monthDayFormatter = utcFormatter("MMM d")
+    private static let monthDayYearFormatter = utcFormatter("MMM d, yyyy")
 
     // MARK: - Agent + Score Section
 

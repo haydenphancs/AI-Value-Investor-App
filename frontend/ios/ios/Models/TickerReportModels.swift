@@ -1246,6 +1246,11 @@ struct TickerReportData: Identifiable {
     let exchange: String
     let logoName: String?
     let liveDate: String
+    /// ISO "yyyy-MM-dd" of the last completed market close the price reflects.
+    /// The header formats "Previous Close · …" render-time from this; nil →
+    /// falls back to `liveDate`. `var` with a default keeps it overridable in
+    /// the memberwise init, so existing mocks compile unchanged.
+    var priceCloseDate: String? = nil
 
     // Agent & Rating
     let agent: ReportAgentPersona
@@ -1303,6 +1308,7 @@ extension TickerReportData {
         exchange: "Nasdaq",
         logoName: nil,
         liveDate: "Live Data as of Feb 8, 8:04 AM",
+        priceCloseDate: "2026-02-06",
         agent: .buffett,
         qualityRating: ReportQualityRating(
             score: 82

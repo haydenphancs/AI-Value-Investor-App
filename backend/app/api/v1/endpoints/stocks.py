@@ -6,7 +6,8 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
           /stocks/{ticker}/news
 """
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import asyncio
@@ -43,6 +44,9 @@ from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.services.signal_of_confidence_service import get_signal_of_confidence_service
 from app.schemas.holders import HoldersResponse
 from app.services.holders_service import get_holders_service
+from app.config import settings
+from app.dependencies import get_current_user_or_guest, StandardRateLimit
+from app.services.ticker_data_cache import warm_ticker_collection
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,10 @@ router = APIRouter()
 # Ticker validation pattern: 1-10 uppercase letters, digits, dots, or hyphens
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
+# Strong refs to fire-and-forget prewarm tasks so they aren't GC'd mid-flight
+# (un-referenced asyncio tasks can be garbage-collected and cancelled).
+_PREWARM_TASKS: set = set()
+
 
 def _validate_ticker(ticker: str) -> str:
     """Validate and normalise a ticker symbol. Raises 422 on bad input."""
@@ -58,6 +66,45 @@ def _validate_ticker(ticker: str) -> str:
     if not t or not _TICKER_RE.match(t):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
     return t
+
+
+@router.post("/{ticker}/prewarm-report")
+async def prewarm_report_collection(
+    ticker: str,
+    user: dict = Depends(get_current_user_or_guest),
+    _rate_limit=StandardRateLimit,
+):
+    """Best-effort: warm the persona-neutral ticker_data_cache for `ticker` so a
+    later Generate Analysis skips re-collecting it.
+
+    iOS fires this fire-and-forget when a user opens the detail view. Returns
+    202 immediately; the warm runs in the background — freshness-guarded +
+    _INFLIGHT-deduped + _WARM_SEMAPHORE-bounded, and NEVER blocks the caller.
+
+    IMPORTANT: the warm runs the FULL persona-NEUTRAL collection — the ~20-call
+    FMP fan-out PLUS the persona-neutral grounded precompute, which for a COLD
+    ticker makes some Gemini-grounded calls (moat grounding, big-mover price
+    catalyst, a shared market-wide geopolitical scan). It skips only the
+    per-persona Stage-A/Stage-B work. So this SHIFTS report work earlier (a
+    latency win + bounded Gemini spend), it does NOT raise report throughput.
+    Guarded against quota drain by StandardRateLimit + a REPORT_PREWARM_MAX_INFLIGHT
+    cap on concurrent background warms.
+    """
+    t = ticker.strip().upper()
+    if not _TICKER_RE.match(t):
+        # Soft-skip on a best-effort path — never 422 a fire-and-forget warm.
+        return JSONResponse(status_code=202, content={"ticker": t, "status": "skipped"})
+    if not settings.REPORT_PREWARM_ON_VIEW_ENABLED:
+        return JSONResponse(status_code=202, content={"ticker": t, "status": "disabled"})
+    # Shed load past a safe in-flight bound so a distinct-cold-ticker burst
+    # can't pile up background warms (each of which can spend Gemini quota).
+    if len(_PREWARM_TASKS) >= settings.REPORT_PREWARM_MAX_INFLIGHT:
+        return JSONResponse(status_code=202, content={"ticker": t, "status": "busy"})
+
+    task = asyncio.create_task(warm_ticker_collection(t))
+    _PREWARM_TASKS.add(task)
+    task.add_done_callback(_PREWARM_TASKS.discard)
+    return JSONResponse(status_code=202, content={"ticker": t, "status": "warming"})
 
 
 # Major US stock exchanges — used to filter search results.

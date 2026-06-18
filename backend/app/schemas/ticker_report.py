@@ -481,6 +481,11 @@ class TickerReportResponse(BaseModel):
     exchange: str
     logo_url: Optional[str] = None
     live_date: str
+    # ISO "yyyy-MM-dd" of the last COMPLETED market close the report's price
+    # reflects. iOS formats the header label ("Previous Close · …") render-time
+    # from this (so a report opened in a later year shows the year). None on
+    # legacy reports that predate the field → iOS falls back to live_date.
+    price_close_date: Optional[str] = None
 
     # Agent & Rating
     agent: str  # "buffett" | "wood" | "lynch" | "ackman" (legacy reports: "dalio")

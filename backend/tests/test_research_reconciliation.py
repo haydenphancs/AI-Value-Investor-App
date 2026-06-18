@@ -222,10 +222,15 @@ async def test_sweep_refunds_only_old_claimable_unrefunded_rows():
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     old = (now - timedelta(seconds=recon.RECON_STUCK_THRESHOLD_SECONDS + 60)).isoformat()
     recent = (now - timedelta(seconds=60)).isoformat()
+    # STARTED-and-hung: processing_started_at older than the stuck threshold.
+    started_old = old
 
     rows = [
-        _row(id="old_processing", created_at=old),                       # refund
-        _row(id="old_failed", status="failed", created_at=old),          # refund
+        # started running long ago, never finished → refund
+        _row(id="old_processing", created_at=old, processing_started_at=started_old),
+        # worker died between mark-failed and refund (also started) → refund
+        _row(id="old_failed", status="failed", created_at=old,
+             processing_started_at=started_old),
         _row(id="recent_processing", created_at=recent),                 # too new
         _row(id="old_completed", status="completed", created_at=old),    # delivered
         _row(id="old_already_refunded", is_refunded=True, created_at=old),  # done
@@ -244,6 +249,63 @@ async def test_sweep_refunds_only_old_claimable_unrefunded_rows():
     assert by_id["old_failed"]["is_refunded"] is True
     assert by_id["recent_processing"]["is_refunded"] is False
     assert by_id["old_completed"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_refund_legitimately_queued_report():
+    """REGRESSION (money bug): a report that has NOT started (processing_started_at
+    NULL) but whose created_at is past the OLD 900s threshold is still
+    legitimately queued behind the agent semaphore — it must NOT be refunded
+    until the much longer abandon window. (Before processing_started_at, the
+    sweep refunded it, which combined with the completion write to double-resolve.)"""
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    # 20 min old, never started — past the 900s stuck threshold but well within
+    # the 3600s queue-abandon window.
+    queued = (now - timedelta(seconds=1200)).isoformat()
+    rows = [_row(id="queued", created_at=queued, processing_started_at=None)]
+    sb = FakeSupabase(rows)
+
+    result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert result == {"stuck": 0, "refunded": 0}
+    assert rows[0]["is_refunded"] is False          # left alone — still queued
+    assert FakeCreditService.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_refunds_never_started_after_abandon_window():
+    """A never-started row older than the abandon window IS orphaned (its
+    fire-and-forget task died before acquiring a slot, e.g. a redeploy)."""
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    abandoned = (
+        now - timedelta(seconds=recon.RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS + 60)
+    ).isoformat()
+    rows = [_row(id="abandoned", created_at=abandoned, processing_started_at=None)]
+    sb = FakeSupabase(rows)
+
+    result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert result == {"stuck": 1, "refunded": 1}
+    assert rows[0]["is_refunded"] is True
+    assert FakeCreditService.calls == [("u1", 5)]
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_refund_recently_started_report():
+    """A report that STARTED recently (within the stuck threshold) but whose
+    created_at is old (long queue wait then started) is still running — not stuck."""
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    old_created = (now - timedelta(seconds=2000)).isoformat()       # long queue wait
+    just_started = (now - timedelta(seconds=120)).isoformat()       # started 2 min ago
+    rows = [_row(id="running", created_at=old_created,
+                 processing_started_at=just_started)]
+    sb = FakeSupabase(rows)
+
+    result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert result == {"stuck": 0, "refunded": 0}
+    assert rows[0]["is_refunded"] is False
+    assert FakeCreditService.calls == []
 
 
 @pytest.mark.asyncio

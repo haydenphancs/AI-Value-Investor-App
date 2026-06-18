@@ -40,23 +40,47 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.api.error_response import ErrorCode, make_error_body
+from app.config import settings
 from app.database import get_supabase
 from app.services.credit_service import CreditService
 
 logger = logging.getLogger(__name__)
 
 
-# A row is considered orphaned once it has sat in a non-terminal state this
-# long. Deliberately well past the iOS client timeout (300s) and a realistic
-# worst-case generation (~5-8 min) so a slow-but-alive report is NEVER
-# false-refunded. Keep STRICTLY above settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS
-# (600) so the in-process wait_for always fails (and refunds) first with a
-# clean error.
-RECON_STUCK_THRESHOLD_SECONDS = 900  # 15 min
+# A STARTED report (processing_started_at set) that hasn't finished this long
+# after work began is hung/dead. Kept STRICTLY above
+# settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS (600) so the in-process wait_for
+# always fails (and refunds) first with a clean error. Because we now age off
+# processing_started_at (not created_at), queue-wait time no longer counts —
+# a report waiting behind the agent semaphore is NOT prematurely refunded.
+RECON_STUCK_THRESHOLD_SECONDS = 900  # 15 min after work STARTED
+
+# A NEVER-STARTED row (processing_started_at NULL) is either still legitimately
+# queued behind the semaphore OR orphaned (its fire-and-forget task died before
+# acquiring a slot — e.g. a Railway redeploy). We can't tell which from a
+# timestamp, so we only reconcile it after a long abandon window. The window is
+# DERIVED from the actual caps so it always exceeds the worst-case legitimate
+# queue drain — a back-of-queue report waits for ~MAX_GLOBAL_INFLIGHT_REPORTS
+# ahead, draining MAX_CONCURRENT_AGENT_RUNS-wide, each possibly running to the
+# full RESEARCH_PIPELINE_TIMEOUT_SECONDS ceiling — plus a margin. This guarantees
+# a still-queued report is never false-refunded, even at full saturation AND
+# even if the concurrency caps are retuned later (e.g. raised at Gemini Tier 2).
+def _worst_case_queue_drain_seconds() -> int:
+    slots = max(1, settings.MAX_CONCURRENT_AGENT_RUNS)
+    backlog = max(0, settings.MAX_GLOBAL_INFLIGHT_REPORTS - slots)
+    batches = math.ceil(backlog / slots)
+    return batches * settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS
+
+
+# Floor of 1 hr; otherwise the derived worst-case drain + a 10-min margin.
+RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS = max(
+    3600, _worst_case_queue_drain_seconds() + 600
+)
 
 # How often the lifespan sweep runs. Worst-case time-to-refund for a killed
 # worker = RECON_STUCK_THRESHOLD + RECON_SWEEP_INTERVAL (~20 min).
@@ -151,6 +175,36 @@ async def claim_and_mark_failed(
     return True
 
 
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO timestamp from Supabase, or None if absent/malformed."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _is_orphaned(
+    row: Dict[str, Any], started_cutoff: datetime, abandoned_cutoff: datetime
+) -> bool:
+    """Precise per-row staleness rule (the coarse SQL filter only narrows the set).
+
+    - STARTED (processing_started_at set): stuck if it began work before
+      `started_cutoff` (hung past RECON_STUCK_THRESHOLD after work started).
+    - NEVER-STARTED (processing_started_at NULL): stuck ONLY if created before
+      `abandoned_cutoff` — i.e. it's been queued/orphaned far longer than any
+      legitimate semaphore wait, so its worker must be dead.
+    """
+    started = _parse_ts(row.get("processing_started_at"))
+    if started is not None:
+        return started < started_cutoff
+    created = _parse_ts(row.get("created_at"))
+    if created is None:
+        return True  # malformed timestamp on a claimable+old row → reconcile
+    return created < abandoned_cutoff
+
+
 async def sweep_once(
     *,
     now: Optional[datetime] = None,
@@ -159,24 +213,31 @@ async def sweep_once(
     """Reconcile orphaned reports: find rows stuck past the threshold and
     refund them (idempotently, via `claim_and_mark_failed`).
 
-    Covers the killed-worker case the in-process failure path cannot. `now`
-    and `supabase` are injectable for tests. Returns
+    Ages a STARTED report off `processing_started_at` (real work-start) and a
+    NEVER-STARTED row off `created_at` only after the long abandon window — so a
+    report legitimately queued behind the agent semaphore is never false-refunded.
+    Covers the killed-worker case the in-process failure path cannot. `now` and
+    `supabase` are injectable for tests. Returns
     {"stuck": <candidates>, "refunded": <claims won>}.
     """
     sb = supabase or get_supabase()
-    cutoff = (now or datetime.now(timezone.utc)) - timedelta(
-        seconds=RECON_STUCK_THRESHOLD_SECONDS
-    )
-    cutoff_iso = cutoff.isoformat()
+    now = now or datetime.now(timezone.utc)
+    started_cutoff = now - timedelta(seconds=RECON_STUCK_THRESHOLD_SECONDS)
+    abandoned_cutoff = now - timedelta(seconds=RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS)
+    # Coarse SQL pre-filter on created_at using the SMALLER threshold — a
+    # started-but-hung row always has created_at older than its
+    # processing_started_at, so this never misses a candidate; the precise rule
+    # (`_is_orphaned`) is applied per row below.
+    coarse_cutoff_iso = started_cutoff.isoformat()
 
     def _find():
         return (
             sb.table("research_reports")
-            .select("id, status, created_at")
+            .select("id, status, created_at, processing_started_at")
             .in_("status", _CLAIMABLE_STATUSES)
             .eq("is_refunded", False)
             .gt("credits_charged", 0)
-            .lt("created_at", cutoff_iso)
+            .lt("created_at", coarse_cutoff_iso)
             .order("created_at", desc=False)
             .limit(200)
             .execute()
@@ -191,14 +252,23 @@ async def sweep_once(
         )
         return {"stuck": 0, "refunded": 0}
 
-    rows = result.data or []
+    candidates = [
+        row for row in (result.data or [])
+        if _is_orphaned(row, started_cutoff, abandoned_cutoff)
+    ]
     refunded = 0
-    for row in rows:
+    for row in candidates:
+        started = row.get("processing_started_at")
+        reason = (
+            f"started {RECON_STUCK_THRESHOLD_SECONDS}s+ ago, never finished"
+            if started else
+            f"queued {RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS}s+ without starting"
+        )
         blob = make_error_body(
             ErrorCode.REPORT_GENERATION_FAILED,
             message=(
-                f"Report orphaned in {row.get('status')!r} for more than "
-                f"{RECON_STUCK_THRESHOLD_SECONDS}s (worker died or hung)"
+                f"Report orphaned in {row.get('status')!r} ({reason}) — "
+                f"worker died or hung"
             ),
             user_message=(
                 "This analysis didn't finish in time, so your credits were "
@@ -213,9 +283,9 @@ async def sweep_once(
         if await claim_and_mark_failed(row["id"], blob, supabase=sb):
             refunded += 1
 
-    if rows:
+    if candidates:
         logger.info(
             "research reconciliation sweep: %d stuck candidate(s), %d refunded",
-            len(rows), refunded,
+            len(candidates), refunded,
         )
-    return {"stuck": len(rows), "refunded": refunded}
+    return {"stuck": len(candidates), "refunded": refunded}

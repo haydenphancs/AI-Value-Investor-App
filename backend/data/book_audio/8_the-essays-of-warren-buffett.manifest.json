@@ -1,0 +1,52 @@
+{
+  "curriculum_order": 8,
+  "book_title": "The Essays of Warren Buffett",
+  "author": "Warren Buffett",
+  "slug": "the-essays-of-warren-buffett",
+  "audio_file": "8_the-essays-of-warren-buffett.m4a",
+  "voice": "Zubenelgenubi",
+  "target_wpm": 160,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 1215.42,
+  "total_label": "20:15",
+  "cores": [
+    {
+      "number": 1,
+      "title": "The Ticker Tape Illusion",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "Decoding the True Economics",
+      "start_seconds": 351.87,
+      "start_label": "5:52"
+    },
+    {
+      "number": 3,
+      "title": "Determining the Strength of the Moat",
+      "start_seconds": 544.13,
+      "start_label": "9:04"
+    },
+    {
+      "number": 4,
+      "title": "Mastering Market Psychology",
+      "start_seconds": 725.89,
+      "start_label": "12:06"
+    },
+    {
+      "number": 5,
+      "title": "The Art of Capital Deployment",
+      "start_seconds": 892.28,
+      "start_label": "14:52"
+    },
+    {
+      "number": 6,
+      "title": "Escaping the Institutional Trap",
+      "start_seconds": 1056.41,
+      "start_label": "17:36"
+    }
+  ],
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a?"
+}

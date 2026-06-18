@@ -300,9 +300,74 @@ async def get_or_collect(ticker: str, fetch_fresh) -> Any:
         if not fut.done():
             fut.set_result(out)
         return out
+    except asyncio.CancelledError:
+        # CancelledError is BaseException (NOT Exception), so it would skip the
+        # handler below and leave `fut` unresolved — every attached waiter
+        # (`return await inflight` above), including a real report's collect(),
+        # would then hang forever (and a warm waiter would leak its
+        # _WARM_SEMAPHORE slot) when a fire-and-forget owner (prewarm task) is
+        # cancelled on shutdown/redeploy. Hand waiters a NORMAL exception so they
+        # fail fast through their own error/refund path, then re-raise our cancel.
+        if not fut.done():
+            fut.set_exception(RuntimeError("ticker collection was cancelled"))
+        raise
     except Exception as e:
         if not fut.done():
             fut.set_exception(e)
         raise
     finally:
         _INFLIGHT.pop(ticker, None)
+
+
+# ── On-view / scheduled pre-warm helper ─────────────────────────────
+# Distinct-ticker concurrency cap so a burst of detail-view opens on MANY
+# different tickers can't trigger that many simultaneous _collect_fresh fan-outs
+# at once (same-ticker already collapses via _INFLIGHT). Lazily built inside the
+# loop so it binds to the running event loop.
+_WARM_SEMAPHORE: Optional["asyncio.Semaphore"] = None
+
+
+def _get_warm_semaphore() -> "asyncio.Semaphore":
+    global _WARM_SEMAPHORE
+    if _WARM_SEMAPHORE is None:
+        from app.config import settings
+        _WARM_SEMAPHORE = asyncio.Semaphore(
+            max(1, settings.REPORT_PREWARM_DETAIL_CONCURRENCY)
+        )
+    return _WARM_SEMAPHORE
+
+
+async def warm_ticker_collection(ticker: str) -> None:
+    """Best-effort warm of the persona-neutral ticker_data_cache for `ticker`.
+
+    Reuses get_or_collect → freshness-guarded (close-aligned) + _INFLIGHT-deduped,
+    so it is idempotent: at most ONE _collect_fresh per ticker per close cycle no
+    matter how many detail-view opens trigger it. Bounded across DISTINCT tickers
+    by _WARM_SEMAPHORE. NEVER raises — a failed/dropped warm simply falls back to
+    on-demand collection when a report actually runs. Used by the on-view prewarm
+    endpoint AND the scheduled pre-warmer.
+    """
+    try:
+        # Normalize INSIDE the try so the "never raises" contract holds even for
+        # a non-str input (e.g. a malformed RPC row).
+        ticker = ticker.upper().strip()
+        # Fast path: already fresh → don't even take a slot (steady state).
+        if await get_cached_collection(ticker) is not None:
+            return
+        # Lazy imports break the cycle (collector imports this module).
+        from app.integrations.fmp import get_fmp_client
+        from app.services.agents.ticker_report_data_collector import (
+            TickerReportDataCollector,
+        )
+
+        async with _get_warm_semaphore():
+            collector = TickerReportDataCollector(fmp=get_fmp_client())
+            # get_or_collect re-checks freshness + _INFLIGHT inside the slot
+            # (handles the race where it became fresh while we queued).
+            await get_or_collect(ticker, lambda: collector._collect_fresh(ticker))
+        logger.info("ticker_data_cache WARMED (prewarm) for %s", ticker)
+    except Exception as e:
+        logger.warning(
+            "warm_ticker_collection failed for %s: %s: %s",
+            ticker, type(e).__name__, e,
+        )

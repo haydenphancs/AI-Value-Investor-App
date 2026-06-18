@@ -1,0 +1,88 @@
+{
+  "curriculum_order": 2,
+  "book_title": "The Intelligent Investor",
+  "author": "Benjamin Graham",
+  "slug": "the-intelligent-investor",
+  "audio_file": "2_the-intelligent-investor.m4a",
+  "voice": "Iapetus",
+  "target_wpm": 150,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 2235.07,
+  "total_label": "37:15",
+  "cores": [
+    {
+      "number": 1,
+      "title": "Drawing the Battle Lines",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "The Invisible Enemy",
+      "start_seconds": 164.91,
+      "start_label": "2:45"
+    },
+    {
+      "number": 3,
+      "title": "Mastering the Manic-Depressive Market",
+      "start_seconds": 357.4,
+      "start_label": "5:57"
+    },
+    {
+      "number": 4,
+      "title": "Building the Fortress (The Defensive Strategy)",
+      "start_seconds": 559.89,
+      "start_label": "9:20"
+    },
+    {
+      "number": 5,
+      "title": "Here is the content for Core 5, where we outline the strict rules for those who want to beat the market.",
+      "start_seconds": 757.19,
+      "start_label": "12:37"
+    },
+    {
+      "number": 6,
+      "title": "The Mutual Fund Maze",
+      "start_seconds": 959.27,
+      "start_label": "15:59"
+    },
+    {
+      "number": 7,
+      "title": "The Earnings Mirage",
+      "start_seconds": 1136.98,
+      "start_label": "18:57"
+    },
+    {
+      "number": 8,
+      "title": "The Comparison Test",
+      "start_seconds": 1304.69,
+      "start_label": "21:45"
+    },
+    {
+      "number": 9,
+      "title": "Filtering for Quality (The Defensive Screen)",
+      "start_seconds": 1493.58,
+      "start_label": "24:54"
+    },
+    {
+      "number": 10,
+      "title": "Hunting for Bargains (The Enterprising Screen)",
+      "start_seconds": 1676.09,
+      "start_label": "27:56"
+    },
+    {
+      "number": 11,
+      "title": "Spotting the Red Flags",
+      "start_seconds": 1875.77,
+      "start_label": "31:16"
+    },
+    {
+      "number": 12,
+      "title": "The Golden Rule (Margin of Safety)",
+      "start_seconds": 2046.28,
+      "start_label": "34:06"
+    }
+  ],
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a?"
+}

@@ -1,0 +1,88 @@
+{
+  "curriculum_order": 4,
+  "book_title": "One Up On Wall Street",
+  "author": "Peter Lynch",
+  "slug": "one-up-on-wall-street",
+  "audio_file": "4_one-up-on-wall-street.m4a",
+  "voice": "Enceladus",
+  "target_wpm": 170,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 1986.81,
+  "total_label": "33:07",
+  "cores": [
+    {
+      "number": 1,
+      "title": "Flipping the Script on Wall Street",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "The Mirror Test & Risk Tolerance",
+      "start_seconds": 154.27,
+      "start_label": "2:34"
+    },
+    {
+      "number": 3,
+      "title": "Ignoring the Macro Noise",
+      "start_seconds": 317.73,
+      "start_label": "5:18"
+    },
+    {
+      "number": 4,
+      "title": "Leveraging Your Daily Routine",
+      "start_seconds": 474.49,
+      "start_label": "7:54"
+    },
+    {
+      "number": 5,
+      "title": "The \"Perfect Stock\" Profile",
+      "start_seconds": 635.47,
+      "start_label": "10:35"
+    },
+    {
+      "number": 6,
+      "title": "The Six Categories of Opportunity",
+      "start_seconds": 788.68,
+      "start_label": "13:09"
+    },
+    {
+      "number": 7,
+      "title": "The Earnings Engine",
+      "start_seconds": 938.01,
+      "start_label": "15:38"
+    },
+    {
+      "number": 8,
+      "title": "Financial Forensics",
+      "start_seconds": 1081.35,
+      "start_label": "18:01"
+    },
+    {
+      "number": 9,
+      "title": "Assessing Management & Dividends",
+      "start_seconds": 1283.27,
+      "start_label": "21:23"
+    },
+    {
+      "number": 10,
+      "title": "Designing the Allocation",
+      "start_seconds": 1429.78,
+      "start_label": "23:50"
+    },
+    {
+      "number": 11,
+      "title": "The Re-Evaluation Loop",
+      "start_seconds": 1581.94,
+      "start_label": "26:22"
+    },
+    {
+      "number": 12,
+      "title": "The Exit Protocols",
+      "start_seconds": 1737.99,
+      "start_label": "28:58"
+    }
+  ],
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a?"
+}

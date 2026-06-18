@@ -122,6 +122,34 @@ async def generate_research_report(
             details={"in_flight": inflight_count, "max": cap},
         )
 
+    # ── Global admission backstop (fast-fail under overload). Beyond the
+    #    per-user cap above, bound the TOTAL reports in flight across ALL users
+    #    in this close cycle so a multi-user burst can't pile unbounded agent
+    #    runs onto the single event loop (protects request latency + RAM). Like
+    #    the per-user cap this is pre-charge (no credits burned on rejection)
+    #    and returns 409 (NOT 429) so the SYSTEM_BUSY user_message reaches iOS.
+    #    The real pacing is the agent-run semaphore in research_service; this
+    #    just sheds load past a safe backlog instead of accepting it.
+    global_cap = settings.MAX_GLOBAL_INFLIGHT_REPORTS
+    if global_cap > 0:
+        global_inflight = (
+            supabase.table("research_reports")
+            .select("id", count="exact")
+            .in_("status", ["pending", "processing"])
+            .gte("created_at", cycle_start)
+            .execute()
+        )
+        global_count = global_inflight.count or 0
+        if global_count >= global_cap:
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY,
+                status_code=409,
+                message=(
+                    f"global in-flight {global_count} >= cap {global_cap}"
+                ),
+                details={"in_flight": global_count, "max": global_cap},
+            )
+
     # Atomic 5-credit charge. The Postgres function returns the new
     # `remaining` balance, or NULL when the user has fewer than 5
     # credits available. NULL → INSUFFICIENT_CREDITS, no row was

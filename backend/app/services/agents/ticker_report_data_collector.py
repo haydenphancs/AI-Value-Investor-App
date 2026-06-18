@@ -1972,6 +1972,8 @@ class TickerReportDataCollector:
             "exchange": meta["exchange"],
             "logo_url": meta["logo_url"],
             "live_date": meta["live_date"],
+            # Raw close date so iOS can format the header label render-time.
+            "price_close_date": c.get("price_close_date"),
             "agent": meta["agent"],
             "quality_score": quality_score,
 

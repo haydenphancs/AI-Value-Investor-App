@@ -30,5 +30,20 @@ extension BookAudioInfo {
             totalSeconds: 1054,
             coreStartSeconds: [1: 0, 2: 157, 3: 310, 4: 459, 5: 606, 6: 764, 7: 907]
         ),
+        2: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a",
+            totalSeconds: 2235,
+            coreStartSeconds: [1: 0, 2: 165, 3: 357, 4: 560, 5: 757, 6: 959, 7: 1137, 8: 1305, 9: 1494, 10: 1676, 11: 1876, 12: 2046]
+        ),
+        4: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a",
+            totalSeconds: 1987,
+            coreStartSeconds: [1: 0, 2: 154, 3: 318, 4: 474, 5: 635, 6: 789, 7: 938, 8: 1081, 9: 1283, 10: 1430, 11: 1582, 12: 1738]
+        ),
+        8: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a",
+            totalSeconds: 1215,
+            coreStartSeconds: [1: 0, 2: 352, 3: 544, 4: 726, 5: 892, 6: 1056]
+        ),
     ]
 }

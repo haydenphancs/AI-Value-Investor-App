@@ -31,6 +31,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.integrations.gemini import GeminiClient
 from app.services._insider_common import ensure_insider_label
 from app.services.agents.persona_config import PersonaConfig
@@ -236,25 +237,67 @@ class NarrativeJob:
     nullable: bool = False
 
 
+# When `evidence` is hoisted into a Gemini CachedContent, each per-field
+# prompt's inline evidence block is replaced with this pointer (the real
+# evidence is the cached prefix the model sees first). Exact-substring replace,
+# so a builder that doesn't embed `evidence` is simply left untouched.
+_EVIDENCE_POINTER = "[see FINANCIAL EVIDENCE provided above]"
+
+
 async def run_narrative_jobs(
     jobs: List[NarrativeJob],
     gemini: GeminiClient,
     persona: PersonaConfig,
+    evidence: str = "",
 ) -> None:
     """Execute every job in parallel. Each job's result lands in-place
     via `apply`; failures use the job's `fallback_value`.
 
-    Never raises — even a total Gemini outage just leaves every
-    narrative field on its honest fallback.
+    When context caching is enabled AND a cache is created successfully, the
+    shared `evidence` + persona system prompt are uploaded ONCE and every call
+    bills only its per-field instruction plus the cached prefix (at the
+    discounted read rate). A per-call cache hiccup falls back to the inline
+    path (full quality); only a failure of BOTH paths lands on the honest
+    sentinel. So caching is a pure cost optimization — it can never degrade the
+    report on its own.
+
+    Never raises — even a total Gemini outage just leaves every narrative field
+    on its honest fallback.
     """
+    if not jobs:
+        return
+
+    use_cache = bool(evidence) and getattr(
+        settings, "GEMINI_CONTEXT_CACHE_ENABLED", True
+    )
+    cache_handle = (
+        await gemini.create_narrative_cache(persona.system_prompt, evidence)
+        if use_cache else None
+    )
 
     async def _one(job: NarrativeJob) -> None:
         try:
-            result = await gemini.generate_text(
-                prompt=job.prompt,
-                system_instruction=persona.system_prompt,
-            )
-            raw = (result.get("text") or "")
+            raw: Optional[str] = None
+            if cache_handle is not None:
+                try:
+                    # Drop the inline evidence — it's the cached prefix now.
+                    slim = job.prompt.replace(evidence, _EVIDENCE_POINTER)
+                    result = await gemini.generate_text_cached(slim, cache_handle)
+                    raw = result.get("text") or ""
+                except Exception as ce:
+                    # Cache-path hiccup → inline retry preserves full quality.
+                    logger.warning(
+                        f"Cached narrative {job.label} failed "
+                        f"({type(ce).__name__}: {ce}) — inline retry"
+                    )
+                    raw = None
+            if raw is None:
+                result = await gemini.generate_text(
+                    prompt=job.prompt,
+                    system_instruction=persona.system_prompt,
+                )
+                raw = result.get("text") or ""
+
             cleaned = _post_process(raw, word_cap=job.word_cap)
             if not cleaned:
                 job.apply(None if job.nullable else job.fallback_value)
@@ -267,9 +310,10 @@ async def run_narrative_jobs(
             )
             job.apply(job.fallback_value)
 
-    if not jobs:
-        return
-    await asyncio.gather(*(_one(j) for j in jobs))
+    try:
+        await asyncio.gather(*(_one(j) for j in jobs))
+    finally:
+        await gemini.delete_cache(cache_handle)
 
 
 # ── Per-field prompt builders ─────────────────────────────────────────

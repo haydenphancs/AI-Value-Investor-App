@@ -30,6 +30,72 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(s in msg for s in _QUOTA_ERROR_STRINGS)
 
 
+class GeminiQuotaError(Exception):
+    """Raised by the circuit breaker when it's open (fail-fast).
+
+    The message intentionally contains "quota"/"resource_exhausted" so both
+    `_is_quota_error` and the API error classifier
+    (`app.api.error_response.classify_exception`) recognize it and route to the
+    GEMINI_QUOTA_EXCEEDED contract — and so the caller's existing sentinel
+    fallback (e.g. narrative jobs) fires instead of propagating a raw error.
+    """
+
+
+class _QuotaCircuitBreaker:
+    """Process-wide breaker that stops hammering Gemini during a sustained
+    quota outage.
+
+    Without it, under load every one of the ~15 parallel narrative calls (per
+    report, across every concurrent report) would each burn its full backoff
+    ladder against an API that is already returning 429 — adding load and
+    latency for nothing. After `GEMINI_QUOTA_CIRCUIT_THRESHOLD` *consecutive*
+    quota errors the breaker opens and `is_open()` returns True for
+    `GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS`; calls then fail fast (the caller's
+    sentinel fallback applies). Any success resets it. A single half-open trial
+    is allowed once the cooldown elapses.
+
+    Single-event-loop process → no lock needed (all access is on one thread).
+    """
+
+    def __init__(self) -> None:
+        self._consecutive = 0
+        self._opened_at = 0.0
+
+    def is_open(self) -> bool:
+        if self._opened_at <= 0.0:
+            return False
+        if time.time() - self._opened_at >= settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS:
+            # Cooldown elapsed → half-open: clear state and allow one trial.
+            self._opened_at = 0.0
+            self._consecutive = 0
+            return False
+        return True
+
+    def record_quota_error(self) -> None:
+        self._consecutive += 1
+        if self._consecutive >= settings.GEMINI_QUOTA_CIRCUIT_THRESHOLD:
+            # Stamp the open time ONLY on the closed→open transition. Setting it
+            # unconditionally would let every straggler 429 (the ~15 parallel
+            # calls already past the is_open() check) push the deadline forward,
+            # holding the breaker open well beyond the configured cooldown.
+            if self._opened_at <= 0.0:
+                logger.error(
+                    "Gemini quota circuit OPEN after %d consecutive quota "
+                    "errors — failing fast for %.0fs",
+                    self._consecutive,
+                    settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS,
+                )
+                self._opened_at = time.time()
+
+    def record_success(self) -> None:
+        self._consecutive = 0
+        self._opened_at = 0.0
+
+
+# Module-level breaker shared by every decorated Gemini call.
+_quota_circuit = _QuotaCircuitBreaker()
+
+
 # ── Per-call timeout guard ─────────────────────────────────────────
 async def _call_with_timeout(callable_, *args, **kwargs):
     """Run a sync Gemini SDK call in a thread with a timeout.
@@ -54,25 +120,64 @@ async def _call_with_timeout(callable_, *args, **kwargs):
 def async_retry(max_attempts: int = 3, delay: float = 1.0):
     """
     Decorator for retrying async functions on failure.
-    Skips retries for quota errors (429) to avoid burning more quota.
+
+    Two independent retry budgets:
+      * Generic errors → up to `max_attempts` tries, linear backoff `delay*n`.
+      * Quota/rate-limit (429) errors → up to GEMINI_QUOTA_MAX_RETRIES tries
+        with GEMINI_QUOTA_RETRY_DELAY_SECONDS*n backoff. Previously these were
+        NOT retried (immediate raise → sentinel narrative); under the
+        agent-run semaphore a short backoff recovers transient 429s so the
+        report keeps its real prose. The shared `_quota_circuit` short-circuits
+        once quota errors are sustained, so retries never pile onto an outage.
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
+            attempt = 0          # generic failures
+            quota_attempt = 0    # quota/429 failures
+            while True:
+                # Fail fast while the breaker is open — don't add load to an
+                # already-exhausted quota; the caller's sentinel fallback fires.
+                if _quota_circuit.is_open():
+                    raise GeminiQuotaError(
+                        "Gemini quota circuit open (resource_exhausted) — "
+                        "failing fast"
+                    )
                 try:
-                    return await func(*args, **kwargs)
+                    result = await func(*args, **kwargs)
+                    _quota_circuit.record_success()
+                    return result
                 except Exception as e:
                     if _is_quota_error(e):
-                        logger.error(f"Quota/rate-limit error — skipping retries: {e}")
-                        raise
-                    if attempt == max_attempts - 1:
+                        _quota_circuit.record_quota_error()
+                        quota_attempt += 1
+                        if (
+                            quota_attempt > settings.GEMINI_QUOTA_MAX_RETRIES
+                            or _quota_circuit.is_open()
+                        ):
+                            logger.error(
+                                f"Quota/rate-limit error — giving up after "
+                                f"{quota_attempt} attempt(s): {e}"
+                            )
+                            raise
+                        backoff = (
+                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
+                            * quota_attempt
+                        )
+                        logger.warning(
+                            f"Quota/rate-limit (attempt {quota_attempt}/"
+                            f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing "
+                            f"off {backoff:.1f}s: {e}"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    attempt += 1
+                    if attempt >= max_attempts:
                         raise
                     logger.warning(
-                        f"Attempt {attempt + 1} failed: {e}. Retrying..."
+                        f"Attempt {attempt} failed: {e}. Retrying..."
                     )
-                    await asyncio.sleep(delay * (attempt + 1))
-            return None
+                    await asyncio.sleep(delay * attempt)
         return wrapper
     return decorator
 
@@ -196,6 +301,112 @@ class GeminiClient:
             logger.error(f"Gemini text generation failed: {e}", exc_info=True)
             raise
 
+    # ── Context caching (Stage-B narratives) ──────────────────────────
+    # The N parallel narrative calls per report share one large evidence blob +
+    # persona system prompt. Uploading that shared prefix to a CachedContent
+    # once and pointing every call at it bills the prefix ~1x (write) + N×25%
+    # (cache reads) instead of N×100%. All three methods are FAIL-SAFE: a
+    # missing-SDK / below-min-size / quota error degrades to the inline path
+    # (create_* returns None) so report quality is never sacrificed for cost.
+
+    async def create_narrative_cache(
+        self,
+        system_instruction: Optional[str],
+        evidence: str,
+        ttl_minutes: Optional[int] = None,
+    ) -> Optional[Any]:
+        """Create a Gemini CachedContent for the shared (system prompt +
+        evidence) prefix and pre-build the model bound to it. Returns an opaque
+        handle ``{"cache", "model"}`` or None on ANY failure (caller falls back
+        to inline prompts). Never raises.
+
+        The model is built here (not per-call) so a `from_cached_content`
+        signature/SDK incompatibility is caught ONCE up front → None → inline
+        path, instead of failing all N calls individually.
+        """
+        if not evidence:
+            return None
+        try:
+            import datetime as _dt
+            from google.generativeai import caching
+
+            ttl = ttl_minutes if ttl_minutes is not None else getattr(
+                settings, "GEMINI_CONTEXT_CACHE_TTL_MINUTES", 10
+            )
+            model_name = (
+                self.model_name
+                if self.model_name.startswith("models/")
+                else f"models/{self.model_name}"
+            )
+
+            def _create():
+                cache = caching.CachedContent.create(
+                    model=model_name,
+                    system_instruction=system_instruction or None,
+                    contents=[f"FINANCIAL EVIDENCE:\n{evidence}"],
+                    ttl=_dt.timedelta(minutes=ttl),
+                )
+                model = genai.GenerativeModel.from_cached_content(
+                    cached_content=cache
+                )
+                return {"cache": cache, "model": model}
+
+            # Through _call_with_timeout (not bare to_thread) so a hung SDK
+            # create can't park the agent run for the full 600s pipeline
+            # ceiling while holding a MAX_CONCURRENT_AGENT_RUNS slot — a
+            # TimeoutError here is caught below → None → inline path.
+            handle = await _call_with_timeout(_create)
+            logger.info("Gemini context cache created (ttl=%dm)", ttl)
+            return handle
+        except Exception as e:
+            # Below-min-token (2.5 Flash min ~1024), old SDK, or quota → inline.
+            logger.info(
+                "Gemini context cache unavailable (%s: %s) — using inline prompts",
+                type(e).__name__, e,
+            )
+            return None
+
+    @async_retry(max_attempts=2, delay=2.0)
+    async def generate_text_cached(
+        self, prompt: str, handle: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """generate_text variant that runs against a CachedContent prefix.
+
+        The shared evidence + system instruction live in the cache; `prompt` is
+        only the per-field instruction. Goes through the same timeout + quota
+        retry/circuit-breaker path as `generate_text`.
+        """
+        model = handle["model"]
+        response = await _call_with_timeout(
+            model.generate_content,
+            prompt,
+            generation_config=self.generation_config,
+        )
+        return {
+            "text": response.text,
+            "model": self.model_name,
+            "tokens_used": (
+                response.usage_metadata.total_token_count
+                if hasattr(response, "usage_metadata") else None
+            ),
+            "finish_reason": (
+                response.candidates[0].finish_reason.name
+                if response.candidates else None
+            ),
+        }
+
+    async def delete_cache(self, handle: Optional[Dict[str, Any]]) -> None:
+        """Best-effort delete of a CachedContent so cache storage is freed
+        before its TTL. Never raises (a failed delete just expires via TTL)."""
+        if not handle:
+            return
+        try:
+            # Timeout-guarded like every other Gemini call — a hung delete just
+            # lets the cache expire via its TTL instead of parking the caller.
+            await _call_with_timeout(handle["cache"].delete)
+        except Exception as e:
+            logger.debug("Context cache delete failed (expires via TTL): %s", e)
+
     @async_retry(max_attempts=2, delay=2.0)
     async def generate_json(
         self,
@@ -247,7 +458,9 @@ class GeminiClient:
             logger.error(f"Gemini JSON generation failed: {e}", exc_info=True)
             raise
 
-    @async_retry(max_attempts=2, delay=2.0)
+    # No @async_retry here: this delegates to generate_text (already decorated).
+    # Stacking it would multiply quota backoff and over-count the circuit breaker
+    # on a single logical call.
     async def generate_with_context(
         self,
         prompt: str,
@@ -307,7 +520,7 @@ Provide a comprehensive answer with citations to the context where appropriate."
             logger.error(f"Embedding generation failed: {e}", exc_info=True)
             raise
 
-    @async_retry(max_attempts=2, delay=2.0)
+    # No @async_retry here: delegates to generate_text (already decorated).
     async def analyze_sentiment(
         self,
         text: str
@@ -360,7 +573,7 @@ Focus on fundamental factors, not short-term price movements."""
             **response
         }
 
-    @async_retry(max_attempts=2, delay=2.0)
+    # No @async_retry here: delegates to generate_text (already decorated).
     async def summarize_text(
         self,
         text: str,

@@ -58,6 +58,10 @@ class ErrorCode(str, Enum):
     REPORT_NOT_READY = "REPORT_NOT_READY"
     INSUFFICIENT_CREDITS = "INSUFFICIENT_CREDITS"
     TOO_MANY_CONCURRENT_REPORTS = "TOO_MANY_CONCURRENT_REPORTS"
+    # Global overload backstop — distinct from the per-user cap above. The
+    # whole service is at capacity, not just this user. 409 (not 429) so iOS
+    # surfaces the user_message instead of a generic "wait 60s".
+    SYSTEM_BUSY = "SYSTEM_BUSY"
 
 
 # Default user-facing copy per code. Endpoints can override per-call.
@@ -104,6 +108,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "You're already running the maximum number of analyses at once. "
         "Wait for one to finish, then try again."
     ),
+    ErrorCode.SYSTEM_BUSY: (
+        "Our analysis engine is at capacity right now. "
+        "Please try again in a moment."
+    ),
 }
 
 
@@ -117,6 +125,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
+    ErrorCode.SYSTEM_BUSY: "retry_later",
 }
 
 
@@ -138,6 +147,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # shows a generic "wait 60s", discarding our user_message. 409 falls
     # through to the structured-body decode so the cap copy is surfaced.
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: 409,
+    # Same 409 rationale — surface the SYSTEM_BUSY user_message, not a 429
+    # generic. Semantically "Too Many Requests" but 429 would be swallowed.
+    ErrorCode.SYSTEM_BUSY: 409,
 }
 
 

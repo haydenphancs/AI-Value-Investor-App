@@ -20,6 +20,7 @@ struct TickerReportAPIResponse: Codable {
     let exchange: String
     let logoUrl: String?
     let liveDate: String
+    let priceCloseDate: String?
     let agent: String
     let qualityScore: Double
     let executiveSummaryText: String
@@ -45,6 +46,7 @@ struct TickerReportAPIResponse: Codable {
         case exchange
         case logoUrl = "logo_url"
         case liveDate = "live_date"
+        case priceCloseDate = "price_close_date"
         case agent
         case qualityScore = "quality_score"
         case executiveSummaryText = "executive_summary_text"
@@ -1042,6 +1044,7 @@ extension TickerReportAPIResponse {
             exchange: exchange,
             logoName: logoUrl,
             liveDate: liveDate,
+            priceCloseDate: priceCloseDate,
             agent: agentPersona,
             qualityRating: quality,
             executiveSummaryText: executiveSummaryText,

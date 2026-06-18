@@ -64,6 +64,10 @@ enum APIEndpoint: Sendable {
     case getSignalOfConfidence(ticker: String)
     case getHoldersData(ticker: String)
     case getTickerReport(ticker: String, persona: String)
+    /// Fire-and-forget: warm the report's persona-neutral ticker_data_cache when
+    /// the user opens the detail view, so a later Generate Analysis skips the
+    /// ~20-call FMP fan-out. Best-effort — the result is ignored.
+    case prewarmReportCollection(ticker: String)
 
     // MARK: - Indices
     case getIndexDetail(symbol: String, range: String, interval: String? = nil)
@@ -195,6 +199,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/\(ticker)"
         case .getStockOverview(let ticker, _, _, _):
             return "/api/v1/stocks/\(ticker)/overview"
+        case .prewarmReportCollection(let ticker):
+            return "/api/v1/stocks/\(ticker)/prewarm-report"
         case .getStockQuote(let ticker):
             return "/api/v1/stocks/\(ticker)/quote"
         case .getStockFundamentals(let ticker):
@@ -397,7 +403,8 @@ enum APIEndpoint: Sendable {
              .createChatSession, .sendChatMessage,
              .chatWithTickerReport, .completeLearnItem,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
-             .createPortfolio, .regenerateResearchReportPDF:
+             .createPortfolio, .regenerateResearchReportPDF,
+             .prewarmReportCollection:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -580,7 +587,7 @@ enum APIEndpoint: Sendable {
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
+             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .prewarmReportCollection, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:

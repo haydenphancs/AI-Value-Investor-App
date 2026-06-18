@@ -164,7 +164,9 @@ class ResearchAgent:
 
         jobs = build_narrative_jobs(self.persona, evidence, report)
         await asyncio.gather(
-            run_narrative_jobs(jobs, self.gemini, self.persona),
+            # Pass `evidence` so Stage B can hoist it into a single Gemini
+            # context cache shared across all N parallel narrative calls.
+            run_narrative_jobs(jobs, self.gemini, self.persona, evidence),
             synthesize_core_thesis(report, self.persona, self.gemini, evidence),
         )
 

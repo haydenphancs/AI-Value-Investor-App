@@ -91,6 +91,16 @@ final class StockRepository: StockRepositoryProtocol {
         )
     }
 
+    // MARK: - Report Pre-warm
+
+    /// Fire-and-forget: ask the backend to warm the report's persona-neutral
+    /// collection cache for `ticker` (so a later Generate Analysis skips the
+    /// ~20-call FMP fan-out). Best-effort — callers should ignore errors and
+    /// never block the UI on it. Returns 202 immediately server-side.
+    func prewarmReportCollection(ticker: String) async throws {
+        try await apiClient.request(endpoint: .prewarmReportCollection(ticker: ticker))
+    }
+
     // MARK: - Stock Detail
 
     func getStock(ticker: String) async throws -> StockDetail {

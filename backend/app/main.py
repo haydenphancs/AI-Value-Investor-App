@@ -59,6 +59,13 @@ async def lifespan(app: FastAPI):
         # Start background news pre-warmer for popular watchlist tickers
         asyncio.create_task(_run_news_pre_warmer())
 
+        # Start background report pre-warmer: warms the persona-neutral
+        # ticker_data_cache for top tickers so the first report after each close
+        # (and any same-session burst) skips re-collecting it. Runs the full
+        # persona-neutral collection (FMP fan-out + grounded precompute, which
+        # makes some Gemini-grounded calls for cold tickers).
+        asyncio.create_task(_run_report_pre_warmer())
+
         # Start background sector benchmark computation (daily)
         asyncio.create_task(_run_sector_benchmark_job())
 
@@ -114,6 +121,56 @@ async def _run_news_pre_warmer():
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
+
+
+async def _run_report_pre_warmer():
+    """Background task: pre-warm the persona-NEUTRAL ticker_data_cache for the
+    most popular watchlist tickers.
+
+    After each market close the close-aligned collection cache goes stale;
+    warming the top tickers here means the first report request (and any
+    same-session multi-user burst on a trending name) hits a warm collection
+    and skips re-collecting it. This runs the full persona-NEUTRAL collection —
+    the ~20-call FMP fan-out PLUS the persona-neutral grounded precompute (which
+    for a cold ticker makes some Gemini-grounded calls) — but skips the
+    per-persona Stage-A/Stage-B work, credits, and research_reports rows.
+
+    Idempotent: `collect()` checks freshness first, so a still-fresh ticker is a
+    one-DB-read no-op — real FMP work only happens right after a new close.
+    Batched small so the pre-warm itself never becomes an FMP thundering herd.
+    """
+    if not settings.REPORT_PREWARM_ENABLED:
+        return
+
+    await asyncio.sleep(45)  # after the news pre-warmer has kicked off
+
+    while True:
+        try:
+            from app.services.ticker_data_cache import warm_ticker_collection
+
+            top_n = settings.REPORT_PREWARM_TOP_N
+            sb = get_supabase()
+            rows = sb.rpc("get_top_watchlist_tickers", {"n": top_n}).execute()
+            tickers = [r["ticker"] for r in (rows.data or []) if r.get("ticker")]
+
+            if not tickers:
+                logger.info("Report pre-warm: no watchlist tickers to warm")
+            else:
+                # warm_ticker_collection bounds DISTINCT-ticker concurrency via
+                # _WARM_SEMAPHORE, collapses same-ticker via _INFLIGHT, and is a
+                # cheap no-op for already-fresh tickers — so fire them all and
+                # let the helper self-throttle.
+                await asyncio.gather(
+                    *(warm_ticker_collection(t) for t in tickers),
+                    return_exceptions=True,
+                )
+                logger.info(
+                    "Report pre-warm: pass complete for %d tickers", len(tickers)
+                )
+        except Exception as e:
+            logger.error(f"Report pre-warmer failed: {e}", exc_info=True)
+
+        await asyncio.sleep(settings.REPORT_PREWARM_INTERVAL_SECONDS)
 
 
 async def _run_research_reconciliation_job():

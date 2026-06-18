@@ -1,0 +1,2610 @@
+{
+  "curriculum_order": 2,
+  "slug": "the-intelligent-investor",
+  "cores": {
+    "1": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Illusion of Competence",
+            "start": 8.600521528198907,
+            "end": 10.000606428138266
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the uncomfortable truth: 90% of people who think they are \"investing\" are actually just gambling with better odds.",
+            "start": 11.200679199514857,
+            "end": 18.881144936325043
+          },
+          {
+            "text": "The friction in your financial life usually stems from a single category error.",
+            "start": 19.901206791995147,
+            "end": 24.081460278956943
+          },
+          {
+            "text": "You treat the stock market like a casino where the chips are expensive and the rules are vague.",
+            "start": 24.921511218920557,
+            "end": 29.80180715585203
+          },
+          {
+            "text": "You assume that because you bought a stock and held it for a year, you are an investor.",
+            "start": 30.801867798665857,
+            "end": 35.16213220133414
+          },
+          {
+            "text": "You aren't.",
+            "start": 36.122190418435416,
+            "end": 36.48221224984839
+          },
+          {
+            "text": "If you bought it based on a feeling, a tip, or a chart pattern, you are speculating.",
+            "start": 37.36226561552456,
+            "end": 41.70252880533656
+          },
+          {
+            "text": "And the market loves to punish speculators who believe they are investors.",
+            "start": 42.64258580958156,
+            "end": 46.28280654942389
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Trinity of Safety",
+            "start": 47.462878107944206,
+            "end": 48.64294966646452
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author solves this by demanding we sign a mental contract before spending a dime.",
+            "start": 49.883024863553665,
+            "end": 54.48330382049727
+          },
+          {
+            "text": "He strips away the noise and offers a ruthless definition.",
+            "start": 55.54336810187992,
+            "end": 58.62355488174651
+          },
+          {
+            "text": "An operation is only an investment if it meets three specific criteria upon thorough analysis:",
+            "start": 59.783625227410546,
+            "end": 65.4439684657368
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Safety of Principal: You are reasonably sure you won't lose your initial cash.",
+            "start": 66.5640363856883,
+            "end": 71.30432383262583
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Adequate Return: You aren't looking for a lottery ticket; you are looking for a fair rent on your money.",
+            "start": 72.46439417828987,
+            "end": 78.60476652516677
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Thorough Analysis: You have done the math on the underlying business, not just the stock price.",
+            "start": 79.84484172225591,
+            "end": 85.78520194057003
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Imagine a man betting on a horse race.",
+            "start": 86.90526986052153,
+            "end": 88.74538144329897
+          },
+          {
+            "text": "He studies the track record, the jockey, and the weather.",
+            "start": 89.80544572468162,
+            "end": 92.94563614311703
+          },
+          {
+            "text": "He is informed, but he is still gambling because he has no safety of principal\u2014if the horse loses, his money vanishes.",
+            "start": 94.04570285021224,
+            "end": 100.68610551849605
+          },
+          {
+            "text": "The \"Intelligent Investor\" refuses to bet on the horse; he buys the racetrack.",
+            "start": 101.80617343844753,
+            "end": 106.06643177683443
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Gamification Trap",
+            "start": 107.24650333535475,
+            "end": 108.40657368101878
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, this distinction is harder to see because the casino has moved into your pocket.",
+            "start": 108.90660400242571,
+            "end": 115.06697756215887
+          },
+          {
+            "text": "Trading apps shower you with digital confetti when you execute a trade, conditioning you to crave action over analysis.",
+            "start": 115.62701152213462,
+            "end": 123.06746270466948
+          },
+          {
+            "text": "We see this in the \"Crypto Craze\" or the \"AI Gold Rush.\"",
+            "start": 123.62749666464524,
+            "end": 127.18771255306245
+          },
+          {
+            "text": "Buying a digital token because you hope a billionaire tweets about it is not investing; it is the \"Greater Fool Theory\"\u2014hoping someone else will pay more for your mistake.",
+            "start": 127.8277513644633,
+            "end": 138.18837962401454
+          },
+          {
+            "text": "The danger today isn't just market volatility; it\u2019s the user interface of your life designed to make speculation feel like strategy.",
+            "start": 138.80841722255911,
+            "end": 146.68889508793208
+          },
+          {
+            "text": "If your asset relies entirely on hype to succeed, you aren't investing in a business; you're investing in a narrative.",
+            "start": 147.38893753790174,
+            "end": 154.72938265615522
+          }
+        ]
+      }
+    ],
+    "2": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Safety Paradox",
+            "start": 169.6902483374896,
+            "end": 170.99031587697422
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\"",
+            "start": 172.03036990856194,
+            "end": 178.0506826683292
+          },
+          {
+            "text": "You look at your bank account, and the number stays the same or grows slightly.",
+            "start": 178.91072734829592,
+            "end": 183.37095906068163
+          },
+          {
+            "text": "You feel a warm sense of security.",
+            "start": 183.95098919368246,
+            "end": 186.21110660847881
+          },
+          {
+            "text": "You sleep well.",
+            "start": 186.75113466334165,
+            "end": 187.5711772651704
+          },
+          {
+            "text": "But this is a hallucination.",
+            "start": 188.27121363258522,
+            "end": 190.09130818786366
+          },
+          {
+            "text": "In the physical world, if you left a car in a garage for twenty years, you\u2019d expect it to rust.",
+            "start": 190.85134767248545,
+            "end": 196.5516438071488
+          },
+          {
+            "text": "Money is no different, yet we treat it as if it\u2019s immune to decay.",
+            "start": 197.1716760182876,
+            "end": 201.55190357439733
+          },
+          {
+            "text": "The friction here is psychological: we are wired to fear the volatility of the stock market (where prices bounce up and down visibly), so we run into the arms of a guaranteed loss.",
+            "start": 202.45195033250207,
+            "end": 214.51257689110557
+          },
+          {
+            "text": "We choose the slow bleed over the bumpy ride.",
+            "start": 215.1126080631754,
+            "end": 218.33277535328347
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Yardstick That Shrank",
+            "start": 219.33282730673318,
+            "end": 220.87290731504572
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author illustrates this with a brutal reality check from the first half of the 20th century.",
+            "start": 221.99296550290939,
+            "end": 227.1532335827099
+          },
+          {
+            "text": "He tells the story of the \"Conservative Investor\" who, traumatized by market crashes, put 100% of his wealth into high-grade bonds.",
+            "start": 227.8932720282627,
+            "end": 237.4537687032419
+          },
+          {
+            "text": "This man felt prudent.",
+            "start": 238.1738061097257,
+            "end": 239.53387676641728
+          },
+          {
+            "text": "He collected his fixed interest checks like clockwork.",
+            "start": 240.03390274314216,
+            "end": 242.75404405652534
+          },
+          {
+            "text": "But while he was staring at the stable numbers on his statements, the world around him changed.",
+            "start": 243.35407522859518,
+            "end": 248.93436512884455
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The price of bread, housing, and energy doubled.",
+            "start": 249.55439733998338,
+            "end": 252.6145563175395
+          },
+          {
+            "text": "The \"yardstick\" of money had shrunk.",
+            "start": 253.2745906068163,
+            "end": 255.25469347464673
+          },
+          {
+            "text": "The author points out that by the time this investor needed to spend his principal, it had lost half its purchasing power.",
+            "start": 255.9547298420615,
+            "end": 262.5950748129676
+          },
+          {
+            "text": "The man hadn't lost dollars; he had lost lifestyle.",
+            "start": 263.1951059850374,
+            "end": 266.43527431421444
+          },
+          {
+            "text": "The \"safe\" investment was actually a trap that guaranteed he would be poorer at the end than when he started.",
+            "start": 267.0553065253533,
+            "end": 273.09562032418955
+          },
+          {
+            "text": "The author\u2019s lesson is stark: Inflation is a thief that works in the dark, and keeping all your money in \"safe\" cash is not prudence\u2014it is a decision to let the thief empty your house while you watch.",
+            "start": 273.7756556525353,
+            "end": 286.51631753948465
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The High-Yield Hallucination",
+            "start": 287.43636533665835,
+            "end": 289.09645157938485
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, this enemy is even more deceptive.",
+            "start": 289.55647547797173,
+            "end": 292.8166448462178
+          },
+          {
+            "text": "You open a High-Yield Savings Account (HYSA) offering 5% and think you are winning.",
+            "start": 293.33667186201166,
+            "end": 299.7370043640898
+          },
+          {
+            "text": "You aren\u2019t.",
+            "start": 300.0970230673317,
+            "end": 300.5570469659185
+          },
+          {
+            "text": "You are barely treading water.",
+            "start": 301.03707190357443,
+            "end": 302.59715295095594
+          },
+          {
+            "text": "If inflation is running at 3.5% and the tax man takes another 1.5% of your gains, your real return is zero.",
+            "start": 303.2971893183708,
+            "end": 311.61762157107233
+          },
+          {
+            "text": "You are running on a financial treadmill just to stay in the same place.",
+            "start": 312.3176579384871,
+            "end": 316.137856400665
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Furthermore, the \"basket of goods\" has changed.",
+            "start": 317.0779052369078,
+            "end": 319.85804966749794
+          },
+          {
+            "text": "The author worried about the price of milk; you need to worry about the cost of healthcare, college tuition, and prime real estate, which often inflate significantly faster than the government's official CPI numbers.",
+            "start": 320.31807356608476,
+            "end": 332.19869077306737
+          },
+          {
+            "text": "If you are paying 1% to a financial advisor to manage a portfolio of cash and bonds that yields 4%, you are essentially paying someone to manage your slow bankruptcy.",
+            "start": 332.9987323358271,
+            "end": 343.11925810473815
+          },
+          {
+            "text": "In a world of unlimited fiat currency printing, holding cash is like holding a melting ice cube.",
+            "start": 343.97930278470494,
+            "end": 349.75960307564424
+          },
+          {
+            "text": "You cannot save your way to wealth in a currency that is designed to depreciate.",
+            "start": 350.3596342477141,
+            "end": 354.7798638819618
+          }
+        ]
+      }
+    ],
+    "3": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Price Tag Panic",
+            "start": 364.36034373765307,
+            "end": 365.7004099170288
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Imagine you own a house you love.",
+            "start": 366.8604672066377,
+            "end": 368.76056104306593
+          },
+          {
+            "text": "You know its value: good roof, solid foundation, great neighborhood.",
+            "start": 369.38059166337416,
+            "end": 374.0408218095614
+          },
+          {
+            "text": "Now imagine a stranger stands on your lawn every single morning yelling a different price at you.",
+            "start": 374.9808682338996,
+            "end": 380.90116060845514
+          },
+          {
+            "text": "Monday he screams, \"I'll give you $500,000!\"",
+            "start": 381.6211961675227,
+            "end": 383.60129395495846
+          },
+          {
+            "text": "Tuesday he whispers, \"The market is crashing!",
+            "start": 385.62139371789806,
+            "end": 388.44153299091266
+          },
+          {
+            "text": "I'll only give you $150,000!\"",
+            "start": 388.80155077044645,
+            "end": 389.5015853417621
+          },
+          {
+            "text": "Wednesday he is euphoric again and offers $900,000.",
+            "start": 392.04171078625046,
+            "end": 394.221818451205
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Most people would close the blinds and ignore him.",
+            "start": 397.1019606874753,
+            "end": 399.422075266693
+          },
+          {
+            "text": "But in the stock market, you do the opposite.",
+            "start": 400.02210489924926,
+            "end": 402.22221355195575
+          },
+          {
+            "text": "You let this stranger dictate your emotional state.",
+            "start": 402.78224120900825,
+            "end": 405.52237653101537
+          },
+          {
+            "text": "When he yells a low price, you panic and sell your house cheap.",
+            "start": 406.06240320031606,
+            "end": 409.48257210588696
+          },
+          {
+            "text": "When he yells a high price, you feel rich and buy more houses.",
+            "start": 410.18260667720267,
+            "end": 413.6027755827736
+          },
+          {
+            "text": "This is the friction: you confuse the price on the screen with the value of the business.",
+            "start": 414.2428071908336,
+            "end": 419.5230679573291
+          },
+          {
+            "text": "You let the fluctuating price tag determine your worth, rather than the quality of the merchandise.",
+            "start": 420.0430936388779,
+            "end": 425.2633514421177
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Partner You Can't Fire",
+            "start": 426.44340971947844,
+            "end": 428.06348972738044
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author introduces us to this stranger.",
+            "start": 429.3035509679968,
+            "end": 431.383653694192
+          },
+          {
+            "text": "His name is \"Mr.",
+            "start": 431.86367740023707,
+            "end": 433.08373765310154
+          },
+          {
+            "text": "Market.\"",
+            "start": 433.1237396286053,
+            "end": 433.4637564203872
+          },
+          {
+            "text": "He is your business partner in a private company.",
+            "start": 434.10378802844724,
+            "end": 436.24389371789806
+          },
+          {
+            "text": "Mr.",
+            "start": 436.8839253259581,
+            "end": 437.1439381667325
+          },
+          {
+            "text": "Market is obliging but emotionally unstable.",
+            "start": 437.1839401422362,
+            "end": 439.9440764519952
+          },
+          {
+            "text": "Every day, without fail, he names a price at which he will either buy your interest or sell you his.",
+            "start": 440.6041090478072,
+            "end": 446.3643935203477
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The catch?",
+            "start": 446.88441920189643,
+            "end": 447.46444784670086
+          },
+          {
+            "text": "His price has nothing to do with the business's actual performance.",
+            "start": 447.92447056499407,
+            "end": 452.2046819438957
+          },
+          {
+            "text": "It is based entirely on his mood.",
+            "start": 452.7047066376926,
+            "end": 454.82481133939154
+          },
+          {
+            "text": "When he is manic (optimistic), he sees only sunshine and names a high price.",
+            "start": 455.42484097194784,
+            "end": 460.70510173844326
+          },
+          {
+            "text": "When he is depressed (pessimistic), he sees only trouble and names a low price.",
+            "start": 461.2651293954958,
+            "end": 466.0653664559462
+          },
+          {
+            "text": "The author\u2019s solution is a mindset shift: Mr.",
+            "start": 466.8054030027657,
+            "end": 470.1255669695772
+          },
+          {
+            "text": "Market is there to serve you, not to guide you.",
+            "start": 470.2055709205847,
+            "end": 473.10571414460685
+          },
+          {
+            "text": "You are not forced to deal with him.",
+            "start": 473.6857427894113,
+            "end": 475.2858218095614
+          },
+          {
+            "text": "If his offer is ridiculous, you ignore him.",
+            "start": 475.8258484788621,
+            "end": 478.0459581193204
+          },
+          {
+            "text": "If his offer is a bargain, you buy.",
+            "start": 478.54598281311735,
+            "end": 480.546081588305
+          },
+          {
+            "text": "If his offer is absurdly high, you sell.",
+            "start": 481.0861082576057,
+            "end": 483.7462396286053
+          },
+          {
+            "text": "You are the adult in the room; he is the hysterical child.",
+            "start": 484.36627024891345,
+            "end": 487.96644804425125
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Algorithm of Anxiety",
+            "start": 488.8864934808376,
+            "end": 490.5065734887396
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, Mr.",
+            "start": 491.38661694982216,
+            "end": 492.26666041090476
+          },
+          {
+            "text": "Market isn't just a guy on your lawn; he is in your pocket, buzzing every 15 minutes.",
+            "start": 492.3066623864085,
+            "end": 497.42691525088895
+          },
+          {
+            "text": "He is the notification on your phone saying \"Bitcoin is down 10%\" or \"Nvidia hits all-time high.\"",
+            "start": 498.0069438956934,
+            "end": 504.4672629395495
+          },
+          {
+            "text": "The modern Mr.",
+            "start": 505.1072945476096,
+            "end": 505.9073340576847
+          },
+          {
+            "text": "Market is amplified by algorithms designed to trigger your dopamine and cortisol.",
+            "start": 505.94733603318844,
+            "end": 510.58756519162387
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider the \"Flash Crash\" or the meme-stock frenzy.",
+            "start": 511.44760766495455,
+            "end": 514.2477459502172
+          },
+          {
+            "text": "These are Mr.",
+            "start": 514.8477755827736,
+            "end": 515.7078180561043
+          },
+          {
+            "text": "Market on steroids\u2014millions of people reacting to a viral sentiment rather than business fundamentals.",
+            "start": 515.7478200316081,
+            "end": 521.9681272224417
+          },
+          {
+            "text": "If you own an S&P 500 ETF, you own the 500 biggest companies in America.",
+            "start": 522.6281598182536,
+            "end": 527.9084205847491
+          },
+          {
+            "text": "Did the value of Coca-Cola or Microsoft actually drop 20% in a week because of a geopolitical rumor?",
+            "start": 528.6284561438167,
+            "end": 534.568749506124
+          },
+          {
+            "text": "No.",
+            "start": 535.0287722244173,
+            "end": 535.1487781509285
+          },
+          {
+            "text": "Their factories didn't burn down.",
+            "start": 535.7688087712366,
+            "end": 537.2088798893717
+          },
+          {
+            "text": "Their customers didn't vanish.",
+            "start": 537.5288956934019,
+            "end": 538.8289598972738
+          },
+          {
+            "text": "Only the price tag changed.",
+            "start": 539.268981627815,
+            "end": 540.7090527459502
+          },
+          {
+            "text": "If you react to the notification, you are letting the algorithm trade against you.",
+            "start": 541.3090823785064,
+            "end": 545.4692878308969
+          },
+          {
+            "text": "You must view volatility not as risk, but as the fee you pay for higher returns.",
+            "start": 546.0493164757013,
+            "end": 551.0095614381667
+          }
+        ]
+      }
+    ],
+    "4": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Myth of the Mastermind",
+            "start": 566.6706873479319,
+            "end": 568.3908617193836
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "There is a persistent lie in finance that \"effort equals return.\"",
+            "start": 569.6109854014599,
+            "end": 574.2914598540145
+          },
+          {
+            "text": "In your job, if you work 80 hours a week, you get a promotion.",
+            "start": 575.0315348742903,
+            "end": 578.3318694241686
+          },
+          {
+            "text": "In the stock market, if you work 80 hours a week analyzing charts, reading news, and tweaking your portfolio, you will likely underperform a dead person.",
+            "start": 579.0119383617193,
+            "end": 588.0728568532036
+          },
+          {
+            "text": "The friction here is ego.",
+            "start": 588.7529257907543,
+            "end": 590.1930717761556
+          },
+          {
+            "text": "You believe you are smarter than the market.",
+            "start": 590.8531386861314,
+            "end": 592.8333394160584
+          },
+          {
+            "text": "You believe you can time the top and the bottom.",
+            "start": 593.3133880778589,
+            "end": 595.413600973236
+          },
+          {
+            "text": "You believe that \"doing nothing\" is lazy.",
+            "start": 595.9136516626115,
+            "end": 598.433907137064
+          },
+          {
+            "text": "But in investing, activity is the enemy of returns.",
+            "start": 599.0339679643147,
+            "end": 602.274296431468
+          },
+          {
+            "text": "The more you touch your portfolio, the more you incur fees, taxes, and emotional errors.",
+            "start": 602.8343532035685,
+            "end": 608.2549026763991
+          },
+          {
+            "text": "The goal of the Fortress is to protect you from your own desire to be clever.",
+            "start": 608.8149594484996,
+            "end": 613.0153852392539
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The 50/50 Split",
+            "start": 614.23550892133,
+            "end": 615.4356305758313
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author solves this by creating a specific category for people who want to get rich without making investing their second job: the \"Defensive Investor.\"",
+            "start": 616.5157400648824,
+            "end": 625.2366240875913
+          },
+          {
+            "text": "He proposes a radical simplicity.",
+            "start": 625.9366950527169,
+            "end": 627.956899837794
+          },
+          {
+            "text": "Imagine a portfolio that is a perfect balance scale.",
+            "start": 628.6569708029197,
+            "end": 631.4572546634225
+          },
+          {
+            "text": "On one side, you have high-grade bonds (lending money to stable governments or corporations).",
+            "start": 631.9773073803731,
+            "end": 636.9578122465531
+          },
+          {
+            "text": "On the other side, you have a diversified list of leading common stocks (owning a piece of the economy).",
+            "start": 637.4978669910787,
+            "end": 642.8384083536091
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author suggests a baseline split of 50% stocks and 50% bonds.",
+            "start": 643.5184772911598,
+            "end": 649.5190855636658
+          },
+          {
+            "text": "This is your \"Fortress.\"",
+            "start": 650.0991443633415,
+            "end": 651.3992761557178
+          },
+          {
+            "text": "When the stock market crashes and people are jumping out of windows, your bonds hold their value, and your portfolio only drops half as much as the market.",
+            "start": 652.0393410381184,
+            "end": 660.6602149229522
+          },
+          {
+            "text": "You sleep well.",
+            "start": 661.2002696674776,
+            "end": 662.0203527980535
+          },
+          {
+            "text": "When the market booms and your neighbor is bragging about his gains, your stocks participate in the rally.",
+            "start": 662.7204237631793,
+            "end": 668.5010097323601
+          },
+          {
+            "text": "You never fully lose, and you never miss out.",
+            "start": 669.0610665044607,
+            "end": 671.6813321167883
+          },
+          {
+            "text": "The genius is in the maintenance: if stocks go up and become 60% of your portfolio, you simply sell some stocks and buy bonds to get back to 50/50.",
+            "start": 672.341399026764,
+            "end": 681.7823560421735
+          },
+          {
+            "text": "This forces you to do the one thing everyone fails at: sell high and buy low, automatically.",
+            "start": 683.1424939172749,
+            "end": 690.2032096512571
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Autopilot Advantage",
+            "start": 691.1233029197081,
+            "end": 692.6434570154096
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, building this Fortress is easier than the author could have ever dreamed.",
+            "start": 693.3835320356853,
+            "end": 697.6639659367397
+          },
+          {
+            "text": "In his day, you had to buy individual bonds and pick 20 different stocks.",
+            "start": 698.2040206812652,
+            "end": 702.6444708029197
+          },
+          {
+            "text": "Today, you can build the entire Fortress with two clicks using low-cost Index Funds or ETFs (Exchange Traded Funds).",
+            "start": 703.1445214922952,
+            "end": 710.865304136253
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Instead of picking \"winners\" (which is hard), you buy the entire S&P 500 or a Total World Stock ETF.",
+            "start": 711.5053690186537,
+            "end": 718.8861171938362
+          },
+          {
+            "text": "You own Apple, Microsoft, Amazon, and 4,000 other companies.",
+            "start": 719.4861780210867,
+            "end": 723.8266180048662
+          },
+          {
+            "text": "If one goes bankrupt, you don't even notice.",
+            "start": 724.3666727493917,
+            "end": 726.7269120032441
+          },
+          {
+            "text": "If a new AI giant emerges, you automatically own it.",
+            "start": 727.2269626926196,
+            "end": 730.7073154906732
+          },
+          {
+            "text": "This is the \"Boglehead\" philosophy (named after Jack Bogle, who popularized index funds), which is the modern spiritual successor to Graham\u2019s Defensive strategy.",
+            "start": 731.3873844282239,
+            "end": 740.4683049472831
+          },
+          {
+            "text": "It accepts that you cannot predict the future, so you simply own the entire economy.",
+            "start": 741.1083698296836,
+            "end": 746.1288787510138
+          },
+          {
+            "text": "It turns investing from a stress-inducing hunt for \"the next Bitcoin\" into a boring, reliable utility bill that pays you.",
+            "start": 746.7689436334144,
+            "end": 754.3897161394972
+          }
+        ]
+      }
+    ],
+    "5": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Core 5: Going on the Offensive (The Enterprising Strategy)",
+            "start": 765.8108532119173,
+            "end": 769.9712649708008
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Hero Complex",
+            "start": 771.0113679105217,
+            "end": 772.0914748094626
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the seduction: You believe that if you are smarter, faster, and read more news than your neighbor, you will make more money.",
+            "start": 773.1515797287935,
+            "end": 781.0123577155301
+          },
+          {
+            "text": "You view the stock market as a test of your intelligence.",
+            "start": 781.7924349203207,
+            "end": 784.9127437394834
+          },
+          {
+            "text": "This is the \"Hero Complex,\" and it is the fastest way to underperform.",
+            "start": 785.632815005444,
+            "end": 790.0332505196477
+          },
+          {
+            "text": "The friction is simple: you are not competing against your neighbor.",
+            "start": 790.8533316836583,
+            "end": 794.5136939522914
+          },
+          {
+            "text": "You are competing against institutional algorithms that read every news headline in milliseconds and price it in before you\u2019ve even unlocked your phone.",
+            "start": 795.0537474017619,
+            "end": 803.6545986340691
+          },
+          {
+            "text": "If you try to \"win\" by buying the same popular, high-growth companies everyone else loves, you are paying a premium for a consensus view.",
+            "start": 804.4946817776898,
+            "end": 812.7554993566268
+          },
+          {
+            "text": "You are buying a Ferrari at full sticker price and hoping to sell it for a profit.",
+            "start": 813.5955825002475,
+            "end": 817.9760160348412
+          },
+          {
+            "text": "That isn't investing; that's wishful thinking.",
+            "start": 818.7960971988518,
+            "end": 821.6963842423044
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Negative Art",
+            "start": 822.6564792635852,
+            "end": 823.5365663664259
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author solves this by redefining what it means to be \"Enterprising.\"",
+            "start": 824.4966613877067,
+            "end": 828.5970672077601
+          },
+          {
+            "text": "He clarifies that being an Enterprising Investor is not about taking more risk; it is about doing more work.",
+            "start": 829.3771444125508,
+            "end": 835.7177719489262
+          },
+          {
+            "text": "It is a job description, not a personality type.",
+            "start": 836.4778471741067,
+            "end": 839.258122339899
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author warns against the siren song of \"Growth Stocks\"\u2014the companies that everyone knows are the future.",
+            "start": 841.1183064436307,
+            "end": 848.1189993071366
+          },
+          {
+            "text": "He tells the story of the investor who buys the great companies of the era (like the radio or airline pioneers) and loses everything because the price was already bid up to perfection.",
+            "start": 848.7590626546571,
+            "end": 860.1801930119767
+          },
+          {
+            "text": "Instead, the Enterprising Investor practices a \"negative art.\"",
+            "start": 860.9202662575474,
+            "end": 864.9406641591607
+          },
+          {
+            "text": "They avoid the popular.",
+            "start": 865.4807176086312,
+            "end": 866.7008383648422
+          },
+          {
+            "text": "They hunt in the scrap heap.",
+            "start": 867.1408819162625,
+            "end": 868.3610026724735
+          },
+          {
+            "text": "They look for \"bargain issues\"\u2014stocks selling for less than their working capital.",
+            "start": 868.821048203504,
+            "end": 873.3414955953677
+          },
+          {
+            "text": "They buy when the news is bad, the outlook is gloomy, and the crowd is selling.",
+            "start": 873.8815490448383,
+            "end": 878.442000395922
+          },
+          {
+            "text": "The Enterprising Investor makes their money not by predicting the future, but by correcting the market's mistakes in the present.",
+            "start": 878.9820538453926,
+            "end": 886.0827566069485
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Edge of Discomfort",
+            "start": 887.1628635058894,
+            "end": 888.5830040582006
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, the \"easy\" information is gone.",
+            "start": 889.4030852222113,
+            "end": 892.3833801841038
+          },
+          {
+            "text": "You cannot find a bargain just by looking at a P/E ratio on Yahoo Finance because a million other people have seen it too.",
+            "start": 892.8834296743541,
+            "end": 899.9241264970801
+          },
+          {
+            "text": "Today, the \"Enterprising\" edge is almost entirely psychological.",
+            "start": 900.6041938038207,
+            "end": 904.464575868554
+          },
+          {
+            "text": "It is the ability to endure social pain.",
+            "start": 905.0246312976344,
+            "end": 907.3848648916164
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Think about the collapse of Meta (Facebook) in 2022 or the energy sector when oil prices went negative in 2020.",
+            "start": 908.1849440760171,
+            "end": 914.8856072453727
+          },
+          {
+            "text": "The \"Enterprising\" move wasn't to buy Nvidia when it was on every magazine cover; it was to buy the unloved, \"boring,\" or \"dead\" sectors when everyone else was chasing AI hype.",
+            "start": 916.1057280015838,
+            "end": 926.9067969909928
+          },
+          {
+            "text": "If you are buying a stock that makes you feel smart at a dinner party, you are likely overpaying.",
+            "start": 927.5268583589034,
+            "end": 932.4673473225776
+          },
+          {
+            "text": "The modern Enterprising strategy often involves \"Deep Value\" or \"Special Situations\"\u2014spinoffs, distressed assets, or small-cap companies too small for the big funds to touch.",
+            "start": 933.027402751658,
+            "end": 943.8884776798972
+          },
+          {
+            "text": "You are looking for the \"ick factor\"\u2014assets that are fundamentally sound but temporarily hated.",
+            "start": 944.4685350885876,
+            "end": 950.0090834405623
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 950.949176482233,
+            "end": 951.5292338909236
+          }
+        ]
+      }
+    ],
+    "6": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Croupier's Cut",
+            "start": 963.9702644907147,
+            "end": 964.9903218908272
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The financial industry is built on a single, powerful myth: \"Investing is too complicated for you to do alone; you need an expert.\"",
+            "start": 966.0103792909398,
+            "end": 974.2708441193022
+          },
+          {
+            "text": "So, you hand your money to a mutual fund manager\u2014a \"star\" in a suit who promises to navigate the market's storms.",
+            "start": 975.0508880135059,
+            "end": 981.7912673044457
+          },
+          {
+            "text": "You pay them a 1% or 2% fee every year, regardless of whether they make you money or lose it.",
+            "start": 982.4313033202026,
+            "end": 988.4916443444007
+          },
+          {
+            "text": "The friction here is mathematical, not emotional.",
+            "start": 989.2716882386044,
+            "end": 992.0318435565559
+          },
+          {
+            "text": "That 2% fee sounds small, but over 30 years, it can consume up to 40% of your total wealth.",
+            "start": 992.6518784468204,
+            "end": 999.532265616207
+          },
+          {
+            "text": "You are taking 100% of the risk, providing 100% of the capital, and giving away nearly half the upside to a manager who, statistically, will fail to beat the market anyway.",
+            "start": 1000.1723016319639,
+            "end": 1011.0129116488464
+          },
+          {
+            "text": "You aren't hiring a guide; you're carrying a parasite.",
+            "start": 1011.6129454136185,
+            "end": 1014.7131198649408
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Rearview Mirror Trap",
+            "start": 1015.5931693866066,
+            "end": 1017.0732526730444
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author saw this coming decades ago.",
+            "start": 1018.093310073157,
+            "end": 1019.9534147439505
+          },
+          {
+            "text": "He identified the fatal flaw in how mutual funds are sold: Performance Chasing.",
+            "start": 1020.5534485087226,
+            "end": 1025.1937096229601
+          },
+          {
+            "text": "He describes the \"Hot Hand\" fallacy\u2014the investor who looks at a list of funds, picks the one that went up 50% last year, and assumes it will do the same next year.",
+            "start": 1025.8737478897017,
+            "end": 1034.4542307259426
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Graham warns that \"past performance is not a guarantee of future results\" isn't just a legal disclaimer; it is an iron law.",
+            "start": 1035.1742712436692,
+            "end": 1042.3546752954417
+          },
+          {
+            "text": "He observed that funds with spectacular returns usually achieved them by taking spectacular risks or getting lucky in a specific sector.",
+            "start": 1043.1347191896455,
+            "end": 1050.4951333708498
+          },
+          {
+            "text": "Once that sector cools off, the \"genius\" manager looks like a fool, and the investor who bought in at the top suffers the crash.",
+            "start": 1051.055164884637,
+            "end": 1057.1755092853123
+          },
+          {
+            "text": "The author\u2019s solution was brutal honesty: most funds are just expensive marketing machines designed to gather assets, not to generate alpha.",
+            "start": 1057.8155453010693,
+            "end": 1065.5759819921216
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Index Revolution",
+            "start": 1066.3560258863251,
+            "end": 1067.4560877884073
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, the trap is even more subtle.",
+            "start": 1067.9961181767023,
+            "end": 1070.956284749578
+          },
+          {
+            "text": "We have \"Thematic ETFs\"\u2014funds dedicated to AI, Cannabis, or Space Travel.",
+            "start": 1071.596320765335,
+            "end": 1078.3967034327518
+          },
+          {
+            "text": "These are the modern version of the \"hot\" mutual funds Graham warned about.",
+            "start": 1079.196748452448,
+            "end": 1083.95701631964
+          },
+          {
+            "text": "They package a compelling narrative (e.g., \"Robots are the future!\") and charge you a premium to own a basket of hype.",
+            "start": 1084.6770568373663,
+            "end": 1093.2375385481148
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The \"Wiser\" analysis, championed by Graham\u2019s disciple John Bogle, is that you should stop looking for the needle in the haystack and just buy the haystack.",
+            "start": 1094.1975925717502,
+            "end": 1103.8381350590882
+          },
+          {
+            "text": "The modern S&P 500 Index Fund allows you to fire the manager.",
+            "start": 1104.718184580754,
+            "end": 1109.5184546989308
+          },
+          {
+            "text": "Instead of paying 1.5% for a human to guess which stocks will go up, you pay 0.03% to a computer to own all the stocks.",
+            "start": 1110.2984985931344,
+            "end": 1119.8190343275182
+          },
+          {
+            "text": "In a world where information is instant, the \"edge\" that active managers used to have is gone.",
+            "start": 1120.599078221722,
+            "end": 1125.8993764772088
+          },
+          {
+            "text": "By indexing, you guarantee you will outperform 90% of professional investors simply by refusing to pay their salaries.",
+            "start": 1126.5194113674734,
+            "end": 1134.2398458075409
+          }
+        ]
+      }
+    ],
+    "7": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The greatest lie on Wall Street is a single number: \"EPS\" (Earnings Per Share).",
+            "start": 1140.6602194394752,
+            "end": 1146.2205509838998
+          },
+          {
+            "text": "The friction is that you are trained to treat this number as a hard fact.",
+            "start": 1146.9405939177102,
+            "end": 1150.8808288610614
+          },
+          {
+            "text": "When a company \"beats earnings estimates,\" the stock pops, and you feel safe.",
+            "start": 1151.3808586762075,
+            "end": 1155.9011282051283
+          },
+          {
+            "text": "But in reality, \"Net Income\" is often an opinion\u2014a flexible figure massaged by accountants to make management look good.",
+            "start": 1156.5211651759093,
+            "end": 1164.5616446034585
+          },
+          {
+            "text": "Cash, on the other hand, is a fact.",
+            "start": 1165.2416851520572,
+            "end": 1167.3818127608824
+          },
+          {
+            "text": "Most investors fail because they buy a company based on the headline profit number without realizing the business is actually bleeding cash to keep the lights on.",
+            "start": 1168.0218509242695,
+            "end": 1177.302404293381
+          },
+          {
+            "text": "They are buying a beautifully painted car with no engine.",
+            "start": 1177.842436493739,
+            "end": 1180.8426153846153
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Kitchen Sink Trap",
+            "start": 1181.7426690518785,
+            "end": 1182.8827370304114
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author exposes this by taking us into the dark room of corporate accounting.",
+            "start": 1183.7427883124628,
+            "end": 1187.9030363744782
+          },
+          {
+            "text": "He tells the story of the \"Big Bath\"\u2014a trick where a new CEO arrives and immediately writes off every possible bad investment, lawsuit, and mistake in a single quarter.",
+            "start": 1188.443068574836,
+            "end": 1199.0236994633274
+          },
+          {
+            "text": "This makes the company look terrible for three months (which the CEO blames on the previous guy), but it clears the decks so that future earnings look artificially explosive.",
+            "start": 1199.7037400119261,
+            "end": 1209.0842993440667
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Graham warns us to ignore \"Pro Forma\" earnings\u2014earnings that exclude \"bad stuff.\"",
+            "start": 1209.824343470483,
+            "end": 1215.1046583184257
+          },
+          {
+            "text": "He likens it to a man saying he saved $1,000 this month, provided you ignore the $5,000 he spent on gambling because that was a \"one-time event.\"",
+            "start": 1215.6846929039953,
+            "end": 1224.7852355396542
+          },
+          {
+            "text": "The author\u2019s solution is to distrust the Income Statement and focus on the Balance Sheet and the dividend record.",
+            "start": 1225.445274895647,
+            "end": 1231.2256195587358
+          },
+          {
+            "text": "If a company says it is making millions but isn't paying dividends or building up cash, the author asks: \"Where is the money?\"",
+            "start": 1231.8056541443052,
+            "end": 1238.7060655933215
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The EBITDA Alibi",
+            "start": 1239.646121645796,
+            "end": 1240.9662003577819
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, this manipulation has evolved into \"Adjusted EBITDA\" (Earnings Before Interest, Taxes, Depreciation, and Amortization).",
+            "start": 1241.566236135957,
+            "end": 1251.4668264758498
+          },
+          {
+            "text": "This is a metric often used by high-growth Tech and AI companies to pretend they are profitable when they are not.",
+            "start": 1252.3068765652952,
+            "end": 1259.247290399523
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider the WeWork debacle, where the company used \"Community Adjusted EBITDA\" to hide massive losses.",
+            "start": 1260.2073476446035,
+            "end": 1267.1477614788312
+          },
+          {
+            "text": "Or look at modern software companies that pay their employees in millions of dollars of Stock-Based Compensation (SBC).",
+            "start": 1268.0478151460943,
+            "end": 1275.1682397137747
+          },
+          {
+            "text": "They claim to be \"profitable\" on an adjusted basis because they treat that stock issuance as free money.",
+            "start": 1276.2283029218843,
+            "end": 1282.1286547406082
+          },
+          {
+            "text": "But it isn't free\u2014it dilutes you.",
+            "start": 1282.668686940966,
+            "end": 1284.5087966607036
+          },
+          {
+            "text": "It slices the pizza into more pieces, making your slice smaller.",
+            "start": 1285.1688360166966,
+            "end": 1289.2490793082886
+          },
+          {
+            "text": "If you only look at the \"Non-GAAP\" earnings promoted in the press release, you are being legally lied to.",
+            "start": 1290.1691341681574,
+            "end": 1295.709464519976
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 1296.5895169946334,
+            "end": 1297.149550387597
+          }
+        ]
+      }
+    ],
+    "8": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Vacuum Trap",
+            "start": 1309.5102551884795,
+            "end": 1310.6103134265143
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The biggest mistake you make is falling in love with a stock in isolation.",
+            "start": 1311.6703695468022,
+            "end": 1316.5506279119018
+          },
+          {
+            "text": "You see a company\u2014let's say a popular coffee chain\u2014and you think, \"I love their coffee, the line is always out the door, this must be a great investment.\"",
+            "start": 1317.230663913596,
+            "end": 1326.9911806437951
+          },
+          {
+            "text": "You buy it because the story feels good.",
+            "start": 1327.7912229987294,
+            "end": 1330.3113564167727
+          },
+          {
+            "text": "This is the \"Vacuum Trap.\"",
+            "start": 1330.8113828886067,
+            "end": 1332.4914718339687
+          },
+          {
+            "text": "You are judging an asset without a benchmark.",
+            "start": 1333.011499364676,
+            "end": 1335.6516391359594
+          },
+          {
+            "text": "It is like buying a house for $1 million without checking if the identical house next door just sold for $500,000.",
+            "start": 1336.4516814908936,
+            "end": 1342.7520150360017
+          },
+          {
+            "text": "Friction arises because you are judging the quality of the product rather than the value of the business.",
+            "start": 1345.0721378653113,
+            "end": 1350.7324375264718
+          },
+          {
+            "text": "A great company can be a terrible investment if you pay the wrong price.",
+            "start": 1351.6124841168996,
+            "end": 1356.032718127912
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Tale of Two Companies",
+            "start": 1357.0727731893267,
+            "end": 1358.6328557814486
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author shatters this illusion by playing a game of \"Spot the Difference.\"",
+            "start": 1359.5529044896232,
+            "end": 1363.733125794155
+          },
+          {
+            "text": "He takes two companies in the same industry\u2014often a popular \"glamour\" stock and an unloved \"boring\" stock\u2014and places their financials side-by-side, stripping away their names.",
+            "start": 1364.4331628547227,
+            "end": 1375.5337505294367
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He tells the story of Company A (the darling) which trades at 40 times its earnings, and Company B (the outcast) which trades at 10 times its earnings.",
+            "start": 1376.3337928843712,
+            "end": 1385.6742873782296
+          },
+          {
+            "text": "Company A has a great story, but its balance sheet is loaded with debt.",
+            "start": 1386.3743244387972,
+            "end": 1390.3945372723422
+          },
+          {
+            "text": "Company B is boring, but it has zero debt and twice the cash reserves.",
+            "start": 1391.0745732740365,
+            "end": 1395.5148083439221
+          },
+          {
+            "text": "The author reveals that to justify its price, Company A would have to grow at a miraculous rate for a decade, while Company B just has to stay alive to make you money.",
+            "start": 1396.2148454044896,
+            "end": 1405.4753356628548
+          },
+          {
+            "text": "By forcing a head-to-head comparison, the \"obvious\" choice often flips.",
+            "start": 1406.215374841169,
+            "end": 1410.335592969081
+          },
+          {
+            "text": "The glamour stock is revealed as a speculation; the boring stock is revealed as the investment.",
+            "start": 1410.895622617535,
+            "end": 1416.0558958068616
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Tesla\" Premium",
+            "start": 1417.0959508682763,
+            "end": 1418.0960038119442
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, this disparity has exploded.",
+            "start": 1418.6960355781448,
+            "end": 1421.9162060567558
+          },
+          {
+            "text": "We see it in the \"Magnificent Seven\" versus the rest of the market.",
+            "start": 1422.496236764083,
+            "end": 1426.3564411266414
+          },
+          {
+            "text": "You might look at a high-flying EV maker or an AI chip designer trading at 80x earnings and think it's the only game in town.",
+            "start": 1427.0964803049555,
+            "end": 1435.3969197373995
+          },
+          {
+            "text": "But if you run the \"Comparison Test\" against a legacy competitor\u2014say, a boring semiconductor firm or an established auto manufacturer\u2014you often find that the \"old\" company has higher profit margins, better dividends, and a valuation that is 80% cheaper.",
+            "start": 1436.1769610334604,
+            "end": 1452.2378113087675
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The modern market pays a massive premium for \"narrative.\"",
+            "start": 1453.537880135536,
+            "end": 1457.2380760271071
+          },
+          {
+            "text": "It overvalues the disruptor and undervalues the incumbent.",
+            "start": 1457.7581035578146,
+            "end": 1461.3782952138924
+          },
+          {
+            "text": "The Wiser Analysis isn't that you should never buy the growth stock; it\u2019s that you must quantify exactly how much \"optimism\" you are paying for.",
+            "start": 1462.358347098687,
+            "end": 1470.998804531978
+          },
+          {
+            "text": "If you are paying 5x more for a dollar of earnings from Company X than from Company Y, you better be certain Company X is five times better.",
+            "start": 1471.9588553578992,
+            "end": 1480.5193085556969
+          },
+          {
+            "text": "Usually, it isn't.",
+            "start": 1481.479359381618,
+            "end": 1482.479412325286
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 1483.719477975434,
+            "end": 1484.3195097416349
+          }
+        ]
+      }
+    ],
+    "9": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Junk Food Portfolio",
+            "start": 1500.9204021917808,
+            "end": 1502.4204843835616
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Most investors suffer from financial obesity.",
+            "start": 1503.6605523287672,
+            "end": 1506.340699178082
+          },
+          {
+            "text": "You fill your portfolio with \"empty calories\"\u2014companies that have great stories but zero nutritional value.",
+            "start": 1507.1207419178081,
+            "end": 1513.441088219178
+          },
+          {
+            "text": "You buy the hot EV startup that hasn't sold a car, or the biotech firm with no revenue, because you are hungry for growth.",
+            "start": 1514.121125479452,
+            "end": 1521.32152
+          },
+          {
+            "text": "The friction is that in a bull market, junk rises just like quality.",
+            "start": 1522.2415704109587,
+            "end": 1526.4418005479451
+          },
+          {
+            "text": "You feel smart holding these fragile companies.",
+            "start": 1527.0818356164382,
+            "end": 1529.2819561643835
+          },
+          {
+            "text": "But when the market turns, the junk crashes 90% and never recovers, while the quality stocks just go on a diet.",
+            "start": 1529.8619879452053,
+            "end": 1537.1623879452054
+          },
+          {
+            "text": "You fail because you have no standards; you let any stock into your house just because it knocked on the door.",
+            "start": 1538.0024339726026,
+            "end": 1543.6027408219177
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Seven-Point Bouncer",
+            "start": 1544.9028120547944,
+            "end": 1546.2228843835614
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author solves this by hiring a ruthless bouncer for your portfolio.",
+            "start": 1547.3829479452054,
+            "end": 1551.2431594520547
+          },
+          {
+            "text": "He creates a specific \"Defensive Screen\"\u2014a checklist of seven strict requirements that a company must meet before you even consider buying it.",
+            "start": 1551.9031956164383,
+            "end": 1559.923635068493
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author tells us that a Defensive Investor is not a talent scout looking for the next big thing; he is a quality control inspector.",
+            "start": 1561.0236953424658,
+            "end": 1568.6641139726028
+          },
+          {
+            "text": "He demands:",
+            "start": 1569.3041490410958,
+            "end": 1569.904181917808
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Adequate Size: No small, risky companies.",
+            "start": 1570.4442115068491,
+            "end": 1573.0243528767123
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Strong Financials: Current assets must be at least twice current liabilities.",
+            "start": 1573.5043791780822,
+            "end": 1577.7446115068492
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Earnings Stability: Positive earnings for the last 10 years.",
+            "start": 1578.3446443835614,
+            "end": 1581.424813150685
+          },
+          {
+            "text": "No losses allowed.",
+            "start": 1581.7648317808219,
+            "end": 1582.6648810958902
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Dividend Record: Uninterrupted payments for 20 years.",
+            "start": 1583.284915068493,
+            "end": 1586.205075068493
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Earnings Growth: A minimum increase of 33% over the last 10 years.",
+            "start": 1586.7451046575343,
+            "end": 1590.9653358904109
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Moderate P/E: The price should not be more than 15 times average earnings.",
+            "start": 1591.505365479452,
+            "end": 1595.7856
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Moderate Price-to-Book: The price should not be more than 1.5 times the book value.",
+            "start": 1596.2856273972602,
+            "end": 1600.9058805479451
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If a stock fails even one of these tests, the bouncer throws it out.",
+            "start": 1601.7659276712327,
+            "end": 1605.5061326027396
+          },
+          {
+            "text": "It doesn't matter if it's the \"future of technology\"; if it doesn't have the numbers, it doesn't get in.",
+            "start": 1606.00616,
+            "end": 1610.9464306849313
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Zombie Apocalypse",
+            "start": 1612.1264953424657,
+            "end": 1613.3465621917808
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, this screen is your only defense against \"Zombie Companies\"\u2014firms that don't earn enough profit to cover the interest on their debt.",
+            "start": 1613.9265939726026,
+            "end": 1623.0070915068493
+          },
+          {
+            "text": "In the last decade of near-zero interest rates, thousands of these zombies have survived by borrowing cheap money.",
+            "start": 1623.627125479452,
+            "end": 1630.4274980821917
+          },
+          {
+            "text": "They are the SPACs, the unprofitable tech IPOs, and the \"disruptors\" that bleed cash.",
+            "start": 1631.0075298630136,
+            "end": 1637.207869589041
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "You can apply Graham\u2019s screen to filter out the noise of the modern tech bubble.",
+            "start": 1637.9279090410957,
+            "end": 1642.1881424657533
+          },
+          {
+            "text": "While you might relax the P/E ratio slightly for high-quality tech giants (who have asset-light models), the core principle remains: Profits matter.",
+            "start": 1642.708170958904,
+            "end": 1652.3486991780821
+          },
+          {
+            "text": "Dividends matter.",
+            "start": 1652.8487265753424,
+            "end": 1653.7887780821916
+          },
+          {
+            "text": "A company like Uber or Airbnb in their early years would have been rejected by this screen\u2014and Graham would be fine with that.",
+            "start": 1654.388810958904,
+            "end": 1661.6292076712327
+          },
+          {
+            "text": "He would rather miss a Google than suffer a WeWork.",
+            "start": 1662.0492306849314,
+            "end": 1664.9093873972602
+          },
+          {
+            "text": "Today, you can automate this by looking at \"Dividend Aristocrats\" or \"Quality Factor\" ETFs, which effectively run this code for you.",
+            "start": 1665.4094147945204,
+            "end": 1673.3098476712328
+          }
+        ]
+      }
+    ],
+    "10": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Dumpster Diver's Dilemma",
+            "start": 1682.7106631273164,
+            "end": 1684.270819392968
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "To be an Enterprising Investor, you must be willing to do something that feels physically repulsive: you must buy what others are throwing away.",
+            "start": 1685.5509476109385,
+            "end": 1694.1318070720224
+          },
+          {
+            "text": "The friction here is intense social pressure.",
+            "start": 1694.9518892116598,
+            "end": 1697.4321376339776
+          },
+          {
+            "text": "When a company is failing, the headlines are screaming \"Bankruptcy!\" and your friends are laughing at it.",
+            "start": 1698.1122057497746,
+            "end": 1703.4527406591205
+          },
+          {
+            "text": "To buy it then requires a stomach of steel.",
+            "start": 1703.972792747671,
+            "end": 1706.7930752278874
+          },
+          {
+            "text": "Most people fail at this because they crave the safety of the herd.",
+            "start": 1707.6131573675248,
+            "end": 1710.91348792948
+          },
+          {
+            "text": "They want to buy \"good\" companies that are winning.",
+            "start": 1711.593556045277,
+            "end": 1714.0738044675948
+          },
+          {
+            "text": "But the Enterprising Investor knows a secret: a \"bad\" company at a dirt-cheap price is a better investment than a \"good\" company at an exorbitant price.",
+            "start": 1714.6538625663627,
+            "end": 1723.8747861364318
+          },
+          {
+            "text": "You aren't looking for quality; you are looking for a mispricing so severe that the market is practically handing you free money.",
+            "start": 1724.5948582590404,
+            "end": 1731.6555654612841
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Cigar Butt Strategy",
+            "start": 1733.0957097065009,
+            "end": 1734.515851948312
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The author famously formalized this with the concept of the \"Net-Net.\"",
+            "start": 1735.7959801662826,
+            "end": 1739.8363848542522
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He tells the story of a specific type of bargain that was once common: a company trading for less than its liquidation value.",
+            "start": 1740.6364649904838,
+            "end": 1747.8771902233798
+          },
+          {
+            "text": "Imagine a company that has $10 million in cash and inventory, owes $2 million in debt, and has a market cap of only $5 million.",
+            "start": 1748.6372663527998,
+            "end": 1757.278131824101
+          },
+          {
+            "text": "Even if the business shuts down tomorrow, sells the inventory, and pays off the debt, there is $8 million left.",
+            "start": 1758.498254031854,
+            "end": 1765.258931183011
+          },
+          {
+            "text": "If you buy the whole company for $5 million, you make an instant $3 million profit.",
+            "start": 1765.8189872783732,
+            "end": 1770.8594921366323
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This is the \"Cigar Butt\" approach.",
+            "start": 1771.3995462285884,
+            "end": 1773.8597926475006
+          },
+          {
+            "text": "You find a discarded cigar on the street that is soggy and gross, but it has one good puff left in it.",
+            "start": 1774.5198587598918,
+            "end": 1781.7005779825704
+          },
+          {
+            "text": "It\u2019s free, so that puff is pure profit.",
+            "start": 1782.2806360813381,
+            "end": 1784.9809065411198
+          },
+          {
+            "text": "The author\u2019s solution for the Enterprising Investor is to hunt for these statistical anomalies\u2014companies worth more dead than alive\u2014and buy a basket of them.",
+            "start": 1785.7609846739456,
+            "end": 1796.282038465391
+          },
+          {
+            "text": "You don't care about their future; you care that you bought a dollar bill for 50 cents.",
+            "start": 1797.0021105879996,
+            "end": 1801.9426054292296
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Hidden Assets of the Digital Age",
+            "start": 1802.8826995893016,
+            "end": 1805.1829299809676
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern market, true \"Net-Nets\" are rare because computers find them instantly.",
+            "start": 1806.183030151257,
+            "end": 1811.4635590503856
+          },
+          {
+            "text": "However, the principle remains the most powerful tool in deep value investing.",
+            "start": 1812.0836211559651,
+            "end": 1816.8040939597315
+          },
+          {
+            "text": "Today, the \"hidden assets\" aren't factories or piles of coal; they are intellectual property, user bases, or even Bitcoin treasuries.",
+            "start": 1817.504164078934,
+            "end": 1826.26504157067
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider a legacy tech company that everyone thinks is a dinosaur.",
+            "start": 1827.125127717119,
+            "end": 1831.0655223880597
+          },
+          {
+            "text": "The stock is crushed.",
+            "start": 1831.5855744766102,
+            "end": 1832.5856746468996
+          },
+          {
+            "text": "But on its balance sheet, it owns a massive portfolio of patents or a stake in a hot AI startup that the market has forgotten about.",
+            "start": 1833.2057367524792,
+            "end": 1840.9065080637083
+          },
+          {
+            "text": "Or consider a retail chain that owns its own real estate.",
+            "start": 1841.686586196534,
+            "end": 1845.0869267755184
+          },
+          {
+            "text": "The market values the business at zero because \"retail is dead,\" but the land under the stores is worth more than the stock price.",
+            "start": 1845.7269908845035,
+            "end": 1853.4477641991384
+          },
+          {
+            "text": "This is the modern \"sum-of-the-parts\" trade.",
+            "start": 1854.1478343183412,
+            "end": 1856.6880887508764
+          },
+          {
+            "text": "You are looking for \"Special Situations\" where the market is so focused on the dying business that it ignores the valuable assets locked inside.",
+            "start": 1857.308150856456,
+            "end": 1865.6889902834819
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 1866.629084443554,
+            "end": 1867.2691485525393
+          }
+        ]
+      }
+    ],
+    "11": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Optimism Blindfold",
+            "start": 1879.1301970674488,
+            "end": 1880.770293255132
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The most dangerous defect in the human brain is the ability to ignore data that contradicts a happy story.",
+            "start": 1881.6103425219942,
+            "end": 1888.010717888563
+          },
+          {
+            "text": "You buy a stock because the CEO is charismatic and the vision is \"world-changing.\"",
+            "start": 1888.7907636363636,
+            "end": 1893.5110404692082
+          },
+          {
+            "text": "When the footnotes in the financial report show massive debt or insider selling, you gloss over them.",
+            "start": 1894.151078005865,
+            "end": 1899.8714134897361
+          },
+          {
+            "text": "\"They're just investing for growth,\" you tell yourself.",
+            "start": 1900.3914439882699,
+            "end": 1902.751582404692
+          },
+          {
+            "text": "The friction is that you are analyzing the narrative, not the structure.",
+            "start": 1903.391619941349,
+            "end": 1907.0518346041056
+          },
+          {
+            "text": "You are admiring the paint job on a house while termites are eating the foundation.",
+            "start": 1907.5118615835777,
+            "end": 1911.732109090909
+          },
+          {
+            "text": "By the time the floor collapses, it is too late.",
+            "start": 1912.3921478005866,
+            "end": 1914.8522920821115
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Conglomerate House of Cards",
+            "start": 1915.712342521994,
+            "end": 1917.4124422287389
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author masterfully exposes this by taking us back to the \"Conglomerate Boom.\"",
+            "start": 1918.132484457478,
+            "end": 1922.5327425219941
+          },
+          {
+            "text": "He tells the story of companies that stopped inventing products and started inventing accounting tricks.",
+            "start": 1923.1527788856304,
+            "end": 1928.3330826979472
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Imagine a boring company that decides to become \"exciting\" by buying up random businesses\u2014a steel mill, an airline, a rental car agency.",
+            "start": 1929.1331296187684,
+            "end": 1937.653629325513
+          },
+          {
+            "text": "On paper, their revenue explodes.",
+            "start": 1938.3536703812317,
+            "end": 1940.333786510264
+          },
+          {
+            "text": "The CEO looks like a genius.",
+            "start": 1940.6938076246333,
+            "end": 1942.2538991202346
+          },
+          {
+            "text": "But the author peels back the curtain to reveal the rot: they paid for these acquisitions with overpriced stock and massive debt.",
+            "start": 1942.7939307917889,
+            "end": 1949.9343495601172
+          },
+          {
+            "text": "The \"growth\" was an illusion created by merging sloppy businesses together.",
+            "start": 1950.5143835777126,
+            "end": 1954.5746217008798
+          },
+          {
+            "text": "The \"Synergy\" they promised never happened.",
+            "start": 1955.114653372434,
+            "end": 1957.2547788856305
+          },
+          {
+            "text": "When the economy slowed down, the debt remained, but the cash flow vanished.",
+            "start": 1957.8148117302053,
+            "end": 1961.5350299120234
+          },
+          {
+            "text": "The stock, once a darling of Wall Street, went to zero.",
+            "start": 1962.0950627565983,
+            "end": 1965.0352351906158
+          },
+          {
+            "text": "The lesson?",
+            "start": 1965.7152750733137,
+            "end": 1966.135299706745
+          },
+          {
+            "text": "Complexity is often a mask for fraud.",
+            "start": 1966.555324340176,
+            "end": 1968.9754662756598
+          },
+          {
+            "text": "If you cannot understand how a company makes money in two sentences, it probably doesn't.",
+            "start": 1969.4354932551319,
+            "end": 1974.0357630498534
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Community Adjusted\" Reality",
+            "start": 1974.6557994134896,
+            "end": 1976.4559049853372
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, the red flags are hidden in plain sight under the guise of \"Innovation.\"",
+            "start": 1977.015937829912,
+            "end": 1981.9762287390029
+          },
+          {
+            "text": "The modern equivalent of the Conglomerate trick is the \"Pivot.\"",
+            "start": 1982.5762639296188,
+            "end": 1985.9364609970673
+          },
+          {
+            "text": "When a crypto exchange collapses, or an \"AI\" startup implodes, the signs were always there.",
+            "start": 1986.4964938416422,
+            "end": 1992.47684457478
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider the recent \"SPAC\" (Special Purpose Acquisition Company) mania.",
+            "start": 1993.196886803519,
+            "end": 1997.3971331378298
+          },
+          {
+            "text": "Companies with zero revenue were taken public based on PowerPoint slides projecting trillions in future profit.",
+            "start": 1998.0171695014662,
+            "end": 2004.3175390029326
+          },
+          {
+            "text": "Or look at the \"WeWork\" disaster, where the company invented a metric called \"Community Adjusted EBITDA\" to pretend that renting desks at a loss was actually profitable.",
+            "start": 2004.9175741935483,
+            "end": 2014.7381501466275
+          },
+          {
+            "text": "They removed the \"bad\" costs (like rent and marketing) to show a \"good\" number.",
+            "start": 2015.2981829912023,
+            "end": 2020.098464516129
+          },
+          {
+            "text": "This is not accounting; it is fiction.",
+            "start": 2020.6784985337242,
+            "end": 2022.8386252199414
+          },
+          {
+            "text": "If a company pivots its entire business model to the latest buzzword (like adding \"Blockchain\" in 2017 or \"AI\" in 2024) without a working product, run.",
+            "start": 2023.4986639296187,
+            "end": 2034.2992973607038
+          },
+          {
+            "text": "They are selling you stock, not software.",
+            "start": 2034.7793255131965,
+            "end": 2037.0994615835777
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 2037.9195096774192,
+            "end": 2038.5395460410557
+          }
+        ]
+      }
+    ],
+    "12": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Perfectionist's Fallacy",
+            "start": 2051.9603008793306,
+            "end": 2053.400377158597
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The biggest lie you tell yourself is that you can predict the future.",
+            "start": 2054.460433308613,
+            "end": 2058.1606293039517
+          },
+          {
+            "text": "You build complex spreadsheets projecting revenue for the next ten years.",
+            "start": 2059.0606769784936,
+            "end": 2063.140893103083
+          },
+          {
+            "text": "You tell yourself, \"If they grow at 15% and margins stay at 20%, the stock is worth exactly $142.50.\"",
+            "start": 2064.0209397181907,
+            "end": 2071.061312639051
+          },
+          {
+            "text": "The friction here is arrogance.",
+            "start": 2074.3414863862695,
+            "end": 2076.121580675919
+          },
+          {
+            "text": "The world is chaotic.",
+            "start": 2077.1416347070663,
+            "end": 2078.4017014514247
+          },
+          {
+            "text": "Pandemics happen.",
+            "start": 2079.041735353321,
+            "end": 2080.001786206166
+          },
+          {
+            "text": "Wars start.",
+            "start": 2080.561815870325,
+            "end": 2081.441862485433
+          },
+          {
+            "text": "CEOs get fired.",
+            "start": 2082.0218932090265,
+            "end": 2083.2619588939506
+          },
+          {
+            "text": "If your investment only works when everything goes perfectly, you are not investing; you are walking a tightrope without a net.",
+            "start": 2084.142005509058,
+            "end": 2091.242381608221
+          },
+          {
+            "text": "One gust of wind, and you are dead.",
+            "start": 2092.2224335205,
+            "end": 2094.182537345058
+          },
+          {
+            "text": "Most people fail because they pay a price that demands perfection.",
+            "start": 2095.1625892573365,
+            "end": 2098.6627746583326
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Engineering Secret",
+            "start": 2099.6628276300457,
+            "end": 2100.7228837800612
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author boils down the secret of investment success into three words: Margin of Safety.",
+            "start": 2101.7229367517743,
+            "end": 2107.403237631105
+          },
+          {
+            "text": "To explain it, he leaves the world of finance and enters the world of engineering.",
+            "start": 2108.4432927216867,
+            "end": 2112.7035183811845
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He tells the story of building a bridge.",
+            "start": 2113.683570293463,
+            "end": 2115.5036667019813
+          },
+          {
+            "text": "If you need a bridge to support a 10,000-pound truck, do you build it to hold exactly 10,000 pounds?",
+            "start": 2116.423715435957,
+            "end": 2122.364030087933
+          },
+          {
+            "text": "No.",
+            "start": 2123.2640777624747,
+            "end": 2123.364083059646
+          },
+          {
+            "text": "If the truck is slightly heavier or the steel is slightly weaker, the bridge collapses.",
+            "start": 2124.0641201398453,
+            "end": 2128.3443468587775
+          },
+          {
+            "text": "You build it to hold 30,000 pounds.",
+            "start": 2129.2043924144505,
+            "end": 2131.284502595614
+          },
+          {
+            "text": "That extra 20,000 pounds of capacity is your \"Margin of Safety.\"",
+            "start": 2132.20455132959,
+            "end": 2135.944749443797
+          },
+          {
+            "text": "It is the buffer that allows for rust, bad weather, and human error.",
+            "start": 2136.864798177773,
+            "end": 2140.3449825193347
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In investing, this means if you calculate a business is worth $100 a share (its \"intrinsic value\"), you do not pay $100.",
+            "start": 2141.285032312745,
+            "end": 2148.005388282657
+          },
+          {
+            "text": "You pay $60.",
+            "start": 2149.385461383621,
+            "end": 2149.7254793940037
+          },
+          {
+            "text": "That $40 gap is your protection.",
+            "start": 2151.4255694459157,
+            "end": 2153.3856732704735
+          },
+          {
+            "text": "It means the company can have a bad year, the economy can tank, or your math can be wrong, and you still won't lose money.",
+            "start": 2154.2857209450153,
+            "end": 2160.386044072465
+          },
+          {
+            "text": "If things go right, you make a fortune.",
+            "start": 2161.2660906875726,
+            "end": 2163.026183917788
+          },
+          {
+            "text": "If things go wrong, you break even.",
+            "start": 2163.466207225342,
+            "end": 2165.0462909206485
+          },
+          {
+            "text": "You win by refusing to pay full price for value.",
+            "start": 2165.926337535756,
+            "end": 2168.7264858565527
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Buffer Against Chaos",
+            "start": 2169.5665303527917,
+            "end": 2170.906601334887
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern world, this concept is the only thing standing between you and total ruin.",
+            "start": 2171.2466193452697,
+            "end": 2176.6469053925202
+          },
+          {
+            "text": "We live in an era of \"Black Swans\"\u2014unpredictable events like COVID-19 or the 2008 Financial Crisis that shatter standard economic models.",
+            "start": 2177.3469424727195,
+            "end": 2186.7874425256914
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider the investors who bought \"safe\" tech stocks at 100 times earnings in 2021 because \"rates will stay low forever.\"",
+            "start": 2187.667489140799,
+            "end": 2195.007877953173
+          },
+          {
+            "text": "They had zero Margin of Safety.",
+            "start": 2195.6679129145036,
+            "end": 2197.267997669245
+          },
+          {
+            "text": "When rates rose, their portfolios fell 70%.",
+            "start": 2198.048038987181,
+            "end": 2200.068145990041
+          },
+          {
+            "text": "Contrast this with the investor who bought energy stocks when oil was negative in 2020.",
+            "start": 2201.728233923085,
+            "end": 2205.8084500476743
+          },
+          {
+            "text": "They bought assets for pennies on the dollar.",
+            "start": 2207.1885231486385,
+            "end": 2209.1886290920647
+          },
+          {
+            "text": "Even if the transition to green energy happens faster than expected, they bought so cheaply that they can't lose.",
+            "start": 2209.888666172264,
+            "end": 2215.3489553978175
+          },
+          {
+            "text": "In a world of algorithms and AI trading, the Margin of Safety is your humility.",
+            "start": 2216.148997775188,
+            "end": 2220.629235088463
+          },
+          {
+            "text": "It is the admission that you don't know what will happen next, so you demand a discount to compensate for your ignorance.",
+            "start": 2221.3692742875305,
+            "end": 2227.449596355546
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Protocol",
+            "start": 2228.1696344951797,
+            "end": 2228.7696662782073
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -294,6 +294,11 @@ struct TrackingContentViewWithBinding: View {
 struct AssetsTabContent: View {
     @ObservedObject var viewModel: TrackingViewModel
 
+    // Which custom header popup (portfolio switcher / sort+manage) is open.
+    // Hosted here, above the list, via an anchor-preference overlay so the
+    // popup floats over the scroll content and a tap anywhere dismisses it.
+    @State private var activeHeaderMenu: PortfolioHeaderMenu?
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             // Tight spacing between sections. Previously used negative padding
@@ -303,7 +308,7 @@ struct AssetsTabContent: View {
             LazyVStack(spacing: AppSpacing.md) {
                 // Active portfolio name (left) + "..." management menu (right).
                 // Replaces the old Sort button — sort now lives inside the menu.
-                PortfolioHeaderBar(viewModel: viewModel)
+                PortfolioHeaderBar(viewModel: viewModel, activeMenu: $activeHeaderMenu)
                     .padding(.top, AppSpacing.sm)
 
                 // Assets List Section — scoped to the active portfolio.
@@ -335,6 +340,18 @@ struct AssetsTabContent: View {
         }
         .refreshable {
             await viewModel.refresh()
+        }
+        // Floating header popups (portfolio switcher + sort/manage). Anchored
+        // to each trigger's bounds and drawn above the scroll content.
+        .overlayPreferenceValue(PortfolioHeaderMenuAnchorKey.self) { anchors in
+            GeometryReader { proxy in
+                PortfolioHeaderMenuOverlay(
+                    viewModel: viewModel,
+                    activeMenu: $activeHeaderMenu,
+                    anchors: anchors,
+                    proxy: proxy
+                )
+            }
         }
         // Auto-open the config sheet the first time the user enables the
         // section without any holding data — saves them a tap.

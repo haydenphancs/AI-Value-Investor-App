@@ -1,0 +1,37 @@
+<svg width="100%" viewBox="0 0 680 466" role="img" xmlns="http://www.w3.org/2000/svg"><title>How TickerDetailView and TickerReportView share the backend</title><desc>Both iOS screens converge on a shared cached-service and ticker_data_cache layer that feeds FMP; only the report path runs the agent pipeline and Gemini.</desc>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.t{font-size:14px;fill:#111827}.th{font-size:14px;font-weight:500;fill:#111827}.ts{font-size:12px;fill:#6b7280}
+.arr{stroke:#9ca3af;stroke-width:1.5;fill:none}
+.c-blue>rect,rect.c-blue{fill:#eff6ff;stroke:#2563eb}.c-blue>.th{fill:#1e40af}.c-blue>.t{fill:#1e3a8a}.c-blue>.ts{fill:#2563eb}
+.c-purple>rect,rect.c-purple{fill:#faf5ff;stroke:#9333ea}.c-purple>.th{fill:#6b21a8}.c-purple>.t{fill:#581c87}.c-purple>.ts{fill:#9333ea}
+.c-gray>rect,rect.c-gray{fill:#f9fafb;stroke:#6b7280}.c-gray>.th{fill:#1f2937}.c-gray>.t{fill:#1f2937}.c-gray>.ts{fill:#4b5563}
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<g class="c-blue"><rect x="56" y="40" width="276" height="44" rx="8"/><text class="th" x="194" y="60" text-anchor="middle">TickerDetailView</text><text class="ts" x="194" y="76" text-anchor="middle">stock detail screen</text></g>
+<g class="c-purple"><rect x="372" y="40" width="268" height="44" rx="8"/><text class="th" x="506" y="60" text-anchor="middle">TickerReportView</text><text class="ts" x="506" y="76" text-anchor="middle">AI report screen</text></g>
+
+<g class="c-blue"><rect x="56" y="112" width="276" height="52" rx="8"/><text class="th" x="194" y="134" text-anchor="middle">GET /stocks/{ticker}/* (×19)</text><text class="ts" x="194" y="152" text-anchor="middle">+ POST /prewarm-report</text></g>
+<g class="c-purple"><rect x="372" y="112" width="268" height="52" rx="8"/><text class="th" x="506" y="134" text-anchor="middle">POST /research/generate</text><text class="ts" x="506" y="152" text-anchor="middle">poll → GET /reports/{id}</text></g>
+
+<g class="c-purple"><rect x="372" y="192" width="268" height="56" rx="8"/><text class="th" x="506" y="214" text-anchor="middle">Report pipeline</text><text class="ts" x="506" y="232" text-anchor="middle">admission → semaphore(8) → agent</text></g>
+
+<g class="c-gray"><rect x="56" y="276" width="372" height="58" rx="8"/><text class="th" x="242" y="299" text-anchor="middle">Shared service + cache layer</text><text class="ts" x="242" y="317" text-anchor="middle">cached services + ticker_data_cache</text></g>
+<g class="c-gray"><rect x="448" y="276" width="192" height="58" rx="8"/><text class="th" x="544" y="300" text-anchor="middle">Gemini 2.5 Flash</text><text class="ts" x="544" y="318" text-anchor="middle">report path only</text></g>
+
+<g class="c-gray"><rect x="56" y="362" width="372" height="46" rx="8"/><text class="th" x="242" y="383" text-anchor="middle">FMP /stable</text><text class="ts" x="242" y="399" text-anchor="middle">20-conn pool · 750 RPM</text></g>
+
+<line class="arr" x1="194" y1="84" x2="194" y2="110" marker-end="url(#arrow)"/>
+<line class="arr" x1="506" y1="84" x2="506" y2="110" marker-end="url(#arrow)"/>
+<line class="arr" x1="194" y1="164" x2="194" y2="274" marker-end="url(#arrow)"/>
+<line class="arr" x1="506" y1="164" x2="506" y2="190" marker-end="url(#arrow)"/>
+<line class="arr" x1="500" y1="248" x2="412" y2="274" marker-end="url(#arrow)"/>
+<line class="arr" x1="560" y1="248" x2="552" y2="274" marker-end="url(#arrow)"/>
+<line class="arr" x1="242" y1="334" x2="242" y2="360" marker-end="url(#arrow)"/>
+<text class="ts" x="200" y="208" text-anchor="start">+ prewarm writes cache</text>
+
+<rect x="56" y="432" width="12" height="12" rx="2" class="c-blue"/><text class="ts" x="74" y="442" text-anchor="start">detail path</text>
+<rect x="216" y="432" width="12" height="12" rx="2" class="c-purple"/><text class="ts" x="234" y="442" text-anchor="start">report path</text>
+<rect x="376" y="432" width="12" height="12" rx="2" class="c-gray"/><text class="ts" x="394" y="442" text-anchor="start">shared / upstream</text>
+</svg>

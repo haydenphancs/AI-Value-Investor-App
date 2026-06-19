@@ -112,6 +112,8 @@ enum APIEndpoint: Sendable {
     case setPortfolioTickers(id: String, tickers: [String])
     case setPortfolioHoldings(id: String, items: [HoldingUpdateItem])
     case reorderPortfolios(ids: [String])
+    /// Server-computed diversification health score for one portfolio.
+    case getPortfolioInsightsForPortfolio(id: String)
 
     // MARK: - Research
     case generateResearch(stockId: String, persona: String)
@@ -310,6 +312,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/portfolios/\(id)/holdings"
         case .reorderPortfolios:
             return "/api/v1/portfolios/reorder"
+        case .getPortfolioInsightsForPortfolio(let id):
+            return "/api/v1/portfolios/\(id)/insights"
 
         // Research
         case .generateResearch:

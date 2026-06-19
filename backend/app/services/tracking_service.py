@@ -209,8 +209,12 @@ class TrackingService:
                         previous_close=round(float(prev_close_raw), 2) if prev_close_raw else None,
                         sparkline_data=sparkline,
                         logo_url=item.get("logo_url"),
-                        sector=item.get("sector") or quote.get("sector"),
-                        country=item.get("country") or quote.get("country"),
+                        # Sector/country live on the watchlist row (seeded on
+                        # holdings-add and lazy-enriched by PortfolioInsights).
+                        # The FMP *quote* endpoint doesn't return these, so the
+                        # old `quote.get(...)` fallback was always null.
+                        sector=item.get("sector"),
+                        country=item.get("country"),
                         market_cap=float(market_cap_raw) if market_cap_raw else None,
                         shares=float(shares) if shares is not None else None,
                         market_value=float(stored_value) if stored_value is not None else None,

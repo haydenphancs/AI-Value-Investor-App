@@ -98,9 +98,13 @@ async def add_holding(
 
     ticker = request.ticker.upper()
 
-    # Enrich with FMP profile + current price (only when we need to seed
-    # market_value from shares).
+    # Enrich with FMP profile + current price. The profile also seeds the
+    # diversification signals (industry / market_cap / beta) so Portfolio
+    # Insights has them without a second lazy fetch.
     sector = None
+    industry = None
+    market_cap: Optional[float] = None
+    beta: Optional[float] = None
     country = "US"
     company_name = request.company_name or ticker
     current_price: Optional[float] = None
@@ -110,7 +114,19 @@ async def add_holding(
         if profile:
             company_name = request.company_name or profile.get("companyName", ticker)
             sector = profile.get("sector")
+            industry = profile.get("industry")
             country = profile.get("country", "US")
+            mc = profile.get("marketCap") or profile.get("mktCap")
+            if mc:
+                try:
+                    market_cap = float(mc)
+                except (TypeError, ValueError):
+                    market_cap = None
+            if profile.get("beta") is not None:
+                try:
+                    beta = float(profile["beta"])
+                except (TypeError, ValueError):
+                    beta = None
         if request.shares is not None and request.market_value is None:
             quote = await fmp.get_stock_price_quote(ticker)
             if quote and quote.get("price"):
@@ -135,6 +151,14 @@ async def add_holding(
         "asset_type": request.asset_type or "Stock",
         "country": country,
     }
+    # Only persist enrichment we actually resolved, so a failed/partial profile
+    # fetch doesn't null out values already on the row during the upsert.
+    if industry is not None:
+        data["industry"] = industry
+    if market_cap is not None:
+        data["market_cap"] = market_cap
+    if beta is not None:
+        data["beta"] = beta
 
     result = (
         supabase.table("watchlist_items")

@@ -11,7 +11,6 @@ struct MoneyMovesSection: View {
     let concepts: [MoneyMove]
     var onSeeAll: (() -> Void)?
     var onConceptTap: ((MoneyMove) -> Void)?
-    var onBookmark: ((MoneyMove) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -45,8 +44,7 @@ struct MoneyMovesSection: View {
                     ForEach(concepts) { moneyMove in
                         MoneyMoveCard(
                             moneyMove: moneyMove,
-                            onTap: { onConceptTap?(moneyMove) },
-                            onBookmark: { onBookmark?(moneyMove) }
+                            onTap: { onConceptTap?(moneyMove) }
                         )
                     }
                 }

@@ -37,6 +37,13 @@ class LearnViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildJourney() }
             .store(in: &cancellables)
+
+        // Completing a Money Move (here, from its card, or by finishing its narration) re-sorts
+        // the row so unread moves stay on the left and completed ones slide to the end.
+        MoneyMovesProgressStore.shared.$completed
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.resortMoneyMoves() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -145,7 +152,19 @@ class LearnViewModel: ObservableObject {
         var cards = MoneyMovesContentStore.shared.cards()
         let authoredTitles = Set(cards.map { $0.title })
         cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
-        moneyMoves = cards
+        moneyMoves = sortedIncompleteFirst(cards)
+    }
+
+    /// Re-sort the existing cards (preserving identity) so a just-completed move slides to the end.
+    private func resortMoneyMoves() {
+        moneyMoves = sortedIncompleteFirst(moneyMoves)
+    }
+
+    /// Unread moves on the left, completed ones at the end (stable within each group).
+    private func sortedIncompleteFirst(_ cards: [MoneyMove]) -> [MoneyMove] {
+        let store = MoneyMovesProgressStore.shared
+        return cards.filter { !store.isCompleted(slug: $0.slug) }
+            + cards.filter { store.isCompleted(slug: $0.slug) }
     }
 
     private func loadBooks() {
@@ -166,20 +185,6 @@ class LearnViewModel: ObservableObject {
     // MARK: - Actions
     func selectTab(_ tab: LearnTab) {
         selectedTab = tab
-    }
-
-    func toggleBookmark(for moneyMove: MoneyMove) {
-        if let index = moneyMoves.firstIndex(where: { $0.id == moneyMove.id }) {
-            let updatedMoneyMove = MoneyMove(
-                title: moneyMove.title,
-                subtitle: moneyMove.subtitle,
-                category: moneyMove.category,
-                estimatedMinutes: moneyMove.estimatedMinutes,
-                learnerCount: moneyMove.learnerCount,
-                isBookmarked: !moneyMove.isBookmarked
-            )
-            moneyMoves[index] = updatedMoneyMove
-        }
     }
 
     func continueJourney() {

@@ -34,6 +34,19 @@ struct SmartMoneyFlowChart: View {
     /// tap elsewhere in the section dismisses it (mirrors the Capital
     /// Allocation chart). Defaults to a constant when no popup is wanted.
     @Binding var selectedMonth: String?
+    /// Vertical gap inserted between the price chart and the volume chart so the
+    /// price axis's bottom label (e.g. "$150") and the volume axis's top label
+    /// (e.g. "200K") don't crowd at the otherwise zero-spacing boundary.
+    /// Defaults to 0 → the Ticker Report's insider chart (and any other caller)
+    /// renders EXACTLY as before; only the Smart Money tab opts into a gap.
+    let priceVolumeGap: CGFloat
+    /// When true, the volume y-axis uses an EXPLICIT symmetric 5-label scale
+    /// (±top, ±top/2, 0) with the top label parked at a fixed 80% of the domain,
+    /// so every tab (insider / institutions / congress) shows the SAME clean
+    /// headroom above the top label regardless of magnitude (±40K vs ±200K vs
+    /// ±100M). Defaults false → the auto-axis (and the Ticker Report) are
+    /// unchanged. Only the Smart Money tab opts in.
+    let uniformVolumeAxis: Bool
 
     init(
         priceData: [StockPriceDataPoint],
@@ -42,7 +55,9 @@ struct SmartMoneyFlowChart: View {
         showPriceChart: Bool = true,
         showVolumeYAxis: Bool = true,
         monthlyCounts: [String: (buy: Int, sell: Int)]? = nil,
-        selectedMonth: Binding<String?> = .constant(nil)
+        selectedMonth: Binding<String?> = .constant(nil),
+        priceVolumeGap: CGFloat = 0,
+        uniformVolumeAxis: Bool = false
     ) {
         self.priceData = priceData
         self.dailyPrices = dailyPrices
@@ -51,6 +66,8 @@ struct SmartMoneyFlowChart: View {
         self.showVolumeYAxis = showVolumeYAxis
         self.monthlyCounts = monthlyCounts
         self._selectedMonth = selectedMonth
+        self.priceVolumeGap = priceVolumeGap
+        self.uniformVolumeAxis = uniformVolumeAxis
     }
 
     // Chart configuration
@@ -117,8 +134,11 @@ struct SmartMoneyFlowChart: View {
                 }
             }
 
-            // Bottom: Buy/Sell Volume Bar Chart
+            // Bottom: Buy/Sell Volume Bar Chart. The gap (when the caller opts
+            // in) separates the volume axis's top label from the price axis's
+            // bottom label — only meaningful when the price chart is above it.
             volumeChart
+                .padding(.top, showPriceChart ? priceVolumeGap : 0)
         }
     }
 
@@ -310,21 +330,36 @@ struct SmartMoneyFlowChart: View {
         }
         .chartYAxis {
             if showVolumeYAxis {
-                AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine()
-                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
-                    AxisValueLabel {
-                        if let doubleValue = value.as(Double.self) {
-                            Text(formatVolumeValue(doubleValue))
-                                // size 10 to match the Capital Allocation chart axis.
-                                .font(.system(size: 11))
-                                .foregroundStyle(AppColors.textMuted)
+                if uniformVolumeAxis {
+                    // Explicit symmetric labels → identical across all tabs.
+                    AxisMarks(position: .trailing, values: explicitVolumeAxisValues) { value in
+                        AxisGridLine()
+                            .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                        AxisValueLabel {
+                            if let doubleValue = value.as(Double.self) {
+                                Text(formatVolumeValue(doubleValue))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(AppColors.textMuted)
+                            }
+                        }
+                    }
+                } else {
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
+                        AxisGridLine()
+                            .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                        AxisValueLabel {
+                            if let doubleValue = value.as(Double.self) {
+                                Text(formatVolumeValue(doubleValue))
+                                    // size 10 to match the Capital Allocation chart axis.
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(AppColors.textMuted)
+                            }
                         }
                     }
                 }
             }
         }
-        .chartYScale(domain: -yScaleMax...yScaleMax)
+        .chartYScale(domain: -volumeDomainMax...volumeDomainMax)
         .chartPlotStyle { plotArea in
             plotArea.background(Color.clear)
         }
@@ -474,6 +509,43 @@ struct SmartMoneyFlowChart: View {
     /// unchanged, so normal tickers render exactly as before.
     private var yScaleMax: Double {
         hasClippedBar ? axisMax * 1.30 : axisMax
+    }
+
+    // ── Uniform volume axis (Smart Money tab) ───────────────────────────
+    // The auto-axis lands the top label at a magnitude-dependent height, so
+    // ±40K (congress), ±200K (insider) and ±100M (institutions) each crowd the
+    // price axis differently. These three keep the axis IDENTICAL across tabs:
+    // explicit ±top / ±top/2 / 0 labels, top parked at 80% of the domain.
+
+    /// Domain half-extent for the volume chart. Uniform mode parks the top label
+    /// at 80% (consistent headroom); otherwise the legacy outlier-aware scale.
+    private var volumeDomainMax: Double {
+        uniformVolumeAxis ? volumeTopLabel / 0.80 : yScaleMax
+    }
+
+    /// Nice, round top label (with a clean half) ≈ the outlier-capped bar max.
+    /// NB: volumes are in MILLION-share units, so a normal magnitude can be a
+    /// small fraction (e.g. 0.04 == 40K shares). niceStep already guards x > 0,
+    /// so there must be NO integer floor here — a `max(…, 1)` would clamp every
+    /// shares-scale tab up to a 2M axis and squash the bars to slivers.
+    private var volumeTopLabel: Double {
+        niceStep(axisMax / 2) * 2
+    }
+
+    /// Explicit symmetric labels — same five-tick shape as the congress axis.
+    private var explicitVolumeAxisValues: [Double] {
+        let t = volumeTopLabel
+        return [-t, -t / 2, 0, t / 2, t]
+    }
+
+    /// Nearest "nice" number (1 / 2 / 5 × 10ⁿ) to `x`.
+    private func niceStep(_ x: Double) -> Double {
+        guard x > 0, x.isFinite else { return 1 }
+        let exponent = floor(log10(x))
+        let base = pow(10, exponent)
+        let fraction = x / base   // 1..<10
+        let nice: Double = fraction < 1.5 ? 1 : (fraction < 3.5 ? 2 : (fraction < 7.5 ? 5 : 10))
+        return nice * base
     }
 
     // A month with real but tiny volume — e.g. a single 480-share insider buy

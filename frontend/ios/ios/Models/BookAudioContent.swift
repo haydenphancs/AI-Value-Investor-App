@@ -35,6 +35,11 @@ extension BookAudioInfo {
             totalSeconds: 2235,
             coreStartSeconds: [1: 0, 2: 165, 3: 357, 4: 560, 5: 757, 6: 959, 7: 1137, 8: 1305, 9: 1494, 10: 1676, 11: 1876, 12: 2046]
         ),
+        3: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/3_the-psychology-of-money.m4a",
+            totalSeconds: 2845,
+            coreStartSeconds: [1: 0, 2: 235, 3: 454, 4: 660, 5: 863, 6: 1148, 7: 1407, 8: 1645, 9: 1910, 10: 2117, 11: 2328, 12: 2543]
+        ),
         4: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a",
             totalSeconds: 1987,
@@ -42,8 +47,8 @@ extension BookAudioInfo {
         ),
         8: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a",
-            totalSeconds: 1215,
-            coreStartSeconds: [1: 0, 2: 352, 3: 544, 4: 726, 5: 892, 6: 1056]
+            totalSeconds: 1076,
+            coreStartSeconds: [1: 0, 2: 155, 3: 360, 4: 554, 5: 731, 6: 906]
         ),
     ]
 }

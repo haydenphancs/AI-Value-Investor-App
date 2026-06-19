@@ -82,7 +82,7 @@ DEFAULT_BOOK = {"voice": "Achird", "wpm": TARGET_WPM,
 BOOK_VOICES: dict[int, dict] = {
     1:  {**DEFAULT_BOOK},  # Rich Dad Poor Dad — Kiyosaki (already shipped on Achird)
     2:  {"voice": "Iapetus",       "wpm": 150, "style": "Narrate as Benjamin Graham, an erudite, classically-educated finance professor — precise, measured and dignified, with dry wit and calm authority. "},
-    3:  {"voice": "Puck",          "wpm": 172, "style": "Narrate as Morgan Housel, a calm, thoughtful modern essayist — reflective and intimate, with gentle, understated pacing. "},
+    3:  {"voice": "Puck",          "wpm": 172, "style": "Read this as a calm, thoughtful modern essayist — reflective, intimate and understated, with gentle pacing. "},  # matches the 4_housel_Puck audition (no person-name imitation, which pulled Puck off-character)
     4:  {"voice": "Enceladus",     "wpm": 170, "style": "Narrate as Peter Lynch, a seasoned, sharp stock-picker — engaging and lively, but in a mature, refined older man's voice; not folksy, not regional. "},
     5:  {"voice": "Schedar",       "wpm": 160, "style": "Narrate as Philip Fisher, a meticulous, reserved, scholarly analyst — even, careful, methodical and precise, slightly formal. "},
     6:  {"voice": "Alnilam",       "wpm": 160, "style": "Narrate as John Bogle, a principled elder statesman of investing — steady, firm, full of conviction, plain and direct. "},

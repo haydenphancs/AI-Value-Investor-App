@@ -8,33 +8,33 @@
         "sentences": [
           {
             "text": "Here is the friction: most investors treat the stock market like a casino and their shares like betting chips.",
-            "start": 4.680133007446144,
-            "end": 9.480269425339625
+            "start": 10.601365451500708,
+            "end": 17.442246554167202
           },
           {
             "text": "They obsess over the flashing numbers (the price), completely detached from the reality of what those numbers represent.",
-            "start": 9.520270562155403,
-            "end": 80.20227931563691
+            "start": 18.002318691227618,
+            "end": 24.54316114904032
           },
           {
             "text": "When the \"chip\" value drops, they panic and fold.",
-            "start": 80.20227931563691,
-            "end": 96.7827505257773
+            "start": 25.163241015071492,
+            "end": 28.10361973463867
           },
           {
             "text": "This is the \"Renter\u2019s Mentality\"\u2014you are just renting a position on a chart, hoping to pass it to a greater fool for a profit.",
-            "start": 96.86275279940887,
-            "end": 112.04318422099699
+            "start": 28.80370990596419,
+            "end": 36.104650264073165
           },
           {
             "text": "This detachment is the single greatest cause of wealth destruction.",
-            "start": 112.06318478940489,
-            "end": 114.96326720854887
+            "start": 36.84474558804586,
+            "end": 40.72524539482159
           },
           {
             "text": "You cannot weather a storm if you don't even know what house you are living in.",
-            "start": 114.96326720854887,
-            "end": 120.04341158415279
+            "start": 41.34532526085276,
+            "end": 44.9257864227747
           }
         ]
       },
@@ -43,13 +43,13 @@
         "sentences": [
           {
             "text": "The \"Silent Partner\" Letter Buffett flips this dynamic by ignoring the stock market entirely.",
-            "start": 120.52342522594215,
-            "end": 148.56422213380324
+            "start": 46.84603374983898,
+            "end": 52.86680922323844
           },
           {
             "text": "In his foundational Owner-Related Business Principles, he tells a simple but radical story: imagine Berkshire Hathaway isn't a publicly traded corporation, but a private family partnership.",
-            "start": 148.74422724947425,
-            "end": 232.0665952367419
+            "start": 53.48688908926961,
+            "end": 65.52844003606853
           }
         ]
       },
@@ -58,28 +58,38 @@
         "sentences": [
           {
             "text": "He posits that he is the managing partner, and you are the silent partner.",
-            "start": 232.12659694196557,
-            "end": 247.38703063718526
+            "start": 66.7285946154837,
+            "end": 70.76911503284812
           },
           {
             "text": "You aren't a \"shareholder\"\u2014a faceless source of capital to be exploited\u2014you are a co-owner.",
-            "start": 247.38703063718526,
-            "end": 269.6676638435742
+            "start": 71.42920005152646,
+            "end": 76.84989823521835
           },
           {
             "text": "Buffett famously notes that he treats his investors as if they were his own sisters and aunts.",
-            "start": 269.70766498038995,
-            "end": 279.88795430000573
+            "start": 77.58999355919103,
+            "end": 82.33060414788098
           },
           {
             "text": "An owner of a private farm doesn't check the price of their land every day; they check the weather and the crop yield.",
-            "start": 279.88795430000573,
-            "end": 285.28810777013587
+            "start": 83.01069174288291,
+            "end": 88.41138735025119
           },
           {
             "text": "Buffett teaches that if you wouldn't be comfortable owning a stock if the market closed down for five years, you shouldn't own it for five minutes.",
-            "start": 285.34810947535954,
-            "end": 321.70914284090264
+            "start": 89.21149040319465,
+            "end": 96.21239211644982
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Gamification Trap",
+            "start": 96.91248228777535,
+            "end": 98.59269869895658
           }
         ]
       },
@@ -87,19 +97,19 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The Gamification Trap In the modern era, \"Adopting the Owner's Mindset\" is harder\u2014and more profitable\u2014than ever.",
-            "start": 321.70914284090264,
-            "end": 326.0292656170068
+            "text": "In the modern era, \"Adopting the Owner's Mindset\" is harder\u2014and more profitable\u2014than ever.",
+            "start": 99.23278114131135,
+            "end": 105.31356434368156
           },
           {
             "text": "Financial apps have weaponized the \"Renter's Mentality\" through gamification.",
-            "start": 326.42927698516456,
-            "end": 328.8493457625192
+            "start": 106.03365709133067,
+            "end": 110.67425479840267
           },
           {
             "text": "When you buy a stock on a modern app and see confetti explode, or panic-sell because a crypto coin dropped 15% in an hour, you are falling into the trap Buffett warned against.",
-            "start": 329.2293565622691,
-            "end": 334.9295185585176
+            "start": 111.27433208811027,
+            "end": 122.9958418137318
           }
         ]
       },
@@ -108,45 +118,55 @@
         "sentences": [
           {
             "text": "Apply the \"Owner's Mindset\" to the AI boom.",
-            "start": 335.48953447393853,
-            "end": 336.8295725572671
+            "start": 124.05597835888187,
+            "end": 126.7963313152132
           },
           {
             "text": "The \"Renter\" buys NVIDIA because the line is going up.",
-            "start": 337.1695822202012,
-            "end": 338.7296265560166
+            "start": 127.45641633389154,
+            "end": 130.79684657993045
           },
           {
             "text": "The \"Owner\" buys it because they understand the moat of the CUDA software ecosystem and want to own a proportional share of that cash flow for the next decade.",
-            "start": 339.00963451372706,
-            "end": 343.5697641107259
+            "start": 131.35691871699086,
+            "end": 140.7381270127528
           },
           {
             "text": "If you are stressing over quarterly earnings calls, you are likely speculating, not owning.",
-            "start": 343.9297743420679,
-            "end": 346.4898470982778
+            "start": 141.51822748937266,
+            "end": 146.9989334020353
           }
         ]
       }
     ],
     "2": [
       {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Profit Mirage",
+            "start": 160.2402420693021,
+            "end": 161.38029770619815
+          }
+        ]
+      },
+      {
         "isHeading": false,
         "sentences": [
           {
-            "text": "The Profit Mirage Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact.",
-            "start": 356.09043903454017,
-            "end": 363.7312338743238
+            "text": "Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact.",
+            "start": 162.5203533430942,
+            "end": 169.2406813079551
           },
           {
             "text": "Most aspiring investors glance at the bottom line of an Income Statement\u2014Net Income\u2014and assume that\u2019s how much money the business actually made.",
-            "start": 364.411304619226,
-            "end": 371.7720703287557
+            "start": 170.1807271839922,
+            "end": 177.58108833577356
           },
           {
             "text": "They are wrong.",
-            "start": 372.23211818560134,
-            "end": 372.7521722846442
+            "start": 178.08111273792093,
+            "end": 178.8011478770132
           }
         ]
       },
@@ -155,23 +175,23 @@
         "sentences": [
           {
             "text": "GAAP (Generally Accepted Accounting Principles) is a set of rules designed to make companies comparable, not necessarily truthful about their economic reality.",
-            "start": 373.47224719101126,
-            "end": 381.5330857261756
+            "start": 180.0212074182528,
+            "end": 188.6616290873597
           },
           {
             "text": "You can follow every accounting rule perfectly and still go bankrupt while reporting a \"profit.\"",
-            "start": 382.2131564710778,
-            "end": 387.0136558468581
+            "start": 189.561673011225,
+            "end": 194.5219150805271
           },
           {
             "text": "If you are analyzing a business based solely on its Price-to-Earnings (P/E) ratio, you are effectively driving a car by looking only at the speedometer while ignoring the fuel gauge.",
-            "start": 387.7137286724927,
-            "end": 396.09460049937576
+            "start": 195.58196681307956,
+            "end": 204.90242166910687
           },
           {
             "text": "You know how fast you're going, but not when the engine is about to die.",
-            "start": 396.5946525176862,
-            "end": 399.6349687890137
+            "start": 205.50245095168376,
+            "end": 208.64260419716936
           }
         ]
       },
@@ -180,8 +200,8 @@
         "sentences": [
           {
             "text": "The \"Owner Earnings\" Revelation",
-            "start": 400.2950374531835,
-            "end": 401.67518102372037
+            "start": 209.7626588579795,
+            "end": 211.34273596876525
           }
         ]
       },
@@ -190,33 +210,33 @@
         "sentences": [
           {
             "text": "Buffett solved this by inventing his own metric: \"Owner Earnings.\"",
-            "start": 402.3952559300874,
-            "end": 405.81561173533083
+            "start": 212.4627906295754,
+            "end": 216.0629663250366
           },
           {
             "text": "In his letters, he describes a hypothetical business that reports massive profits but requires new machinery every year just to stay open.",
-            "start": 406.395672076571,
-            "end": 413.1763774448606
+            "start": 217.16302000976086,
+            "end": 224.54338018545633
           },
           {
             "text": "To the accountant, buying that machine is just capital expenditure (CapEx) that gets depreciated slowly over years.",
-            "start": 413.7564377861007,
-            "end": 419.61704744069914
+            "start": 225.60343191800877,
+            "end": 231.54372181551975
           },
           {
             "text": "To the owner, that money is gone.",
-            "start": 420.0570932168123,
-            "end": 421.6572596754057
+            "start": 232.18375305026842,
+            "end": 233.96383992191312
           },
           {
             "text": "It left the bank account.",
-            "start": 422.09730545151893,
-            "end": 423.0374032459426
+            "start": 234.32385749145925,
+            "end": 235.32390629575403
           },
           {
             "text": "It cannot be used to pay dividends or expand.",
-            "start": 423.4374448605909,
-            "end": 425.5776674989596
+            "start": 235.64392191312834,
+            "end": 237.90403221083454
           }
         ]
       },
@@ -225,18 +245,28 @@
         "sentences": [
           {
             "text": "Buffett\u2019s formula is ruthless: Take reported earnings, add back depreciation (a non-cash charge), but then subtract the capital expenditures required to maintain the company's competitive position.",
-            "start": 426.2577382438618,
-            "end": 436.3587890137328
+            "start": 239.0040858955588,
+            "end": 249.98462176671546
           },
           {
             "text": "This reveals the \"distributable cash\"\u2014the actual money the owner can take out of the business without hurting it.",
-            "start": 436.9988555971702,
-            "end": 442.1793945068664
+            "start": 251.1446783796974,
+            "end": 256.6649477794046
           },
           {
             "text": "He teaches us to look for companies that don't just report accounting profits, but generate \"free cash flow\"\u2014businesses that don't require heavy reinvestment just to survive.",
-            "start": 442.75945484810654,
-            "end": 450.9003017062006
+            "start": 257.74500048804293,
+            "end": 266.5854319180088
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Adjusted EBITDA\" Trap",
+            "start": 266.9854514397267,
+            "end": 269.34556661786235
           }
         ]
       },
@@ -244,14 +274,14 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The \"Adjusted EBITDA\" Trap In today\u2019s tech-dominated market, this distortion is even worse.",
-            "start": 451.3803516437786,
-            "end": 458.7611194340408
+            "text": "In today\u2019s tech-dominated market, this distortion is even worse.",
+            "start": 270.2256095656418,
+            "end": 274.34581063933626
           },
           {
             "text": "We live in the era of \"Adjusted EBITDA\"\u2014a metric Charlie Munger famously called \"bullshit earnings.\"",
-            "start": 459.30117561381604,
-            "end": 465.6418352059925
+            "start": 274.9258389458272,
+            "end": 282.00618448023425
           }
         ]
       },
@@ -260,23 +290,23 @@
         "sentences": [
           {
             "text": "Modern tech companies (SaaS, AI, Gig Economy) often report massive losses but claim they are profitable on an \"Adjusted\" basis.",
-            "start": 467.48202663337497,
-            "end": 475.48285892634203
+            "start": 282.8462254758419,
+            "end": 291.4266442166911
           },
           {
             "text": "They do this by excluding things like Stock-Based Compensation (paying employees in stock instead of cash).",
-            "start": 476.02291510611735,
-            "end": 481.463481065335
+            "start": 292.00667252318203,
+            "end": 297.5869448511469
           },
           {
             "text": "They pretend this isn't a real expense.",
-            "start": 481.943531002913,
-            "end": 483.88373283395754
+            "start": 298.16697315763787,
+            "end": 300.1870717423133
           },
           {
             "text": "But if you are an owner, it is a real expense\u2014it dilutes your ownership stake.",
-            "start": 484.36378277153557,
-            "end": 488.1441760299625
+            "start": 300.6670951683748,
+            "end": 304.8873011224988
           }
         ]
       },
@@ -285,18 +315,18 @@
         "sentences": [
           {
             "text": "Consider the recent AI boom.",
-            "start": 489.9443632958802,
-            "end": 491.52452767374115
+            "start": 305.6673391898487,
+            "end": 307.3074192288922
           },
           {
             "text": "A company might show high EBITDA, but if they have to spend billions every year on new GPU clusters just to keep their model relevant, their Owner Earnings might be negative.",
-            "start": 492.0045776113192,
-            "end": 500.6854806491885
+            "start": 307.8874475353831,
+            "end": 317.28790629575406
           },
           {
             "text": "They are running on a treadmill, running faster and faster just to stay in the same place.",
-            "start": 501.1455285060341,
-            "end": 505.5259841864336
+            "start": 317.7279277696437,
+            "end": 322.3081512933138
           }
         ]
       },
@@ -305,13 +335,13 @@
         "sentences": [
           {
             "text": "The Capex Check: Open the Cash Flow Statement and compare \"Capital Expenditures\" (under Investing) to \"Depreciation\" (under Operating).",
-            "start": 507.34617353308363,
-            "end": 514.5869267582189
+            "start": 323.1281913128355,
+            "end": 331.1485827232797
           },
           {
             "text": "If Capex is consistently higher than Depreciation, the company is burning cash just to stay alive rather than generating wealth for you\u2014proceed with extreme caution.",
-            "start": 515.0869787765293,
-            "end": 523.6678714107366
+            "start": 331.6886090775988,
+            "end": 341.1490707662274
           }
         ]
       },
@@ -320,50 +350,60 @@
         "sentences": [
           {
             "text": "The \"Real\" P/E: Ignore the standard P/E ratio found on finance sites.",
-            "start": 525.5680690803163,
-            "end": 529.8085101955888
+            "start": 341.96911078574914,
+            "end": 346.94935383113716
           },
           {
             "text": "Calculate \"Price to Free Cash Flow\" by dividing Market Cap by (Operating Cash Flow minus Capital Expenditures) to see the true multiple you are paying for the cash the business actually generates.",
-            "start": 530.248555971702,
-            "end": 539.7895484810654
+            "start": 347.42937725719867,
+            "end": 357.5298701805759
           }
         ]
       }
     ],
     "3": [
       {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Good Product\" Fallacy",
+            "start": 367.3307372986369,
+            "end": 368.9109004543577
+          }
+        ]
+      },
+      {
         "isHeading": false,
         "sentences": [
           {
-            "text": "The \"Good Product\" Fallacy Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growing market.",
-            "start": 550.370686695279,
-            "end": 559.6517079344118
+            "text": "Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growing market.",
+            "start": 369.67097893432464,
+            "end": 377.6918071045023
           },
           {
             "text": "They see a revolutionary technology or a popular brand and assume the stock is a winner.",
-            "start": 560.3917893694288,
-            "end": 565.412341806977
+            "start": 378.27186699710865,
+            "end": 383.8124390747625
           },
           {
             "text": "This is the \"Good Product Fallacy.\"",
-            "start": 566.1924276438868,
-            "end": 567.7926037195995
+            "start": 384.4925092936803,
+            "end": 386.59272614622057
           },
           {
             "text": "History is littered with companies that changed the world but went bankrupt because they couldn't protect their profits.",
-            "start": 568.6126939584021,
-            "end": 574.4133322328602
+            "start": 387.33280256092524,
+            "end": 393.99349029326726
           },
           {
             "text": "If you are buying a stock just because \"everyone is using it,\" you are missing the most critical variable: durability.",
-            "start": 575.2334224716628,
-            "end": 581.8541509849235
+            "start": 394.673560512185,
+            "end": 402.39435770342834
           },
           {
             "text": "A castle with no moat is just a pile of gold waiting to be looted by competitors.",
-            "start": 582.714245625619,
-            "end": 587.1747364366678
+            "start": 403.0944299876084,
+            "end": 408.334971086328
           }
         ]
       },
@@ -372,8 +412,8 @@
         "sentences": [
           {
             "text": "The Castle and the Knight",
-            "start": 588.5748905029162,
-            "end": 589.7150159568614
+            "start": 409.43508467575384,
+            "end": 410.8152271788517
           }
         ]
       },
@@ -382,23 +422,23 @@
         "sentences": [
           {
             "text": "Buffett solves this with his most famous metaphor: the \"Economic Moat.\"",
-            "start": 590.8351392098602,
-            "end": 594.7355683944096
+            "start": 411.9153407682776,
+            "end": 416.2757909954564
           },
           {
             "text": "He asks you to imagine a business as a magnificent castle.",
-            "start": 595.6756718388907,
-            "end": 598.8160173874766
+            "start": 416.93585914911193,
+            "end": 420.47622470053693
           },
           {
             "text": "Inside the castle is the \"Gold\"\u2014the high returns on invested capital.",
-            "start": 599.6361076262793,
-            "end": 603.3365148013646
+            "start": 421.13629285419245,
+            "end": 425.49674308137133
           },
           {
             "text": "But every day, a thousand knights (competitors) ride up to the castle walls, trying to steal that gold.",
-            "start": 604.096598437328,
-            "end": 610.2972807307142
+            "start": 426.0568009087154,
+            "end": 431.6773812474184
           }
         ]
       },
@@ -407,48 +447,58 @@
         "sentences": [
           {
             "text": "He distinguishes between two types of businesses: \"Franchises\" and \"Commodities.\"",
-            "start": 611.3573973808737,
-            "end": 615.797885990976
+            "start": 432.6974865757951,
+            "end": 437.59799256505573
           },
           {
             "text": "A Franchise is a castle with a wide, crocodile-filled moat.",
-            "start": 616.5979740288324,
-            "end": 620.0183503906679
+            "start": 438.15805039239984,
+            "end": 442.09845724907063
           },
           {
             "text": "It has pricing power\u2014it can raise prices, and customers still pay.",
-            "start": 620.6184164190602,
-            "end": 624.3788301969847
+            "start": 442.61851094589014,
+            "end": 446.81894465097065
           },
           {
             "text": "Think of See's Candies, a company Buffett bought.",
-            "start": 625.2389248376802,
-            "end": 627.7592021569275
+            "start": 447.49901486988847,
+            "end": 450.0992833539859
           },
           {
             "text": "They could raise the price of a box of chocolates every single year, and people would still buy it for Valentine's Day because no one wants to give their spouse \"discount\" chocolate.",
-            "start": 628.5392879938373,
-            "end": 636.9002079894354
+            "start": 450.65934118133003,
+            "end": 460.38034489880215
           },
           {
             "text": "A Commodity business, on the other hand, has no moat.",
-            "start": 637.8003070320237,
-            "end": 640.5406085616816
+            "start": 461.04041305245767,
+            "end": 463.80069805865344
           },
           {
             "text": "It must compete solely on price.",
-            "start": 641.0606657862882,
-            "end": 642.9408726752504
+            "start": 464.30074969021064,
+            "end": 466.4209686080132
           },
           {
             "text": "If it raises prices by a penny, customers leave.",
-            "start": 643.6009453064818,
-            "end": 646.221233630461
+            "start": 466.961024370095,
+            "end": 469.7613135068153
           },
           {
             "text": "Buffett teaches that it is far better to buy a wonderful business (Franchise) at a fair price than a fair business (Commodity) at a wonderful price.",
-            "start": 647.2213436777814,
-            "end": 655.8422922856828
+            "start": 470.42138166047084,
+            "end": 479.7423440726972
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Network Effect\" Moat",
+            "start": 480.3624080958282,
+            "end": 481.8825650557621
           }
         ]
       },
@@ -456,14 +506,14 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The \"Network Effect\" Moat In the modern economy, moats have evolved from physical brands to digital networks.",
-            "start": 656.3023429074502,
-            "end": 663.4031242434246
+            "text": "In the modern economy, moats have evolved from physical brands to digital networks.",
+            "start": 482.74265386204047,
+            "end": 488.4832465923172
           },
           {
             "text": "The most powerful moat today is the \"Network Effect\"\u2014where a product becomes more valuable as more people use it.",
-            "start": 664.0431946737096,
-            "end": 670.7239297898096
+            "start": 489.1433147459727,
+            "end": 496.4040644361834
           }
         ]
       },
@@ -472,43 +522,43 @@
         "sentences": [
           {
             "text": "Consider the \"AI War.\"",
-            "start": 671.5640222295588,
-            "end": 673.1441961043249
+            "start": 497.4041676992978,
+            "end": 498.944326724494
           },
           {
             "text": "A standalone AI wrapper app has a weak moat; anyone can copy the code and undercut the price.",
-            "start": 673.8242709365027,
-            "end": 679.784926818532
+            "start": 499.70440520446095,
+            "end": 506.20507641470465
           },
           {
             "text": "But a platform like the Apple App Store or Microsoft's enterprise ecosystem has a massive moat.",
-            "start": 680.424997248817,
-            "end": 685.7255804996148
+            "start": 506.8851466336224,
+            "end": 512.825760016522
           },
           {
             "text": "If you are a developer, you must be on the App Store because that's where the users are.",
-            "start": 686.4856641355783,
-            "end": 690.9661571475734
+            "start": 513.5658364312268,
+            "end": 518.1063052457662
           },
           {
             "text": "If you are a user, you stay because that's where the apps are.",
-            "start": 691.5262187740728,
-            "end": 694.7665753273908
+            "start": 518.6863651383726,
+            "end": 521.8866955803387
           },
           {
             "text": "This creates a \"Switching Cost\" so high that users are effectively locked in.",
-            "start": 695.3866435567294,
-            "end": 700.0271541762958
+            "start": 522.6467740603057,
+            "end": 527.3472593969434
           },
           {
             "text": "In the age of remote work and digital subscriptions, looking for high \"Switching Costs\" is the modern equivalent of looking for a brand name.",
-            "start": 700.8672466160449,
-            "end": 707.9480257510729
+            "start": 528.2273502684841,
+            "end": 536.0681598513011
           },
           {
             "text": "If it takes a company 12 months and $10 million to migrate away from a software provider, that provider has a moat of steel.",
-            "start": 708.6080983823044,
-            "end": 716.308945746671
+            "start": 536.7282280049566,
+            "end": 544.3490148698885
           }
         ]
       }
@@ -519,8 +569,8 @@
         "sentences": [
           {
             "text": "The Manic Neighbor",
-            "start": 730.9703053251593,
-            "end": 731.8703594181993
+            "start": 559.0702921931407,
+            "end": 560.0303463447653
           }
         ]
       },
@@ -529,33 +579,33 @@
         "sentences": [
           {
             "text": "You believe the market is an authority figure.",
-            "start": 733.1104339463877,
-            "end": 735.3905709820892
+            "start": 561.0904061371841,
+            "end": 563.6105482851985
           },
           {
             "text": "When a stock price collapses by 10% in a single morning, your primal brain assumes the market \"knows\" something you don\u2019t.",
-            "start": 736.0506106503185,
-            "end": 743.1310361822334
+            "start": 564.1905810018051,
+            "end": 571.8710142148014
           },
           {
             "text": "You feel foolish, exposed, and desperate to stop the pain.",
-            "start": 743.7510734463277,
-            "end": 747.431294626758
+            "start": 572.451046931408,
+            "end": 576.3312657942238
           },
           {
             "text": "You assume price equals truth.",
-            "start": 748.1313366991225,
-            "end": 750.271465320351
+            "start": 577.1113097924188,
+            "end": 579.2114282490975
           },
           {
             "text": "But in the short run, the market is not a weighing machine that measures value; it is a voting machine that measures popularity.",
-            "start": 751.171519413391,
-            "end": 757.751914893617
+            "start": 580.0114733754513,
+            "end": 587.4918953068592
           },
           {
             "text": "If you let the daily ticker dictate your emotional state, you are letting a mob of strangers determine your self-worth.",
-            "start": 758.5519629763193,
-            "end": 765.1923620627479
+            "start": 588.3319426895307,
+            "end": 595.1523273916968
           }
         ]
       },
@@ -564,8 +614,8 @@
         "sentences": [
           {
             "text": "The Legend of Mr. Market",
-            "start": 766.3924341868013,
-            "end": 767.892524341868
+            "start": 596.1923860559566,
+            "end": 597.7524740523465
           }
         ]
       },
@@ -574,8 +624,8 @@
         "sentences": [
           {
             "text": "Buffett didn\u2019t invent the solution to this; he inherited it from his mentor, Ben Graham, in the form of a parable that changes everything.",
-            "start": 769.2126036783267,
-            "end": 776.7330556557279
+            "start": 598.7525304602888,
+            "end": 606.6529760830325
           }
         ]
       },
@@ -584,38 +634,38 @@
         "sentences": [
           {
             "text": "Imagine you own a small business in partnership with a man named \"Mr.",
-            "start": 777.9731301839163,
-            "end": 781.8333621829547
+            "start": 607.6330313628158,
+            "end": 611.613255866426
           },
           {
             "text": "Market.\"",
-            "start": 781.8733645870898,
-            "end": 782.2133850222382
+            "start": 611.6532581227436,
+            "end": 612.0132784296029
           },
           {
             "text": "Every single morning, without fail, Mr.",
-            "start": 782.8334222863325,
-            "end": 785.3135713427095
+            "start": 612.6933167870036,
+            "end": 615.4334713447653
           },
           {
             "text": "Market knocks on your office door.",
-            "start": 785.3535737468445,
-            "end": 786.9336687101815
+            "start": 615.473473601083,
+            "end": 617.1135661101083
           },
           {
             "text": "He is a manic-depressive.",
-            "start": 787.453699963938,
-            "end": 788.5937684817886
+            "start": 617.8936101083033,
+            "end": 619.2536868231047
           },
           {
             "text": "Some days, he is euphoric, sees only sunshine, and offers to buy your share of the business for a ludicrously high price.",
-            "start": 789.1538021396802,
-            "end": 795.8142024281765
+            "start": 619.8337195397112,
+            "end": 626.9941234205776
           },
           {
             "text": "Other days, he is despondent, sees only ruin, and offers to sell you his share for pennies on the dollar.",
-            "start": 796.5342457026085,
-            "end": 802.234588291862
+            "start": 627.714164034296,
+            "end": 633.7545047382671
           }
         ]
       },
@@ -624,33 +674,43 @@
         "sentences": [
           {
             "text": "The author teaches us that Mr.",
-            "start": 803.4946640221181,
-            "end": 804.9947541771847
+            "start": 634.5745509927798,
+            "end": 636.2946480144404
           },
           {
             "text": "Market is there to serve you, not to guide you.",
-            "start": 805.0347565813198,
-            "end": 807.6349128501022
+            "start": 636.3746525270758,
+            "end": 639.2348138537906
           },
           {
             "text": "His wallet is open, but his wisdom is non-existent.",
-            "start": 808.2149477100613,
-            "end": 811.0351172015867
+            "start": 639.8348476985559,
+            "end": 642.915021435018
           },
           {
             "text": "You have three choices: you can ignore him, you can sell to him when he is manic, or you can buy from him when he is depressed.",
-            "start": 811.7151580718836,
-            "end": 818.4155607645149
+            "start": 643.695065433213,
+            "end": 650.8154670577617
           },
           {
             "text": "The one thing you must never do is fall under his influence.",
-            "start": 819.0956016348118,
-            "end": 822.2357903594182
+            "start": 651.5355076714801,
+            "end": 654.9356994584838
           },
           {
             "text": "If you look at a dropping price and think, \"I must be wrong,\" you have allowed the crazy neighbor to run your house.",
-            "start": 822.87582882558,
-            "end": 828.8761894458469
+            "start": 655.675741200361,
+            "end": 661.8760909296029
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Algorithm Is the New Mr. Market",
+            "start": 662.3561180054152,
+            "end": 664.9962669223827
           }
         ]
       },
@@ -658,24 +718,19 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The Algorithm Is the New Mr.",
-            "start": 829.3562182954681,
-            "end": 831.5963529270344
-          },
-          {
-            "text": "Market In the 1950s, Mr.",
-            "start": 831.6563565332372,
-            "end": 834.5365296309652
+            "text": "In the 1950s, Mr.",
+            "start": 665.6363030234656,
+            "end": 667.5964135830325
           },
           {
             "text": "Market showed up once a day in the morning newspaper.",
-            "start": 834.5965332371679,
-            "end": 837.5567111431662
+            "start": 667.656416967509,
+            "end": 670.9166008574007
           },
           {
             "text": "Today, he lives in your pocket, screaming at you 24/7 through push notifications and red/green candlesticks.",
-            "start": 838.0967435989902,
-            "end": 845.4171835557158
+            "start": 671.6566425992779,
+            "end": 679.9971130415162
           }
         ]
       },
@@ -684,65 +739,75 @@
         "sentences": [
           {
             "text": "Modern apps have gamified this manic behavior.",
-            "start": 846.3772412549586,
-            "end": 849.3574203630244
+            "start": 681.0971750902527,
+            "end": 684.0973443140795
           },
           {
             "text": "They use bright red colors and downward arrows to trigger a cortisol spike (fear) and bright green confetti to trigger dopamine (greed).",
-            "start": 849.9374552229835,
-            "end": 858.6779805265055
+            "start": 684.7773826714802,
+            "end": 694.457928700361
           },
           {
             "text": "In the world of Crypto and 24-hour trading, Mr.",
-            "start": 859.4780286092079,
-            "end": 862.7782269503546
+            "start": 695.237972698556,
+            "end": 698.7581712545126
           },
           {
             "text": "Market never sleeps; he is on a permanent bender.",
-            "start": 862.8182293544897,
-            "end": 865.8184096646231
+            "start": 698.8181746389891,
+            "end": 702.0183551444043
           },
           {
             "text": "If you check your portfolio five times a day, you are inviting a manic-depressive into your brain five times a day to scream at you.",
-            "start": 866.49845053492,
-            "end": 874.2389157350643
+            "start": 702.8784036552346,
+            "end": 711.1788718411552
           },
           {
             "text": "The \"wiser\" investor realizes that volatility is not risk\u2014it is the fee you pay for entrance.",
-            "start": 874.8989554032937,
-            "end": 880.9593196297632
+            "start": 712.0789226083032,
+            "end": 718.7392982851985
           },
           {
             "text": "If you can decouple your mood from the color of the pixels on your screen, you have an insurmountable advantage over the algorithm-addicted masses.",
-            "start": 881.6793629041952,
-            "end": 889.5198341146772
+            "start": 719.4793400270758,
+            "end": 728.4998488267148
           }
         ]
       }
     ],
     "5": [
       {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The CEO\u2019s Secret Addiction",
+            "start": 735.700516925892,
+            "end": 737.6007342177493
+          }
+        ]
+      },
+      {
         "isHeading": false,
         "sentences": [
           {
-            "text": "The CEO\u2019s Secret Addiction Here is the friction: You assume the CEO works for you.",
-            "start": 896.9602851572021,
-            "end": 903.1406617109432
+            "text": "Here is the friction: You assume the CEO works for you.",
+            "start": 738.6408531564501,
+            "end": 742.7413220494052
           },
           {
             "text": "You assume their primary goal is to make your shares more valuable.",
-            "start": 904.0007141116256,
-            "end": 907.4409237143553
+            "start": 743.4013975297346,
+            "end": 747.2218344007318
           },
           {
             "text": "In reality, most CEOs suffer from a \"growth addiction.\"",
-            "start": 908.3009761150378,
-            "end": 911.8811942481111
+            "start": 747.9619190301921,
+            "end": 752.0823902104299
           },
           {
             "text": "Their salaries, prestige, and magazine covers are often tied to the size of the company (total revenue), not the value per share.",
-            "start": 912.7812490860346,
-            "end": 920.4417158176943
+            "start": 752.7624679780421,
+            "end": 761.2034332113449
           }
         ]
       },
@@ -751,28 +816,28 @@
         "sentences": [
           {
             "text": "This creates a conflict of interest.",
-            "start": 921.4417767487204,
-            "end": 922.9418681452595
+            "start": 761.8235041171088,
+            "end": 763.4836939615736
           },
           {
             "text": "A CEO will often take the cash the business generates\u2014your cash\u2014and light it on fire by buying a mediocre competitor at a premium price, just to make the empire bigger.",
-            "start": 923.8019205459419,
-            "end": 933.6025176699975
+            "start": 764.1037648673375,
+            "end": 775.1250251601098
           },
           {
             "text": "They call it \"strategic synergy.\"",
-            "start": 934.5225737265415,
-            "end": 936.2426785279064
+            "start": 775.725093778591,
+            "end": 777.6053087831656
           },
           {
             "text": "Usually, it\u2019s just ego.",
-            "start": 937.0427272727272,
-            "end": 938.142794296856
+            "start": 778.2853865507776,
+            "end": 779.6055375114364
           },
           {
             "text": "If you don't watch how management spends the money in the bank, you are letting a teenager with a credit card run your household.",
-            "start": 939.0828515720204,
-            "end": 944.703194004387
+            "start": 780.3656244281792,
+            "end": 786.7463540713632
           }
         ]
       },
@@ -781,8 +846,8 @@
         "sentences": [
           {
             "text": "The \"One Dollar\" Ultimatum",
-            "start": 946.0032732147209,
-            "end": 947.2233475505727
+            "start": 787.6064524245196,
+            "end": 789.226637694419
           }
         ]
       },
@@ -791,13 +856,13 @@
         "sentences": [
           {
             "text": "Buffett counters this with a ruthless rule known as the \"One Dollar Test.\"",
-            "start": 948.6234328540093,
-            "end": 952.4236643919083
+            "start": 790.4667795059469,
+            "end": 794.6672598353156
           },
           {
             "text": "In his letters, he lays out a simple ultimatum for management: A company should only retain earnings if, for every dollar retained, it creates at least one dollar of market value over time.",
-            "start": 953.2237131367292,
-            "end": 963.3443297587131
+            "start": 795.327335315645,
+            "end": 807.0686779505946
           }
         ]
       },
@@ -806,28 +871,38 @@
         "sentences": [
           {
             "text": "He tells the story of how easy it is for a CEO to \"buy\" growth.",
-            "start": 964.2843870338776,
-            "end": 967.9246088228125
+            "start": 807.7087511436413,
+            "end": 812.0892520585544
           },
           {
             "text": "Anyone can grow sales by buying a bad business.",
-            "start": 968.6846551303923,
-            "end": 970.9447928345113
+            "start": 812.7493275388838,
+            "end": 815.3296225983531
           },
           {
             "text": "But a true \"Capital Allocator\" (Buffett's highest praise) knows when to shrink.",
-            "start": 971.6448354862296,
-            "end": 976.1051072386059
+            "start": 815.8096774931381,
+            "end": 820.6502310155535
           },
           {
             "text": "If the company cannot reinvest cash at a high rate of return, the CEO must have the humility to give it back to the shareholders\u2014either through dividends (a direct check) or share buybacks (increasing your percentage of ownership).",
-            "start": 976.9851608579088,
-            "end": 989.2659090909091
+            "start": 821.370313357731,
+            "end": 834.4118046660567
           },
           {
             "text": "He views a share buyback not as a market signal, but as a way to buy out \"unhappy partners\" at a discount, instantly making the remaining partners richer without them lifting a finger.",
-            "start": 990.1259614915915,
-            "end": 999.3665244942724
+            "start": 835.0718801463861,
+            "end": 845.4130626715462
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Buyback Masquerade",
+            "start": 845.8731152790484,
+            "end": 847.5533074107959
           }
         ]
       },
@@ -835,24 +910,24 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The Buyback Masquerade In the modern tech era, the \"Share Buyback\" has been corrupted.",
-            "start": 1000.9266195466731,
-            "end": 1006.4669571045577
+            "text": "In the modern tech era, the \"Share Buyback\" has been corrupted.",
+            "start": 848.1933806038426,
+            "end": 851.9938151875572
           },
           {
             "text": "Many Silicon Valley giants announce massive, multi-billion dollar buyback programs to great fanfare.",
-            "start": 1007.2270034121375,
-            "end": 1013.1273629051913
+            "start": 852.5538792314729,
+            "end": 858.7345860018297
           },
           {
             "text": "It sounds like they are returning capital to you.",
-            "start": 1013.6873970265659,
-            "end": 1015.5475103582744
+            "start": 859.3146523330283,
+            "end": 861.6549199451051
           },
           {
             "text": "Often, they are lying.",
-            "start": 1016.2275517913721,
-            "end": 1017.4276249086034
+            "start": 862.3750022872827,
+            "end": 863.6751509606587
           }
         ]
       },
@@ -861,65 +936,75 @@
         "sentences": [
           {
             "text": "They are using those buybacks to offset \"Stock-Based Compensation\" (SBC).",
-            "start": 1018.5476931513526,
-            "end": 1022.5479368754569
+            "start": 864.2352150045745,
+            "end": 868.5957136322049
           },
           {
             "text": "They pay their engineers in millions of new shares (diluting you), then use company cash to buy those shares back (undiluting you).",
-            "start": 1023.3479856202778,
-            "end": 1030.5684255422861
+            "start": 869.3758028362305,
+            "end": 877.5167337602927
           },
           {
             "text": "The net result?",
-            "start": 1031.1684621009017,
-            "end": 1031.748497440897
+            "start": 878.0367932296431,
+            "end": 878.6368618481243
           },
           {
             "text": "The share count stays flat, but the cash is gone.",
-            "start": 1032.2285266877893,
-            "end": 1034.788682671216
+            "start": 879.1169167429093,
+            "end": 882.0772552607502
           },
           {
             "text": "This is running in place.",
-            "start": 1035.4087204484524,
-            "end": 1036.7688033146478
+            "start": 882.5373078682525,
+            "end": 883.9974748398902
           },
           {
             "text": "A \"wiser\" analysis looks at the net change in share count.",
-            "start": 1037.2488325615402,
-            "end": 1040.2490153546185
+            "start": 884.6175457456541,
+            "end": 888.2179574565416
           },
           {
             "text": "If a company spends $10 billion on buybacks but the share count doesn't drop, that wasn't a return of capital\u2014it was a disguised employee salary expense.",
-            "start": 1040.7890482573725,
-            "end": 1049.12955642213
+            "start": 888.8580306495883,
+            "end": 897.8190553522415
           }
         ]
       }
     ],
     "6": [
       {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Boardroom Blind Spot",
+            "start": 910.9405731132076,
+            "end": 912.5207594339623
+          }
+        ]
+      },
+      {
         "isHeading": false,
         "sentences": [
           {
-            "text": "The Boardroom Blind Spot We treat CEOs like chess grandmasters.",
-            "start": 1061.2103018867924,
-            "end": 1066.0906088050315
+            "text": "We treat CEOs like chess grandmasters.",
+            "start": 913.5008750000001,
+            "end": 916.1611886792454
           },
           {
             "text": "We assume that when a leader announces a massive acquisition or a pivot into a new technology, they have run thousands of simulations and found the optimal move.",
-            "start": 1066.5706389937109,
-            "end": 1075.8912251572328
+            "start": 916.7412570754717,
+            "end": 925.8623325471699
           },
           {
             "text": "But inside the boardroom, a different, darker game is being played.",
-            "start": 1076.59126918239,
-            "end": 1080.5715194968554
+            "start": 926.8624504716981,
+            "end": 930.6228938679245
           },
           {
             "text": "It isn\u2019t strategy; it\u2019s survival.",
-            "start": 1081.1115534591195,
-            "end": 1083.2516880503144
+            "start": 931.342978773585,
+            "end": 933.3832193396227
           }
         ]
       },
@@ -928,28 +1013,28 @@
         "sentences": [
           {
             "text": "Most corporate leadership is not driven by logic, but by a terrifying fear of being the \"odd one out.\"",
-            "start": 1084.1517446540881,
-            "end": 1090.29213081761
+            "start": 934.383337264151,
+            "end": 940.284033018868
           },
           {
             "text": "If Competitor A buys a blockchain startup, Competitor B feels a primal compulsion to buy one too, regardless of the price.",
-            "start": 1090.852166037736,
-            "end": 1098.1726264150943
+            "start": 941.1641367924528,
+            "end": 948.0649504716981
           },
           {
             "text": "If they don't, and blockchain succeeds, they look like fools.",
-            "start": 1098.6526566037737,
-            "end": 1101.812855345912
+            "start": 948.6850235849057,
+            "end": 951.5853655660378
           },
           {
             "text": "If they buy it and it fails, well, \"everyone else did it too.\"",
-            "start": 1102.2328817610064,
-            "end": 1105.33307672956
+            "start": 952.1654339622642,
+            "end": 955.0257712264151
           },
           {
             "text": "This herd mentality is the single greatest destroyer of shareholder capital, yet it parades itself as \"industry standard best practice.\"",
-            "start": 1106.1931308176102,
-            "end": 1114.2936402515725
+            "start": 955.9658820754718,
+            "end": 963.9868278301888
           }
         ]
       },
@@ -958,8 +1043,8 @@
         "sentences": [
           {
             "text": "The \"Institutional Imperative\"",
-            "start": 1115.1536943396227,
-            "end": 1116.893803773585
+            "start": 964.846929245283,
+            "end": 966.6671438679246
           }
         ]
       },
@@ -968,13 +1053,13 @@
         "sentences": [
           {
             "text": "Buffett coined a specific term for this force: the \"Institutional Imperative.\"",
-            "start": 1117.7338566037736,
-            "end": 1122.054128301887
+            "start": 967.6272570754718,
+            "end": 971.9677688679245
           },
           {
             "text": "In his letters, he dissects how decent, intelligent managers turn into irrational copycats the moment they enter a corporate hierarchy.",
-            "start": 1122.6541660377359,
-            "end": 1130.154637735849
+            "start": 972.8478726415094,
+            "end": 980.428766509434
           }
         ]
       },
@@ -983,28 +1068,38 @@
         "sentences": [
           {
             "text": "He compares it to a teenager smoking to look cool.",
-            "start": 1130.994690566038,
-            "end": 1133.394841509434
+            "start": 981.348875,
+            "end": 983.6691485849057
           },
           {
             "text": "The Imperative dictates that if an investment banker proposes a deal, the CEO will find a way to justify it.",
-            "start": 1133.894872955975,
-            "end": 1139.6552352201259
+            "start": 984.4892452830189,
+            "end": 990.1699150943397
           },
           {
             "text": "If a competitor expands, the CEO will expand.",
-            "start": 1140.035259119497,
-            "end": 1142.6954264150945
+            "start": 990.9700094339623,
+            "end": 993.6503254716981
           },
           {
             "text": "Buffett famously noted that this force is so strong it can make a group of brilliant people do things that any one of them, acting alone, would call insane.",
-            "start": 1143.2354603773585,
-            "end": 1151.8560025157233
+            "start": 994.5104268867925,
+            "end": 1002.1513278301887
           },
           {
             "text": "He teaches us that the rarest asset in business is not intelligence\u2014it is the courage to say \"no\" when everyone else is shouting \"yes.\"",
-            "start": 1152.4360389937108,
-            "end": 1159.9565119496856
+            "start": 1002.871412735849,
+            "end": 1010.0522594339623
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Pivot\" Pandemic",
+            "start": 1010.9923702830189,
+            "end": 1012.0524952830189
           }
         ]
       },
@@ -1012,14 +1107,14 @@
         "isHeading": false,
         "sentences": [
           {
-            "text": "The \"Pivot\" Pandemic In the modern era, the Institutional Imperative has accelerated into a virus.",
-            "start": 1160.8965710691825,
-            "end": 1166.5969295597486
+            "text": "In the modern era, the Institutional Imperative has accelerated into a virus.",
+            "start": 1012.9125966981132,
+            "end": 1016.7730518867925
           },
           {
             "text": "We see it in the \"Pivot\" culture.",
-            "start": 1167.0369572327045,
-            "end": 1168.537051572327
+            "start": 1017.2731108490566,
+            "end": 1018.6132688679246
           }
         ]
       },
@@ -1028,23 +1123,23 @@
         "sentences": [
           {
             "text": "First, it was the \"Dot-com\" pivot.",
-            "start": 1168.9970805031448,
-            "end": 1171.0772113207547
+            "start": 1019.1733349056605,
+            "end": 1021.3935966981132
           },
           {
             "text": "Then, the \"Blockchain\" pivot.",
-            "start": 1171.5772427672957,
-            "end": 1172.9973320754718
+            "start": 1021.9736650943397,
+            "end": 1023.5138466981132
           },
           {
             "text": "Now, it is the \"AI\" pivot.",
-            "start": 1173.5373660377359,
-            "end": 1175.1374666666668
+            "start": 1024.1539221698113,
+            "end": 1026.014141509434
           },
           {
             "text": "Companies that sell pet food or furniture have no business declaring themselves \"AI-first\" organizations, yet they launch half-baked chatbots just to boost their stock price for a quarter.",
-            "start": 1175.6975018867925,
-            "end": 1185.0380893081763
+            "start": 1026.7742311320756,
+            "end": 1037.9755518867926
           }
         ]
       },
@@ -1053,28 +1148,28 @@
         "sentences": [
           {
             "text": "Consider the Metaverse hype cycle of 2021.",
-            "start": 1185.5181194968554,
-            "end": 1187.4382402515723
+            "start": 1039.3957193396227,
+            "end": 1041.4759646226416
           },
           {
             "text": "Facebook changed its name to Meta, and suddenly, every Fortune 500 company felt the Imperative to buy virtual real estate.",
-            "start": 1188.718320754717,
-            "end": 1195.1187232704403
+            "start": 1043.0361485849057,
+            "end": 1050.297004716981
           },
           {
             "text": "Billions of dollars of shareholder capital were incinerated in months because CEOs were terrified of missing out on a future they didn't even understand.",
-            "start": 1195.5987534591195,
-            "end": 1202.7592037735849
+            "start": 1051.0170896226416,
+            "end": 1059.5380943396226
           },
           {
             "text": "A \"wiser\" investor spots these waves of hysteria.",
-            "start": 1203.3992440251573,
-            "end": 1206.0394100628932
+            "start": 1061.598337264151,
+            "end": 1064.4586745283018
           },
           {
             "text": "When a CEO uses the latest buzzword 50 times on an earnings call but cannot explain the unit economics, they are not innovating; they are succumbing to the Imperative.",
-            "start": 1206.599445283019,
-            "end": 1215.1799849056604
+            "start": 1065.09875,
+            "end": 1075.3199551886792
           }
         ]
       }

@@ -50,6 +50,9 @@ struct AssetRow: View {
             .padding(.vertical, AppSpacing.md)
             .padding(.horizontal, AppSpacing.lg)
             .background(AppColors.cardBackground)
+            // Standalone rounded card — same radius as AlertCardView so the
+            // holdings cards and the Alerts cards read as one family.
+            .cornerRadius(AppCornerRadius.large)
         }
         .buttonStyle(.plain)
     }

@@ -10,13 +10,13 @@ Design (mirrors home_service.py):
 """
 
 import asyncio
-import random
 import time as _time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.services.chart_helper import fetch_chart_data
 from app.database import get_supabase
 from app.schemas.tracking import (
     TrackedAssetResponse,
@@ -75,17 +75,15 @@ def _sparkline_cache_set(ticker: str, value: List[float]) -> None:
     _sparkline_cache[ticker] = (_time.monotonic(), value)
 
 
-def _synthetic_sparkline(positive: bool) -> List[float]:
-    """Fallback sparkline when historical prices are unavailable."""
-    data: List[float] = []
-    value = random.uniform(90.0, 110.0)
-    for _ in range(20):
-        change = random.uniform(-3.0, 3.0)
-        trend = 0.5 if positive else -0.5
-        value += change + trend
-        value = max(80.0, min(120.0, value))
-        data.append(round(value, 2))
-    return data
+def _downsample(values: List[float], target: int) -> List[float]:
+    """Evenly downsample to at most *target* points, always keeping the FIRST
+    and LAST (the iOS SparklineView colors green/red off values[0] and dots
+    values[-1], so the open baseline and end point must survive)."""
+    if len(values) <= target:
+        return values
+    step = (len(values) - 1) / (target - 1)
+    idxs = sorted({round(i * step) for i in range(target)} | {0, len(values) - 1})
+    return [values[i] for i in idxs]
 
 
 # ── Service ─────────────────────────────────────────────────────────
@@ -258,32 +256,45 @@ class TrackingService:
                 return (ticker, cached)
 
             try:
-                to_date = datetime.now().strftime("%Y-%m-%d")
-                from_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
-                data = await self.fmp.get_historical_prices(
-                    ticker, from_date=from_date, to_date=to_date
-                )
-                if not data:
-                    sparkline = _synthetic_sparkline(True)
-                    _sparkline_cache_set(ticker, sparkline)
-                    return (ticker, sparkline)
+                # Use the SAME series the TickerDetailView 1D chart draws:
+                # 5-min intraday bars, regular market hours only, oldest-first
+                # (via the shared chart_helper). This keeps the holdings-card
+                # sparkline visually consistent with the chart the user sees
+                # when they open the ticker — the old path drew a ~1-month
+                # daily-EOD line, which looked nothing like the 1D chart.
+                bars = await fetch_chart_data(self.fmp, ticker, "1D")
+                if not bars:
+                    # Honest empty — never fabricate. iOS SparklineView draws
+                    # nothing for an empty/1-point series.
+                    _sparkline_cache_set(ticker, [])
+                    return (ticker, [])
 
-                # FMP stable API returns a flat list; legacy v3 nests under "historical"
-                historical = data if isinstance(data, list) else data.get("historical", [])
-                if not historical:
-                    sparkline = _synthetic_sparkline(True)
-                    _sparkline_cache_set(ticker, sparkline)
-                    return (ticker, sparkline)
+                # Keep only the most recent trading day — mirrors the iOS
+                # TradingDayHelper.filterToLatestDay step, so the multi-day
+                # warm-up bars don't fold several sessions into one mini-chart.
+                last_day = str(bars[-1].get("date", ""))[:10]  # "YYYY-MM-DD"
+                day_bars = [
+                    b for b in bars if str(b.get("date", "")).startswith(last_day)
+                ]
 
-                # historical is newest-first; take 20, reverse for oldest-first
-                prices = [float(day.get("close") or 0) for day in historical[:20]]
-                prices.reverse()
-                sparkline = [round(p, 2) for p in prices]
+                closes = [
+                    float(b["close"]) for b in day_bars if b.get("close") is not None
+                ]
+                if len(closes) < 2:
+                    _sparkline_cache_set(ticker, [])
+                    return (ticker, [])
+
+                # ~78 five-min bars per session → downsample so the card payload
+                # stays small and the tiny chart reads cleanly.
+                sparkline = [round(c, 2) for c in _downsample(closes, 30)]
                 _sparkline_cache_set(ticker, sparkline)
                 return (ticker, sparkline)
             except Exception as exc:
-                logger.warning("Sparkline for %s failed: %s", ticker, exc)
-                return (ticker, _synthetic_sparkline(True))
+                logger.warning(
+                    "Sparkline (1D intraday) for %s failed: %s: %s",
+                    ticker, type(exc).__name__, exc,
+                )
+                return (ticker, [])
 
         results = await asyncio.gather(*[_fetch_one(t) for t in tickers])
         return dict(results)

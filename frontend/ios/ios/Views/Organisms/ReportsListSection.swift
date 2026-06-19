@@ -169,15 +169,12 @@ struct ReportsListSection: View {
                 }
             }
             .frame(width: 178)
-            .background(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackgroundLight)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.4), radius: 16, y: 6)
+            // Native iOS 26 Liquid Glass — the material supplies the translucent
+            // frost, the rounded shape, the adaptive edge highlight, AND the
+            // floating-layer shadow, so there's no manual fill / stroke / shadow
+            // (an opaque fill would defeat the translucency; a manual shadow
+            // would double up). Honors Reduce Transparency automatically.
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.medium))
             .offset(y: 34)   // drop just below the Sort capsule
         }
     }

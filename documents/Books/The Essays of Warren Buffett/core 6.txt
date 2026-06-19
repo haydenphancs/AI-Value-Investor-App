@@ -1,5 +1,7 @@
 Core 6: Escaping the Institutional Trap
-The Boardroom Blind Spot We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a pivot into a new technology, they have run thousands of simulations and found the optimal move. But inside the boardroom, a different, darker game is being played. It isn’t strategy; it’s survival.
+The Boardroom Blind Spot
+
+We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a pivot into a new technology, they have run thousands of simulations and found the optimal move. But inside the boardroom, a different, darker game is being played. It isn’t strategy; it’s survival.
 
 Most corporate leadership is not driven by logic, but by a terrifying fear of being the "odd one out." If Competitor A buys a blockchain startup, Competitor B feels a primal compulsion to buy one too, regardless of the price. If they don't, and blockchain succeeds, they look like fools. If they buy it and it fails, well, "everyone else did it too." This herd mentality is the single greatest destroyer of shareholder capital, yet it parades itself as "industry standard best practice."
 
@@ -9,7 +11,9 @@ Buffett coined a specific term for this force: the "Institutional Imperative." I
 
 He compares it to a teenager smoking to look cool. The Imperative dictates that if an investment banker proposes a deal, the CEO will find a way to justify it. If a competitor expands, the CEO will expand. Buffett famously noted that this force is so strong it can make a group of brilliant people do things that any one of them, acting alone, would call insane. He teaches us that the rarest asset in business is not intelligence—it is the courage to say "no" when everyone else is shouting "yes."
 
-The "Pivot" Pandemic In the modern era, the Institutional Imperative has accelerated into a virus. We see it in the "Pivot" culture.
+The "Pivot" Pandemic
+
+In the modern era, the Institutional Imperative has accelerated into a virus. We see it in the "Pivot" culture.
 
 First, it was the "Dot-com" pivot. Then, the "Blockchain" pivot. Now, it is the "AI" pivot. Companies that sell pet food or furniture have no business declaring themselves "AI-first" organizations, yet they launch half-baked chatbots just to boost their stock price for a quarter.
 

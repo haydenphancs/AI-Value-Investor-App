@@ -1,0 +1,3030 @@
+{
+  "curriculum_order": 3,
+  "slug": "the-psychology-of-money",
+  "cores": {
+    "1": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Have you ever noticed how the smartest people in the room often make the most disastrous financial decisions?",
+            "start": 8.480721211090323,
+            "end": 13.501148154448037
+          },
+          {
+            "text": "The friction comes from a fundamental misunderstanding: we treat finance like it is physics.",
+            "start": 14.241211090321485,
+            "end": 18.921609117196805
+          },
+          {
+            "text": "We believe it operates on immutable laws, formulas, and perfectly rational answers.",
+            "start": 19.541661847252936,
+            "end": 24.162054771219598
+          },
+          {
+            "text": "We assume that if we just build a complex enough system\u2014perhaps engineering intricate data architecture to process market trends and chart the future\u2014we can perfectly conquer the market.",
+            "start": 24.882116006123493,
+            "end": 34.60294267732608
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But human beings aren't code.",
+            "start": 35.5230209219255,
+            "end": 36.98314509270284
+          },
+          {
+            "text": "We fail because we optimize for a spreadsheet instead of optimizing for a peaceful night's sleep.",
+            "start": 37.54319271985032,
+            "end": 42.22359074672564
+          },
+          {
+            "text": "When you design a flawless financial plan on a quiet Sunday afternoon, you are acting rationally.",
+            "start": 43.0836638884164,
+            "end": 47.90407382207859
+          },
+          {
+            "text": "When the market drops 15% on a Tuesday morning and your heart starts pounding, rationality evaporates.",
+            "start": 48.46412144922606,
+            "end": 53.58455689743154
+          },
+          {
+            "text": "The perfectly calculated plan shatters against the reality of human emotion.",
+            "start": 54.16460622554857,
+            "end": 57.70490729715939
+          },
+          {
+            "text": "The secret the industry tries to hide is that trying to be completely, coldly rational is actually a trap.",
+            "start": 58.504975335941495,
+            "end": 63.64541248511652
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Fever of the Era",
+            "start": 65.06553325395475,
+            "end": 66.0656183024324
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author tells a compelling story about how our personal history dictates our financial reality.",
+            "start": 67.16571185575779,
+            "end": 71.62609117196803
+          },
+          {
+            "text": "Imagine two different people.",
+            "start": 72.34615240687192,
+            "end": 73.60625956795374
+          },
+          {
+            "text": "One was born in 1950 and watched the stock market go essentially nowhere during their formative years in the 1970s.",
+            "start": 74.3463225038272,
+            "end": 79.76678346657596
+          },
+          {
+            "text": "The other was born in 1970 and came of age during the unstoppable roaring bull market of the 1990s.",
+            "start": 80.40683789760165,
+            "end": 85.7472920564722
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If you ask both of them about risk, you will get two entirely opposite answers.",
+            "start": 87.14741112434088,
+            "end": 91.46777853376426
+          },
+          {
+            "text": "And the fascinating part?",
+            "start": 92.1278346657595,
+            "end": 93.08791631229802
+          },
+          {
+            "text": "No one is crazy.",
+            "start": 93.60796053750639,
+            "end": 94.42803027725805
+          },
+          {
+            "text": "The author points out that every financial decision makes perfect sense to the person making it at that exact moment, heavily filtered through the tiny sliver of economic history they personally experienced.",
+            "start": 95.30810511991837,
+            "end": 105.28895390372513
+          },
+          {
+            "text": "We are all viewing money through a highly distorted, individualized lens.",
+            "start": 105.88900493281172,
+            "end": 109.26929239666612
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Because our lenses are so biased, the author argues that aiming for strict rationality is a vulnerability.",
+            "start": 110.26937744514375,
+            "end": 115.72984180983161
+          },
+          {
+            "text": "A purely rational investor might look at historical data and decide to leverage themselves to the absolute limit because the expected return is mathematically positive.",
+            "start": 116.48990644667462,
+            "end": 124.63059874128254
+          },
+          {
+            "text": "But a reasonable investor knows that if a sudden dip causes a margin call, or simply triggers enough anxiety to force a panic exit, the math is entirely useless.",
+            "start": 125.19064636843002,
+            "end": 133.3913437659466
+          },
+          {
+            "text": "You must aim for a strategy that is reasonable enough to let you stay in the game long-term, even if it isn't flawlessly rational on paper.",
+            "start": 134.13140670182005,
+            "end": 140.43194250722914
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Trading the Algorithm for the Human",
+            "start": 141.31201734988946,
+            "end": 142.83214662357545
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let\u2019s drag this into the reality of right now.",
+            "start": 143.79222827011398,
+            "end": 145.83240176900836
+          },
+          {
+            "text": "We are living in an era of overwhelming technological acceleration.",
+            "start": 146.39244939615583,
+            "end": 149.4527096444974
+          },
+          {
+            "text": "AI infrastructure is booming, data centers are eating massive amounts of capital, and markets swing wildly based on geopolitical murmurs or the sudden movement of a single crypto whale.",
+            "start": 149.9527521687362,
+            "end": 158.37346827691786
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, you hold an unprecedented amount of analytical power right in your pocket.",
+            "start": 158.79350399727846,
+            "end": 163.73392413675796
+          },
+          {
+            "text": "You can deploy an autonomous Deep Research Agent to parse a decade of dense 10-K filings in minutes, and it might tell you exactly what you need to know about a company.",
+            "start": 164.49398877360096,
+            "end": 172.89470318081308
+          },
+          {
+            "text": "The AI feels no fear.",
+            "start": 173.71477292056474,
+            "end": 175.01488348358566
+          },
+          {
+            "text": "It doesn't sweat.",
+            "start": 175.5549294097636,
+            "end": 176.27499064466747
+          },
+          {
+            "text": "It only sees pure expected value and cold, hard rationality.",
+            "start": 176.87504167375405,
+            "end": 180.47534784827354
+          },
+          {
+            "text": "But you are the one who has to stare at the screen when a sudden supply chain shock causes those exact companies to plummet 20% in a week.",
+            "start": 181.3754243919034,
+            "end": 189.1560860690594
+          },
+          {
+            "text": "When you look at your phone and see those red numbers flashing across your live widget, the psychological pain immediately overrides the AI's logical blueprint.",
+            "start": 190.2561796223848,
+            "end": 197.9768361966321
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In today's world of frictionless, hyper-fast mobile finance, the ultimate edge isn't just having the most sophisticated data or the fastest alert system.",
+            "start": 198.8569110392924,
+            "end": 207.25762544650453
+          },
+          {
+            "text": "It is building a strategy that actively accommodates your own human flaws.",
+            "start": 207.75766797074334,
+            "end": 211.55799115495836
+          },
+          {
+            "text": "If maintaining a theoretically \"perfect\" portfolio keeps you staring at the ceiling at 2 AM, it is a catastrophic strategy for you.",
+            "start": 212.47806939955777,
+            "end": 219.1386358224188
+          },
+          {
+            "text": "Wealth isn't built by the person with the smartest data; it is built by the person who creates a framework reasonable enough to survive their own worst impulses.",
+            "start": 219.9387038612009,
+            "end": 227.73936723932644
+          }
+        ]
+      }
+    ],
+    "2": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Listen closely.",
+            "start": 240.30023441076824,
+            "end": 240.90026188078016
+          },
+          {
+            "text": "The financial world is obsessed with the myth of the self-made visionary.",
+            "start": 241.62029484479444,
+            "end": 245.12045508653054
+          },
+          {
+            "text": "When we see someone accumulate massive wealth, our immediate instinct is to dissect their morning routine, their work ethic, and their precise execution.",
+            "start": 245.78048530354363,
+            "end": 253.06081860635473
+          },
+          {
+            "text": "We assume their success is a direct, one-to-one output of their intelligence.",
+            "start": 253.64084516069957,
+            "end": 257.4610200531087
+          },
+          {
+            "text": "Conversely, when we fail, we beat ourselves up, assuming we just weren't smart enough or didn't grind hard enough.",
+            "start": 258.0010447761194,
+            "end": 263.3612901748924
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This is the friction that breaks most investors.",
+            "start": 264.10132405457375,
+            "end": 266.24142203094954
+          },
+          {
+            "text": "We completely ignore the massive, invisible forces constantly acting upon our lives and our portfolios.",
+            "start": 266.80144766962735,
+            "end": 272.00168574306383
+          },
+          {
+            "text": "We look at the winners and try to perfectly replicate their exact steps, completely forgetting that it is impossible to replicate their exact circumstances.",
+            "start": 272.58171229740867,
+            "end": 279.66203644354914
+          },
+          {
+            "text": "When you believe you are in complete control of the outcome, every loss destroys your confidence, and every win inflates your ego to dangerous levels.",
+            "start": 280.3420675762293,
+            "end": 287.502395385038
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Tragic Flip of the Coin",
+            "start": 288.32243292738764,
+            "end": 289.702496108415
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author illustrates this profound truth with the story of Bill Gates and his high school friend, Kent Evans.",
+            "start": 290.6225382290999,
+            "end": 295.3427543265269
+          },
+          {
+            "text": "In 1968, Bill Gates attended Lakeside School, which happened to be one of the only high schools in the entire world with access to a computer.",
+            "start": 295.9827836278729,
+            "end": 302.623087629338
+          },
+          {
+            "text": "The odds of a teenager having access to that kind of computing power at that time were roughly one in a million.",
+            "start": 303.2231150993499,
+            "end": 308.16334126911454
+          },
+          {
+            "text": "That extraordinary stroke of luck set the stage for the creation of Microsoft.",
+            "start": 308.80337057046063,
+            "end": 312.3435326435308
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But there is a darker half to this story.",
+            "start": 313.0835665232122,
+            "end": 314.62363702957606
+          },
+          {
+            "text": "Gates had a best friend named Kent Evans.",
+            "start": 315.243665415255,
+            "end": 317.1037505722919
+          },
+          {
+            "text": "Kent was just as brilliant as Gates, just as obsessed with coding, and shared the exact same world-changing ambition.",
+            "start": 317.60377346396854,
+            "end": 322.9040161157403
+          },
+          {
+            "text": "But before they even graduated, Kent died in a tragic mountaineering accident.",
+            "start": 323.50404358575224,
+            "end": 326.904199249153
+          },
+          {
+            "text": "The odds of a high school student dying on a mountain are also about one in a million.",
+            "start": 327.48422580349785,
+            "end": 330.7043732258951
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Gates experienced a one-in-a-million stroke of positive variance.",
+            "start": 331.16439428623755,
+            "end": 335.10457467264905
+          },
+          {
+            "text": "That is luck.",
+            "start": 335.5845966486586,
+            "end": 336.26462778133873
+          },
+          {
+            "text": "Kent experienced a one-in-a-million stroke of negative variance.",
+            "start": 337.12466715502245,
+            "end": 340.5248228184232
+          },
+          {
+            "text": "That is risk.",
+            "start": 341.02484571009984,
+            "end": 341.84488325244945
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Luck and risk are siblings; they are doppelg\u00e4ngers.",
+            "start": 343.04493819247324,
+            "end": 346.00507371119863
+          },
+          {
+            "text": "The author reveals that outcomes are rarely just the result of individual effort.",
+            "start": 347.00511949455176,
+            "end": 350.7252898086256
+          },
+          {
+            "text": "Furthermore, the vast majority of massive financial success is driven by \"tails\"\u2014extreme, rare outlier events.",
+            "start": 351.58532918230935,
+            "end": 358.4456432561121
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In finance, as in business, you can be completely wrong half the time and still make a fortune, provided your few successful ventures catch a massive tailwind.",
+            "start": 359.54569361780057,
+            "end": 367.50605805329184
+          },
+          {
+            "text": "You don't need to be right every time.",
+            "start": 368.54610566797913,
+            "end": 370.02617342734186
+          },
+          {
+            "text": "You just need to survive long enough to catch the right wave.",
+            "start": 370.46619357201723,
+            "end": 373.08631352440256
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Catching the Algorithmic Tailwind",
+            "start": 374.38637304276165,
+            "end": 376.02644812746087
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let's drag this into the reality of the modern market.",
+            "start": 377.28650581448585,
+            "end": 379.4866065378628
+          },
+          {
+            "text": "Think about the explosive rise of AI and data center infrastructure over the last few years.",
+            "start": 380.4266495742148,
+            "end": 384.52683728596287
+          },
+          {
+            "text": "Someone who heavily allocated capital into specific GPU manufacturers five years ago might be parading around as a visionary genius today.",
+            "start": 385.5468839849831,
+            "end": 392.1671870707811
+          },
+          {
+            "text": "But were they truly predicting the exact trajectory of generative AI, or did they happen to be standing in the right sector right before a massive, unpredictable technological boom reshaped the global economy?",
+            "start": 393.0672282757989,
+            "end": 403.0276842779965
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If you try to flawlessly replicate their specific strategy now, assuming it was pure skill, you might end up swallowing the \"risk\" side of the coin just as the market cycle shifts.",
+            "start": 404.28774196502155,
+            "end": 412.4681164728505
+          },
+          {
+            "text": "In today\u2019s hyper-connected environment\u2014where a single regulatory shift in Clean Energy, a sudden breakthrough in decentralized networks, or an overnight geopolitical trade war can erase billions in value\u2014you cannot accurately predict the future.",
+            "start": 413.568166834539,
+            "end": 425.78872630711476
+          },
+          {
+            "text": "The variables are too dense.",
+            "start": 426.60876384946437,
+            "end": 428.1288334401612
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Your objective is not to be a flawless oracle.",
+            "start": 428.5688535848366,
+            "end": 431.6689955132314
+          },
+          {
+            "text": "Your objective is endurance.",
+            "start": 432.2290211519092,
+            "end": 434.1691099716144
+          },
+          {
+            "text": "You must construct a system robust enough to weather the 99 terrible or mediocre days so that your capital is still sitting at the table when that 1 extraordinary day of massive returns finally arrives.",
+            "start": 434.80913927296035,
+            "end": 446.5496767695266
+          },
+          {
+            "text": "The secret isn't predicting the tails; it's surviving the wait.",
+            "start": 447.28971064920796,
+            "end": 450.7898708909441
+          }
+        ]
+      }
+    ],
+    "3": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Have you ever noticed that hitting your financial targets rarely feels as good as you thought it would?",
+            "start": 458.9902613172722,
+            "end": 463.33047211968136
+          },
+          {
+            "text": "You hustle, you scrape, you finally hit that magic number in your portfolio\u2014and within forty-eight hours, the satisfaction evaporates.",
+            "start": 463.9505022343113,
+            "end": 471.5708723528269
+          },
+          {
+            "text": "You immediately set a new, higher target.",
+            "start": 472.07089663881874,
+            "end": 474.2310015543035
+          },
+          {
+            "text": "The friction here is that most people believe wealth is a numbers game, but it is actually a psychology game.",
+            "start": 475.01103944045076,
+            "end": 480.63131241499906
+          },
+          {
+            "text": "We fail at this because we allow our ego to scale linearly with our net worth.",
+            "start": 481.2513425296289,
+            "end": 485.0915290460463
+          },
+          {
+            "text": "We step onto a hedonic treadmill, convinced that if we just get a little bit more, we will finally arrive.",
+            "start": 485.7315601321158,
+            "end": 491.23182727802606
+          },
+          {
+            "text": "But the goalpost has wheels.",
+            "start": 491.69184962113854,
+            "end": 492.9319098503983
+          },
+          {
+            "text": "People destroy perfectly good financial plans, taking catastrophic risks, simply because they are playing a game of comparison they can never win.",
+            "start": 493.65194482222654,
+            "end": 500.9723003691471
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Phantom in the Ferrari",
+            "start": 501.83234214105306,
+            "end": 503.0123994559938
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author crystalizes this trap through a brilliant concept called the \"Man in the Car Paradox.\"",
+            "start": 503.8924421993394,
+            "end": 508.392660773266
+          },
+          {
+            "text": "Imagine you are walking down the street and a sleek, roaring $200,000 Ferrari pulls up to the stoplight.",
+            "start": 509.1326967165339,
+            "end": 514.3729512337284
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "What goes through your mind?",
+            "start": 515.0529842626773,
+            "end": 515.9730289489023
+          },
+          {
+            "text": "You almost never look at the driver and think, \"Wow, the guy driving that car is incredibly cool and successful.",
+            "start": 516.4530522634544,
+            "end": 521.6333038663299
+          },
+          {
+            "text": "I admire him.\"",
+            "start": 521.9733203808044,
+            "end": 522.5533485525549
+          },
+          {
+            "text": "Instead, you look at the car and think, \"If I had that car, people would think I am cool.\"",
+            "start": 523.0933747814261,
+            "end": 527.3535816980766
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Do you see the tragic irony?",
+            "start": 527.9136088983875,
+            "end": 529.4536836992423
+          },
+          {
+            "text": "The driver purchased the Ferrari explicitly to signal their wealth and command your admiration.",
+            "start": 530.0337118709929,
+            "end": 534.5339304449194
+          },
+          {
+            "text": "But you bypass the driver entirely, using their expensive possession as a mirror to reflect your own desires for status.",
+            "start": 535.0139537594715,
+            "end": 540.8942393627356
+          },
+          {
+            "text": "Nobody is as impressed with your stuff as you are.",
+            "start": 541.5542714202448,
+            "end": 543.6743743928503
+          },
+          {
+            "text": "The author also notes the tragic trajectory of incredibly wealthy executives\u2014people who already had hundreds of millions of dollars\u2014who committed financial crimes just to get a little bit more.",
+            "start": 544.3944093646785,
+            "end": 553.8348678842044
+          },
+          {
+            "text": "They risked something they had and needed (their freedom and reputation) for something they didn't have and didn't need (a higher ranking on a billionaire's list).",
+            "start": 554.4748989702739,
+            "end": 561.7952545171945
+          },
+          {
+            "text": "They completely forgot how to define the word \"enough.\"",
+            "start": 562.3552817175054,
+            "end": 564.9554080046629
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Flexing in the Digital Colosseum",
+            "start": 567.8355478919759,
+            "end": 569.4956285214688
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let's pull this into the hyper-connected reality of today.",
+            "start": 571.2157120652807,
+            "end": 573.7958373809986
+          },
+          {
+            "text": "The \"Man in the Car\" is no longer just a guy at a stoplight; he is everywhere.",
+            "start": 574.3158626384302,
+            "end": 578.1960510977268
+          },
+          {
+            "text": "The ego trap has gone digital, frictionless, and infinite.",
+            "start": 578.6360724693997,
+            "end": 581.4162074995143
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Fifteen years ago, you only had to compare your financial success to your immediate neighbors.",
+            "start": 582.476258985817,
+            "end": 586.3164455022343
+          },
+          {
+            "text": "Today, because of social media, remote work digital nomads, and viral trading communities, you are forced to compare your portfolio to the top 0.001% of the global internet.",
+            "start": 586.7964688167865,
+            "end": 595.5368933359239
+          },
+          {
+            "text": "You might execute a brilliant, disciplined strategy, securing a solid, sustainable return on a clean energy ETF or a well-researched AI infrastructure play.",
+            "start": 596.136922479114,
+            "end": 603.6572877404313
+          },
+          {
+            "text": "You should be thrilled.",
+            "start": 604.0973091121041,
+            "end": 604.8173440839324
+          },
+          {
+            "text": "But then you open your phone and see a 19-year-old who turned a stimulus check into millions by gambling on a decentralized crypto token.",
+            "start": 605.2773664270449,
+            "end": 611.0176452302312
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Instantly, your very reasonable success feels like a failure.",
+            "start": 613.8777841461045,
+            "end": 618.017985234117
+          },
+          {
+            "text": "Your ego screams that you are falling behind.",
+            "start": 618.6580163201866,
+            "end": 621.0981348358267
+          },
+          {
+            "text": "In the modern market, the ultimate scarcity isn't capital or data; it is the psychological armor required to ignore what everyone else is doing.",
+            "start": 621.878172721974,
+            "end": 630.6185972411113
+          },
+          {
+            "text": "If you let the viral screenshots of overnight tech millionaires dictate your baseline for success, you will eventually take uncharacteristic risks that blow up your entire life's work.",
+            "start": 631.4586380415776,
+            "end": 641.3591189042161
+          },
+          {
+            "text": "You have to realize that comparing your behind-the-scenes reality to someone else's curated highlight reel is a rigged game.",
+            "start": 642.0591529046046,
+            "end": 648.2594540509035
+          },
+          {
+            "text": "The only way to win is to refuse to play.",
+            "start": 648.779479308335,
+            "end": 651.2595997668545
+          }
+        ]
+      }
+    ],
+    "4": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Curse of the Maximum Yield",
+            "start": 664.3802398741643,
+            "end": 665.8803136059772
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is a secret that the loudest voices in the financial media desperately want you to ignore: hunting for the highest possible return is usually what destroys your wealth.",
+            "start": 667.1803775068817,
+            "end": 675.640793354306
+          },
+          {
+            "text": "The friction here is rooted in our impatience.",
+            "start": 676.6408425088479,
+            "end": 678.7609467164766
+          },
+          {
+            "text": "We treat investing like a drag race, constantly scanning the horizon for the fastest-moving vehicle.",
+            "start": 679.3009732599293,
+            "end": 683.8611974046402
+          },
+          {
+            "text": "If one asset is up 20% and ours is only up 8%, we feel like we are losing.",
+            "start": 684.5212298466379,
+            "end": 689.1014549744397
+          },
+          {
+            "text": "So, we switch lanes.",
+            "start": 689.5614775855289,
+            "end": 690.4215198584349
+          },
+          {
+            "text": "We pivot.",
+            "start": 690.6415306724341,
+            "end": 691.0615513173417
+          },
+          {
+            "text": "We interrupt the process.",
+            "start": 691.401568029886,
+            "end": 692.5616250491545
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But wealth creation isn't a drag race; it is a glacier.",
+            "start": 693.6816801022414,
+            "end": 696.3418108533228
+          },
+          {
+            "text": "Most people fail because they misunderstand the fundamental math of compounding.",
+            "start": 697.2618560755013,
+            "end": 700.7020251671254
+          },
+          {
+            "text": "They think compounding is about earning massive percentages every single year.",
+            "start": 701.4220605583956,
+            "end": 704.7422237514746
+          },
+          {
+            "text": "It isn't.",
+            "start": 705.1622443963822,
+            "end": 705.6022660243807
+          },
+          {
+            "text": "Compounding is a stubborn, slow-moving machine that only requires one input to work its magic: unbroken, continuous time.",
+            "start": 706.2822994494691,
+            "end": 713.6426612268974
+          },
+          {
+            "text": "Every time you panic, chase a new trend, or try to dodge a market dip, you unplug the machine and reset the clock to zero.",
+            "start": 714.5627064490759,
+            "end": 720.7230092410539
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The $81 Billion Birthday and the Price of Admission",
+            "start": 722.1230780574125,
+            "end": 724.8632127408573
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author shatters this illusion by pointing to the most famous investor alive: Warren Buffett.",
+            "start": 726.0232697601258,
+            "end": 730.5834939048368
+          },
+          {
+            "text": "We attribute Buffett\u2019s fortune to supreme stock-picking intelligence.",
+            "start": 731.5035391270153,
+            "end": 734.503686590641
+          },
+          {
+            "text": "But the author reveals a staggering mathematical reality: of Buffett's roughly $84.5 billion net worth (at the time the book was written), $81.5 billion of it came after his 65th birthday.",
+            "start": 734.9437082186394,
+            "end": 746.0042518678725
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Buffett isn't the greatest investor of all time because he had the highest annual returns.",
+            "start": 747.2043108533228,
+            "end": 750.884491742037
+          },
+          {
+            "text": "In fact, there are quantitative fund managers who boast significantly higher average annual returns than him.",
+            "start": 751.2845114038537,
+            "end": 755.7247296500196
+          },
+          {
+            "text": "Buffett's secret is simply that he has been achieving good returns uninterrupted for three-quarters of a century.",
+            "start": 756.544769956744,
+            "end": 761.345005898545
+          },
+          {
+            "text": "He never stopped the engine.",
+            "start": 761.9050334250885,
+            "end": 763.1650953598112
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But how do you keep the engine running when the market collapses?",
+            "start": 763.565115021628,
+            "end": 766.3052497050727
+          },
+          {
+            "text": "The author explains this through the metaphor of a \"fee versus a fine.\"",
+            "start": 766.9252801808886,
+            "end": 770.1854404246952
+          },
+          {
+            "text": "When you get a speeding ticket, that is a fine.",
+            "start": 770.8454728666928,
+            "end": 772.8655721588675
+          },
+          {
+            "text": "It means you did something wrong; you are being punished and you should change your behavior.",
+            "start": 773.3655967361384,
+            "end": 777.1257815572159
+          },
+          {
+            "text": "But when you pay $150 to get into Disneyland, that is a fee.",
+            "start": 777.8258159653952,
+            "end": 781.2259830908375
+          },
+          {
+            "text": "It is simply the price of admission to experience something great.",
+            "start": 781.9460184821078,
+            "end": 784.8461610302792
+          },
+          {
+            "text": "Market volatility\u2014the agonizing 20% or 30% drops\u2014is not a fine.",
+            "start": 785.8062082186394,
+            "end": 790.3864333464412
+          },
+          {
+            "text": "It does not mean you made a mistake.",
+            "start": 790.9864628391663,
+            "end": 792.3065277231616
+          },
+          {
+            "text": "It is the unavoidable fee you must pay to access the theme park of long-term compounding.",
+            "start": 792.9465591820684,
+            "end": 797.4867823436886
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Weathering the AI Super-Cycle",
+            "start": 798.7268432953205,
+            "end": 800.3269219425874
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let\u2019s contextualize this for the modern market.",
+            "start": 801.5869838773102,
+            "end": 803.5470802202124
+          },
+          {
+            "text": "We are currently watching a massive structural shift regarding artificial intelligence, autonomous networks, and global data center expansion.",
+            "start": 804.2271136453008,
+            "end": 810.6074272512781
+          },
+          {
+            "text": "The long-term trajectory of these technologies is incredibly profound.",
+            "start": 811.4274675580024,
+            "end": 814.667626818718
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "However, the day-to-day reality of participating in this super-cycle is brutal.",
+            "start": 815.9676907196225,
+            "end": 819.6478716083366
+          },
+          {
+            "text": "A sudden semiconductor export restriction, a minor trade war whisper, or an unexpected shift in remote-work enterprise spending can send a perfectly healthy AI infrastructure company plummeting 35% in a single month.",
+            "start": 820.327905033425,
+            "end": 832.1884880062918
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "When modern investors see that flash crash on their screens, their instinct is to view it as a speeding ticket.",
+            "start": 833.388546991742,
+            "end": 837.7687622886355
+          },
+          {
+            "text": "They think, \u201cI made a mistake, I need to exit immediately to stop the pain.\u201d",
+            "start": 838.3487907982698,
+            "end": 841.508946126622
+          },
+          {
+            "text": "But if you truly understand the underlying thesis of the asset, that 35% drop is just the admission fee.",
+            "start": 842.7290060951632,
+            "end": 848.649297090051
+          },
+          {
+            "text": "If you refuse to pay the fee of modern market volatility, you will never be allowed to stay on the ride long enough to let the compounding engine do its actual work.",
+            "start": 849.649346244593,
+            "end": 856.7296942587495
+          },
+          {
+            "text": "You cannot get a multi-decade technological tailwind for free.",
+            "start": 857.3697257176563,
+            "end": 860.2498672827369
+          }
+        ]
+      }
+    ],
+    "5": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Getting wealthy is glamorous; staying wealthy is agonizingly dull.",
+            "start": 866.4901240277486,
+            "end": 870.1302515591059
+          },
+          {
+            "text": "The financial world glorifies the ascent.",
+            "start": 870.7902746829235,
+            "end": 872.7703440543761
+          },
+          {
+            "text": "We obsess over the visionaries who see what no one else sees, the risk-takers who put everything on the line, and the bold optimists who look at a skeptical market and confidently declare, \"I am right, and everyone else is wrong.\"",
+            "start": 873.2103594702544,
+            "end": 884.7507637867003
+          },
+          {
+            "text": "Getting money absolutely demands this aggressive, forward-leaning posture.",
+            "start": 885.4307876112396,
+            "end": 888.8909088361013
+          },
+          {
+            "text": "You must be optimistic enough to believe that the future will be larger and more profitable than the past.",
+            "start": 889.4309277555883,
+            "end": 894.3911015345807
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But here is the brutal friction that shatters most portfolios: the very psychological traits required to make money are the exact traits that will mathematically guarantee you lose it.",
+            "start": 895.0911260598417,
+            "end": 904.3514504940089
+          },
+          {
+            "text": "People fail because they treat wealth generation and wealth preservation as the exact same discipline.",
+            "start": 904.971472216383,
+            "end": 909.2716228715577
+          },
+          {
+            "text": "They are not just different skills; they are polar opposites.",
+            "start": 909.87164389321,
+            "end": 912.5117363884801
+          },
+          {
+            "text": "To keep your wealth, you must undergo a complete psychological inversion.",
+            "start": 913.1717595122977,
+            "end": 916.1518639198375
+          },
+          {
+            "text": "You have to trade your visionary optimism for a creeping, constant paranoia.",
+            "start": 916.6518814378811,
+            "end": 920.5120166771776
+          },
+          {
+            "text": "You must assume that your past success was largely a byproduct of a temporary tailwind, and that tomorrow's market is actively conspiring to take it all back.",
+            "start": 921.1320383995516,
+            "end": 928.192285754327
+          },
+          {
+            "text": "When you refuse to shift gears\u2014when you keep your foot slammed on the accelerator of optimism after you have already won the race\u2014you eventually drive your portfolio straight off a cliff.",
+            "start": 928.8523088781445,
+            "end": 937.1926010791116
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Ghost of Jesse Livermore and the Mechanics of Survival",
+            "start": 938.0726319108683,
+            "end": 940.7127244061384
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author illustrates this catastrophic failure to shift gears through the haunting story of Jesse Livermore.",
+            "start": 941.5527538364516,
+            "end": 946.9729437320441
+          },
+          {
+            "text": "In the early 20th century, Livermore was arguably the greatest stock trader alive.",
+            "start": 947.7129696587485,
+            "end": 951.9931196132017
+          },
+          {
+            "text": "When the catastrophic market crash of 1929 hit, wiping out a generation of wealth and plunging the nation into the Great Depression, Livermore\u2019s wife locked their doors, assuming they were completely ruined like everyone else in their social circle.",
+            "start": 952.6731434377409,
+            "end": 964.4135547614043
+          },
+          {
+            "text": "But Livermore returned home with unbelievable news: he had aggressively shorted the market.",
+            "start": 965.0735778852219,
+            "end": 969.6937397519446
+          },
+          {
+            "text": "While the world burned, Livermore made the modern equivalent of over three billion dollars in a single week.",
+            "start": 970.3137614743187,
+            "end": 975.2339338518675
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He had achieved the ultimate financial victory.",
+            "start": 976.2539695886765,
+            "end": 978.394044565903
+          },
+          {
+            "text": "He was invincible.",
+            "start": 978.93406348539,
+            "end": 980.0141013243641
+          },
+          {
+            "text": "But Livermore could not turn off the risk-taking engine that made him a billionaire.",
+            "start": 980.7541272510687,
+            "end": 984.0942442715998
+          },
+          {
+            "text": "He kept placing massive, highly leveraged, wildly optimistic bets on the market, assuming his own genius was a permanent shield.",
+            "start": 984.6142624903651,
+            "end": 990.8544811155491
+          },
+          {
+            "text": "He lacked the paranoia required to protect what he had built.",
+            "start": 991.4745028379232,
+            "end": 993.9545897274193
+          },
+          {
+            "text": "Four years later, Livermore had lost absolutely everything, culminating in tragedy.",
+            "start": 994.7746184570108,
+            "end": 999.2547754186813
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This story perfectly highlights the author\u2019s concept of \"Room for Error,\" often called the margin of safety.",
+            "start": 999.8547964403335,
+            "end": 1005.0349779272651
+          },
+          {
+            "text": "Room for error is the unspoken, unglamorous secret of the world's most enduring investors.",
+            "start": 1005.8750073575784,
+            "end": 1010.735177632962
+          },
+          {
+            "text": "It is the understanding that your predictive models will eventually be wrong.",
+            "start": 1011.3952007567796,
+            "end": 1014.7353177773107
+          },
+          {
+            "text": "If your financial plan requires the market to perform exactly as you predicted in order for you to survive, you are playing Russian roulette.",
+            "start": 1015.5153451054587,
+            "end": 1021.7755644313644
+          },
+          {
+            "text": "Building an unbreakable defense means engineering a life and a portfolio that can endure a reality where your assumptions are completely shattered.",
+            "start": 1022.5955931609558,
+            "end": 1029.6958419171747
+          },
+          {
+            "text": "It is the realization that survival is not just one of the strategies; survival is the only foundation upon which compounding can actually work.",
+            "start": 1030.4158671431576,
+            "end": 1037.6561208044286
+          },
+          {
+            "text": "If you are forced out of the game during a downturn, your past brilliance is entirely erased.",
+            "start": 1038.3161439282462,
+            "end": 1042.536291780534
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Surviving the Algorithmic Meat Grinder",
+            "start": 1043.9963429332213,
+            "end": 1045.7564045967347
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Fast forward to our current reality.",
+            "start": 1047.1564536472567,
+            "end": 1048.5965040992223
+          },
+          {
+            "text": "The velocity of money and the sheer speed of information have violently accelerated.",
+            "start": 1049.0565202158223,
+            "end": 1052.9366561558406
+          },
+          {
+            "text": "We are navigating an era of unprecedented leverage and hyperspeed narrative-driven markets.",
+            "start": 1053.4966757760494,
+            "end": 1058.056835540607
+          },
+          {
+            "text": "Consider the billions of dollars currently flowing into AI infrastructure and massive data centers, the wild swings of clean energy ETFs reacting to a single regulatory rumor, or the chaotic, 24/7 global casino of cryptocurrency.",
+            "start": 1058.6968579637028,
+            "end": 1070.8972854039662
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In this hyper-connected environment, the illusion of safety is a dangerous and intoxicating trap.",
+            "start": 1072.1773302501576,
+            "end": 1076.9774984233761
+          },
+          {
+            "text": "People build complex, highly optimized portfolios that work flawlessly\u2014right up until a sudden geopolitical trade war severs a critical semiconductor supply chain, or an unforeseen algorithmic shift triggers a cascading flash crash across the network.",
+            "start": 1077.5975201457502,
+            "end": 1090.0979580968399
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, having room for error isn't just about keeping a percentage of your portfolio in cash.",
+            "start": 1090.537973512718,
+            "end": 1095.5181479924322
+          },
+          {
+            "text": "It is about structural, psychological defense.",
+            "start": 1096.0981683133627,
+            "end": 1098.438250297807
+          },
+          {
+            "text": "It means asking yourself what happens if the remote work trend completely reverses, commercial real estate collapses, and the specific tech sector you are heavily exposed to experiences a decade-long winter.",
+            "start": 1099.1782762245114,
+            "end": 1109.8786511106441
+          },
+          {
+            "text": "A modern margin of safety means recognizing that the unprecedented will happen.",
+            "start": 1109.8786511106441,
+            "end": 1114.5388143788102
+          },
+          {
+            "text": "If you have leveraged yourself to the absolute maximum to capture the upside of the current AI super-cycle, you have left yourself zero room for error when the inevitable, unpredictable macro-shock arrives, that lack of a safety net will force you to liquidate your positions at the absolute worst time just to survive.",
+            "start": 1115.4788473127321,
+            "end": 1131.5794113937357
+          },
+          {
+            "text": "You must be skeptical enough to build a massive financial moat today, precisely so you can afford to be optimistic about the decades to come.",
+            "start": 1132.4994436269358,
+            "end": 1139.5396902809894
+          }
+        ]
+      }
+    ],
+    "6": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is a reality most people completely misunderstand about capital: we are conditioned to view money strictly as a medium of exchange for physical goods.",
+            "start": 1154.740491309386,
+            "end": 1163.181143298571
+          },
+          {
+            "text": "You earn money to exchange it for a car, a house, a vacation, or a watch.",
+            "start": 1163.7411865585168,
+            "end": 1167.5614816531481
+          },
+          {
+            "text": "The friction that traps almost every investor is the belief that if you are not actively spending your money on something tangible, that money is sitting idle and useless.",
+            "start": 1168.2415341830824,
+            "end": 1176.1221429123216
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Because of this, people only save with a specific purchase in mind.",
+            "start": 1177.3022340672076,
+            "end": 1180.7024967168793
+          },
+          {
+            "text": "They save for a down payment.",
+            "start": 1181.1425307068366,
+            "end": 1182.3426234067208
+          },
+          {
+            "text": "They save for a wedding.",
+            "start": 1182.5826419466978,
+            "end": 1183.562717651603
+          },
+          {
+            "text": "But when you only view money as a ticket to acquire things, you inevitably fall victim to lifestyle creep.",
+            "start": 1184.122760911549,
+            "end": 1189.0031378910778
+          },
+          {
+            "text": "The moment your income increases, your desires stretch to match it.",
+            "start": 1189.663188876014,
+            "end": 1192.8034314407107
+          },
+          {
+            "text": "You upgrade your apartment, you upgrade your car, and suddenly your new, massive income is entirely spoken for.",
+            "start": 1193.2234638856703,
+            "end": 1198.643882580147
+          },
+          {
+            "text": "You feel wealthy because you are surrounded by expensive items, but you are actually chained to a higher burn rate.",
+            "start": 1199.223927385091,
+            "end": 1204.184310544612
+          },
+          {
+            "text": "You are forced to work harder, take on more stress, and answer to more people just to maintain the baseline.",
+            "start": 1204.6243445345694,
+            "end": 1209.5647261490924
+          },
+          {
+            "text": "You have succeeded in acquiring money, but you have failed to acquire the one thing money is actually designed to buy.",
+            "start": 1210.1247694090384,
+            "end": 1215.3651741985323
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Highest Dividend",
+            "start": 1219.7455125531094,
+            "end": 1220.7455898030128
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author shatters this consumption mindset by revealing what he considers the single greatest intrinsic value of a dollar.",
+            "start": 1223.9258354577057,
+            "end": 1229.7062819621476
+          },
+          {
+            "text": "He argues that the absolute highest dividend money can possibly pay is the ability to control your own time.",
+            "start": 1230.2663252220937,
+            "end": 1235.7867516415606
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "To illustrate this, the author points to a massive, multi-decade study of elderly populations.",
+            "start": 1237.046848976439,
+            "end": 1242.5872769409038
+          },
+          {
+            "text": "When researchers asked thousands of elderly people what the secret to a happy life was, almost none of them said \"working hard to make enough money to buy things.\"",
+            "start": 1243.2273263808422,
+            "end": 1251.4479613750484
+          },
+          {
+            "text": "None of them cared about the size of their former houses or the prestige of their titles.",
+            "start": 1252.2480231749712,
+            "end": 1256.4083445345696
+          },
+          {
+            "text": "The overwhelmingly common denominator for happiness was having quality time, strong relationships, and the autonomy to dictate their own schedules.",
+            "start": 1257.0883970645039,
+            "end": 1264.989007338741
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author explains that the most powerful form of saving is saving for absolutely nothing at all.",
+            "start": 1266.6091324835845,
+            "end": 1271.3895017381228
+          },
+          {
+            "text": "You do not need a specific reason to save.",
+            "start": 1272.0295511780612,
+            "end": 1274.269724217845
+          },
+          {
+            "text": "When you save without a goal, you are no longer saving to buy a product; you are saving to buy options.",
+            "start": 1274.7297597528004,
+            "end": 1279.9701645422945
+          },
+          {
+            "text": "You are purchasing a hedge against life's inevitable unpredictability.",
+            "start": 1280.4502016222482,
+            "end": 1283.8104611819235
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Every unspent dollar in your bank account represents a tiny piece of your future that you own outright.",
+            "start": 1285.410584781769,
+            "end": 1290.1709524913094
+          },
+          {
+            "text": "It represents the ability to take a lower-paying job that you actually love, the ability to walk away from a toxic boss, or the ability to take a six-month sabbatical without your life falling apart.",
+            "start": 1290.7910003862496,
+            "end": 1300.9517852452686
+          },
+          {
+            "text": "True wealth is waking up in the morning and saying, \"I can do whatever I want today.\"",
+            "start": 1301.8918578601779,
+            "end": 1306.2321931247586
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Digital Sweatshop",
+            "start": 1307.8323167246042,
+            "end": 1308.892398609502
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let\u2019s translate this into the hyper-accelerated modern era.",
+            "start": 1310.4925222093473,
+            "end": 1313.2527354190809
+          },
+          {
+            "text": "Look around at the current boom in tech, remote work, and the frantic race to capitalize on artificial intelligence.",
+            "start": 1313.9327879490152,
+            "end": 1319.2932020084977
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "We now have a generation of highly paid \"digital nomads\" and tech executives making staggering amounts of money.",
+            "start": 1319.8332437234455,
+            "end": 1326.3137443028197
+          },
+          {
+            "text": "But look closely at their lives.",
+            "start": 1327.0738030127463,
+            "end": 1328.8139374275784
+          },
+          {
+            "text": "A remote worker might be pulling in $300,000 a year, but if they are terrified of being replaced by the latest generative AI model, and are chained to their Slack notifications 24/7 to prove their productivity, they are not free.",
+            "start": 1329.5339930475088,
+            "end": 1342.414988026265
+          },
+          {
+            "text": "They have a massive income, but they are living in a digital sweatshop.",
+            "start": 1342.995032831209,
+            "end": 1346.2352831208962
+          },
+          {
+            "text": "They have zero autonomy over their Tuesday afternoon.",
+            "start": 1346.775324835844,
+            "end": 1349.1555086906142
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Conversely, consider someone who built a modest, unglamorous portfolio\u2014perhaps a steady accumulation of basic index funds or stable tech mainstays\u2014but purposely kept their living expenses incredibly low.",
+            "start": 1350.595619930475,
+            "end": 1362.156512939359
+          },
+          {
+            "text": "They don't have the income to charter a private jet, but they have accumulated enough unspent capital to insulate themselves from the AI panic.",
+            "start": 1362.8165639242952,
+            "end": 1369.5170814986482
+          },
+          {
+            "text": "If their industry shifts or a global pandemic reshapes the economy, they don't have to scramble.",
+            "start": 1370.1771324835845,
+            "end": 1374.4574631131713
+          },
+          {
+            "text": "They have the flexibility to pause, pivot, and retrain at their own pace.",
+            "start": 1374.8774955581307,
+            "end": 1378.6177844727695
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In today's world, where algorithms can execute trades in milliseconds and remote work blurs the line between the office and the bedroom, your time is under constant siege.",
+            "start": 1379.977889532638,
+            "end": 1388.4585446118194
+          },
+          {
+            "text": "If you are using your portfolio just to fund a more expensive lifestyle, you are missing his point.",
+            "start": 1389.0585909617614,
+            "end": 1393.4189277713403
+          },
+          {
+            "text": "You should be using your portfolio to buy yourself out of the modern grind.",
+            "start": 1394.0189741212826,
+            "end": 1397.0392074159909
+          },
+          {
+            "text": "Your wealth is measured not by what you can purchase, but by how many months you can truly \"live\" without asking anyone for permission!",
+            "start": 1397.659255310931,
+            "end": 1403.7197234453458
+          }
+        ]
+      }
+    ],
+    "7": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is a psychological trap that almost everyone falls into: we rely on visual cues to measure success.",
+            "start": 1411.0601582358388,
+            "end": 1417.3204216816766
+          },
+          {
+            "text": "If you want to know if someone is physically fit, you look at them.",
+            "start": 1417.9804494571163,
+            "end": 1420.6805630839156
+          },
+          {
+            "text": "If you want to know if someone is a good public speaker, you listen to them.",
+            "start": 1421.1805841259152,
+            "end": 1423.9407002777543
+          },
+          {
+            "text": "So, logically, if you want to know if someone is doing well financially, you look at their lifestyle.",
+            "start": 1424.4807230031142,
+            "end": 1428.7809039643128
+          },
+          {
+            "text": "You look at the car they drive, the zip code they live in, and the photos they post.",
+            "start": 1429.2409233229525,
+            "end": 1432.5810638835114
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The friction arises because this logic is entirely backwards when it comes to finance.",
+            "start": 1433.3010941839912,
+            "end": 1437.5212717784698
+          },
+          {
+            "text": "The only definitive thing you know about someone driving a $100,000 car is that they have $100,000 less in the bank than they did yesterday\u2014or worse, they are drowning in $100,000 of debt.",
+            "start": 1438.1012961871895,
+            "end": 1449.0817582695058
+          },
+          {
+            "text": "People completely fail at building long-term security because they are trying to emulate the spending patterns of the rich, completely misunderstanding that true wealth is exactly what you cannot see.",
+            "start": 1449.9417944617455,
+            "end": 1459.3421900513424
+          },
+          {
+            "text": "When you use your money to signal to the world how much money you have, you are actively destroying the very thing you are trying to display.",
+            "start": 1460.1422237185423,
+            "end": 1466.4424888477402
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Price of the Unbought",
+            "start": 1468.3825704906994,
+            "end": 1469.582620991499
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author delivers a masterclass on this distinction by brutally separating two words society uses interchangeably: \"Rich\" and \"Wealthy.\"",
+            "start": 1470.2226479252588,
+            "end": 1477.3229467216563
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Rich is a current income.",
+            "start": 1478.1029795471761,
+            "end": 1479.4030342563756
+          },
+          {
+            "text": "It is highly visible.",
+            "start": 1479.7630494066157,
+            "end": 1480.7030889655753
+          },
+          {
+            "text": "Even someone drowning in debt can be \"rich\" if their monthly cash flow is high enough to cover the interest payments on their massive mansion and sports car.",
+            "start": 1481.203110007575,
+            "end": 1487.643381028533
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Wealth, however, is hidden.",
+            "start": 1488.1034003871728,
+            "end": 1489.8034719299721
+          },
+          {
+            "text": "Wealth is the income not spent.",
+            "start": 1490.5235022304519,
+            "end": 1492.3635796650112
+          },
+          {
+            "text": "The author tells the story of the singer Rihanna, who nearly went bankrupt and sued her financial advisor.",
+            "start": 1493.183614173891,
+            "end": 1498.3238304856493
+          },
+          {
+            "text": "The advisor\u2019s defense was a profound, almost sarcastic truth: \"Was it really necessary to tell her that if you spend money on things, you will end up with the things and not the money?\"",
+            "start": 1499.043860786129,
+            "end": 1509.4642993014056
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author confesses that his own personal financial strategy isn't about maximizing every single yield or driving a spectacular car.",
+            "start": 1510.724352327245,
+            "end": 1517.9446561737227
+          },
+          {
+            "text": "He and his family purposefully live a quiet, unglamorous lifestyle with a massive savings rate.",
+            "start": 1518.6246847908424,
+            "end": 1523.7449002609208
+          },
+          {
+            "text": "Why?",
+            "start": 1524.2249204612406,
+            "end": 1524.4849314030805
+          },
+          {
+            "text": "Because wealth is the luxury car not purchased.",
+            "start": 1525.1249583368403,
+            "end": 1527.7450685969193
+          },
+          {
+            "text": "It is the big diamond ring not bought.",
+            "start": 1528.2050879555593,
+            "end": 1530.1251687568385
+          },
+          {
+            "text": "It is the first-class upgrade declined.",
+            "start": 1530.6451906405184,
+            "end": 1532.5252697584378
+          },
+          {
+            "text": "Wealth is financial assets that have not yet been converted into the stuff you see.",
+            "start": 1533.2853017422776,
+            "end": 1537.2254675532363
+          },
+          {
+            "text": "It is a quiet, hidden ledger of options, flexibility, and unspent potential.",
+            "start": 1537.885495328676,
+            "end": 1542.5256905984345
+          },
+          {
+            "text": "If you cannot embrace the agonizingly boring act of leaving money alone, you will never build wealth; you will only ever build a facade.",
+            "start": 1543.3457251073141,
+            "end": 1550.8060390539517
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Digital Flex Economy",
+            "start": 1554.5261956064303,
+            "end": 1555.8662519989898
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let\u2019s pull this into the hyper-visible reality of the present moment.",
+            "start": 1557.1063041831494,
+            "end": 1559.9864253850685
+          },
+          {
+            "text": "The pressure to look rich has exponentially mutated.",
+            "start": 1560.5064472687484,
+            "end": 1563.2065608955475
+          },
+          {
+            "text": "It is no longer just the guy in your neighborhood showing off a new lawnmower; it is a global, 24/7 digital colosseum.",
+            "start": 1563.7265827792273,
+            "end": 1570.246857166905
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Look at the modern crypto ecosystem, or the explosive wealth narratives surrounding early AI infrastructure investments.",
+            "start": 1571.1868967258647,
+            "end": 1576.7471307129028
+          },
+          {
+            "text": "Every single day, you are bombarded with screenshots of massive decentralized wallet balances, tech founders flashing their lavish remote-work setups in Bali, or traders showcasing massive overnight gains from an obscure Data Center REIT.",
+            "start": 1577.3871576466627,
+            "end": 1589.1476525544988
+          },
+          {
+            "text": "This is the modern flex.",
+            "start": 1589.7676786465786,
+            "end": 1590.927727464018
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But remember the rule of the unseen: you are only seeing the highlight reel.",
+            "start": 1591.507751872738,
+            "end": 1595.8079328339365
+          },
+          {
+            "text": "What that viral screenshot does not show you is the crippling margin debt holding that portfolio together.",
+            "start": 1596.4079580843363,
+            "end": 1601.4281693460146
+          },
+          {
+            "text": "It does not show you the catastrophic tax liability waiting at the end of the year.",
+            "start": 1602.1081979631344,
+            "end": 1605.8083536739332
+          },
+          {
+            "text": "It does not show you the insomnia.",
+            "start": 1606.4483806076928,
+            "end": 1607.8684403669724
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In an era where everyone can instantly broadcast their perceived success, the desire to convert your unspent capital into visible status is overwhelming.",
+            "start": 1609.5685119097718,
+            "end": 1618.128872148809
+          },
+          {
+            "text": "If you acquire a solid, life-changing return from a clean energy ETF, your ego will scream at you to immediately upgrade your lifestyle so the world knows you succeeded.",
+            "start": 1618.8689032909688,
+            "end": 1627.8692820469657
+          },
+          {
+            "text": "You have to fight this modern instinct with everything you have.",
+            "start": 1628.4893081390455,
+            "end": 1631.3494284992844
+          },
+          {
+            "text": "The ultimate flex in today's digital economy is having an unassailable, deeply secure financial foundation that absolutely no one on the internet knows about.",
+            "start": 1631.9294529080044,
+            "end": 1640.2098013635216
+          },
+          {
+            "text": "True wealth is silent.",
+            "start": 1640.8298274556014,
+            "end": 1642.189884689841
+          }
+        ]
+      }
+    ],
+    "8": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the most dangerous assumption embedded in modern finance: the belief that the past is a perfect blueprint for the future.",
+            "start": 1649.4501704502602,
+            "end": 1655.7304072705333
+          },
+          {
+            "text": "We are conditioned to treat financial history like a hard science.",
+            "start": 1656.6304412097443,
+            "end": 1659.4905490610151
+          },
+          {
+            "text": "We look at past recessions, past technological revolutions, and past market crashes, and we build elaborate, hyper-detailed models to predict exactly what will happen next.",
+            "start": 1660.15057394977,
+            "end": 1668.9909073082435
+          },
+          {
+            "text": "The friction that destroys so many portfolios is the misplaced confidence that if you just study enough historical data, you can eliminate uncertainty.",
+            "start": 1670.0309465268874,
+            "end": 1677.1712157779623
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But people fail because they are studying a world that no longer exists.",
+            "start": 1678.3712610302437,
+            "end": 1681.6313839656084
+          },
+          {
+            "text": "They build highly rigid, decades-long financial plans assuming two things will remain absolutely static: the macroeconomic environment, and their own personal desires.",
+            "start": 1682.2914088543632,
+            "end": 1690.4317158156725
+          },
+          {
+            "text": "Both of these assumptions are fatal.",
+            "start": 1690.971736179199,
+            "end": 1692.4517919903462
+          },
+          {
+            "text": "When you lock yourself into a rigid, mathematically optimized master plan, you are completely defenseless when the world inevitably does something it has never done before.",
+            "start": 1693.431828946376,
+            "end": 1700.692102722679
+          },
+          {
+            "text": "Even worse, you are trapped when you wake up a decade later and realize the person you are today no longer wants the things the person you were ten years ago was saving for.",
+            "start": 1701.4921328908667,
+            "end": 1708.452395354099
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Prophet\u2019s Fallacy and the Stranger in the Mirror",
+            "start": 1709.6524406063807,
+            "end": 1711.8325228146919
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author dismantles this rigid thinking by exposing two profound psychological blind spots.",
+            "start": 1712.93256429595,
+            "end": 1717.0327189079117
+          },
+          {
+            "text": "First, he addresses the illusion of history.",
+            "start": 1717.652742288257,
+            "end": 1719.4328094124746
+          },
+          {
+            "text": "Economic history is not a map of the future; it is a study of unprecedented, unpredictable surprises.",
+            "start": 1720.252840334867,
+            "end": 1725.4130349196773
+          },
+          {
+            "text": "Think about the most consequential economic events of the last century\u2014the Great Depression, World War II, the dot-com bubble, or the 2008 financial crisis.",
+            "start": 1726.2330658420697,
+            "end": 1733.8133516856476
+          },
+          {
+            "text": "None of these events were historically precedented when they occurred.",
+            "start": 1734.4133743117882,
+            "end": 1736.8534663247606
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If you only use history as a guide to the future, you act like a prophet who is only looking in the rearview mirror.",
+            "start": 1737.3734859340825,
+            "end": 1742.9536963571913
+          },
+          {
+            "text": "You will successfully predict the previous crisis, but you will be completely blindsided by the next one, because the next crisis will look entirely different.",
+            "start": 1743.6737235085602,
+            "end": 1751.0940033185007
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author then pairs this with a brilliant concept from psychology: the \"End of History Illusion.\"",
+            "start": 1752.174044045554,
+            "end": 1756.8142190210424
+          },
+          {
+            "text": "If you look back at who you were ten years ago, you will easily recognize how drastically your goals, personality, and priorities have changed.",
+            "start": 1757.7142529602534,
+            "end": 1764.1944973225734
+          },
+          {
+            "text": "However, when we look forward, we suffer from a massive failure of imagination.",
+            "start": 1764.8745229655328,
+            "end": 1768.8346722980618
+          },
+          {
+            "text": "We almost always assume that who we are today is the finished product.",
+            "start": 1769.4946971868167,
+            "end": 1772.954827664228
+          },
+          {
+            "text": "We assume our current career ambitions, risk tolerance, and lifestyle desires will remain permanently fixed until we retire.",
+            "start": 1773.5748510445735,
+            "end": 1779.1750622218872
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This illusion leads to catastrophic financial rigidity.",
+            "start": 1780.355106719964,
+            "end": 1782.755197224527
+          },
+          {
+            "text": "A young professional might commit to an extreme, punishing frugality strategy to retire at thirty-five, only to realize at thirty-five that they actually love their work and want the capital to start a massive business instead.",
+            "start": 1783.4152221132815,
+            "end": 1793.175590165171
+          },
+          {
+            "text": "The author warns that because you cannot predict the global economy, and you cannot even predict your own future personality, avoiding extreme financial commitments is the only way to survive.",
+            "start": 1794.0956248585867,
+            "end": 1803.0559627422883
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The AI Event Horizon and the Shifting Self",
+            "start": 1807.276121879478,
+            "end": 1809.496205596199
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Let\u2019s translate this into the hyper-volatile reality you are navigating right now.",
+            "start": 1813.5763594539558,
+            "end": 1816.856483143525
+          },
+          {
+            "text": "Look at the explosion of generative AI, the staggering energy demands of modern Data Centers, and the sudden, decentralized architecture of Crypto.",
+            "start": 1817.4165042612565,
+            "end": 1824.4367689871033
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If you try to map the current AI infrastructure super-cycle perfectly onto the 1990s internet boom, you will get crushed.",
+            "start": 1824.9767893506298,
+            "end": 1831.897050305453
+          },
+          {
+            "text": "The 1990s did not feature the same complex, interwoven geopolitical supply chains, immediate remote-work workforce distributions, or the instantaneous, algorithmic capital flight we see today.",
+            "start": 1832.5170736857983,
+            "end": 1843.5774907609925
+          },
+          {
+            "text": "We are living in an era where an unexpected trade war over a tiny semiconductor component can freeze an entire global sector overnight.",
+            "start": 1844.3575201749754,
+            "end": 1851.377784900822
+          },
+          {
+            "text": "The world is writing new rules in real-time.",
+            "start": 1852.097812052191,
+            "end": 1854.3178957689117
+          },
+          {
+            "text": "History cannot save you here.",
+            "start": 1855.07792442869,
+            "end": 1856.4779772230183
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "More importantly, your relationship to this new economy will evolve.",
+            "start": 1857.2980081454107,
+            "end": 1860.4381265555471
+          },
+          {
+            "text": "Right now, you might have a high-risk tolerance.",
+            "start": 1861.2181559695302,
+            "end": 1863.1182276189759
+          },
+          {
+            "text": "You might be perfectly content concentrating your capital into volatile tech ETFs, fully willing to endure brutal 30% swings.",
+            "start": 1863.5782449656838,
+            "end": 1870.1984946074365
+          },
+          {
+            "text": "But what happens in seven years if you have a family, or decide to move across the country, or suddenly discover a passion for a totally different, lower-paying industry?",
+            "start": 1871.0185255298288,
+            "end": 1878.5588098649973
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If your financial architecture is so rigid that it only works if you remain an aggressive, risk-hungry tech investor forever, you are building a prison.",
+            "start": 1879.558847575232,
+            "end": 1886.5191100384645
+          },
+          {
+            "text": "True financial mastery in the modern era requires extreme adaptability.",
+            "start": 1887.3591417150615,
+            "end": 1891.0392804887247
+          },
+          {
+            "text": "You have to build a system that leaves room for the global economy to shock you, and leaves room for you to shock yourself.",
+            "start": 1891.8193099027076,
+            "end": 1897.039506750132
+          },
+          {
+            "text": "You must refuse to become a prisoner to your own past predictions.",
+            "start": 1897.8395369183197,
+            "end": 1900.919653065842
+          }
+        ]
+      }
+    ],
+    "9": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the invisible trapdoor in the financial world: assuming everyone on the field is playing the exact same sport.",
+            "start": 1914.4602093988226,
+            "end": 1920.4204969603395
+          },
+          {
+            "text": "Most people fail at wealth creation because they suffer from financial identity theft.",
+            "start": 1921.3205403840586,
+            "end": 1925.1207237286499
+          },
+          {
+            "text": "They watch a stranger double their net worth in three weeks and immediately feel a sickening wave of FOMO.",
+            "start": 1925.9007613625397,
+            "end": 1930.9610055003377
+          },
+          {
+            "text": "They assume, subconsciously, that the stranger\u2019s victory is their own missed opportunity.",
+            "start": 1931.8210469941137,
+            "end": 1935.8212399884203
+          },
+          {
+            "text": "But this is an illusion.",
+            "start": 1936.4612708675093,
+            "end": 1937.4013162211713
+          },
+          {
+            "text": "The friction arises when you take a financial cue from someone who has radically different risk tolerances, goals, and time horizons than you do.",
+            "start": 1938.1613528900896,
+            "end": 1944.6416655408664
+          },
+          {
+            "text": "You wouldn't watch a marathon runner sprinting the final 100 yards and decide to adopt that pace for the first mile of your own race.",
+            "start": 1945.7017166843577,
+            "end": 1951.5820003859885
+          },
+          {
+            "text": "Yet, in the markets, everyday people constantly mimic the moves of institutional sprinters, completely forgetting they are supposed to be running a marathon.",
+            "start": 1952.242032230049,
+            "end": 1959.0023583904274
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Tale of Two Bubbles",
+            "start": 1959.8223979542602,
+            "end": 1960.9824539226092
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author tells the story of the late 1990s Dot-Com bubble to illustrate this exact psychological blind spot.",
+            "start": 1961.802493486442,
+            "end": 1967.0427463089839
+          },
+          {
+            "text": "Why did otherwise rational, educated people pay utterly unjustifiable prices for internet companies with zero revenue?",
+            "start": 1967.762781047959,
+            "end": 1973.5230589597606
+          },
+          {
+            "text": "The common narrative is that people just lost their minds to greed.",
+            "start": 1974.2030917687928,
+            "end": 1976.5832066004052
+          },
+          {
+            "text": "But the author argues something much more nuanced: the prices actually made perfect sense for the people setting them\u2014the day traders.",
+            "start": 1977.103231689665,
+            "end": 1982.843508636495
+          },
+          {
+            "text": "If a momentum trader acquires a tech stock at $60 with the sole intention of flipping it by lunchtime for $61, they don't care about cash flow, fundamentals, or a ten-year valuation.",
+            "start": 1983.583544340442,
+            "end": 1991.9639486635142
+          },
+          {
+            "text": "For their specific, short-term game, the price is entirely rational.",
+            "start": 1992.5639776126602,
+            "end": 1995.8441358679918
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The disaster strikes when a long-term investor, looking to fund a retirement two decades away, sees the day trader's momentum and copies the move.",
+            "start": 1996.34415999228,
+            "end": 2004.6845623854094
+          },
+          {
+            "text": "The long-term investor is operating under the delusion that the short-term trader knows something they don't.",
+            "start": 2005.524602914214,
+            "end": 2010.4648412621827
+          },
+          {
+            "text": "They take their cues from someone playing a fundamentally different game, and when the bubble bursts, the long-term player is left clutching the ashes while the day trader has long since moved on.",
+            "start": 2011.2448788960724,
+            "end": 2020.8453420824085
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The AI Illusion",
+            "start": 2022.4854212100743,
+            "end": 2023.5854742835086
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, this trap is infinitely more dangerous because the noise is deafening.",
+            "start": 2025.2255534111744,
+            "end": 2029.1857444755378
+          },
+          {
+            "text": "We no longer just have day traders; we have high-frequency trading networks, deep learning models, and massive institutional capital dictating market momentum.",
+            "start": 2029.86577728457,
+            "end": 2038.0261709929555
+          },
+          {
+            "text": "Consider the current explosion in artificial intelligence and the massive capital flowing into data centers and semiconductor infrastructure.",
+            "start": 2038.9262144166746,
+            "end": 2045.6065367171668
+          },
+          {
+            "text": "When a quantitative fund deploys a complex deep learning LSTM network or uses cluster analysis to detect micro-anomalies in tech valuations, that machine is optimizing for a game measured in days, hours, or even milliseconds.",
+            "start": 2046.6065849657434,
+            "end": 2059.1271890379235
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "If an everyday investor opens an interface, sees a massive price spike driven by those algorithmic maneuvers, and decides to jump in for their 30-year portfolio, they are committing the ultimate unforced error.",
+            "start": 2060.2272421113576,
+            "end": 2070.727748721413
+          },
+          {
+            "text": "They are copying the homework of an entity that is solving an entirely different equation.",
+            "start": 2071.3277776705586,
+            "end": 2075.207964875036
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The same applies to the rapid rotations into clean energy ETFs or reacting to geopolitical trade-war rumors.",
+            "start": 2075.807993824182,
+            "end": 2082.328308404902
+          },
+          {
+            "text": "The headlines will scream about massive daily gains or steep drops, but those headlines never disclose the time horizon of the people taking the profits or cutting their losses.",
+            "start": 2083.0683441088486,
+            "end": 2092.1687831708964
+          },
+          {
+            "text": "If you are building wealth for a decade from now, the daily noise of someone optimizing for tomorrow's closing bell is worse than useless to you\u2014it is actively destructive.",
+            "start": 2093.0288246646724,
+            "end": 2102.1892666216345
+          },
+          {
+            "text": "True financial clarity comes from writing down exactly what game you are playing, and then putting blinders on.",
+            "start": 2102.9293023255814,
+            "end": 2108.3695647978384
+          },
+          {
+            "text": "You have to clearly define your own financial identity and ruthlessly ignore the noise from everyone else.",
+            "start": 2109.069598571842,
+            "end": 2114.589864903985
+          }
+        ]
+      }
+    ],
+    "10": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Sit in any busy coffee shop, open up your laptop, and scroll through the day's financial headlines.",
+            "start": 2122.0502211045737,
+            "end": 2126.690441260201
+          },
+          {
+            "text": "Notice how the articles predicting a catastrophic market collapse are always written by people who sound like absolute geniuses.",
+            "start": 2127.5104801670145,
+            "end": 2132.790730688935
+          },
+          {
+            "text": "They use complex macroeconomic jargon, cite geopolitical trade wars, and weave intricate data models to prove that the sky is falling.",
+            "start": 2133.410760106282,
+            "end": 2139.931069462896
+          },
+          {
+            "text": "In contrast, the person quietly saying, \"I think the market will probably be higher in ten years,\" sounds like a naive amateur.",
+            "start": 2140.6911055228693,
+            "end": 2146.8513977984435
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This is the friction that destroys most portfolios.",
+            "start": 2147.8114433478836,
+            "end": 2150.031548680964
+          },
+          {
+            "text": "We are biologically wired to treat pessimism as an intellectual flex.",
+            "start": 2150.631577149364,
+            "end": 2153.6517204403112
+          },
+          {
+            "text": "Evolution taught our ancestors that treating a rustle in the bushes as a deadly predator kept them alive, while assuming it was just the wind got them killed.",
+            "start": 2154.4117565002844,
+            "end": 2160.5120459290188
+          },
+          {
+            "text": "In the financial world, pessimism sounds like someone desperately trying to save your life.",
+            "start": 2161.332084835832,
+            "end": 2164.7522471057127
+          },
+          {
+            "text": "Optimism sounds like a cheap, oblivious sales pitch.",
+            "start": 2165.332274625166,
+            "end": 2167.512378060353
+          },
+          {
+            "text": "The reason most people fail at long-term wealth creation is that they let the intellectual seduction of pessimism talk them out of the mathematical reality of human progress.",
+            "start": 2168.3124160182197,
+            "end": 2175.292747200607
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Adaptation Blindspot",
+            "start": 2176.3727984437273,
+            "end": 2177.4528496868475
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author highlights a fatal flaw in pessimistic forecasting: it assumes human beings just stand still and blindly take the punishment.",
+            "start": 2178.3128904915543,
+            "end": 2184.133166635035
+          },
+          {
+            "text": "When experts predict a crisis, they almost always draw a straight, downward line from today's problem directly into the future.",
+            "start": 2184.913203643955,
+            "end": 2190.0334465743026
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "What they consistently fail to model is human adaptation.",
+            "start": 2190.7534807363827,
+            "end": 2194.0936392104763
+          },
+          {
+            "text": "The author points out the profound pessimism that follows major economic crashes or resource shortages.",
+            "start": 2194.73366957677,
+            "end": 2199.8939144050105
+          },
+          {
+            "text": "Consider the early 2000s, when the smartest people in the room mathematically \"proved\" we had reached peak oil production and global economies would soon grind to a halt.",
+            "start": 2200.573946669197,
+            "end": 2208.4743215031313
+          },
+          {
+            "text": "What the pessimists didn't calculate was that the looming threat of running out of oil created a massive, urgent financial incentive to invent horizontal drilling and fracking.",
+            "start": 2209.334362307838,
+            "end": 2217.6547570696525
+          },
+          {
+            "text": "The problem itself funded the solution.",
+            "start": 2218.2747864869993,
+            "end": 2219.9548661985195
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Optimism isn't the delusional belief that everything will be perfect, that crashes won't happen, or that you won't lose money in the short term.",
+            "start": 2220.8149070032264,
+            "end": 2226.5351784019736
+          },
+          {
+            "text": "True financial optimism is the baseline belief that the odds of a good outcome are in your favor over time, because human beings are incredibly efficient at solving problems when their backs are against the wall.",
+            "start": 2227.175208768267,
+            "end": 2236.3556443347884
+          },
+          {
+            "text": "Pessimists extrapolate the disaster; optimists bank on the response.",
+            "start": 2237.0756784968685,
+            "end": 2240.4558388688556
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Cortisol Economy",
+            "start": 2243.876001138736,
+            "end": 2244.936051432909
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, this biological glitch is being ruthlessly exploited.",
+            "start": 2248.5562231922563,
+            "end": 2251.7963769216167
+          },
+          {
+            "text": "You are not just fighting your own evolutionary wiring; you are fighting algorithms explicitly designed to monetize your anxiety.",
+            "start": 2252.3164015942302,
+            "end": 2257.896666350351
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Consider the current narrative around the technology sector.",
+            "start": 2258.6967043082177,
+            "end": 2260.956811539191
+          },
+          {
+            "text": "On any given day, you can find brilliantly articulated, data-backed reports explaining why the artificial intelligence infrastructure build-out is a massive, unsustainable bubble.",
+            "start": 2261.4968371607515,
+            "end": 2269.317208198899
+          },
+          {
+            "text": "You will read deeply researched white papers on how data center energy consumption will collapse the power grid, or how international trade wars will permanently sever the semiconductor supply chain.",
+            "start": 2270.2772537483393,
+            "end": 2278.3576371227937
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "These arguments sound incredibly urgent, smart, and terrifying.",
+            "start": 2278.7376551527805,
+            "end": 2282.677842095274
+          },
+          {
+            "text": "But they entirely discount the invisible army of engineers and entrepreneurs currently working 80-hour weeks to optimize GPU efficiency, pioneer next-generation cooling systems, and build resilient, localized supply chains.",
+            "start": 2283.177865818941,
+            "end": 2296.298488327956
+          },
+          {
+            "text": "The media will amplify the looming disaster of an AI bottleneck because panic drives clicks and engagement.",
+            "start": 2296.9785205921426,
+            "end": 2302.27877206301
+          },
+          {
+            "text": "But betting on that doom means betting against thousands of incredibly smart people who are incentivized by billions of dollars to solve that exact bottleneck.",
+            "start": 2302.7787957866767,
+            "end": 2310.879180110078
+          },
+          {
+            "text": "History shows that betting against human ingenuity is a terrible long-term strategy.",
+            "start": 2311.579213323211,
+            "end": 2315.499399316758
+          },
+          {
+            "text": "The smart money knows that pessimism is for the headlines, but optimism is for the portfolio.",
+            "start": 2316.2194334788383,
+            "end": 2320.3996318086924
+          }
+        ]
+      }
+    ],
+    "11": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Look at the current state of the global market.",
+            "start": 2331.6001600446634,
+            "end": 2333.640254954871
+          },
+          {
+            "text": "We are navigating an era of unprecedented chaos\u2014shifting interest rates, volatile geopolitical trade wars, and entire industries being upended overnight by new technologies.",
+            "start": 2334.2202819391455,
+            "end": 2344.5407620731366
+          },
+          {
+            "text": "In the middle of this storm, human beings are desperate for a map.",
+            "start": 2345.300797431841,
+            "end": 2348.540948171583
+          },
+          {
+            "text": "We crave a predictable world, one where a simple, guaranteed formula leads directly to financial freedom.",
+            "start": 2349.100974225365,
+            "end": 2354.9412459290966
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This craving is the invisible friction that destroys so many portfolios.",
+            "start": 2355.7612840792776,
+            "end": 2359.7214683167394
+          },
+          {
+            "text": "When you desperately need an outcome to be true\u2014because you feel behind on retirement, because inflation is eating your savings, or because you just want to escape the 9-to-5 grind\u2014your brain stops processing cold, hard data.",
+            "start": 2360.4415018144596,
+            "end": 2372.182048013399
+          },
+          {
+            "text": "Instead, it starts hunting for a comforting narrative.",
+            "start": 2372.7620749976736,
+            "end": 2375.2821922396947
+          },
+          {
+            "text": "Most people fail at investing not because they lack intelligence, but because they are easily seduced by storytellers who promise them exactly what they want to hear.",
+            "start": 2376.062228528892,
+            "end": 2384.3226128221827
+          },
+          {
+            "text": "They want a predictable universe so badly that they willingly accept financial fictions.",
+            "start": 2385.0026444589184,
+            "end": 2389.4428510281937
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Hallucination of the Oasis",
+            "start": 2390.3828947613288,
+            "end": 2391.9229664092304
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author highlights a profound psychological vulnerability: the more you want something to be true, the more likely you are to overestimate the odds of it actually being true.",
+            "start": 2392.7830064203963,
+            "end": 2401.6034167674698
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Think of a wanderer lost in the desert.",
+            "start": 2402.4434558481435,
+            "end": 2404.2635405229366
+          },
+          {
+            "text": "When a person is dying of thirst, they don't just hope there is a lake over the next sand dune; their brain actually fabricates a mirage.",
+            "start": 2404.823566576719,
+            "end": 2411.4038727086627
+          },
+          {
+            "text": "They hallucinate an oasis because their body desperately needs water to survive.",
+            "start": 2411.883895040476,
+            "end": 2415.9040820694145
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The exact same psychological mechanism operates in finance.",
+            "start": 2416.3641034707357,
+            "end": 2419.3642430445702
+          },
+          {
+            "text": "If a person is 55 years old, severely underfunded for retirement, and terrified of running out of money, they are wandering in a financial desert.",
+            "start": 2419.8042635153997,
+            "end": 2426.7245854657112
+          },
+          {
+            "text": "When a charismatic fund manager or a loud internet guru pitches them a revolutionary new strategy guaranteeing a 20% annual return, the investor doesn't look at the math.",
+            "start": 2427.3246133804782,
+            "end": 2436.0450190750907
+          },
+          {
+            "text": "They don't audit the historical failure rate of such promises.",
+            "start": 2436.4250367544428,
+            "end": 2438.7651456220337
+          },
+          {
+            "text": "They look at the pitch and see an oasis.",
+            "start": 2439.2251670233554,
+            "end": 2441.0652526286403
+          },
+          {
+            "text": "They believe the story because the alternative\u2014that they have to work for ten more years and drastically cut their standard of living\u2014is too painful to accept.",
+            "start": 2441.625278682423,
+            "end": 2448.485597841258
+          },
+          {
+            "text": "The narrative acts as an anesthetic against reality.",
+            "start": 2449.0456238950405,
+            "end": 2451.385732762631
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Inevitability Trap",
+            "start": 2452.0657643993673,
+            "end": 2453.0658109239785
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, the financial deserts are crowded, and the mirages are incredibly sophisticated.",
+            "start": 2454.1258602400667,
+            "end": 2458.2060500604816
+          },
+          {
+            "text": "We see this vividly in the massive narratives surrounding the Clean Energy transition and the Electric Vehicle (EV) revolution.",
+            "start": 2458.72607425328,
+            "end": 2464.0663226947054
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The story being aggressively pushed is that a carbon-neutral world is an absolute, inevitable certainty.",
+            "start": 2464.726353400949,
+            "end": 2469.406571136131
+          },
+          {
+            "text": "Therefore, the narrative suggests, investing in any solar manufacturer or new EV startup is a guaranteed, morally righteous path to generational wealth.",
+            "start": 2470.02659998139,
+            "end": 2477.326939611054
+          },
+          {
+            "text": "The story feels so good.",
+            "start": 2477.8869656648367,
+            "end": 2479.227028007816
+          },
+          {
+            "text": "It feels like buying into the dawn of the automotive age in 1910.",
+            "start": 2479.767053131106,
+            "end": 2482.1471638596818
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Because everyday investors desperately want to align their money with their morals\u2014and get rich doing it\u2014they willingly suspend their disbelief.",
+            "start": 2483.6872355075834,
+            "end": 2489.387500697869
+          },
+          {
+            "text": "They ignore the cold data: that manufacturing hardware is a brutally low-margin, capital-intensive business.",
+            "start": 2489.9475267516514,
+            "end": 2494.9877612356936
+          },
+          {
+            "text": "They completely dismiss the historical reality that in massive industrial revolutions, the early pioneers usually go completely bankrupt fighting vicious price wars before the ultimate winners emerge.",
+            "start": 2495.487784497999,
+            "end": 2504.228191123104
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The fiction is that a necessary global transition automatically equals a profitable, risk-free investment for you.",
+            "start": 2504.848219968363,
+            "end": 2511.6485363357215
+          },
+          {
+            "text": "It doesn't.",
+            "start": 2512.2285633199963,
+            "end": 2512.6885847213175
+          },
+          {
+            "text": "But when you desperately want to secure your financial future while feeling like you are saving the planet, the \"Green Super-Cycle\" becomes your oasis.",
+            "start": 2513.2486107750997,
+            "end": 2520.388942960826
+          },
+          {
+            "text": "You believe the hype not because the financial fundamentals support the valuation, but because you deeply need the story to be true.",
+            "start": 2520.988970875593,
+            "end": 2527.1292565367075
+          },
+          {
+            "text": "Protecting your portfolio means realizing that just because an industry changes the world, doesn't mean it will make you rich.",
+            "start": 2527.829289103936,
+            "end": 2533.7295635991436
+          }
+        ]
+      }
+    ],
+    "12": [
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Walk into any bookstore or log onto any financial forum, and you will immediately notice a common delusion: everyone is desperately searching for the \"master key.\"",
+            "start": 2547.010129104873,
+            "end": 2556.0304277012715
+          },
+          {
+            "text": "The current state of the global market is a chaotic swirl of conflicting data, and in response, a multi-billion-dollar industry has emerged to sell you the illusion of a single, mathematically perfect formula.",
+            "start": 2556.810453522246,
+            "end": 2567.830818326271
+          },
+          {
+            "text": "The friction that destroys everyday investors is the quiet, nagging belief that if they are struggling, it is simply because they haven't discovered the right algorithm or the correct spreadsheet yet.",
+            "start": 2568.7308481197033,
+            "end": 2578.411168564619
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But personal finance is not physics; there are no universal laws that apply equally to every single person.",
+            "start": 2579.1511930614406,
+            "end": 2584.8113804290256
+          },
+          {
+            "text": "What works brilliantly for a billionaire hedge fund manager with a forty-year time horizon will completely bankrupt a thirty-year-old teacher saving for a down payment.",
+            "start": 2585.6114069120763,
+            "end": 2593.251659825212
+          },
+          {
+            "text": "The failure rate in personal wealth creation has very little to do with poor mathematics.",
+            "start": 2594.0916876324154,
+            "end": 2598.2918266684323
+          },
+          {
+            "text": "It has everything to do with adopting a strategy that fundamentally clashes with your unique psychological makeup.",
+            "start": 2598.6518385858053,
+            "end": 2604.092018670551
+          },
+          {
+            "text": "You cannot borrow someone else's financial philosophy any more than you can borrow their personality.",
+            "start": 2604.912045815678,
+            "end": 2609.1921875000003
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Sleep Test",
+            "start": 2609.992213983051,
+            "end": 2610.7522391419493
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The author tells a highly revealing story about his own personal finances to illustrate this exact point.",
+            "start": 2611.532264962924,
+            "end": 2616.4324271716105
+          },
+          {
+            "text": "If you were to ask a high-powered supercomputer to design an investment portfolio for a young, high-income financial writer, the machine would output a very specific set of instructions.",
+            "start": 2617.2524543167374,
+            "end": 2626.0527456302966
+          },
+          {
+            "text": "It would tell him to heavily leverage cheap debt, maximize his risk profile in the markets, and optimize every single dollar for the highest possible yield.",
+            "start": 2626.73276814089,
+            "end": 2634.2730177436442
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Instead, the author does the exact opposite.",
+            "start": 2634.8930382680087,
+            "end": 2638.073143538136
+          },
+          {
+            "text": "He owns his house outright, refusing to carry a mortgage, and he keeps an uncomfortably large portion of his net worth sitting quietly in a standard bank account as plain, boring cash.",
+            "start": 2638.753166048729,
+            "end": 2649.673527542373
+          },
+          {
+            "text": "A purely rational economist would look at this and scream.",
+            "start": 2650.713561970339,
+            "end": 2653.513654661017
+          },
+          {
+            "text": "They would point to the spreadsheets proving that the author is losing out on massive compound interest and allowing inflation to slowly eat away at his cash reserves.",
+            "start": 2654.3536824682205,
+            "end": 2662.333946636653
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But the author argues that he is not trying to win a spreadsheet competition.",
+            "start": 2663.2739777542374,
+            "end": 2666.9540995762713
+          },
+          {
+            "text": "He is trying to win the \"sleep test.\"",
+            "start": 2667.5141181144068,
+            "end": 2669.3741796875
+          },
+          {
+            "text": "His personal philosophy is not optimized for maximum financial returns; it is optimized for independence and total peace of mind.",
+            "start": 2670.3742127913138,
+            "end": 2677.8344597457626
+          },
+          {
+            "text": "He knows his own psychology.",
+            "start": 2678.7544902012714,
+            "end": 2680.054533236229
+          },
+          {
+            "text": "He knows that if a market crash wiped out his portfolio while he was heavily in debt, he would panic.",
+            "start": 2680.6945544226696,
+            "end": 2685.1747027277543
+          },
+          {
+            "text": "By paying off his house and holding cash, he has built a financial fortress that prevents him from ever being forced to make a desperate decision.",
+            "start": 2686.1547351694917,
+            "end": 2692.6149490201274
+          },
+          {
+            "text": "He chose a strategy that is technically sub-optimal in a spreadsheet, but wildly successful in real life, because it allows his family to sleep soundly at night.",
+            "start": 2693.574980799788,
+            "end": 2701.2552350370765
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Robotic Sky",
+            "start": 2702.2952694650426,
+            "end": 2703.215299920551
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, the pressure to abandon your peace of mind for the sake of optimization is louder and more aggressive than ever.",
+            "start": 2704.1953323622884,
+            "end": 2709.775517081568
+          },
+          {
+            "text": "Look at the bleeding edge of the market right now: the explosive emergence of autonomous robotics and the rapidly developing eVTOL (electric vertical takeoff and landing) sector.",
+            "start": 2710.755549523305,
+            "end": 2719.915852754237
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The narratives surrounding these technologies are intoxicating.",
+            "start": 2720.4958719544493,
+            "end": 2723.8759838453393
+          },
+          {
+            "text": "Social media feeds are flooded with aggressively smart analysts screaming that if you aren\u2019t heavily exposed to the robotic supply chain or the new aerial mobility infrastructure, you are mathematically dooming your future.",
+            "start": 2724.5960076800848,
+            "end": 2735.6363731461865
+          },
+          {
+            "text": "They present compelling, undeniable data showing how these sectors will reshape global transportation and labor.",
+            "start": 2736.196391684322,
+            "end": 2741.876579713983
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "But here is where you must apply the author's logic: if putting a massive chunk of your net worth into a pre-revenue flying car startup makes you check your phone fifty times a day in a cold sweat, it is the wrong strategy for you.",
+            "start": 2742.3165942796613,
+            "end": 2754.17698689089
+          },
+          {
+            "text": "It does not matter if the math is right.",
+            "start": 2754.637002118644,
+            "end": 2756.417061043432
+          },
+          {
+            "text": "Even if that specific eVTOL company goes on to completely dominate the sky in 2035, the extreme volatility between now and then will shake you out.",
+            "start": 2756.997080243644,
+            "end": 2765.737369570975
+          },
+          {
+            "text": "You cannot reap the rewards of a mathematical home run if your psychological threshold forces you to abandon the game during the third inning.",
+            "start": 2766.1973847987288,
+            "end": 2772.957608580509
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Your financial philosophy must act as a titanium filter against the noise of the \"next big thing.\"",
+            "start": 2773.457625132415,
+            "end": 2778.437789989407
+          },
+          {
+            "text": "True wealth management in the modern era is recognizing that a boring, conservative portfolio that you can stick with during a terrifying market crash will infinitely outperform a genius-level robotics portfolio that causes you to panic-exit at the exact wrong moment.",
+            "start": 2778.9778078654663,
+            "end": 2792.398252118644
+          },
+          {
+            "text": "You must define your own psychological breaking point and architect your entire financial life to ensure you never cross it.",
+            "start": 2793.0582739671613,
+            "end": 2799.2184778866526
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Final Words for the Book",
+            "start": 2799.818497748941,
+            "end": 2800.9585354872884
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The Psychology of Money reveals the ultimate paradox of finance: the most complex systems in the world are governed by the simplest human emotions.",
+            "start": 2801.398550052966,
+            "end": 2810.698857918432
+          },
+          {
+            "text": "Intelligence, pedigree, and access to sophisticated data algorithms cannot save you from your own ego, fear, or greed.",
+            "start": 2811.398881091102,
+            "end": 2818.91913003178
+          },
+          {
+            "text": "True wealth is never measured by the car in your driveway or the notifications on your screen.",
+            "start": 2819.979165121822,
+            "end": 2824.779324020127
+          },
+          {
+            "text": "It is measured by the invisible, quiet reality of waking up every single morning and knowing that you have total control over your own time.",
+            "start": 2825.5393491790255,
+            "end": 2833.759621292373
+          },
+          {
+            "text": "Master your psychology, respect the role of luck, build an unbreakable margin of safety, and you will achieve the only financial goal that actually matters: absolute freedom.",
+            "start": 2834.5996490995763,
+            "end": 2844.9399913930088
+          }
+        ]
+      }
+    ]
+  }
+}

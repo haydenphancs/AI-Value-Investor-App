@@ -1,5 +1,7 @@
 Core 2: Decoding the True Economics
-The Profit Mirage Here is the dangerous secret about financial statements: "Profit" is an opinion, but "Cash" is a fact. Most aspiring investors glance at the bottom line of an Income Statement—Net Income—and assume that’s how much money the business actually made. They are wrong.
+The Profit Mirage
+
+Here is the dangerous secret about financial statements: "Profit" is an opinion, but "Cash" is a fact. Most aspiring investors glance at the bottom line of an Income Statement—Net Income—and assume that’s how much money the business actually made. They are wrong.
 
 GAAP (Generally Accepted Accounting Principles) is a set of rules designed to make companies comparable, not necessarily truthful about their economic reality. You can follow every accounting rule perfectly and still go bankrupt while reporting a "profit." If you are analyzing a business based solely on its Price-to-Earnings (P/E) ratio, you are effectively driving a car by looking only at the speedometer while ignoring the fuel gauge. You know how fast you're going, but not when the engine is about to die.
 
@@ -9,7 +11,9 @@ Buffett solved this by inventing his own metric: "Owner Earnings." In his letter
 
 Buffett’s formula is ruthless: Take reported earnings, add back depreciation (a non-cash charge), but then subtract the capital expenditures required to maintain the company's competitive position. This reveals the "distributable cash"—the actual money the owner can take out of the business without hurting it. He teaches us to look for companies that don't just report accounting profits, but generate "free cash flow"—businesses that don't require heavy reinvestment just to survive.
 
-The "Adjusted EBITDA" Trap In today’s tech-dominated market, this distortion is even worse. We live in the era of "Adjusted EBITDA"—a metric Charlie Munger famously called "bullshit earnings."
+The "Adjusted EBITDA" Trap
+
+In today’s tech-dominated market, this distortion is even worse. We live in the era of "Adjusted EBITDA"—a metric Charlie Munger famously called "bullshit earnings."
 
 Modern tech companies (SaaS, AI, Gig Economy) often report massive losses but claim they are profitable on an "Adjusted" basis. They do this by excluding things like Stock-Based Compensation (paying employees in stock instead of cash). They pretend this isn't a real expense. But if you are an owner, it is a real expense—it dilutes your ownership stake.
 

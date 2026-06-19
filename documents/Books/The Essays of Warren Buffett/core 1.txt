@@ -5,7 +5,9 @@ The "Silent Partner" Letter Buffett flips this dynamic by ignoring the stock mar
 
 He posits that he is the managing partner, and you are the silent partner. You aren't a "shareholder"—a faceless source of capital to be exploited—you are a co-owner. Buffett famously notes that he treats his investors as if they were his own sisters and aunts. An owner of a private farm doesn't check the price of their land every day; they check the weather and the crop yield. Buffett teaches that if you wouldn't be comfortable owning a stock if the market closed down for five years, you shouldn't own it for five minutes.
 
-The Gamification Trap In the modern era, "Adopting the Owner's Mindset" is harder—and more profitable—than ever. Financial apps have weaponized the "Renter's Mentality" through gamification. When you buy a stock on a modern app and see confetti explode, or panic-sell because a crypto coin dropped 15% in an hour, you are falling into the trap Buffett warned against.
+The Gamification Trap
+
+In the modern era, "Adopting the Owner's Mindset" is harder—and more profitable—than ever. Financial apps have weaponized the "Renter's Mentality" through gamification. When you buy a stock on a modern app and see confetti explode, or panic-sell because a crypto coin dropped 15% in an hour, you are falling into the trap Buffett warned against.
 
 Apply the "Owner's Mindset" to the AI boom. The "Renter" buys NVIDIA because the line is going up. The "Owner" buys it because they understand the moat of the CUDA software ecosystem and want to own a proportional share of that cash flow for the next decade. If you are stressing over quarterly earnings calls, you are likely speculating, not owning.
 

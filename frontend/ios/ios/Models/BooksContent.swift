@@ -5245,9 +5245,14 @@ extension CoreChapterContent {
                         content: .text("He posits that he is the managing partner, and you are the silent partner. You aren't a \"shareholder\"—a faceless source of capital to be exploited—you are a co-owner. Buffett famously notes that he treats his investors as if they were his own sisters and aunts. An owner of a private farm doesn't check the price of their land every day; they check the weather and the crop yield. Buffett teaches that if you wouldn't be comfortable owning a stock if the market closed down for five years, you shouldn't own it for five minutes.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Gamification Trap")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Gamification Trap In the modern era, \"Adopting the Owner's Mindset\" is harder—and more profitable—than ever. Financial apps have weaponized the \"Renter's Mentality\" through gamification. When you buy a stock on a modern app and see confetti explode, or panic-sell because a crypto coin dropped 15% in an hour, you are falling into the trap Buffett warned against.")
+                        content: .text("In the modern era, \"Adopting the Owner's Mindset\" is harder—and more profitable—than ever. Financial apps have weaponized the \"Renter's Mentality\" through gamification. When you buy a stock on a modern app and see confetti explode, or panic-sell because a crypto coin dropped 15% in an hour, you are falling into the trap Buffett warned against.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5281,9 +5286,14 @@ extension CoreChapterContent {
                 bookAuthor: "Warren Buffett",
                 sections: [
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Profit Mirage")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Profit Mirage Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspiring investors glance at the bottom line of an Income Statement—Net Income—and assume that’s how much money the business actually made. They are wrong.")
+                        content: .text("Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspiring investors glance at the bottom line of an Income Statement—Net Income—and assume that’s how much money the business actually made. They are wrong.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5306,9 +5316,14 @@ extension CoreChapterContent {
                         content: .text("Buffett’s formula is ruthless: Take reported earnings, add back depreciation (a non-cash charge), but then subtract the capital expenditures required to maintain the company's competitive position. This reveals the \"distributable cash\"—the actual money the owner can take out of the business without hurting it. He teaches us to look for companies that don't just report accounting profits, but generate \"free cash flow\"—businesses that don't require heavy reinvestment just to survive.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The \"Adjusted EBITDA\" Trap")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Adjusted EBITDA\" Trap In today’s tech-dominated market, this distortion is even worse. We live in the era of \"Adjusted EBITDA\"—a metric Charlie Munger famously called \"bullshit earnings.\"")
+                        content: .text("In today’s tech-dominated market, this distortion is even worse. We live in the era of \"Adjusted EBITDA\"—a metric Charlie Munger famously called \"bullshit earnings.\"")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5341,9 +5356,14 @@ extension CoreChapterContent {
                 bookAuthor: "Warren Buffett",
                 sections: [
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The \"Good Product\" Fallacy")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Good Product\" Fallacy Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growing market. They see a revolutionary technology or a popular brand and assume the stock is a winner. This is the \"Good Product Fallacy.\" History is littered with companies that changed the world but went bankrupt because they couldn't protect their profits. If you are buying a stock just because \"everyone is using it,\" you are missing the most critical variable: durability. A castle with no moat is just a pile of gold waiting to be looted by competitors.")
+                        content: .text("Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growing market. They see a revolutionary technology or a popular brand and assume the stock is a winner. This is the \"Good Product Fallacy.\" History is littered with companies that changed the world but went bankrupt because they couldn't protect their profits. If you are buying a stock just because \"everyone is using it,\" you are missing the most critical variable: durability. A castle with no moat is just a pile of gold waiting to be looted by competitors.")
                     ),
                     CoreChapterSection(
                         type: .heading,
@@ -5361,9 +5381,14 @@ extension CoreChapterContent {
                         content: .text("He distinguishes between two types of businesses: \"Franchises\" and \"Commodities.\" A Franchise is a castle with a wide, crocodile-filled moat. It has pricing power—it can raise prices, and customers still pay. Think of See's Candies, a company Buffett bought. They could raise the price of a box of chocolates every single year, and people would still buy it for Valentine's Day because no one wants to give their spouse \"discount\" chocolate. A Commodity business, on the other hand, has no moat. It must compete solely on price. If it raises prices by a penny, customers leave. Buffett teaches that it is far better to buy a wonderful business (Franchise) at a fair price than a fair business (Commodity) at a wonderful price.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The \"Network Effect\" Moat")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Network Effect\" Moat In the modern economy, moats have evolved from physical brands to digital networks. The most powerful moat today is the \"Network Effect\"—where a product becomes more valuable as more people use it.")
+                        content: .text("In the modern economy, moats have evolved from physical brands to digital networks. The most powerful moat today is the \"Network Effect\"—where a product becomes more valuable as more people use it.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5432,9 +5457,14 @@ extension CoreChapterContent {
                         content: .text("The author teaches us that Mr. Market is there to serve you, not to guide you. His wallet is open, but his wisdom is non-existent. You have three choices: you can ignore him, you can sell to him when he is manic, or you can buy from him when he is depressed. The one thing you must never do is fall under his influence. If you look at a dropping price and think, \"I must be wrong,\" you have allowed the crazy neighbor to run your house.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Algorithm Is the New Mr. Market")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Algorithm Is the New Mr. Market In the 1950s, Mr. Market showed up once a day in the morning newspaper. Today, he lives in your pocket, screaming at you 24/7 through push notifications and red/green candlesticks.")
+                        content: .text("In the 1950s, Mr. Market showed up once a day in the morning newspaper. Today, he lives in your pocket, screaming at you 24/7 through push notifications and red/green candlesticks.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5452,9 +5482,14 @@ extension CoreChapterContent {
                 bookAuthor: "Warren Buffett",
                 sections: [
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The CEO’s Secret Addiction")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The CEO’s Secret Addiction Here is the friction: You assume the CEO works for you. You assume their primary goal is to make your shares more valuable. In reality, most CEOs suffer from a \"growth addiction.\" Their salaries, prestige, and magazine covers are often tied to the size of the company (total revenue), not the value per share.")
+                        content: .text("Here is the friction: You assume the CEO works for you. You assume their primary goal is to make your shares more valuable. In reality, most CEOs suffer from a \"growth addiction.\" Their salaries, prestige, and magazine covers are often tied to the size of the company (total revenue), not the value per share.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5477,9 +5512,14 @@ extension CoreChapterContent {
                         content: .text("He tells the story of how easy it is for a CEO to \"buy\" growth. Anyone can grow sales by buying a bad business. But a true \"Capital Allocator\" (Buffett's highest praise) knows when to shrink. If the company cannot reinvest cash at a high rate of return, the CEO must have the humility to give it back to the shareholders—either through dividends (a direct check) or share buybacks (increasing your percentage of ownership). He views a share buyback not as a market signal, but as a way to buy out \"unhappy partners\" at a discount, instantly making the remaining partners richer without them lifting a finger.")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Buyback Masquerade")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Buyback Masquerade In the modern tech era, the \"Share Buyback\" has been corrupted. Many Silicon Valley giants announce massive, multi-billion dollar buyback programs to great fanfare. It sounds like they are returning capital to you. Often, they are lying.")
+                        content: .text("In the modern tech era, the \"Share Buyback\" has been corrupted. Many Silicon Valley giants announce massive, multi-billion dollar buyback programs to great fanfare. It sounds like they are returning capital to you. Often, they are lying.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5513,9 +5553,14 @@ extension CoreChapterContent {
                 bookAuthor: "Warren Buffett",
                 sections: [
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The Boardroom Blind Spot")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The Boardroom Blind Spot We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a pivot into a new technology, they have run thousands of simulations and found the optimal move. But inside the boardroom, a different, darker game is being played. It isn’t strategy; it’s survival.")
+                        content: .text("We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a pivot into a new technology, they have run thousands of simulations and found the optimal move. But inside the boardroom, a different, darker game is being played. It isn’t strategy; it’s survival.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -5538,9 +5583,14 @@ extension CoreChapterContent {
                         content: .text("He compares it to a teenager smoking to look cool. The Imperative dictates that if an investment banker proposes a deal, the CEO will find a way to justify it. If a competitor expands, the CEO will expand. Buffett famously noted that this force is so strong it can make a group of brilliant people do things that any one of them, acting alone, would call insane. He teaches us that the rarest asset in business is not intelligence—it is the courage to say \"no\" when everyone else is shouting \"yes.\"")
                     ),
                     CoreChapterSection(
+                        type: .heading,
+                        title: nil,
+                        content: .text("The \"Pivot\" Pandemic")
+                    ),
+                    CoreChapterSection(
                         type: .paragraph,
                         title: nil,
-                        content: .text("The \"Pivot\" Pandemic In the modern era, the Institutional Imperative has accelerated into a virus. We see it in the \"Pivot\" culture.")
+                        content: .text("In the modern era, the Institutional Imperative has accelerated into a virus. We see it in the \"Pivot\" culture.")
                     ),
                     CoreChapterSection(
                         type: .paragraph,
@@ -7044,11 +7094,11 @@ extension BookCoreChapter {
         ],
         8: [
             BookCoreChapter(number: 1, title: "The Ticker Tape Illusion", description: "Here is the friction: most investors treat the stock market like a casino and their shares like betting chips. They obsess over th…"),
-            BookCoreChapter(number: 2, title: "Decoding the True Economics", description: "The Profit Mirage Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspi…"),
-            BookCoreChapter(number: 3, title: "Determining the Strength of the Moat", description: "The \"Good Product\" Fallacy Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growi…"),
+            BookCoreChapter(number: 2, title: "Decoding the True Economics", description: "Here is the dangerous secret about financial statements: \"Profit\" is an opinion, but \"Cash\" is a fact. Most aspiring investors gla…"),
+            BookCoreChapter(number: 3, title: "Determining the Strength of the Moat", description: "Here is the friction: most investors think a \"good company\" is one with a great product or a fast-growing market. They see a revol…"),
             BookCoreChapter(number: 4, title: "Mastering Market Psychology", description: "You believe the market is an authority figure. When a stock price collapses by 10% in a single morning, your primal brain assumes…"),
-            BookCoreChapter(number: 5, title: "The Art of Capital Deployment", description: "The CEO’s Secret Addiction Here is the friction: You assume the CEO works for you. You assume their primary goal is to make your s…"),
-            BookCoreChapter(number: 6, title: "Escaping the Institutional Trap", description: "The Boardroom Blind Spot We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a…"),
+            BookCoreChapter(number: 5, title: "The Art of Capital Deployment", description: "Here is the friction: You assume the CEO works for you. You assume their primary goal is to make your shares more valuable. In rea…"),
+            BookCoreChapter(number: 6, title: "Escaping the Institutional Trap", description: "We treat CEOs like chess grandmasters. We assume that when a leader announces a massive acquisition or a pivot into a new technolo…"),
         ],
         9: [
             BookCoreChapter(number: 1, title: "The Grand Illusion of Wall Street", description: "Listen closely. We are navigating an era of unprecedented financial chaos. Between inflation silently eating away your purchasing…"),

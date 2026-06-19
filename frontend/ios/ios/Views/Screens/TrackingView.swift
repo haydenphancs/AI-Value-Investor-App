@@ -324,6 +324,8 @@ struct AssetsTabContent: View {
                     alerts: viewModel.filteredAlerts,
                     onAlertTapped: { alert in viewModel.viewAlertDetail(alert) }
                 )
+                // Extra breathing room between the holdings cards and this section.
+                .padding(.top, AppSpacing.sm)
 
                 // Portfolio Insights — computed locally from the active portfolio.
                 PortfolioInsightsSection(

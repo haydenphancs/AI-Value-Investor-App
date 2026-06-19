@@ -113,16 +113,13 @@ struct PortfolioHeaderMenuOverlay: View {
                 panel(for: menu)
                     .frame(width: menuWidth, alignment: .leading)
                     .padding(.vertical, AppSpacing.xs)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .fill(AppColors.cardBackgroundLight)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
-                    .shadow(color: .black.opacity(0.35), radius: 16, x: 0, y: 8)
+                    // Native iOS 26 Liquid Glass. The material itself supplies the
+                    // translucent frost, the rounded shape, the adaptive edge
+                    // highlight, AND the floating-layer shadow — so there's no
+                    // manual fill / stroke / clipShape / shadow (an opaque fill
+                    // would defeat the translucency; a manual shadow would double
+                    // up). It also honors Reduce Transparency automatically.
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
                     .offset(x: xOffset(for: menu, rect: rect), y: rect.maxY + AppSpacing.xs)
             }
             // No insertion/removal transition — the popup is on or off, instantly.

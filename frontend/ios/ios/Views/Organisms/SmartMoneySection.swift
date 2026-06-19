@@ -60,7 +60,14 @@ struct SmartMoneySection: View {
                 SmartMoneyFlowChart(
                     priceData: currentData.priceData,
                     dailyPrices: currentData.dailyPrices,
-                    flowData: currentData.flowData
+                    flowData: currentData.flowData,
+                    // Small fixed gap below the price axis, plus a deterministic
+                    // volume axis (uniformVolumeAxis) that parks the top label at
+                    // a constant 80% of the domain — so Insider / Institutions /
+                    // Congress all show the SAME clean two-axis layout regardless
+                    // of magnitude. (Report's insider chart omits both → unchanged.)
+                    priceVolumeGap: AppSpacing.sm,
+                    uniformVolumeAxis: true
                 )
                 .id(selectedTab.rawValue)
                 .animation(.easeInOut(duration: 0.3), value: selectedTab)

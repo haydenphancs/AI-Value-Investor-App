@@ -117,7 +117,8 @@ struct AssetsListSection: View {
         shares: nil,
         marketValue: nil,
         sector: nil,
-        country: nil
+        country: nil,
+        backendPreviousClose: nil
     )
 }
 

@@ -29,6 +29,9 @@ class TrackedAssetResponse(BaseModel):
     company_name: str
     price: float = 0.0
     change_percent: float = 0.0
+    # Previous trading day's close (authoritative, from the FMP quote). The
+    # sparkline's dotted baseline anchors to this; nullable for degraded rows.
+    previous_close: Optional[float] = None
     sparkline_data: List[float] = Field(default_factory=list)
     logo_url: Optional[str] = None
     sector: Optional[str] = None

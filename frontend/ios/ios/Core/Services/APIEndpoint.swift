@@ -164,6 +164,11 @@ enum APIEndpoint: Sendable {
     case getLearnProgress(contentType: String)
     case completeLearnItem(contentType: String, key: String)
 
+    // MARK: - Learn / Book bookmarks (account-synced; key = book title)
+    case getBookBookmarks
+    case addBookBookmark(key: String)
+    case removeBookBookmark(key: String)
+
     // MARK: - Personas
     case getPersonas
 
@@ -384,6 +389,10 @@ enum APIEndpoint: Sendable {
         case .completeLearnItem(let contentType, _):
             return "/api/v1/learn/progress/\(contentType)"
 
+        // Learn / Book bookmarks (key travels in the body, not the path)
+        case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
+            return "/api/v1/learn/bookmarks"
+
         // Personas
         case .getPersonas:
             return "/api/v1/research/personas"
@@ -401,7 +410,7 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage,
-             .chatWithTickerReport, .completeLearnItem,
+             .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .createPortfolio, .regenerateResearchReportPDF,
              .prewarmReportCollection:
@@ -415,7 +424,7 @@ enum APIEndpoint: Sendable {
             return .PUT
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
-             .unfollowWhale, .deletePortfolio:
+             .unfollowWhale, .deletePortfolio, .removeBookBookmark:
             return .DELETE
 
         default:
@@ -519,6 +528,9 @@ enum APIEndpoint: Sendable {
         case .completeLearnItem(_, let key):
             return CompleteLearnItemRequest(key: key)
 
+        case .addBookBookmark(let key), .removeBookBookmark(let key):
+            return BookBookmarkRequest(bookKey: key)
+
         case .removeFromWatchlist(let stockId):
             return RemoveFromWatchlistRequest(stockId: stockId)
 
@@ -606,6 +618,9 @@ enum APIEndpoint: Sendable {
             return false
         // Learn progress uses optional auth (token sent if signed in; guests still work via cache)
         case .getLearnProgress, .completeLearnItem:
+            return false
+        // Book bookmarks use optional auth (token sent if signed in; guests still work via cache)
+        case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
             return false
         // Personas are public
         case .getPersonas:
@@ -731,5 +746,13 @@ nonisolated struct EnrichStockNewsRequest: Encodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case articleIds = "article_ids"
+    }
+}
+
+nonisolated struct BookBookmarkRequest: Encodable, Sendable {
+    let bookKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case bookKey = "book_key"
     }
 }

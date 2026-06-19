@@ -11,6 +11,7 @@ struct BookLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
     @ObservedObject private var progress = BookProgressStore.shared
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
 
@@ -51,7 +52,9 @@ struct BookLibraryView: View {
                         ProgressDashboardCard(
                             masteredCount: masteredCount,
                             totalCount: totalCount,
-                            progressPercentage: progressPercentage
+                            progressPercentage: progressPercentage,
+                            bookmarkedBookTitle: bookmarks.mostRecent,
+                            onOpenBookmarked: openBookmarkedBook
                         )
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.top, AppSpacing.sm)
@@ -77,7 +80,9 @@ struct BookLibraryView: View {
                             LibraryBookCard(
                                 book: book,
                                 isMastered: progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount),
+                                isBookmarked: bookmarks.isBookmarked(book.title),
                                 onChatWithBook: { handleChatWithBook(book) },
+                                onToggleBookmark: { bookmarks.toggle(book.title) },
                                 onReview: { handleReview(book) }
                             )
                             .padding(.horizontal, AppSpacing.lg)
@@ -97,8 +102,9 @@ struct BookLibraryView: View {
             loadBooks()
         }
         .task {
-            // Pull server-side progress and union it into the local cache (best-effort).
+            // Pull server-side progress + bookmarks and union them into the local caches (best-effort).
             await progress.hydrate()
+            await bookmarks.hydrate()
         }
         .fullScreenCover(item: $selectedBook) { book in
             BookDetailView(book: book)
@@ -108,6 +114,13 @@ struct BookLibraryView: View {
 
     private func loadBooks() {
         books = LibraryBook.sampleData
+    }
+
+    /// Open the most-recently bookmarked book (the hero-card shortcut). No-op if none.
+    private func openBookmarkedBook() {
+        guard let title = bookmarks.mostRecent,
+              let book = books.first(where: { $0.title == title }) else { return }
+        selectedBook = book
     }
 
     private func handleChatWithBook(_ book: LibraryBook) {
@@ -160,6 +173,9 @@ private struct ProgressDashboardCard: View {
     let masteredCount: Int
     let totalCount: Int
     let progressPercentage: Double
+    /// Most-recently bookmarked book title; when set, the card shows a tappable shortcut to it.
+    let bookmarkedBookTitle: String?
+    var onOpenBookmarked: (() -> Void)?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -210,11 +226,29 @@ private struct ProgressDashboardCard: View {
                             .foregroundColor(.white.opacity(0.9))
                     }
 
-                    // Motivational message
-                    Text(motivationalMessage)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(2)
+                    // A bookmarked-book shortcut when one exists; otherwise the motivational
+                    // message. Same slot ⇒ the card keeps its size either way.
+                    if let bookmarkedBookTitle {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "bookmark.fill")
+                                .font(AppTypography.iconTiny)
+
+                            Text(bookmarkedBookTitle)
+                                .font(AppTypography.bodySmall).fontWeight(.semibold)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+
+                            Image(systemName: "chevron.right")
+                                .font(AppTypography.iconTiny)
+                                .opacity(0.8)
+                        }
+                        .foregroundColor(.white)
+                    } else {
+                        Text(motivationalMessage)
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(.white.opacity(0.85))
+                            .lineLimit(2)
+                    }
                 }
 
                 Spacer()
@@ -234,6 +268,9 @@ private struct ProgressDashboardCard: View {
         }
         .aspectRatio(16/9, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
+        // Whole card opens the bookmarked book; no-op when nothing is bookmarked.
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenBookmarked?() }
     }
 
     private var motivationalMessage: String {

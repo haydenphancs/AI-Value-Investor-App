@@ -49,15 +49,19 @@ struct TrackedAsset: Identifiable {
     let marketValue: Double?
     let sector: String?
     let country: String?
+    /// Authoritative previous close from the backend FMP quote (nil on older
+    /// backends / degraded rows). Preferred over the derived value below.
+    let backendPreviousClose: Double?
 
     var isPositive: Bool {
         changePercent >= 0
     }
 
-    /// Previous trading day's close, derived from current price and day-change %
-    /// (price = prevClose × (1 + pct/100)). Used as the sparkline baseline so the
-    /// dotted line anchors to prior close, not the day's first point.
+    /// Previous trading day's close — the sparkline's dotted baseline. Uses the
+    /// authoritative backend value when present (matches the detail chart),
+    /// else derives it from price and day-change % as a fallback.
     var previousClose: Double? {
+        if let pc = backendPreviousClose { return pc }
         let factor = 1 + changePercent / 100
         guard factor != 0 else { return nil }
         return price / factor
@@ -483,6 +487,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let companyName: String
     let price: Double
     let changePercent: Double
+    // Optional so an older backend (no key) still decodes cleanly.
+    let previousClose: Double?
     let sparklineData: [Double]
     let logoUrl: String?
     let sector: String?
@@ -497,6 +503,7 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case companyName = "company_name"
         case price
         case changePercent = "change_percent"
+        case previousClose = "previous_close"
         case sparklineData = "sparkline_data"
         case logoUrl = "logo_url"
         case sector, country, shares
@@ -518,7 +525,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
             shares: shares,
             marketValue: marketValue,
             sector: sector,
-            country: country
+            country: country,
+            backendPreviousClose: previousClose
         )
     }
 }
@@ -911,7 +919,8 @@ extension TrackedAsset {
             shares: 100,
             marketValue: 17_842,
             sector: "Technology",
-            country: "US"
+            country: "US",
+            backendPreviousClose: nil
         ),
         TrackedAsset(
             ticker: "NVDA",
@@ -924,7 +933,8 @@ extension TrackedAsset {
             shares: 50,
             marketValue: 24_761,
             sector: "Technology",
-            country: "US"
+            country: "US",
+            backendPreviousClose: nil
         ),
         TrackedAsset(
             ticker: "MSFT",
@@ -937,7 +947,8 @@ extension TrackedAsset {
             shares: 50,
             marketValue: 18_945.50,
             sector: "Technology",
-            country: "US"
+            country: "US",
+            backendPreviousClose: nil
         ),
         TrackedAsset(
             ticker: "GOOGL",
@@ -950,7 +961,8 @@ extension TrackedAsset {
             shares: 100,
             marketValue: 13_967,
             sector: "Communication Services",
-            country: "US"
+            country: "US",
+            backendPreviousClose: nil
         )
     ]
 }

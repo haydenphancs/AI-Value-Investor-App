@@ -12,6 +12,8 @@ struct AIBooksSection: View {
     var onSeeAll: (() -> Void)?
     var onBookTap: ((EducationBook) -> Void)?
     var onChatWithBook: ((EducationBook) -> Void)?
+    var isBookmarked: ((EducationBook) -> Bool)?
+    var onToggleBookmark: ((EducationBook) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -44,8 +46,10 @@ struct AIBooksSection: View {
                 ForEach(books) { book in
                     EducationBookCard(
                         book: book,
+                        isBookmarked: isBookmarked?(book) ?? false,
                         onTap: { onBookTap?(book) },
-                        onChatWithBook: { onChatWithBook?(book) }
+                        onChatWithBook: { onChatWithBook?(book) },
+                        onToggleBookmark: { onToggleBookmark?(book) }
                     )
                 }
             }

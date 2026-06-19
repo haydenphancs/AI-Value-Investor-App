@@ -19,13 +19,16 @@ struct BookDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
     @ObservedObject private var progress = BookProgressStore.shared
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var selectedTab: BookDetailTab = .core
-    @State private var isBookmarked: Bool = false
     @State private var showShareSheet: Bool = false
     @State private var scrollOffset: CGFloat = 0
     @State private var aiInputText: String = ""
 
     let book: LibraryBook
+
+    /// Bookmark state for this book (BookmarkStore, keyed by title) — shared with every card.
+    private var isBookmarked: Bool { bookmarks.isBookmarked(book.title) }
 
     // Computed property for header opacity based on scroll. Fades the sticky header in right as the
     // hero's own nav bar scrolls away (~50px), so a header is pinned throughout scrolling.
@@ -52,7 +55,7 @@ struct BookDetailView: View {
                         book: book,
                         onBackTapped: { dismiss() },
                         isBookmarked: isBookmarked,
-                        onBookmarkTapped: { isBookmarked.toggle() },
+                        onBookmarkTapped: { bookmarks.toggle(book.title) },
                         onShareTapped: { showShareSheet = true }
                     )
 
@@ -96,7 +99,7 @@ struct BookDetailView: View {
                 book: book,
                 isBookmarked: isBookmarked,
                 onBackTapped: { dismiss() },
-                onBookmarkTapped: { isBookmarked.toggle() },
+                onBookmarkTapped: { bookmarks.toggle(book.title) },
                 onShareTapped: { showShareSheet = true }
             )
             .opacity(headerOpacity)

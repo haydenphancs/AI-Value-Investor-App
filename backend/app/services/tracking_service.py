@@ -190,6 +190,7 @@ class TrackingService:
 
                 change_pct = quote.get("changePercentage") or 0
                 price = quote.get("price") or 0
+                prev_close_raw = quote.get("previousClose")
                 market_cap_raw = quote.get("marketCap")
 
                 # Holding info — these columns live on watchlist_items and
@@ -205,6 +206,7 @@ class TrackingService:
                         company_name=item.get("company_name") or quote.get("name") or ticker,
                         price=round(float(price), 2),
                         change_percent=round(float(change_pct), 2),
+                        previous_close=round(float(prev_close_raw), 2) if prev_close_raw else None,
                         sparkline_data=sparkline,
                         logo_url=item.get("logo_url"),
                         sector=item.get("sector") or quote.get("sector"),

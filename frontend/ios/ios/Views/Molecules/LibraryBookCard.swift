@@ -11,7 +11,10 @@ struct LibraryBookCard: View {
     let book: LibraryBook
     /// Whether every core in the book has been completed (real progress, from BookProgressStore).
     var isMastered: Bool = false
+    /// Whether this book is bookmarked (from BookmarkStore, keyed by title).
+    var isBookmarked: Bool = false
     var onChatWithBook: (() -> Void)?
+    var onToggleBookmark: (() -> Void)?
     var onReview: (() -> Void)?
 
     var body: some View {
@@ -70,20 +73,10 @@ struct LibraryBookCard: View {
 
                         Spacer()
 
-                        // Rating
-                        HStack(spacing: AppSpacing.xxs) {
-                            Image(systemName: "star.fill")
-                                .font(AppTypography.iconXS)
-                                .foregroundColor(AppColors.neutral)
-
-                            Text(book.formattedRating)
-                                .font(AppTypography.labelSmallEmphasis)
-                                .foregroundColor(AppColors.textPrimary)
+                        // Bookmark toggle (replaces the old star rating)
+                        BookmarkButton(isBookmarked: isBookmarked, size: 18) {
+                            onToggleBookmark?()
                         }
-                        .padding(.horizontal, AppSpacing.sm)
-                        .padding(.vertical, AppSpacing.xs)
-                        .background(AppColors.cardBackgroundLight)
-                        .cornerRadius(AppCornerRadius.small)
                     }
 
                     // Author

@@ -12,6 +12,7 @@ struct LearnContentView: View {
     @Environment(\.appState) private var appState
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
@@ -92,6 +93,7 @@ struct LearnContentView: View {
             // Pull server-side progress into the local caches (best-effort; books/journey/money moves).
             await JourneyProgressStore.shared.hydrate()
             await MoneyMovesProgressStore.shared.hydrate()
+            await bookmarks.hydrate()
         }
         }
     }
@@ -126,7 +128,9 @@ struct LearnContentView: View {
                         books: viewModel.books,
                         onSeeAll: handleSeeAllBooks,
                         onBookTap: handleBookTap,
-                        onChatWithBook: handleChatWithBook
+                        onChatWithBook: handleChatWithBook,
+                        isBookmarked: { bookmarks.isBookmarked($0.title) },
+                        onToggleBookmark: { bookmarks.toggle($0.title) }
                     )
                 }
 

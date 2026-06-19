@@ -9,7 +9,10 @@ import SwiftUI
 
 struct SearchBookCard: View {
     let book: SearchBookItem
+    /// Whether this book is bookmarked (from BookmarkStore, keyed by title).
+    var isBookmarked: Bool = false
     var onChatWithBook: (() -> Void)?
+    var onToggleBookmark: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -51,20 +54,10 @@ struct SearchBookCard: View {
 
                         Spacer()
 
-                        // Rating badge
-                        HStack(spacing: AppSpacing.xxs) {
-                            Image(systemName: "star.fill")
-                                .font(AppTypography.iconXS)
-                                .foregroundColor(AppColors.neutral)
-
-                            Text(book.formattedRating)
-                                .font(AppTypography.labelSmallEmphasis)
-                                .foregroundColor(AppColors.textPrimary)
+                        // Bookmark toggle (replaces the old star rating)
+                        BookmarkButton(isBookmarked: isBookmarked, size: 18) {
+                            onToggleBookmark?()
                         }
-                        .padding(.horizontal, AppSpacing.sm)
-                        .padding(.vertical, AppSpacing.xs)
-                        .background(AppColors.cardBackgroundLight)
-                        .cornerRadius(AppCornerRadius.small)
                     }
 
                     // Author

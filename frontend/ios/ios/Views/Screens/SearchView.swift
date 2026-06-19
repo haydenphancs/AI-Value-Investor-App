@@ -10,6 +10,7 @@ import SwiftUI
 struct SearchView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = SearchViewModel()
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var selectedNewsArticle: NewsArticle?
 
     var body: some View {
@@ -55,7 +56,9 @@ struct SearchView: View {
                         // AI-Enabled Books Section
                         SearchBooksSection(
                             books: viewModel.books,
-                            onChatWithBook: handleChatWithBook
+                            onChatWithBook: handleChatWithBook,
+                            isBookmarked: { bookmarks.isBookmarked($0.title) },
+                            onToggleBookmark: { bookmarks.toggle($0.title) }
                         )
 
                         // Bottom spacing for safe area
@@ -77,6 +80,7 @@ struct SearchView: View {
         .navigationBarHidden(true)
         .task {
             await viewModel.loadInitialData()
+            await bookmarks.hydrate()
         }
         .gesture(
             DragGesture()
@@ -176,6 +180,7 @@ struct SearchView: View {
 // MARK: - SearchContentView (For use in NavigationStack)
 struct SearchContentView: View {
     @StateObject private var viewModel = SearchViewModel()
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var selectedNewsArticle: NewsArticle?
     var onDismiss: (() -> Void)?
 
@@ -258,7 +263,9 @@ struct SearchContentView: View {
                         // AI-Enabled Books Section
                         SearchBooksSection(
                             books: viewModel.books,
-                            onChatWithBook: { viewModel.chatWithBook($0) }
+                            onChatWithBook: { viewModel.chatWithBook($0) },
+                            isBookmarked: { bookmarks.isBookmarked($0.title) },
+                            onToggleBookmark: { bookmarks.toggle($0.title) }
                         )
 
                         // Bottom spacing
@@ -279,6 +286,7 @@ struct SearchContentView: View {
         }
         .task {
             await viewModel.loadInitialData()
+            await bookmarks.hydrate()
         }
         .gesture(
             DragGesture()

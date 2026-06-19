@@ -75,7 +75,7 @@ struct EarningsSectionCard: View {
 
             // Surprise percentages row (1Y only - replaced by bar chart in 3Y)
             if selectedTimeRange == .oneYear {
-                EarningsSurpriseRow(quarters: displayQuarters)
+                EarningsSurpriseRow(quarters: displayQuarters, dataType: selectedDataType)
             }
 
             // Spacer before legend

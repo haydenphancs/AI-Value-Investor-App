@@ -9,8 +9,11 @@ import SwiftUI
 
 struct EarningsSurpriseRow: View {
     let quarters: [EarningsQuarterData]
-    
-    private var yAxisWidth: CGFloat { 40 }
+    var dataType: EarningsDataType = .eps
+
+    // MUST match EarningsChartView.yAxisWidth so each % sits under its dot.
+    // Revenue labels ("23.3B") are wider than EPS ("2.49"), so the axis is wider.
+    private var yAxisWidth: CGFloat { dataType == .revenue ? 50 : 40 }
 
     var body: some View {
         HStack(spacing: 0) {

@@ -74,6 +74,12 @@ struct SmartMoneyFlowChart: View {
     private let priceChartHeight: CGFloat = 80
     private let volumeChartHeight: CGFloat = 145
 
+    /// Fixed width for the y-axis label column so the price axis ("$150") and the
+    /// volume axis ("200K" / "-100M") share ONE straight left edge regardless of
+    /// label width. Only applied when `uniformVolumeAxis` is on (the Smart Money
+    /// tab); the report keeps its natural per-axis widths.
+    private let yAxisLabelWidth: CGFloat = 40
+
     /// Wider bars for quarterly (8 bars) vs monthly (12 bars)
     private var barWidth: CGFloat {
         isQuarterly ? 20 : 12
@@ -188,6 +194,10 @@ struct SmartMoneyFlowChart: View {
                         Text(formatPriceValue(doubleValue))
                             .font(AppTypography.caption)
                             .foregroundStyle(AppColors.textMuted)
+                            // Same fixed-width left-aligned column as the volume
+                            // axis so "$150" lines up under "200K". nil width on
+                            // the report path → unchanged there.
+                            .frame(width: uniformVolumeAxis ? yAxisLabelWidth : nil, alignment: .leading)
                     }
                 }
             }
@@ -243,6 +253,10 @@ struct SmartMoneyFlowChart: View {
                         Text(formatPriceValue(doubleValue))
                             .font(AppTypography.caption)
                             .foregroundStyle(AppColors.textMuted)
+                            // Same fixed-width left-aligned column as the volume
+                            // axis so "$150" lines up under "200K". nil width on
+                            // the report path → unchanged there.
+                            .frame(width: uniformVolumeAxis ? yAxisLabelWidth : nil, alignment: .leading)
                     }
                 }
             }
@@ -340,6 +354,10 @@ struct SmartMoneyFlowChart: View {
                                 Text(formatVolumeValue(doubleValue))
                                     .font(.system(size: 11))
                                     .foregroundStyle(AppColors.textMuted)
+                                    // Fixed-width left-aligned column → the volume
+                                    // labels share one straight left edge with the
+                                    // price axis ("2" of 200K sits under "$").
+                                    .frame(width: yAxisLabelWidth, alignment: .leading)
                             }
                         }
                     }

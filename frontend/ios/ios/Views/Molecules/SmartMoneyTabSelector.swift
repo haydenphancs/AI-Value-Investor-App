@@ -12,40 +12,31 @@ import SwiftUI
 struct SmartMoneyTabSelector: View {
     @Binding var selectedTab: SmartMoneyTab
 
+    // Segmented control — matches RecentActivitiesTabSelector exactly: equal-
+    // width tabs in a rounded `cardBackground` container, the selected tab
+    // filled with `cardBackgroundLight`.
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
+        HStack(spacing: 0) {
             ForEach(SmartMoneyTab.allCases, id: \.rawValue) { tab in
-                tabPill(for: tab)
-            }
-
-            Spacer()
-        }
-    }
-
-    private func tabPill(for tab: SmartMoneyTab) -> some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                selectedTab = tab
-            }
-        } label: {
-            Text(tab.rawValue)
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
-                .padding(.horizontal, AppSpacing.md)
-                .padding(.vertical, AppSpacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                        .fill(selectedTab == tab ? AppColors.cardBackgroundLight : Color.clear)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                                .stroke(
-                                    selectedTab == tab ? Color.clear : AppColors.cardBackgroundLight,
-                                    lineWidth: 1
-                                )
+                Button {
+                    selectedTab = tab
+                } label: {
+                    Text(tab.rawValue)
+                        .font(AppTypography.bodyEmphasis)
+                        .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(
+                            selectedTab == tab ? AppColors.cardBackgroundLight : Color.clear
                         )
-                )
+                        .cornerRadius(AppCornerRadius.medium)
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(AppSpacing.xs)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
     }
 }
 

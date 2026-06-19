@@ -17,6 +17,16 @@ struct TickerChartView: View {
     let assetContext: ChartAssetContext
     var chartDataVersion: Int = 0
     var chartEventDates: ChartEventDates? = nil
+    /// Previous trading day's close — anchors the 1D dashed baseline. nil → the
+    /// baseline falls back to the first visible point (start of the range).
+    var previousClose: Double? = nil
+
+    /// Reference price for the dashed baseline: prior-day close on 1D, else the
+    /// first visible point (start of the selected range).
+    private var baselineClose: Double? {
+        if selectedRange == .oneDay, let pc = previousClose { return pc }
+        return visiblePoints.first?.close
+    }
 
     @State private var showSettingsSheet = false
     @StateObject private var crosshairState = CrosshairState()
@@ -140,7 +150,8 @@ struct TickerChartView: View {
                     showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
                     chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
-                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto
+                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto,
+                    baselineClose: baselineClose
                 )
 
                 ChartCrosshairGesture(

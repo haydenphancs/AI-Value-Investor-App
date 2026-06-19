@@ -96,7 +96,8 @@ struct TickerDetailView: View {
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .stock,
                                 chartDataVersion: viewModel.chartDataVersion,
-                                chartEventDates: viewModel.chartEventDates
+                                chartEventDates: viewModel.chartEventDates,
+                                previousClose: viewModel.stockQuote?.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
                         }

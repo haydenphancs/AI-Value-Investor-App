@@ -123,6 +123,10 @@ class InstitutionalActivitySchema(BaseModel):
     change_in_millions: float = Field(0.0)
     change_percent: float = Field(0.0)
     total_held_in_billions: float = Field(0.0)
+    # True when this is a brand-new position (prev quarter held 0). FMP reports
+    # such rows as "+100%", which reads like "doubled" — the iOS side renders
+    # this flag as "New" instead.
+    is_new_position: bool = False
 
 
 class InsiderActivitySummarySchema(BaseModel):

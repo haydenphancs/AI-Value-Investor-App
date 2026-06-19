@@ -31,10 +31,12 @@ Usage:
 """
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -65,8 +67,11 @@ assert KEY, "GEMINI_API_KEY not found in env or backend/.env"
 MODEL = "gemini-2.5-flash-preview-tts"
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={KEY}"
 TARGET_WPM = 170                 # default pace; per-book overrides live in BOOK_VOICES
-MAX_CHUNK_CHARS = 1800           # keep each TTS request comfortably under the model's input cap
+MAX_CHUNK_CHARS = 6000           # ONE TTS call per core (a core ≈ a few min = TTS's consistency sweet
+                                 # spot); only an unusually long core splits. Bigger = fewer "takes"
+                                 # = a core sounds uniform throughout (no mid-core voice/speed drift).
 BREAK_SECONDS = 2.5              # silence between cores ("a short break for each core")
+_TRUNCATION_WPM = 230            # native pace above this ⇒ the model truncated the take → split & retry
 
 # Common narration directive appended after each book's persona style.
 _NARRATOR = ("Use natural pauses at the periods, and let the transitions between chapters breathe. "
@@ -189,17 +194,19 @@ def action_recap(action: list[tuple[str, str]]) -> str:
     return f"To put this into practice, here are your action steps: {joined}."
 
 
-def chunk_blocks(blocks: list[str], limit: int = MAX_CHUNK_CHARS) -> list[str]:
-    """Group blocks into chunks under `limit` chars, never splitting a single block."""
+def chunk_blocks(blocks: list[str], limit: int = MAX_CHUNK_CHARS) -> list[list[str]]:
+    """Group blocks into chunks under `limit` chars (never splitting a single block). Returns each
+    chunk as a LIST of blocks (so a chunk can be re-split if its take comes back truncated). With the
+    6000-char limit this is normally ONE chunk per core."""
     chunks, cur, cur_len = [], [], 0
     for b in blocks:
         if cur and cur_len + len(b) + 1 > limit:
-            chunks.append("\n".join(cur))
+            chunks.append(cur)
             cur, cur_len = [], 0
         cur.append(b)
         cur_len += len(b) + 1
     if cur:
-        chunks.append("\n".join(cur))
+        chunks.append(cur)
     return chunks
 
 
@@ -231,13 +238,35 @@ def synth_pcm(text: str, voice: str, style: str):
     raise RuntimeError("TTS request failed after repeated 429s (likely a daily quota cap)")
 
 
+def _synth_take(blocks: list[str], voice: str, style: str) -> tuple[bytes, int]:
+    """Synthesize `blocks` as ONE take (joined). Truncation guard: if the returned audio is far too
+    short for the word count (native pace > _TRUNCATION_WPM), the model truncated — split the block
+    list in half and retry each part, so no narration is silently dropped."""
+    words = sum(len(b.split()) for b in blocks)
+    pcm, rate = synth_pcm("\n".join(blocks), voice, style)
+    secs = len(pcm) / 2 / rate
+    native_wpm = (words / secs * 60) if secs else 0.0
+    if native_wpm > _TRUNCATION_WPM and len(blocks) > 1:
+        mid = len(blocks) // 2
+        print(f"      ⚠ truncation suspected ({native_wpm:.0f} WPM over {secs:.0f}s) — "
+              f"splitting {len(blocks)}→{mid}+{len(blocks) - mid} blocks and retrying")
+        time.sleep(THROTTLE_SECONDS)
+        a, rate = _synth_take(blocks[:mid], voice, style)
+        time.sleep(THROTTLE_SECONDS)
+        b, rate = _synth_take(blocks[mid:], voice, style)
+        return a + b, rate
+    return pcm, rate
+
+
 def synth_segment(blocks: list[str], tmp: Path, name: str, voice: str, style: str, wpm: int) -> tuple[bytes, int]:
-    """Synthesize one core segment (bridge + body) to NORMALIZED (`wpm`) mono 16-bit PCM."""
+    """Synthesize one core segment (bridge + body + action recap) as a SINGLE take (one TTS call per
+    core — only an unusually long core splits), then normalize its pace to `wpm`. One take per core
+    means a core has no internal voice/speed/volume seams."""
     chunks = chunk_blocks(blocks)
     words = sum(len(b.split()) for b in blocks)
     pcm_all, rate = b"", 24000
-    for i, chunk in enumerate(chunks):
-        pcm, rate = synth_pcm(chunk, voice, style)
+    for i, blist in enumerate(chunks):
+        pcm, rate = _synth_take(blist, voice, style)
         pcm_all += pcm
         if i < len(chunks) - 1:
             time.sleep(THROTTLE_SECONDS)
@@ -258,6 +287,28 @@ def synth_segment(blocks: list[str], tmp: Path, name: str, voice: str, style: st
         out_pcm = w.readframes(w.getnframes())
     raw.unlink(missing_ok=True); norm.unlink(missing_ok=True)
     return out_pcm, out_rate
+
+
+def _segment_with_cache(cache_dir: Path, num: int, blocks: list[str], tmp: Path,
+                        voice: str, style: str, wpm: int) -> tuple[bytes, int, bool]:
+    """synth_segment with a per-core CHECKPOINT, so a quota-interrupted run resumes for free instead
+    of re-spending TTS quota on cores it already made. Caches the normalized core PCM as a WAV keyed
+    by a hash of (voice, wpm, style, text); a re-run reuses it when nothing changed and re-synthesizes
+    only on a hash miss (edited text / different voice or pace). Returns (pcm, rate, from_cache)."""
+    cache_dir.mkdir(exist_ok=True)
+    key = hashlib.sha1("\x1f".join([voice, str(wpm), style, *blocks]).encode()).hexdigest()[:12]
+    cache_file = cache_dir / f"core{num}_{key}.wav"
+    for stale in cache_dir.glob(f"core{num}_*.wav"):     # drop checkpoints for older text/voice/pace
+        if stale != cache_file:
+            stale.unlink(missing_ok=True)
+    if cache_file.exists():
+        with wave.open(str(cache_file), "rb") as w:
+            return w.readframes(w.getnframes()), w.getframerate(), True
+    pcm, rate = synth_segment(blocks, tmp, f"core{num}", voice, style, wpm)
+    with wave.open(str(cache_file), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(pcm)
+    return pcm, rate, False
 
 
 def render_book(order: int, force: bool) -> None:
@@ -290,6 +341,7 @@ def render_book(order: int, force: bool) -> None:
           f"{f' · pitch {pitch}st' if pitch else ''} -> {m4a.name}")
     tmp = OUT / f".tmp_{order}"
     tmp.mkdir(exist_ok=True)
+    cache_dir = OUT / f".cache_{order}"         # per-core checkpoints — survive a quota interruption
 
     final_pcm, rate = b"", 24000
     silence = b""
@@ -301,7 +353,9 @@ def render_book(order: int, force: bool) -> None:
             blocks.append(recap)
         words = sum(len(b.split()) for b in blocks)
         print(f"  core {num} '{title}' (~{words} words incl. bridge + action recap)")
-        seg_pcm, rate = synth_segment(blocks, tmp, f"core{num}", voice, style, wpm)
+        seg_pcm, rate, cached = _segment_with_cache(cache_dir, num, blocks, tmp, voice, style, wpm)
+        if cached:
+            print("    [resumed from checkpoint — no TTS call]")
         if not silence:
             silence = b"\x00\x00" * int(rate * BREAK_SECONDS)
 
@@ -315,7 +369,8 @@ def render_book(order: int, force: bool) -> None:
         final_pcm += seg_pcm
         if idx < len(parsed) - 1:
             final_pcm += silence            # break AFTER each core except the last
-        time.sleep(THROTTLE_SECONDS)
+        if not cached:
+            time.sleep(THROTTLE_SECONDS)     # only pace real API calls; cached cores are instant
 
     total_seconds = len(final_pcm) / 2 / rate
     final_wav = tmp / "book.wav"
@@ -347,6 +402,7 @@ def render_book(order: int, force: bool) -> None:
         "cores": cores_manifest,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    shutil.rmtree(cache_dir, ignore_errors=True)   # full book assembled OK → drop the checkpoints
     print(f"\n  -> {m4a}  ({fmt_ts(total_seconds)})")
     print(f"  -> {manifest_path.name}")
     print("  core start times:")

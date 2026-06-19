@@ -87,7 +87,7 @@ BOOK_VOICES: dict[int, dict] = {
     5:  {"voice": "Schedar",       "wpm": 160, "style": "Narrate as Philip Fisher, a meticulous, reserved, scholarly analyst — even, careful, methodical and precise, slightly formal. "},
     6:  {"voice": "Alnilam",       "wpm": 160, "style": "Narrate as John Bogle, a principled elder statesman of investing — steady, firm, full of conviction, plain and direct. "},
     7:  {"voice": "Orus",          "wpm": 160, "style": "Narrate as Burton Malkiel, a witty professor emeritus and a normal older man — clear and plain-spoken, in a low, measured register, lightly amused. "},
-    8:  {"voice": "Zubenelgenubi", "wpm": 160, "style": "Narrate as Warren Buffett, a warm, wise, plain-spoken older man — patient and unhurried, with gentle good humor, in a neutral American accent, not a strong regional or folksy twang. "},
+    8:  {"voice": "Iapetus",       "wpm": 150, "style": "Narrate as Warren Buffett, a warm, wise, plain-spoken older man — patient and unhurried, with gentle good humor, in a neutral American accent, not a strong regional or folksy twang. "},  # shares book 2's Iapetus voice @ 150 WPM (slower; was Zubenelgenubi @ 160 — read too fast)
     9:  {"voice": "Achird",        "wpm": 160, "pitch": -1, "style": "Narrate as Joel Greenblatt, a friendly, patient teacher explaining a clever idea simply to a curious beginner — warm and a touch playful. "},
     10: {"voice": "Sadaltager",    "wpm": 160, "style": "Narrate as Howard Marks, a seasoned, contemplative investor weighing each idea — calm gravitas, thoughtful and measured. "},
 }

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caydex — Report system design</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+         color: #1f2937; background: #ffffff; line-height: 1.65; margin: 0; padding: 40px 24px 72px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 19px; font-weight: 600; margin: 40px 0 8px; }
+  .sub { color: #6b7280; margin: 0 0 8px; }
+  figure { margin: 20px 0 8px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; }
+  figure img { width: 100%; height: auto; display: block; }
+  figcaption { color: #6b7280; font-size: 13px; margin-top: 10px; }
+  ul { padding-left: 22px; } li { margin: 6px 0; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 5px; font-size: 0.9em;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .kicker { display:inline-block; font-size:12px; letter-spacing:.04em; text-transform:uppercase;
+            color:#6b7280; }
+  .takeaway { border-left: 3px solid #d97706; background: #fffbeb; padding: 12px 16px;
+              border-radius: 0 8px 8px 0; margin: 16px 0; }
+  footer { color:#9ca3af; font-size:12px; margin-top:48px; border-top:1px solid #e5e7eb; padding-top:16px; }
+</style>
+</head>
+<body>
+<main>
+  <span class="kicker">Caydex · AI Value Investor</span>
+  <h1>Report generation — system design</h1>
+  <p class="sub">How <strong>TickerDetailView</strong> and <strong>TickerReportView</strong> share the backend, and the data flow for 100 users generating 100 different reports.</p>
+
+  <h2>1 · How the two screens share the backend</h2>
+  <figure>
+    <img src="caydex-report-architecture.svg" alt="Architecture diagram: both iOS screens converge on a shared cached-service and ticker_data_cache layer feeding FMP; only the report path uses the agent pipeline and Gemini.">
+    <figcaption>The two screens share no endpoints, but converge on the gray service + cache layer.</figcaption>
+  </figure>
+  <ul>
+    <li><strong>TickerDetailView</strong> → <code>GET /stocks/{ticker}/*</code> (≈19 endpoints) → cached services → <strong>FMP</strong>. No Gemini, no semaphore — it is FMP-bound. On open it also fires <code>POST /prewarm-report</code>, which <strong>writes <code>ticker_data_cache</code></strong> (the report's bundled collection).</li>
+    <li><strong>TickerReportView</strong> → <code>POST /research/generate</code> → the <strong>report pipeline</strong> (admission → semaphore → agent) → the agent's collector <strong>reuses the same cached services + <code>ticker_data_cache</code></strong>, and additionally calls <strong>Gemini</strong>.</li>
+    <li><strong>The overlap</strong> is the gray layer: the report collector pulls from the same <code>analyst / holders / snapshots / revenue / earnings</code> caches the detail view populates (~8–9 of its ~20 sub-fetches), and both read/write <code>ticker_data_cache</code>. Opening the detail view is a <em>partial warm</em> of a future report — FMP side only; the Gemini half is report-exclusive.</li>
+  </ul>
+
+  <h2>2 · Data flow — 100 users, 100 different reports</h2>
+  <figure>
+    <img src="caydex-100-users-dataflow.svg" alt="Data-flow diagram: 100 report requests admitted, charged, and queued, then drained eight at a time through the global agent semaphore; each running report does FMP and Gemini work before a conditional completion write or refund.">
+    <figcaption>Distinct tickers = the worst case (no dedup). The semaphore (=8) is the gate.</figcaption>
+  </figure>
+  <ul>
+    <li><strong>Admit</strong> — the per-user cap (≤4) is irrelevant (100 different users, 1 each); the global cap (≤150) admits all 100. If it were 200, ~50 would fast-fail with <code>409 SYSTEM_BUSY</code>.</li>
+    <li><strong>Charge + enqueue</strong> — 5 credits ×100, 100 <code>pending</code> rows, 100 fire-and-forget tasks.</li>
+    <li><strong>Cache</strong> — 100 distinct tickers → 100 misses (no dedup). Same ticker instead → collapses to <strong>1</strong> run via <code>_INFLIGHT</code>.</li>
+    <li><strong>The gate</strong> — the global semaphore = <strong>8</strong>. Only 8 compute at once; the other 92 park cheaply and drain as slots free.</li>
+    <li><strong>Per running report</strong> — ~25–40 FMP calls through the <strong>shared 20-connection pool / 750 RPM</strong>, and ~22 Gemini calls (15 Stage-B narratives in parallel, context-cached). This is the bottleneck pair.</li>
+    <li><strong>Finish</strong> — a <em>conditional</em> completion write delivers the report, <strong>XOR</strong> the reconciliation safety net refunds it (never both) — the credit invariant, kept honest by the <code>processing_started_at</code> clock.</li>
+  </ul>
+
+  <div class="takeaway">
+    <strong>Takeaway.</strong> Reports are <strong>Gemini-bound</strong> (8-slot semaphore + tier TPM); the detail view is <strong>FMP-bound</strong> (20-conn pool + 750 RPM) — different ceilings. 100 distinct reports drain in ~13 waves of 8 (≈10–15 min; first users ~1 min); 100 distinct detail views are far cheaper (no Gemini, no semaphore). Under overload nothing crashes — it sheds load (409), paces Gemini (429 backoff + circuit breaker), and refunds anything it can't deliver.
+  </div>
+
+  <footer>Caydex report scaling — Phase 0/1 + detail-view pre-warm. Tunables: <code>MAX_CONCURRENT_AGENT_RUNS</code> (8), <code>MAX_GLOBAL_INFLIGHT_REPORTS</code> (150). Last updated 2026-06-19.</footer>
+</main>
+</body>
+</html>

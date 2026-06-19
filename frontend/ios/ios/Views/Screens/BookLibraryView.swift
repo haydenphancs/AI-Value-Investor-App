@@ -32,6 +32,24 @@ struct BookLibraryView: View {
         return Double(masteredCount) / Double(totalCount)
     }
 
+    /// The most-recently bookmarked book resolved to its LibraryBook (or nil).
+    private var bookmarkedBook: LibraryBook? {
+        guard let title = bookmarks.mostRecent else { return nil }
+        return books.first(where: { $0.title == title })
+    }
+
+    /// "Core N · <title>" for the bookmarked book's first UNFINISHED core — the resume position.
+    /// Follows curriculum order: stays on the earliest incomplete core even if a later one is
+    /// finished out of order, and advances only once that core itself is completed.
+    private var bookmarkedCoreLabel: String? {
+        guard let book = bookmarkedBook else { return nil }
+        let n = progress.resumeCore(order: book.curriculumOrder, totalCores: book.chapterCount)
+        if let coreTitle = book.coreChapters.first(where: { $0.number == n })?.title, !coreTitle.isEmpty {
+            return "Core \(n) · \(coreTitle)"
+        }
+        return "Core \(n)"
+    }
+
     var body: some View {
         ZStack {
             // Background
@@ -54,6 +72,7 @@ struct BookLibraryView: View {
                             totalCount: totalCount,
                             progressPercentage: progressPercentage,
                             bookmarkedBookTitle: bookmarks.mostRecent,
+                            bookmarkedCoreLabel: bookmarkedCoreLabel,
                             onOpenBookmarked: openBookmarkedBook
                         )
                         .padding(.horizontal, AppSpacing.lg)
@@ -175,6 +194,8 @@ private struct ProgressDashboardCard: View {
     let progressPercentage: Double
     /// Most-recently bookmarked book title; when set, the card shows a tappable shortcut to it.
     let bookmarkedBookTitle: String?
+    /// "Core N · <title>" the learner will resume in that book (first unfinished core, in order).
+    let bookmarkedCoreLabel: String?
     var onOpenBookmarked: (() -> Void)?
 
     var body: some View {
@@ -229,18 +250,29 @@ private struct ProgressDashboardCard: View {
                     // A bookmarked-book shortcut when one exists; otherwise the motivational
                     // message. Same slot ⇒ the card keeps its size either way.
                     if let bookmarkedBookTitle {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "bookmark.fill")
-                                .font(AppTypography.iconTiny)
+                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                            HStack(spacing: AppSpacing.xs) {
+                                Image(systemName: "bookmark.fill")
+                                    .font(AppTypography.iconTiny)
 
-                            Text(bookmarkedBookTitle)
-                                .font(AppTypography.bodySmall).fontWeight(.semibold)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
+                                Text(bookmarkedBookTitle)
+                                    .font(AppTypography.bodySmall).fontWeight(.semibold)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
 
-                            Image(systemName: "chevron.right")
-                                .font(AppTypography.iconTiny)
-                                .opacity(0.8)
+                                Image(systemName: "chevron.right")
+                                    .font(AppTypography.iconTiny)
+                                    .opacity(0.8)
+                            }
+
+                            // The core the learner will resume — first unfinished core, in order.
+                            if let bookmarkedCoreLabel {
+                                Text(bookmarkedCoreLabel)
+                                    .font(AppTypography.label)
+                                    .foregroundColor(.white.opacity(0.8))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                            }
                         }
                         .foregroundColor(.white)
                     } else {
@@ -258,7 +290,9 @@ private struct ProgressDashboardCard: View {
                     .frame(width: 90, height: 90)
             }
             .padding(.horizontal, AppSpacing.xl)
-            .padding(.vertical, AppSpacing.xl)
+            .padding(.top, AppSpacing.xl)
+            // Extra room at the bottom so the bookmarked-book + resume-core lines have space.
+            .padding(.bottom, AppSpacing.xxl)
 
             // Trophy badge
             if masteredCount > 0 {
@@ -266,7 +300,8 @@ private struct ProgressDashboardCard: View {
                     .padding(AppSpacing.lg)
             }
         }
-        .aspectRatio(16/9, contentMode: .fit)
+        // Hug the content (with the xl vertical padding above) instead of a fixed 16:9 ratio,
+        // which left a large empty band below the text. Card height now tracks its content.
         .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
         // Whole card opens the bookmarked book; no-op when nothing is bookmarked.
         .contentShape(Rectangle())

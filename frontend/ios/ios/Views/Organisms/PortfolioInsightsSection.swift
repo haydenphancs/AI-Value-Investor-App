@@ -15,6 +15,11 @@ import SwiftUI
 struct PortfolioInsightsSection: View {
     let score: DiversificationScore?
     var coverageNote: String? = nil
+    /// Number of tickers the user has actually entered shares / dollars for.
+    /// When this is between 1 and `minimumHoldings - 1` the score is nil (you
+    /// can't diversify a single position), so we show an explanatory hint
+    /// instead of the first-run empty state.
+    var enteredHoldingsCount: Int = 0
     @Binding var isEnabled: Bool
     var onConfigureTapped: (() -> Void)?
 
@@ -64,6 +69,9 @@ struct PortfolioInsightsSection: View {
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
+        } else if enteredHoldingsCount > 0
+                    && enteredHoldingsCount < DiversificationThresholds.minimumHoldings {
+            needsMoreHoldingsState
         } else {
             emptyState
         }
@@ -75,6 +83,50 @@ struct PortfolioInsightsSection: View {
             .foregroundColor(AppColors.textSecondary)
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, AppSpacing.xs)
+    }
+
+    /// Shown when the user has entered at least one holding but fewer than the
+    /// minimum needed to score (a single position can't be "diversified"). This
+    /// replaces the silent dead-end where one entered holding looked identical
+    /// to having entered nothing.
+    private var needsMoreHoldingsState: some View {
+        let minimum = DiversificationThresholds.minimumHoldings
+        return VStack(spacing: AppSpacing.md) {
+            Image(systemName: "chart.pie")
+                .font(AppTypography.iconDisplay)
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Diversification needs at least \(minimum) holdings — you've entered \(enteredHoldingsCount). Add another ticker to this portfolio and enter its shares or amount to see your score.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.lg)
+
+            if let onConfigureTapped = onConfigureTapped {
+                Button {
+                    onConfigureTapped()
+                } label: {
+                    HStack(spacing: AppSpacing.xxs) {
+                        Image(systemName: "pencil")
+                            .font(AppTypography.iconXS)
+                        Text("Edit holdings")
+                            .font(AppTypography.bodySmallEmphasis)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, AppSpacing.xl)
+                    .padding(.vertical, AppSpacing.sm)
+                    .background(AppColors.primaryBlue)
+                    .cornerRadius(AppCornerRadius.pill)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, AppSpacing.xxl)
+        .background(AppColors.cardBackground)
+        .cornerRadius(AppCornerRadius.large)
+        .padding(.horizontal, AppSpacing.lg)
     }
 
     private var emptyState: some View {
@@ -122,6 +174,12 @@ struct PortfolioInsightsSection: View {
         )
         PortfolioInsightsSection(
             score: nil,
+            isEnabled: .constant(true),
+            onConfigureTapped: {}
+        )
+        PortfolioInsightsSection(
+            score: nil,
+            enteredHoldingsCount: 1,
             isEnabled: .constant(true),
             onConfigureTapped: {}
         )

@@ -24,17 +24,20 @@ struct BookDetailView: View {
     @State private var showShareSheet: Bool = false
     @State private var scrollOffset: CGFloat = 0
     @State private var aiInputText: String = ""
+    /// Set when the player's "Read" button is tapped — the core whose reading view should open.
+    @State private var playerTargetCore: BookCoreChapter?
 
     let book: LibraryBook
 
     /// Bookmark state for this book (BookmarkStore, keyed by title) — shared with every card.
     private var isBookmarked: Bool { bookmarks.isBookmarked(book.title) }
 
-    // Computed property for header opacity based on scroll. Fades the sticky header in right as the
-    // hero's own nav bar scrolls away (~50px), so a header is pinned throughout scrolling.
+    // Computed property for header opacity based on scroll. The hero's own nav bar (a 44pt button
+    // row + small top padding) clears at ~52px, so the sticky mini-header fades in over 24→64px —
+    // it's essentially solid the instant the hero nav scrolls away, leaving no header-less gap.
     private var headerOpacity: Double {
-        let fadeStart: CGFloat = 70
-        let fadeEnd: CGFloat = 150
+        let fadeStart: CGFloat = 24
+        let fadeEnd: CGFloat = 64
         if scrollOffset < fadeStart { return 0 }
         if scrollOffset > fadeEnd { return 1 }
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
@@ -122,7 +125,10 @@ struct BookDetailView: View {
             // Full Screen Player (modal overlay) — presented here because this screen is shown as a
             // fullScreenCover above RootContainerView, whose own full-screen player would be hidden.
             if audioManager.showFullScreenPlayer {
-                FullScreenAudioPlayer()
+                FullScreenAudioPlayer(onNavigateToCore: { coreNumber in
+                    // "Read" → open the reading view for the core the narration is currently in.
+                    playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
+                })
                     .transition(.move(edge: .bottom))
                     .zIndex(100)
             }
@@ -132,6 +138,13 @@ struct BookDetailView: View {
         .sheet(isPresented: $showShareSheet) {
             if let url = URL(string: "https://app.example.com/book/\(book.id)") {
                 ShareSheet(items: [book.title, "by \(book.author)", url])
+            }
+        }
+        // Player "Read" → open the reading view for the currently-narrated core.
+        .fullScreenCover(item: $playerTargetCore) { chapter in
+            if let content = chapter.getDetailContent(for: book) {
+                BookCoreDetailView(content: content, book: book)
+                    .environmentObject(AudioManager.shared)
             }
         }
         .onDisappear {

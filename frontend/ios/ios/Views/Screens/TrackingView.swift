@@ -331,6 +331,7 @@ struct AssetsTabContent: View {
                 PortfolioInsightsSection(
                     score: viewModel.portfolioDiversificationScore,
                     coverageNote: viewModel.portfolioInsightsCoverageNote,
+                    enteredHoldingsCount: viewModel.enteredHoldingsCount,
                     isEnabled: $viewModel.isInsightsEnabled,
                     onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
                 )

@@ -318,39 +318,6 @@ private struct FeaturedDeepDiveHeroCard: View {
                         endPoint: .bottomTrailing
                     )
 
-                    // Animated glow orbs
-                    GeometryReader { geometry in
-                        Circle()
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color(hex: "3B82F6").opacity(0.3),
-                                        Color.clear
-                                    ],
-                                    center: .center,
-                                    startRadius: 0,
-                                    endRadius: geometry.size.width * 0.35
-                                )
-                            )
-                            .frame(width: geometry.size.width * 0.5)
-                            .offset(x: -geometry.size.width * 0.15, y: geometry.size.height * 0.3)
-
-                        Circle()
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color(hex: "8B5CF6").opacity(0.25),
-                                        Color.clear
-                                    ],
-                                    center: .center,
-                                    startRadius: 0,
-                                    endRadius: geometry.size.width * 0.3
-                                )
-                            )
-                            .frame(width: geometry.size.width * 0.4)
-                            .offset(x: geometry.size.width * 0.6, y: geometry.size.height * 0.1)
-                    }
-
                     // Grainy texture overlay
                     GrainyTextureOverlay()
 

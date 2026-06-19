@@ -328,6 +328,15 @@ class TrackingViewModel: ObservableObject {
         return "Based on \(used) of \(total) \(noun)"
     }
 
+    /// How many of the active portfolio's tickers have shares or a dollar
+    /// amount entered (i.e. count toward the score). Drives the "add at least
+    /// N holdings" hint: when the user has entered some holdings but fewer than
+    /// `DiversificationThresholds.minimumHoldings`, the score is nil and we want
+    /// to tell them why instead of showing the blank first-run empty state.
+    var enteredHoldingsCount: Int {
+        portfolioStore.activePortfolio?.items.filter { $0.isHolding }.count ?? 0
+    }
+
     var filteredWhaleActivities: [WhaleActivity] {
         // Filter by category if needed
         // For now, return all activities

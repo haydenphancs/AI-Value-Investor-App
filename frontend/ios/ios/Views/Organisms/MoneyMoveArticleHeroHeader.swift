@@ -39,39 +39,6 @@ struct MoneyMoveArticleHeroHeader: View {
                     endPoint: .bottomTrailing
                 )
 
-                // Animated glow orbs
-                GeometryReader { geometry in
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Color(hex: "3B82F6").opacity(0.15),
-                                    Color.clear
-                                ],
-                                center: .center,
-                                startRadius: 0,
-                                endRadius: geometry.size.width * 0.4
-                            )
-                        )
-                        .frame(width: geometry.size.width * 0.6)
-                        .offset(x: -geometry.size.width * 0.1, y: geometry.size.height * 0.2)
-
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Color(hex: "8B5CF6").opacity(0.12),
-                                    Color.clear
-                                ],
-                                center: .center,
-                                startRadius: 0,
-                                endRadius: geometry.size.width * 0.35
-                            )
-                        )
-                        .frame(width: geometry.size.width * 0.5)
-                        .offset(x: geometry.size.width * 0.5, y: geometry.size.height * 0.5)
-                }
-
                 // Grain texture
                 GrainyTextureOverlay()
 

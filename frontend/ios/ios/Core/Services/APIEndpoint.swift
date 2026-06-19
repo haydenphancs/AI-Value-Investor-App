@@ -165,6 +165,7 @@ enum APIEndpoint: Sendable {
     // MARK: - Learn progress (unified completion log; contentType = book_core|journey_lesson|money_move)
     case getLearnProgress(contentType: String)
     case completeLearnItem(contentType: String, key: String)
+    case uncompleteLearnItem(contentType: String, key: String)
 
     // MARK: - Learn / Book bookmarks (account-synced; key = book title)
     case getBookBookmarks
@@ -392,6 +393,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/learn/progress/\(contentType)"
         case .completeLearnItem(let contentType, _):
             return "/api/v1/learn/progress/\(contentType)"
+        case .uncompleteLearnItem(let contentType, _):
+            return "/api/v1/learn/progress/\(contentType)"
 
         // Learn / Book bookmarks (key travels in the body, not the path)
         case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
@@ -428,7 +431,7 @@ enum APIEndpoint: Sendable {
             return .PUT
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
-             .unfollowWhale, .deletePortfolio, .removeBookBookmark:
+             .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem:
             return .DELETE
 
         default:
@@ -529,7 +532,7 @@ enum APIEndpoint: Sendable {
         case .addToWatchlist(let stockId):
             return AddToWatchlistRequest(stockId: stockId)
 
-        case .completeLearnItem(_, let key):
+        case .completeLearnItem(_, let key), .uncompleteLearnItem(_, let key):
             return CompleteLearnItemRequest(key: key)
 
         case .addBookBookmark(let key), .removeBookBookmark(let key):
@@ -621,7 +624,7 @@ enum APIEndpoint: Sendable {
         case .getMoneyMoves:
             return false
         // Learn progress uses optional auth (token sent if signed in; guests still work via cache)
-        case .getLearnProgress, .completeLearnItem:
+        case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem:
             return false
         // Book bookmarks use optional auth (token sent if signed in; guests still work via cache)
         case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:

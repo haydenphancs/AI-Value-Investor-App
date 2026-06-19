@@ -49,6 +49,21 @@ final class MoneyMovesProgressStore: ObservableObject {
         Task { await self.pushCompletion(s) }
     }
 
+    /// Un-mark an article (the article-end toggle's "undo"). Removes it locally AND on the backend
+    /// (DELETE) so it doesn't reappear on the next sync.
+    func unmarkCompleted(slug: String) {
+        let s = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard completed.contains(s) else { return }
+        completed.remove(s)
+        persistLocal()
+        Task { await self.pushUncompletion(s) }
+    }
+
+    /// Flip completion — used by the article-end Complete / Completed button.
+    func toggleCompleted(slug: String) {
+        isCompleted(slug: slug) ? unmarkCompleted(slug: slug) : markCompleted(slug: slug)
+    }
+
     /// Clear all progress (debug / reset). Local only.
     func reset() {
         guard !completed.isEmpty else { return }
@@ -79,6 +94,18 @@ final class MoneyMovesProgressStore: ObservableObject {
             merge(resp)
         } catch {
             // Stays in the local cache; re-pushes next time it's marked.
+        }
+    }
+
+    private func pushUncompletion(_ slug: String) async {
+        do {
+            let resp = try await apiClient.request(
+                endpoint: .uncompleteLearnItem(contentType: Self.contentType, key: slug),
+                responseType: LearnProgressResponse.self
+            )
+            merge(resp)
+        } catch {
+            // Stays removed locally; re-pushes the delete next time it's toggled.
         }
     }
 

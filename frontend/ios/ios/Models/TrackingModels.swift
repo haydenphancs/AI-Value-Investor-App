@@ -362,33 +362,25 @@ struct SectorAllocation: Identifiable {
 
 // MARK: - Diversification Sub-Score
 
-/// One dimension of the composite diversification health score (0–100).
-/// `zone` ("green"/"yellow"/"red") drives the guardrail bar color.
+/// One additive dimension of the diversification score. `points` out of
+/// `maxPoints`; the dimensions' maxPoints sum to 100, so the bars add up to the
+/// overall score. `zone` ("green"/"yellow"/"red") drives the bar color.
 struct DiversificationSubScore: Identifiable {
     let id = UUID()
-    let key: String       // "position" | "sector" | "single_top5" | "marketcap" | "region"
+    let key: String       // "position" | "sector" | "single_top5" | "marketcap"
     let label: String
-    let score: Int        // 0–100
+    let points: Int       // earned, 0…maxPoints
+    let maxPoints: Int    // budget for this dimension
     let zone: String      // "green" | "yellow" | "red"
 
-    var progressValue: Double { Double(score) / 100.0 }
-}
-
-// MARK: - Diversification Nudge
-
-/// An actionable suggestion derived from the score breakdown.
-struct DiversificationNudge: Identifiable {
-    let id = UUID()
-    let severity: String  // "info" | "warning" | "critical"
-    let title: String
-    let detail: String
+    var progressValue: Double { maxPoints > 0 ? Double(points) / Double(maxPoints) : 0 }
+    var pointsText: String { "\(points)/\(maxPoints)" }
 }
 
 // MARK: - Diversification Score
 struct DiversificationScore: Identifiable {
     let id: UUID
-    let score: Int                                 // 0–100 composite
-    let grade: String                              // "A"…"F"
+    let score: Int                                 // 0–100 = sum of sub-score points
     let zone: String                               // "green" | "yellow" | "red"
     let effectiveHoldings: Double
     let message: String
@@ -396,26 +388,20 @@ struct DiversificationScore: Identifiable {
     let subScores: [DiversificationSubScore]
     let sectorAllocations: [SectorAllocation]
     let marketcapAllocations: [SectorAllocation]
-    let regionAllocations: [SectorAllocation]
-    let nudges: [DiversificationNudge]
 
     init(
         id: UUID = UUID(),
         score: Int,
-        grade: String,
         zone: String,
         effectiveHoldings: Double,
         message: String,
         sectorCount: Int,
         subScores: [DiversificationSubScore] = [],
         sectorAllocations: [SectorAllocation] = [],
-        marketcapAllocations: [SectorAllocation] = [],
-        regionAllocations: [SectorAllocation] = [],
-        nudges: [DiversificationNudge] = []
+        marketcapAllocations: [SectorAllocation] = []
     ) {
         self.id = id
         self.score = score
-        self.grade = grade
         self.zone = zone
         self.effectiveHoldings = effectiveHoldings
         self.message = message
@@ -423,11 +409,8 @@ struct DiversificationScore: Identifiable {
         self.subScores = subScores
         self.sectorAllocations = sectorAllocations
         self.marketcapAllocations = marketcapAllocations
-        self.regionAllocations = regionAllocations
-        self.nudges = nudges
     }
 
-    var formattedScore: String { "\(score)" }
     var progressValue: Double { Double(score) / 100.0 }
     var effectiveHoldingsText: String { String(format: "%.1f", effectiveHoldings) }
 }
@@ -446,7 +429,6 @@ struct TrackingFeedResponse: Codable {
 /// diversification health score, sub-scores, breakdown allocations, and nudges.
 struct PortfolioInsightsDTO: Codable {
     let score: Int
-    let grade: String
     let zone: String
     let effectiveHoldings: Double
     let message: String
@@ -454,19 +436,16 @@ struct PortfolioInsightsDTO: Codable {
     let subScores: [DiversificationSubScoreDTO]
     let sectorAllocations: [SectorAllocationDTO]
     let marketcapAllocations: [SectorAllocationDTO]
-    let regionAllocations: [SectorAllocationDTO]
-    let nudges: [NudgeDTO]
     let holdingsCount: Int
     let totalValue: Double
 
     enum CodingKeys: String, CodingKey {
-        case score, grade, zone, message, nudges
+        case score, zone, message
         case effectiveHoldings = "effective_holdings"
         case sectorCount = "sector_count"
         case subScores = "sub_scores"
         case sectorAllocations = "sector_allocations"
         case marketcapAllocations = "marketcap_allocations"
-        case regionAllocations = "region_allocations"
         case holdingsCount = "holdings_count"
         case totalValue = "total_value"
     }
@@ -474,16 +453,13 @@ struct PortfolioInsightsDTO: Codable {
     func toDiversificationScore() -> DiversificationScore {
         DiversificationScore(
             score: score,
-            grade: grade,
             zone: zone,
             effectiveHoldings: effectiveHoldings,
             message: message,
             sectorCount: sectorCount,
             subScores: subScores.map { $0.toSubScore() },
             sectorAllocations: sectorAllocations.map { $0.toSectorAllocation() },
-            marketcapAllocations: marketcapAllocations.map { $0.toSectorAllocation() },
-            regionAllocations: regionAllocations.map { $0.toSectorAllocation() },
-            nudges: nudges.map { $0.toNudge() }
+            marketcapAllocations: marketcapAllocations.map { $0.toSectorAllocation() }
         )
     }
 }
@@ -500,21 +476,19 @@ struct SectorAllocationDTO: Codable {
 struct DiversificationSubScoreDTO: Codable {
     let key: String
     let label: String
-    let score: Int
+    let points: Int
+    let maxPoints: Int
     let zone: String
 
-    func toSubScore() -> DiversificationSubScore {
-        DiversificationSubScore(key: key, label: label, score: score, zone: zone)
+    enum CodingKeys: String, CodingKey {
+        case key, label, points, zone
+        case maxPoints = "max_points"
     }
-}
 
-struct NudgeDTO: Codable {
-    let severity: String
-    let title: String
-    let detail: String
-
-    func toNudge() -> DiversificationNudge {
-        DiversificationNudge(severity: severity, title: title, detail: detail)
+    func toSubScore() -> DiversificationSubScore {
+        DiversificationSubScore(
+            key: key, label: label, points: points, maxPoints: maxPoints, zone: zone
+        )
     }
 }
 
@@ -1131,7 +1105,6 @@ extension DiversificationScore {
         // Fallback (should never reach here with valid sample data)
         return DiversificationScore(
             score: 0,
-            grade: "F",
             zone: "red",
             effectiveHoldings: 0,
             message: "Add assets to see your diversification score",

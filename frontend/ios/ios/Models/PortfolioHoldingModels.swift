@@ -56,6 +56,9 @@ struct PortfolioHolding: Identifiable, Codable {
     let sector: String?
     let assetType: AssetType
     let country: String
+    /// Latest market cap (USD) for the Market-Cap Mix dimension. Optional —
+    /// when absent that dimension is dropped and its budget redistributed.
+    let marketCap: Double?
 
     /// Portfolio weight as a fraction (0.0–1.0). Computed by the calculator.
     var weight: Double = 0.0
@@ -67,6 +70,7 @@ struct PortfolioHolding: Identifiable, Codable {
         case sector
         case assetType = "asset_type"
         case country
+        case marketCap = "market_cap"
     }
 
     // MARK: - Codable Init (from backend JSON)
@@ -94,6 +98,7 @@ struct PortfolioHolding: Identifiable, Codable {
         assetType = AssetType(rawValue: assetTypeStr) ?? .stock
 
         country = try container.decodeIfPresent(String.self, forKey: .country) ?? "US"
+        marketCap = try container.decodeIfPresent(Double.self, forKey: .marketCap)
         weight = 0.0
     }
 
@@ -107,7 +112,8 @@ struct PortfolioHolding: Identifiable, Codable {
         shares: Double? = nil,
         sector: String? = nil,
         assetType: AssetType = .stock,
-        country: String = "US"
+        country: String = "US",
+        marketCap: Double? = nil
     ) {
         self.id = id
         self.ticker = ticker
@@ -117,6 +123,7 @@ struct PortfolioHolding: Identifiable, Codable {
         self.sector = sector
         self.assetType = assetType
         self.country = country
+        self.marketCap = marketCap
     }
 }
 

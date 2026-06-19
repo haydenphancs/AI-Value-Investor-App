@@ -2,65 +2,29 @@
 //  DiversificationCalculator.swift
 //  ios
 //
-//  Pure-function scoring engine using the "Robo-Advisor" three-bucket rubric.
+//  OFFLINE FALLBACK for the diversification score. The server is the source of
+//  truth (GET /portfolios/{id}/insights); this mirrors its additive-points
+//  model closely enough to render the card when the network call fails.
 //
-//  Bucket 1 — Single Asset Concentration (40 pts)
-//  Bucket 2 — Sector Weighting (40 pts)
-//  Bucket 3 — Asset Class & Geography (20 pts)
-//
-//  Total = 100 points. Deductions for concentration risk.
+//  Each dimension earns points = quality × maxPoints; the budgets sum to 100,
+//  so the bars add up to the overall score. Market-cap data isn't available
+//  offline (the holdings feed carries no market cap), so the three remaining
+//  budgets absorb its share (35 / 35 / 30). Geography is excluded (US-only).
 //
 
 import Foundation
 
-// MARK: - Thresholds
-
-/// Tunable constants for the diversification scoring algorithm.
+/// Shared thresholds for the diversification feature.
 enum DiversificationThresholds {
-
-    // ── Bucket 1: Single Asset Concentration ──────────────────────
-    static let singleAssetHealthyLimit: Double = 0.10       // 10%
-    static let singleAssetSevereLimit: Double = 0.30        // 30%
-    static let concentrationPenaltyPerPct: Double = 1.0
-    static let concentrationSevereMultiplier: Double = 1.5
-
-    // ── Bucket 2: Sector Weighting ────────────────────────────────
-    static let sectorHealthyLimit: Double = 0.25            // 25%
-    static let sectorSevereLimit: Double = 0.50             // 50%
-    static let sectorPenaltyPerPct: Double = 0.8
-    static let sectorSevereMultiplier: Double = 1.5
-
-    // ── Bucket 3: Asset Class & Geography ─────────────────────────
-    static let pointsPerAssetClass: Double = 4.0
-    static let classPointsCap: Double = 12.0
-    static let internationalExposureBonus: Double = 5.0
-    static let internationalSignificantBonus: Double = 3.0
-    static let internationalSignificantThreshold: Double = 0.20
-
-    // ── Bucket Maximums ───────────────────────────────────────────
-    static let bucket1Max: Double = 40.0
-    static let bucket2Max: Double = 40.0
-    static let bucket3Max: Double = 20.0
-
-    // ── Minimum holdings to show a meaningful score ───────────────
-    static let minimumHoldings: Int = 2
+    /// Minimum holdings required for a meaningful score (matches the backend
+    /// `MIN_HOLDINGS`). Below this the card shows the "add at least N" hint.
+    static let minimumHoldings = 2
 }
 
-// MARK: - Calculator
-
-/// Pure-function scoring engine. Takes portfolio holdings, returns a
-/// `DiversificationScore`. All methods are static and side-effect free.
-///
-/// Usage:
-/// ```swift
-/// let score = DiversificationCalculator.calculate(holdings: myHoldings)
-/// ```
 struct DiversificationCalculator {
 
-    // MARK: - Main Entry Point
-
-    /// Calculate the overall diversification score from a list of holdings.
-    /// Returns `nil` if the portfolio has fewer than `minimumHoldings` positions.
+    /// Calculate the offline diversification score. Returns `nil` below the
+    /// minimum holdings or when the total value is non-positive.
     static func calculate(holdings: [PortfolioHolding]) -> DiversificationScore? {
         guard holdings.count >= DiversificationThresholds.minimumHoldings else {
             return nil
@@ -69,236 +33,138 @@ struct DiversificationCalculator {
         let totalValue = holdings.reduce(0.0) { $0 + $1.marketValue }
         guard totalValue > 0 else { return nil }
 
-        // Compute weights
         var weighted = holdings
         for i in weighted.indices {
             weighted[i].weight = weighted[i].marketValue / totalValue
         }
-
-        // Calculate each bucket
-        let bucket1 = calculateConcentrationScore(weighted)
-        let bucket2 = calculateSectorScore(weighted)
-        let bucket3 = calculateDiversityScore(weighted)
-
-        let totalScore = Int(round(bucket1 + bucket2 + bucket3))
-        let clampedScore = max(0, min(100, totalScore))
-
-        // Build sector allocations for the donut chart
-        let sectorAllocations = buildSectorAllocations(weighted)
-
-        // Generate context-aware message
-        let message = generateMessage(
-            score: clampedScore,
-            sectorCount: sectorAllocations.count,
-            holdings: weighted
-        )
-
-        // Map the three legacy buckets onto the new 0–100 sub-score shape so
-        // the offline fallback renders in the same card as the server result.
-        let subScores: [DiversificationSubScore] = [
-            DiversificationSubScore(
-                key: "position",
-                label: "Asset Concentration",
-                score: Int(round(bucket1 / DiversificationThresholds.bucket1Max * 100)),
-                zone: Self.zone(forBucket: bucket1, max: DiversificationThresholds.bucket1Max)
-            ),
-            DiversificationSubScore(
-                key: "sector",
-                label: "Sector Balance",
-                score: Int(round(bucket2 / DiversificationThresholds.bucket2Max * 100)),
-                zone: Self.zone(forBucket: bucket2, max: DiversificationThresholds.bucket2Max)
-            ),
-            DiversificationSubScore(
-                key: "region",
-                label: "Asset & Geo Diversity",
-                score: Int(round(bucket3 / DiversificationThresholds.bucket3Max * 100)),
-                zone: Self.zone(forBucket: bucket3, max: DiversificationThresholds.bucket3Max)
-            ),
-        ]
-
         let weights = weighted.map { $0.weight }
+        let n = weights.count
+
+        // ── Per-dimension quality (0–100) ──────────────────────────────
+        let positionQ = normalizedHHI(weights, n)
+
+        var sectorWeights: [String: Double] = [:]
+        for h in weighted {
+            sectorWeights[h.sector ?? "Other", default: 0] += h.weight
+        }
+        let sectorQ = normalizedHHI(Array(sectorWeights.values), sectorWeights.count)
+
+        let maxWeight = weights.max() ?? 0
+        let single = max(0.0, min(100.0, 100.0 - maxWeight * 100.0))
+        let concentrationQ = 0.5 * single + 0.5 * top5Score(weights, n)
+
+        // Market-cap mix (scored only over holdings with a known cap).
+        var capWeights: [String: Double] = [:]
+        var knownCapWeight = 0.0
+        for h in weighted {
+            if let bucket = capBucket(h.marketCap) {
+                capWeights[bucket, default: 0] += h.weight
+                knownCapWeight += h.weight
+            }
+        }
+        let marketcapAvailable = knownCapWeight > 0
+        let marketcapQ = marketcapAvailable
+            ? normalizedHHI(capWeights.values.map { $0 / knownCapWeight }, capWeights.count)
+            : 0.0
+
+        // ── Additive points (budgets sum to 100; bars add up to the score) ──
+        // Market-cap present → 30/30/25/15; absent → 35/35/30.
+        var budgets: [(key: String, label: String, quality: Double, max: Int)] = [
+            ("position", "Position Balance", positionQ, marketcapAvailable ? 30 : 35),
+            ("sector", "Sector Spread", sectorQ, marketcapAvailable ? 30 : 35),
+            ("single_top5", "Concentration", concentrationQ, marketcapAvailable ? 25 : 30),
+        ]
+        if marketcapAvailable {
+            budgets.append(("marketcap", "Market-Cap Mix", marketcapQ, 15))
+        }
+
+        var subScores: [DiversificationSubScore] = []
+        var total = 0
+        for b in budgets {
+            let pts = max(0, min(b.max, Int((b.quality / 100.0 * Double(b.max)).rounded())))
+            total += pts
+            let ratio = b.max > 0 ? Int((Double(pts) / Double(b.max) * 100).rounded()) : 0
+            subScores.append(DiversificationSubScore(
+                key: b.key, label: b.label, points: pts, maxPoints: b.max, zone: zone(for: ratio)
+            ))
+        }
+        total = max(0, min(100, total))
+
         let hhi = weights.reduce(0.0) { $0 + $1 * $1 }
         let effectiveHoldings = hhi > 0 ? 1.0 / hhi : 0.0
 
+        let sectorAllocations = sectorWeights
+            .sorted { $0.value > $1.value }
+            .map { SectorAllocation(name: $0.key, percentage: $0.value * 100.0) }
+
+        // Size donut: bucket every holding (unknown caps grouped as "Unknown").
+        var capAlloc: [String: Double] = [:]
+        for h in weighted {
+            capAlloc[capBucket(h.marketCap) ?? "Unknown", default: 0] += h.weight
+        }
+        let marketcapAllocations = capAlloc
+            .sorted { $0.value > $1.value }
+            .map { SectorAllocation(name: $0.key, percentage: $0.value * 100.0) }
+
         return DiversificationScore(
-            score: clampedScore,
-            grade: Self.grade(for: clampedScore),
-            zone: Self.zone(for: clampedScore),
+            score: total,
+            zone: zone(for: total),
             effectiveHoldings: effectiveHoldings,
-            message: message,
+            message: message(for: total),
             sectorCount: sectorAllocations.count,
             subScores: subScores,
             sectorAllocations: sectorAllocations,
-            marketcapAllocations: [],
-            regionAllocations: buildRegionAllocations(weighted),
-            nudges: []
+            marketcapAllocations: marketcapAllocations
         )
     }
 
-    // MARK: - Grade / Zone helpers (mirror the backend bands)
+    // MARK: - Math helpers (mirror the backend)
 
-    static func grade(for score: Int) -> String {
+    /// Normalized HHI quality: 100 = perfectly even across the `n` buckets,
+    /// 0 = fully concentrated in one.
+    private static func normalizedHHI(_ weights: [Double], _ n: Int) -> Double {
+        guard n > 1 else { return 0 }
+        let hhi = weights.reduce(0.0) { $0 + $1 * $1 }
+        let minHHI = 1.0 / Double(n)
+        guard 1.0 - minHHI > 0 else { return 100 }
+        let norm = (hhi - minHHI) / (1.0 - minHHI)
+        return max(0.0, min(100.0, (1.0 - norm) * 100.0))
+    }
+
+    /// Penalize when the 5 largest positions dominate. For n ≤ 5 the top-5 is
+    /// the whole book, so there's nothing to penalize.
+    private static func top5Score(_ weights: [Double], _ n: Int) -> Double {
+        guard n > 5 else { return 100 }
+        let top5 = weights.sorted(by: >).prefix(5).reduce(0, +)
+        let ideal = 5.0 / Double(n)
+        let excess = max(0.0, (top5 - ideal) / (1.0 - ideal))
+        return max(0.0, min(100.0, (1.0 - excess) * 100.0))
+    }
+
+    /// Market-cap bucket (USD cutoffs mirror the backend).
+    private static func capBucket(_ marketCap: Double?) -> String? {
+        guard let mc = marketCap, mc > 0 else { return nil }
+        if mc >= 200_000_000_000 { return "Mega Cap" }
+        if mc >= 10_000_000_000 { return "Large Cap" }
+        if mc >= 2_000_000_000 { return "Mid Cap" }
+        return "Small Cap"
+    }
+
+    private static func zone(for ratio: Int) -> String {
+        switch ratio {
+        case 70...:   return "green"
+        case 40..<70: return "yellow"
+        default:      return "red"
+        }
+    }
+
+    private static func message(for score: Int) -> String {
         switch score {
-        case 85...:    return "A"
-        case 70..<85:  return "B"
-        case 55..<70:  return "C"
-        case 40..<55:  return "D"
-        default:       return "F"
-        }
-    }
-
-    static func zone(for score: Int) -> String {
-        switch score {
-        case 70...:    return "green"
-        case 40..<70:  return "yellow"
-        default:       return "red"
-        }
-    }
-
-    private static func zone(forBucket value: Double, max: Double) -> String {
-        guard max > 0 else { return "red" }
-        return zone(for: Int(round(value / max * 100)))
-    }
-
-    private static func buildRegionAllocations(
-        _ holdings: [PortfolioHolding]
-    ) -> [SectorAllocation] {
-        Dictionary(grouping: holdings) {
-            $0.country == "US" ? "United States" : "International"
-        }
-        .mapValues { group in group.reduce(0.0) { $0 + $1.weight } }
-        .sorted { $0.value > $1.value }
-        .map { SectorAllocation(name: $0.key, percentage: $0.value * 100.0) }
-    }
-
-    // MARK: - Bucket 1: Single Asset Concentration (40 points)
-
-    /// Start with 40 points. Deduct for each holding exceeding the healthy limit.
-    /// Penalty accelerates above the severe limit.
-    private static func calculateConcentrationScore(
-        _ holdings: [PortfolioHolding]
-    ) -> Double {
-        let T = DiversificationThresholds.self
-        var score = T.bucket1Max
-
-        for holding in holdings {
-            let excess = holding.weight - T.singleAssetHealthyLimit
-            guard excess > 0 else { continue }
-
-            if holding.weight > T.singleAssetSevereLimit {
-                // Two-zone penalty: normal zone + severe zone
-                let normalExcess = (T.singleAssetSevereLimit - T.singleAssetHealthyLimit) * 100.0
-                let severeExcess = (holding.weight - T.singleAssetSevereLimit) * 100.0
-
-                let penalty = (normalExcess * T.concentrationPenaltyPerPct)
-                    + (severeExcess * T.concentrationPenaltyPerPct * T.concentrationSevereMultiplier)
-                score -= penalty
-            } else {
-                // Linear penalty zone
-                let excessPct = excess * 100.0
-                score -= excessPct * T.concentrationPenaltyPerPct
-            }
-        }
-
-        return max(0, score)
-    }
-
-    // MARK: - Bucket 2: Sector Weighting (40 points)
-
-    /// Start with 40 points. Deduct for each sector exceeding the healthy limit.
-    /// Penalty accelerates above the severe limit.
-    private static func calculateSectorScore(
-        _ holdings: [PortfolioHolding]
-    ) -> Double {
-        let T = DiversificationThresholds.self
-        var score = T.bucket2Max
-
-        // Group by sector
-        let sectorWeights = Dictionary(grouping: holdings) { $0.sector ?? "Other" }
-            .mapValues { group in group.reduce(0.0) { $0 + $1.weight } }
-
-        for (_, weight) in sectorWeights {
-            let excess = weight - T.sectorHealthyLimit
-            guard excess > 0 else { continue }
-
-            if weight > T.sectorSevereLimit {
-                let normalExcess = (T.sectorSevereLimit - T.sectorHealthyLimit) * 100.0
-                let severeExcess = (weight - T.sectorSevereLimit) * 100.0
-
-                let penalty = (normalExcess * T.sectorPenaltyPerPct)
-                    + (severeExcess * T.sectorPenaltyPerPct * T.sectorSevereMultiplier)
-                score -= penalty
-            } else {
-                let excessPct = excess * 100.0
-                score -= excessPct * T.sectorPenaltyPerPct
-            }
-        }
-
-        return max(0, score)
-    }
-
-    // MARK: - Bucket 3: Asset Class & Geography (20 points)
-
-    /// Additive scoring. Points for asset class diversity + international exposure.
-    private static func calculateDiversityScore(
-        _ holdings: [PortfolioHolding]
-    ) -> Double {
-        let T = DiversificationThresholds.self
-        var score: Double = 0.0
-
-        // Asset class diversity: up to classPointsCap (12) points
-        let distinctClasses = Set(holdings.map { $0.assetType.assetClass })
-        let classPoints = min(
-            Double(distinctClasses.count) * T.pointsPerAssetClass,
-            T.classPointsCap
-        )
-        score += classPoints
-
-        // Geographic diversity
-        let internationalWeight = holdings
-            .filter { $0.country != "US" }
-            .reduce(0.0) { $0 + $1.weight }
-
-        if internationalWeight > 0 {
-            score += T.internationalExposureBonus
-            if internationalWeight >= T.internationalSignificantThreshold {
-                score += T.internationalSignificantBonus
-            }
-        }
-
-        return min(score, T.bucket3Max)
-    }
-
-    // MARK: - Sector Allocations (for Donut Chart)
-
-    private static func buildSectorAllocations(
-        _ holdings: [PortfolioHolding]
-    ) -> [SectorAllocation] {
-        Dictionary(grouping: holdings) { $0.sector ?? "Other" }
-            .mapValues { group in group.reduce(0.0) { $0 + $1.weight } }
-            .sorted { $0.value > $1.value }
-            .map { SectorAllocation(name: $0.key, percentage: $0.value * 100.0) }
-    }
-
-    // MARK: - Message Generation
-
-    private static func generateMessage(
-        score: Int,
-        sectorCount: Int,
-        holdings: [PortfolioHolding]
-    ) -> String {
-        switch score {
-        case 80...100:
-            return "Excellent diversification across \(sectorCount) sectors"
-        case 60..<80:
-            return "Well-diversified across \(sectorCount) sectors"
-        case 40..<60:
-            if let top = holdings.max(by: { $0.weight < $1.weight }), top.weight > 0.25 {
-                return "Consider reducing \(top.ticker) concentration (\(Int(top.weight * 100))%)"
-            }
-            return "Moderate diversification — consider spreading across more sectors"
-        default:
-            return "High concentration risk — diversify across more sectors and asset classes"
+        case 85...:   return "Excellent diversification"
+        case 70..<85: return "Well diversified"
+        case 55..<70: return "Moderately diversified"
+        case 40..<55: return "Somewhat concentrated"
+        default:      return "Highly concentrated"
         }
     }
 }

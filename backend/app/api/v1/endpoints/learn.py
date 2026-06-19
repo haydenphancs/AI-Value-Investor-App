@@ -128,6 +128,41 @@ async def complete_learn_item(
     return await get_learn_progress(content_type=content_type, user=user, supabase=supabase)
 
 
+@router.delete("/progress/{content_type}", response_model=LearnProgressResponse)
+async def uncomplete_learn_item(
+    content_type: str,
+    request: CompleteLearnItemRequest,
+    user: dict = Depends(get_current_user_or_guest),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Un-mark one Learn item (idempotent). Returns the remaining key set for that content_type.
+
+    Lets a learner toggle completion back off — e.g. the Money Moves article-end Complete button.
+    """
+    user_id = user["id"]
+    key = (request.key or "").strip()
+    if content_type in LEARN_CONTENT_TYPES and key:
+        try:
+            (
+                supabase.table("user_learn_progress")
+                .delete()
+                .eq("user_id", user_id)
+                .eq("content_type", content_type)
+                .eq("item_key", key)
+                .execute()
+            )
+        except Exception as exc:
+            logger.error(
+                "[Learn] uncomplete failed (user=%s type=%s key=%r): %s",
+                user_id,
+                content_type,
+                key,
+                exc,
+            )
+    return await get_learn_progress(content_type=content_type, user=user, supabase=supabase)
+
+
 # --- Book bookmarks ---------------------------------------------------------------------------
 # Toggleable per-user book bookmarks live in the SAME unified table as Learn completion progress
 # (user_learn_progress, migration 067), under content_type 'book_bookmark'. item_key is the book

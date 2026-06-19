@@ -315,7 +315,8 @@ class TrackingViewModel: ObservableObject {
                 shares: item.shares,
                 sector: asset?.sector,
                 assetType: mappedAssetType,
-                country: asset?.country ?? "US"
+                country: asset?.country ?? "US",
+                marketCap: asset?.marketCap
             )
         }
         return DiversificationCalculator.calculate(holdings: holdings)
@@ -689,6 +690,9 @@ class TrackingViewModel: ObservableObject {
 
     func setActivePortfolio(_ id: String) {
         portfolioStore.setActivePortfolio(id)
+        // The diversification score is per-portfolio — re-fetch it for the
+        // newly active portfolio so the card doesn't show a stale score.
+        Task { await loadPortfolioInsights() }
     }
 
     func openNewPortfolioSheet() {
@@ -705,7 +709,10 @@ class TrackingViewModel: ObservableObject {
 
     @discardableResult
     func createPortfolio(named name: String) async throws -> Portfolio {
-        try await portfolioStore.createPortfolio(named: name)
+        let portfolio = try await portfolioStore.createPortfolio(named: name)
+        // New portfolio becomes active (and starts empty) — refresh the score.
+        await loadPortfolioInsights()
+        return portfolio
     }
 
     func renamePortfolio(id: String, to newName: String) async throws {
@@ -714,6 +721,8 @@ class TrackingViewModel: ObservableObject {
 
     func deletePortfolio(id: String) async throws {
         try await portfolioStore.deletePortfolio(id: id)
+        // Active portfolio may have been reassigned — refresh the score.
+        await loadPortfolioInsights()
     }
 
     // MARK: - Portfolio Insights Actions

@@ -37,7 +37,6 @@ from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
     AllocationResponse,
     DiversificationSubScoreResponse,
-    NudgeResponse,
     PortfolioHoldingResponse,
     PortfolioInsightsResponse,
 )
@@ -50,23 +49,27 @@ logger = logging.getLogger(__name__)
 
 MIN_HOLDINGS = 2
 
-# Composite weights (must sum to 1.0). The two concentration dimensions
-# dominate because that's what users feel; cap-mix / geography refine.
-WEIGHT_POSITION = 0.30
-WEIGHT_SECTOR = 0.30
-WEIGHT_SINGLE_TOP5 = 0.20
-WEIGHT_MARKETCAP = 0.10
-WEIGHT_REGION = 0.10
+# Additive point budgets per dimension — they SUM TO 100, so the bars add up to
+# the overall score (the "old way" the bars contribute points to the whole).
+# Market-cap is the minor one; when its data is unavailable its budget is
+# redistributed across the other three (see _BUDGETS_NO_CAP) so the total can
+# still reach 100. (Geography is intentionally excluded — US-only universe.)
+_BUDGETS = [
+    ("position", "Position Balance", 30),
+    ("sector", "Sector Spread", 30),
+    ("single_top5", "Concentration", 25),
+    ("marketcap", "Market-Cap Mix", 15),
+]
+_BUDGETS_NO_CAP = [
+    ("position", "Position Balance", 35),
+    ("sector", "Sector Spread", 35),
+    ("single_top5", "Concentration", 30),
+]
 
 # Market-cap bucket cutoffs (USD).
 CAP_MEGA = 200_000_000_000.0
 CAP_LARGE = 10_000_000_000.0
 CAP_MID = 2_000_000_000.0
-
-# Nudge thresholds.
-SINGLE_NAME_ALERT = 0.40       # one position above 40% of the book
-SECTOR_DOMINANT_ALERT = 0.80   # one sector above 80%
-EFFECTIVE_HOLDINGS_ALERT = 2.0 # behaves like <2 bets despite >=3 names
 
 
 # ── Pure scoring helpers (no I/O — unit-tested directly) ────────────
@@ -124,29 +127,11 @@ def _cap_bucket(market_cap: Optional[float]) -> Optional[str]:
     return "Small Cap"
 
 
-def _region(country: Optional[str]) -> str:
-    c = (country or "US").strip().upper()
-    if c in ("US", "USA", "UNITED STATES", "U.S.", "U.S.A."):
-        return "United States"
-    return "International"
-
-
-def _grade(score: int) -> str:
-    if score >= 85:
-        return "A"
-    if score >= 70:
-        return "B"
-    if score >= 55:
-        return "C"
-    if score >= 40:
-        return "D"
-    return "F"
-
-
-def _zone(score: int) -> str:
-    if score >= 70:
+def _zone(ratio_0_100: int) -> str:
+    """Color band for a 0..100 quality ratio (points / max_points)."""
+    if ratio_0_100 >= 70:
         return "green"
-    if score >= 40:
+    if ratio_0_100 >= 40:
         return "yellow"
     return "red"
 
@@ -166,110 +151,17 @@ def _allocations(group: Dict[str, float]) -> List[AllocationResponse]:
     ]
 
 
-def _message(score: int, sector_count: int) -> str:
+def _message(score: int) -> str:
+    """Short, neutral descriptor of the overall score (no advice)."""
     if score >= 85:
-        return f"Excellent diversification across {sector_count} sectors."
+        return "Excellent diversification"
     if score >= 70:
-        return f"Well diversified across {sector_count} sectors."
+        return "Well diversified"
     if score >= 55:
-        return "Reasonably diversified — a few areas to tighten up."
+        return "Moderately diversified"
     if score >= 40:
-        return "Concentrated — spreading out would lower your risk."
-    return (
-        "Highly concentrated — diversifying across sectors and positions "
-        "would meaningfully cut your risk."
-    )
-
-
-def _build_nudges(
-    holdings: List[PortfolioHoldingResponse],
-    weights: List[float],
-    sector_group: Dict[str, float],
-    cap_group: Dict[str, float],
-    marketcap_available: bool,
-    effective: float,
-) -> List[NudgeResponse]:
-    """Severity-ordered, capped at 4."""
-    critical: List[NudgeResponse] = []
-    warning: List[NudgeResponse] = []
-    info: List[NudgeResponse] = []
-
-    # Largest single position.
-    top_idx = max(range(len(weights)), key=lambda i: weights[i])
-    top_w = weights[top_idx]
-    if top_w > SINGLE_NAME_ALERT:
-        pct = int(round(top_w * 100))
-        critical.append(NudgeResponse(
-            severity="critical",
-            title=f"Trim {holdings[top_idx].ticker}",
-            detail=(
-                f"{holdings[top_idx].ticker} is {pct}% of your portfolio — a "
-                f"drop there would hit you hard. Consider trimming it."
-            ),
-        ))
-
-    # Sector concentration.
-    if sector_group:
-        top_sector, top_sector_w = max(sector_group.items(), key=lambda kv: kv[1])
-        if len(sector_group) == 1:
-            warning.append(NudgeResponse(
-                severity="warning",
-                title="Add another sector",
-                detail=(
-                    f"Every holding is in {top_sector}. Adding a position from "
-                    f"a different sector would lower your risk."
-                ),
-            ))
-        elif top_sector_w >= SECTOR_DOMINANT_ALERT:
-            pct = int(round(top_sector_w * 100))
-            warning.append(NudgeResponse(
-                severity="warning",
-                title=f"Heavy in {top_sector}",
-                detail=(
-                    f"{pct}% of your money is in {top_sector}. Spreading across "
-                    f"more sectors would balance your exposure."
-                ),
-            ))
-
-    # Geography.
-    intl_weight = sum(
-        w for h, w in zip(holdings, weights)
-        if _region(h.country) != "United States"
-    )
-    if intl_weight <= 0:
-        info.append(NudgeResponse(
-            severity="info",
-            title="Consider international exposure",
-            detail=(
-                "You're 100% U.S. Adding international names can smooth out "
-                "country-specific risk."
-            ),
-        ))
-
-    # Market-cap mix.
-    if marketcap_available and len(cap_group) == 1:
-        only_bucket = next(iter(cap_group))
-        info.append(NudgeResponse(
-            severity="info",
-            title="Mix in other company sizes",
-            detail=(
-                f"Everything is {only_bucket.lower()}. Mid- and small-cap names "
-                f"add a different growth and risk profile."
-            ),
-        ))
-
-    # Effective concentration despite multiple names.
-    if len(holdings) >= 3 and effective < EFFECTIVE_HOLDINGS_ALERT:
-        warning.append(NudgeResponse(
-            severity="warning",
-            title="Effectively concentrated",
-            detail=(
-                f"Your {len(holdings)} holdings behave like only "
-                f"~{effective:.1f} because the weights are lopsided."
-            ),
-        ))
-
-    return (critical + warning + info)[:4]
+        return "Somewhat concentrated"
+    return "Highly concentrated"
 
 
 def score_holdings(
@@ -277,7 +169,11 @@ def score_holdings(
 ) -> Optional[PortfolioInsightsResponse]:
     """Pure diversification scoring. Returns ``None`` when there are fewer than
     ``MIN_HOLDINGS`` positions or the total value is non-positive. No I/O — the
-    caller supplies fully-resolved holdings (price-refreshed + enriched)."""
+    caller supplies fully-resolved holdings (price-refreshed + enriched).
+
+    Each dimension earns ``points = quality x max_points``; the dimensions'
+    ``max_points`` sum to 100, so the bars add up to the overall ``score``.
+    Geography is excluded (US-only universe)."""
     if len(holdings) < MIN_HOLDINGS:
         return None
 
@@ -288,21 +184,19 @@ def score_holdings(
     weights = [h.market_value / total_value for h in holdings]
     n = len(holdings)
 
-    # ── Sub-scores ──────────────────────────────────────────────────
-    position_score = normalized_hhi_score(weights, n)
+    # ── Per-dimension quality (0..100, normalized HHI = weight-responsive) ──
+    position_q = normalized_hhi_score(weights, n)
 
     sector_group = _weighted_group(
         [(_normalize_sector(h.sector) if h.sector else "Other", w)
          for h, w in zip(holdings, weights)]
     )
-    sector_score = normalized_hhi_score(
-        list(sector_group.values()), len(sector_group)
-    )
+    sector_q = normalized_hhi_score(list(sector_group.values()), len(sector_group))
 
     max_w = max(weights)
     single = _clamp(100.0 - max_w * 100.0, 0.0, 100.0)
     top5 = _top5_score(weights, n)
-    single_top5_score = 0.5 * single + 0.5 * top5
+    concentration_q = 0.5 * single + 0.5 * top5
 
     # Market-cap mix (scored only over holdings with a known cap).
     cap_group: Dict[str, float] = {}
@@ -313,47 +207,39 @@ def score_holdings(
             cap_group[bucket] = cap_group.get(bucket, 0.0) + w
             known_cap_weight += w
     marketcap_available = known_cap_weight > 0
-    if marketcap_available:
-        norm_cap = [w / known_cap_weight for w in cap_group.values()]
-        marketcap_score = normalized_hhi_score(norm_cap, len(cap_group))
-    else:
-        marketcap_score = 0.0
-
-    region_group = _weighted_group(
-        [(_region(h.country), w) for h, w in zip(holdings, weights)]
-    )
-    region_score = normalized_hhi_score(
-        list(region_group.values()), len(region_group)
+    marketcap_q = (
+        normalized_hhi_score(
+            [w / known_cap_weight for w in cap_group.values()], len(cap_group)
+        )
+        if marketcap_available
+        else 0.0
     )
 
-    # ── Composite (renormalize if market-cap data is unavailable) ────
-    dims: List[Tuple[str, str, float, float]] = [
-        ("position", "Position Balance", position_score, WEIGHT_POSITION),
-        ("sector", "Sector Spread", sector_score, WEIGHT_SECTOR),
-        ("single_top5", "Concentration", single_top5_score, WEIGHT_SINGLE_TOP5),
-    ]
-    if marketcap_available:
-        dims.append(
-            ("marketcap", "Market-Cap Mix", marketcap_score, WEIGHT_MARKETCAP)
+    qualities = {
+        "position": position_q,
+        "sector": sector_q,
+        "single_top5": concentration_q,
+        "marketcap": marketcap_q,
+    }
+
+    # ── Additive points (max_points sum to 100; bars add up to the score) ──
+    budgets = _BUDGETS if marketcap_available else _BUDGETS_NO_CAP
+    sub_scores: List[DiversificationSubScoreResponse] = []
+    total = 0
+    for key, label, max_points in budgets:
+        quality = qualities[key]
+        points = int(max(0, min(max_points, round(quality / 100.0 * max_points))))
+        total += points
+        ratio = int(round(points / max_points * 100)) if max_points else 0
+        sub_scores.append(
+            DiversificationSubScoreResponse(
+                key=key, label=label, points=points,
+                max_points=max_points, zone=_zone(ratio),
+            )
         )
-    dims.append(("region", "Geography", region_score, WEIGHT_REGION))
+    total = int(max(0, min(100, total)))
 
-    total_weight = sum(w for *_, w in dims)
-    composite = int(max(0, min(100, round(
-        sum(score * w for _, _, score, w in dims) / total_weight
-    ))))
-
-    sub_scores = [
-        DiversificationSubScoreResponse(
-            key=key,
-            label=label,
-            score=int(round(score)),
-            zone=_zone(int(round(score))),
-        )
-        for key, label, score, _ in dims
-    ]
-
-    # ── Allocations (donuts) ────────────────────────────────────────
+    # ── Allocations (donuts: sector + size) ─────────────────────────────
     sector_allocations = _allocations(sector_group)
     marketcap_allocations = _allocations(
         _weighted_group(
@@ -361,30 +247,16 @@ def score_holdings(
              for h, w in zip(holdings, weights)]
         )
     )
-    region_allocations = _allocations(region_group)
-
-    eff = effective_holdings(weights)
-    nudges = _build_nudges(
-        holdings=holdings,
-        weights=weights,
-        sector_group=sector_group,
-        cap_group=cap_group,
-        marketcap_available=marketcap_available,
-        effective=eff,
-    )
 
     return PortfolioInsightsResponse(
-        score=composite,
-        grade=_grade(composite),
-        zone=_zone(composite),
-        effective_holdings=round(eff, 1),
-        message=_message(composite, len(sector_group)),
+        score=total,
+        zone=_zone(total),
+        effective_holdings=round(effective_holdings(weights), 1),
+        message=_message(total),
         sector_count=len(sector_group),
         sub_scores=sub_scores,
         sector_allocations=sector_allocations,
         marketcap_allocations=marketcap_allocations,
-        region_allocations=region_allocations,
-        nudges=nudges,
         holdings_count=n,
         total_value=total_value,
     )

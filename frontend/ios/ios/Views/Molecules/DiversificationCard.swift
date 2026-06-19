@@ -2,9 +2,9 @@
 //  DiversificationCard.swift
 //  ios
 //
-//  Molecule: Portfolio diversification health card.
-//  Score + letter grade → effective-holdings headline → breakdown donut
-//  (sector / size / region) → per-dimension guardrail bars → actionable nudges.
+//  Molecule: Portfolio diversification card.
+//  One overall "Diversification" bar (no number) → breakdown donut
+//  (Sector / Size) → four additive point-bars whose points add up to the score.
 //
 
 import SwiftUI
@@ -29,35 +29,18 @@ struct DiversificationCard: View {
     enum Breakdown: String, CaseIterable {
         case sector = "Sector"
         case size = "Size"
-        case region = "Region"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            scoreHeader
-
-            if let coverageNote {
-                Text(coverageNote)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            Text(score.message)
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            overallSection
 
             divider
             breakdownSection
 
             if !score.subScores.isEmpty {
                 divider
-                guardrailSection
-            }
-
-            if !score.nudges.isEmpty {
-                divider
-                nudgeSection
+                pointBars
             }
         }
         .padding(AppSpacing.lg)
@@ -65,45 +48,38 @@ struct DiversificationCard: View {
         .cornerRadius(AppCornerRadius.large)
     }
 
-    // MARK: - Score Header
+    // MARK: - Overall (one bar, no number)
 
-    private var scoreHeader: some View {
-        HStack(alignment: .center, spacing: AppSpacing.lg) {
-            VStack(spacing: 0) {
-                Text(score.formattedScore)
-                    .font(AppTypography.dataHero)
+    private var overallSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.sm) {
+                Text("Diversification")
+                    .font(AppTypography.headingSmall)
+                    .foregroundColor(AppColors.textPrimary)
+                Spacer()
+                Text(score.message)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(zoneColor(score.zone))
-                Text("/ 100")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
             }
-            .frame(minWidth: 76)
 
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                HStack(spacing: AppSpacing.sm) {
-                    Text("Diversification Score")
-                        .font(AppTypography.headingSmall)
-                        .foregroundColor(AppColors.textPrimary)
-                    gradePill
-                }
+            GradientProgressBar(
+                progress: score.progressValue,
+                height: 10,
+                gradientColors: [zoneColor(score.zone), zoneColor(score.zone).opacity(0.6)]
+            )
+
+            HStack(spacing: AppSpacing.sm) {
                 Text("Behaves like ~\(score.effectiveHoldingsText) independent holdings")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let coverageNote {
+                    Spacer(minLength: AppSpacing.sm)
+                    Text(coverageNote)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
-
-            Spacer(minLength: 0)
         }
-    }
-
-    private var gradePill: some View {
-        Text(score.grade)
-            .font(AppTypography.captionEmphasis)
-            .foregroundColor(.white)
-            .padding(.horizontal, AppSpacing.sm)
-            .padding(.vertical, 2)
-            .background(zoneColor(score.zone))
-            .cornerRadius(AppCornerRadius.pill)
     }
 
     // MARK: - Breakdown (donut + switcher)
@@ -145,33 +121,16 @@ struct DiversificationCard: View {
         .cornerRadius(AppCornerRadius.medium)
     }
 
-    // MARK: - Guardrail bars
+    // MARK: - Point bars (each contributes points to the whole)
 
-    private var guardrailSection: some View {
+    private var pointBars: some View {
         VStack(spacing: AppSpacing.sm) {
             ForEach(score.subScores) { sub in
-                GuardrailBar(
+                PointBar(
                     label: sub.label,
-                    score: sub.score,
+                    progress: sub.progressValue,
+                    pointsText: sub.pointsText,
                     color: zoneColor(sub.zone)
-                )
-            }
-        }
-    }
-
-    // MARK: - Nudges
-
-    private var nudgeSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Suggestions")
-                .font(AppTypography.captionEmphasis)
-                .foregroundColor(AppColors.textMuted)
-
-            ForEach(score.nudges) { nudge in
-                NudgeRow(
-                    nudge: nudge,
-                    color: severityColor(nudge.severity),
-                    icon: severityIcon(nudge.severity)
                 )
             }
         }
@@ -189,7 +148,6 @@ struct DiversificationCard: View {
         switch breakdown {
         case .sector: return score.sectorAllocations
         case .size:   return score.marketcapAllocations
-        case .region: return score.regionAllocations
         }
     }
 
@@ -220,29 +178,14 @@ struct DiversificationCard: View {
         default:       return AppColors.neutral
         }
     }
-
-    private func severityColor(_ severity: String) -> Color {
-        switch severity {
-        case "critical": return AppColors.bearish
-        case "warning":  return AppColors.alertOrange
-        default:         return AppColors.primaryBlue
-        }
-    }
-
-    private func severityIcon(_ severity: String) -> String {
-        switch severity {
-        case "critical": return "exclamationmark.triangle.fill"
-        case "warning":  return "exclamationmark.circle.fill"
-        default:         return "lightbulb.fill"
-        }
-    }
 }
 
-// MARK: - Guardrail Bar
+// MARK: - Point Bar
 
-private struct GuardrailBar: View {
+private struct PointBar: View {
     let label: String
-    let score: Int
+    let progress: Double
+    let pointsText: String
     let color: Color
 
     var body: some View {
@@ -253,48 +196,16 @@ private struct GuardrailBar: View {
                 .frame(width: 120, alignment: .leading)
 
             GradientProgressBar(
-                progress: Double(score) / 100.0,
+                progress: progress,
                 height: 6,
                 gradientColors: [color, color.opacity(0.5)]
             )
 
-            Text("\(score)")
+            Text(pointsText)
                 .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textSecondary)
-                .frame(width: 28, alignment: .trailing)
+                .frame(width: 44, alignment: .trailing)
         }
-    }
-}
-
-// MARK: - Nudge Row
-
-private struct NudgeRow: View {
-    let nudge: DiversificationNudge
-    let color: Color
-    let icon: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.sm) {
-            Image(systemName: icon)
-                .font(AppTypography.iconSmall)
-                .foregroundColor(color)
-                .padding(.top, 1)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(nudge.title)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-                Text(nudge.detail)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(AppSpacing.sm)
-        .background(color.opacity(0.08))
-        .cornerRadius(AppCornerRadius.medium)
     }
 }
 

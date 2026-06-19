@@ -10,7 +10,6 @@ import SwiftUI
 struct SearchBooksSection: View {
     let books: [SearchBookItem]
     var onChatWithBook: ((SearchBookItem) -> Void)?
-    var onReadKeyIdeas: ((SearchBookItem) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -25,8 +24,7 @@ struct SearchBooksSection: View {
                 ForEach(books) { book in
                     SearchBookCard(
                         book: book,
-                        onChatWithBook: { onChatWithBook?(book) },
-                        onReadKeyIdeas: { onReadKeyIdeas?(book) }
+                        onChatWithBook: { onChatWithBook?(book) }
                     )
                 }
             }

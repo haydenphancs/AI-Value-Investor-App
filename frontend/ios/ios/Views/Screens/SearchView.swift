@@ -55,8 +55,7 @@ struct SearchView: View {
                         // AI-Enabled Books Section
                         SearchBooksSection(
                             books: viewModel.books,
-                            onChatWithBook: handleChatWithBook,
-                            onReadKeyIdeas: handleReadKeyIdeas
+                            onChatWithBook: handleChatWithBook
                         )
 
                         // Bottom spacing for safe area
@@ -172,10 +171,6 @@ struct SearchView: View {
     private func handleChatWithBook(_ book: SearchBookItem) {
         viewModel.chatWithBook(book)
     }
-
-    private func handleReadKeyIdeas(_ book: SearchBookItem) {
-        viewModel.readKeyIdeas(book)
-    }
 }
 
 // MARK: - SearchContentView (For use in NavigationStack)
@@ -263,8 +258,7 @@ struct SearchContentView: View {
                         // AI-Enabled Books Section
                         SearchBooksSection(
                             books: viewModel.books,
-                            onChatWithBook: { viewModel.chatWithBook($0) },
-                            onReadKeyIdeas: { viewModel.readKeyIdeas($0) }
+                            onChatWithBook: { viewModel.chatWithBook($0) }
                         )
 
                         // Bottom spacing

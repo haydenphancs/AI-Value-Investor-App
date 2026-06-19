@@ -293,6 +293,12 @@ struct IndexDetailData: Identifiable {
         priceChange >= 0
     }
 
+    /// Previous close (current price − today's change). Anchors the chart's
+    /// dashed baseline to prior close, like Apple Stocks / Robinhood.
+    var previousClose: Double {
+        currentPrice - priceChange
+    }
+
     var formattedPrice: String {
         String(format: "$%.2f", currentPrice)
     }

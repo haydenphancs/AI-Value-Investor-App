@@ -16,6 +16,8 @@ struct MoneyMovesDetailView: View {
     @State private var battles: [MoneyMove] = []
     @State private var featured: MoneyMoveArticle?
     @State private var selectedArticle: MoneyMoveArticle?
+    /// Observed so the rows re-sort live (completed moves slide to the end) when a move completes.
+    @ObservedObject private var moneyMovesProgress = MoneyMovesProgressStore.shared
 
     var body: some View {
         ZStack {
@@ -48,25 +50,22 @@ struct MoneyMovesDetailView: View {
                         // Section 1: The Blueprints
                         MoneyMovesCategorySection(
                             category: .blueprints,
-                            moves: blueprints,
-                            onMoveTap: handleMoveTap,
-                            onBookmark: handleBookmark
+                            moves: incompleteFirst(blueprints),
+                            onMoveTap: handleMoveTap
                         )
 
                         // Section 2: Value Traps
                         MoneyMovesCategorySection(
                             category: .valueTraps,
-                            moves: valueTraps,
-                            onMoveTap: handleMoveTap,
-                            onBookmark: handleBookmark
+                            moves: incompleteFirst(valueTraps),
+                            onMoveTap: handleMoveTap
                         )
 
                         // Section 3: Battles
                         MoneyMovesCategorySection(
                             category: .battles,
-                            moves: battles,
-                            onMoveTap: handleMoveTap,
-                            onBookmark: handleBookmark
+                            moves: incompleteFirst(battles),
+                            onMoveTap: handleMoveTap
                         )
 
                         // Bottom padding for safe area
@@ -109,15 +108,19 @@ struct MoneyMovesDetailView: View {
         battles = cards.filter { $0.category == .battles && !$0.isFeatured }
     }
 
+    /// Unread moves on the left, completed ones at the end (stable within each group). Recomputed
+    /// each render; `moneyMovesProgress` observation makes the row re-sort live on completion.
+    private func incompleteFirst(_ moves: [MoneyMove]) -> [MoneyMove] {
+        let store = MoneyMovesProgressStore.shared
+        return moves.filter { !store.isCompleted(slug: $0.slug) }
+            + moves.filter { store.isCompleted(slug: $0.slug) }
+    }
+
     private func handleMoveTap(_ move: MoneyMove) {
         // Prefer authored content (backend → bundled) for this card; fall back to
         // generated placeholder content for cards not yet authored.
         selectedArticle = MoneyMovesContentStore.shared.article(forTitle: move.title)
             ?? createArticleFromMove(move)
-    }
-
-    private func handleBookmark(_ move: MoneyMove) {
-        print("Bookmark toggled for: \(move.title)")
     }
 
     /// Creates a full MoneyMoveArticle from a MoneyMove card data
@@ -148,7 +151,7 @@ struct MoneyMovesDetailView: View {
             readTimeMinutes: move.estimatedMinutes,
             viewCount: move.learnerCount,
             commentCount: Int.random(in: 20...200),
-            isBookmarked: move.isBookmarked,
+            isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
             tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),
@@ -405,7 +408,6 @@ private struct MoneyMovesCategorySection: View {
     let category: MoneyMoveCategory
     let moves: [MoneyMove]
     var onMoveTap: ((MoneyMove) -> Void)?
-    var onBookmark: ((MoneyMove) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -420,8 +422,7 @@ private struct MoneyMovesCategorySection: View {
                         MoneyMoveCard(
                             moneyMove: move,
                             showIcon: false,
-                            onTap: { onMoveTap?(move) },
-                            onBookmark: { onBookmark?(move) }
+                            onTap: { onMoveTap?(move) }
                         )
                     }
                 }

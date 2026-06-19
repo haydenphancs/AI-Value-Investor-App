@@ -101,7 +101,7 @@ struct MoneyMoveArticleDTO: Decodable {
             category: MoneyMoveArticleDTO.category(from: category),
             estimatedMinutes: readTimeMinutes,
             learnerCount: learnerCount ?? viewCount,
-            isBookmarked: false
+            hasAudio: audioUrl != nil
         )
     }
 

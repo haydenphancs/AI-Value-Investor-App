@@ -84,28 +84,91 @@ struct DiversificationCalculator {
         let clampedScore = max(0, min(100, totalScore))
 
         // Build sector allocations for the donut chart
-        let allocations = buildSectorAllocations(weighted)
+        let sectorAllocations = buildSectorAllocations(weighted)
 
         // Generate context-aware message
         let message = generateMessage(
             score: clampedScore,
-            sectorCount: allocations.count,
+            sectorCount: sectorAllocations.count,
             holdings: weighted
         )
 
-        let subScores = DiversificationSubScores(
-            concentrationScore: Int(round(bucket1)),
-            sectorScore: Int(round(bucket2)),
-            diversityScore: Int(round(bucket3))
-        )
+        // Map the three legacy buckets onto the new 0–100 sub-score shape so
+        // the offline fallback renders in the same card as the server result.
+        let subScores: [DiversificationSubScore] = [
+            DiversificationSubScore(
+                key: "position",
+                label: "Asset Concentration",
+                score: Int(round(bucket1 / DiversificationThresholds.bucket1Max * 100)),
+                zone: Self.zone(forBucket: bucket1, max: DiversificationThresholds.bucket1Max)
+            ),
+            DiversificationSubScore(
+                key: "sector",
+                label: "Sector Balance",
+                score: Int(round(bucket2 / DiversificationThresholds.bucket2Max * 100)),
+                zone: Self.zone(forBucket: bucket2, max: DiversificationThresholds.bucket2Max)
+            ),
+            DiversificationSubScore(
+                key: "region",
+                label: "Asset & Geo Diversity",
+                score: Int(round(bucket3 / DiversificationThresholds.bucket3Max * 100)),
+                zone: Self.zone(forBucket: bucket3, max: DiversificationThresholds.bucket3Max)
+            ),
+        ]
+
+        let weights = weighted.map { $0.weight }
+        let hhi = weights.reduce(0.0) { $0 + $1 * $1 }
+        let effectiveHoldings = hhi > 0 ? 1.0 / hhi : 0.0
 
         return DiversificationScore(
             score: clampedScore,
+            grade: Self.grade(for: clampedScore),
+            zone: Self.zone(for: clampedScore),
+            effectiveHoldings: effectiveHoldings,
             message: message,
-            sectorCount: allocations.count,
-            allocations: allocations,
-            subScores: subScores
+            sectorCount: sectorAllocations.count,
+            subScores: subScores,
+            sectorAllocations: sectorAllocations,
+            marketcapAllocations: [],
+            regionAllocations: buildRegionAllocations(weighted),
+            nudges: []
         )
+    }
+
+    // MARK: - Grade / Zone helpers (mirror the backend bands)
+
+    static func grade(for score: Int) -> String {
+        switch score {
+        case 85...:    return "A"
+        case 70..<85:  return "B"
+        case 55..<70:  return "C"
+        case 40..<55:  return "D"
+        default:       return "F"
+        }
+    }
+
+    static func zone(for score: Int) -> String {
+        switch score {
+        case 70...:    return "green"
+        case 40..<70:  return "yellow"
+        default:       return "red"
+        }
+    }
+
+    private static func zone(forBucket value: Double, max: Double) -> String {
+        guard max > 0 else { return "red" }
+        return zone(for: Int(round(value / max * 100)))
+    }
+
+    private static func buildRegionAllocations(
+        _ holdings: [PortfolioHolding]
+    ) -> [SectorAllocation] {
+        Dictionary(grouping: holdings) {
+            $0.country == "US" ? "United States" : "International"
+        }
+        .mapValues { group in group.reduce(0.0) { $0 + $1.weight } }
+        .sorted { $0.value > $1.value }
+        .map { SectorAllocation(name: $0.key, percentage: $0.value * 100.0) }
     }
 
     // MARK: - Bucket 1: Single Asset Concentration (40 points)

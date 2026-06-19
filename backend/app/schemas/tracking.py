@@ -157,6 +157,10 @@ class PortfolioHoldingResponse(BaseModel):
 
     ``market_value`` is refreshed against the current FMP price when ``shares``
     is set; otherwise it's the static dollar amount the user entered.
+
+    ``market_cap`` / ``industry`` / ``beta`` are profile signals used by the
+    diversification scorer (market-cap mix, future correlation proxy). They're
+    optional — a degraded row simply drops out of the dimensions that need them.
     """
 
     id: str
@@ -167,6 +171,9 @@ class PortfolioHoldingResponse(BaseModel):
     sector: Optional[str] = None
     asset_type: str = "Stock"
     country: str = "US"
+    market_cap: Optional[float] = None
+    industry: Optional[str] = None
+    beta: Optional[float] = None
 
 
 class BulkHoldingUpdateItem(BaseModel):
@@ -181,22 +188,35 @@ class BulkHoldingUpdateItem(BaseModel):
     market_value: Optional[float] = None
 
 
-# ── Portfolio Insights (diversification score) ──────────────────────
+# ── Portfolio Insights (diversification health score) ───────────────
 
 
-class SectorAllocationResponse(BaseModel):
-    """One slice of the sector donut chart."""
+class AllocationResponse(BaseModel):
+    """One slice of a breakdown donut (sector / market-cap / region)."""
 
     name: str
     percentage: float  # 0..100
 
 
-class DiversificationSubScoresResponse(BaseModel):
-    """Three-bucket breakdown of the diversification score."""
+class DiversificationSubScoreResponse(BaseModel):
+    """One dimension of the composite diversification health score.
 
-    concentration_score: int  # 0..40 — single-asset concentration
-    sector_score: int         # 0..40 — sector weighting
-    diversity_score: int      # 0..20 — asset-class & geography
+    ``score`` is a normalized 0..100 value (higher = better diversified on this
+    axis). ``zone`` drives the guardrail bar color on iOS.
+    """
+
+    key: str    # "position" | "sector" | "single_top5" | "marketcap" | "region"
+    label: str  # human-readable, e.g. "Position Balance"
+    score: int  # 0..100
+    zone: str   # "green" | "yellow" | "red"
+
+
+class NudgeResponse(BaseModel):
+    """A single actionable suggestion derived from the score breakdown."""
+
+    severity: str  # "info" | "warning" | "critical"
+    title: str
+    detail: str
 
 
 class PortfolioInsightsResponse(BaseModel):
@@ -204,12 +224,22 @@ class PortfolioInsightsResponse(BaseModel):
 
     Returned by ``GET /tracking/portfolio-insights`` — null when the user has
     fewer than the minimum holdings required for a meaningful score.
+
+    The score is a 0..100 composite of normalized-HHI sub-scores across
+    position / sector / concentration / market-cap / geography. ``effective_holdings``
+    (1 / HHI) is the intuitive headline ("your N stocks behave like ~K bets").
     """
 
-    score: int  # 0..100
+    score: int   # 0..100 composite
+    grade: str   # "A".."F"
+    zone: str    # "green" | "yellow" | "red"
+    effective_holdings: float
     message: str
     sector_count: int
-    allocations: List[SectorAllocationResponse]
-    sub_scores: DiversificationSubScoresResponse
+    sub_scores: List[DiversificationSubScoreResponse]
+    sector_allocations: List[AllocationResponse]
+    marketcap_allocations: List[AllocationResponse]
+    region_allocations: List[AllocationResponse]
+    nudges: List[NudgeResponse]
     holdings_count: int
     total_value: float

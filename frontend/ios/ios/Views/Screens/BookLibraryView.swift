@@ -268,10 +268,10 @@ private struct ProgressDashboardCard: View {
                             // The core the learner will resume — first unfinished core, in order.
                             if let bookmarkedCoreLabel {
                                 Text(bookmarkedCoreLabel)
-                                    .font(AppTypography.label)
+                                    .font(AppTypography.labelSmall)
                                     .foregroundColor(.white.opacity(0.8))
                                     .lineLimit(1)
-                                    .minimumScaleFactor(0.7)
+                                    .truncationMode(.tail)
                             }
                         }
                         .foregroundColor(.white)
@@ -282,8 +282,9 @@ private struct ProgressDashboardCard: View {
                             .lineLimit(2)
                     }
                 }
-
-                Spacer()
+                // Fill the available width so the bookmarked-book + core lines run right up to
+                // (just shy of) the progress ring, truncating with "…" only when genuinely too long.
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Right: Progress ring
                 ProgressRingView(progress: progressPercentage)

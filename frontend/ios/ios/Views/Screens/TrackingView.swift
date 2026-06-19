@@ -329,7 +329,7 @@ struct AssetsTabContent: View {
 
                 // Portfolio Insights — computed locally from the active portfolio.
                 PortfolioInsightsSection(
-                    score: viewModel.portfolioDiversificationScore,
+                    score: viewModel.displayedDiversificationScore,
                     coverageNote: viewModel.portfolioInsightsCoverageNote,
                     enteredHoldingsCount: viewModel.enteredHoldingsCount,
                     isEnabled: $viewModel.isInsightsEnabled,
@@ -359,7 +359,7 @@ struct AssetsTabContent: View {
         // Auto-open the config sheet the first time the user enables the
         // section without any holding data — saves them a tap.
         .onChange(of: viewModel.isInsightsEnabled) { _, isOn in
-            if isOn && viewModel.portfolioDiversificationScore == nil {
+            if isOn && viewModel.displayedDiversificationScore == nil {
                 viewModel.openPortfolioConfigSheet()
             }
         }

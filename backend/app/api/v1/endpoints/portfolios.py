@@ -37,6 +37,8 @@ from supabase import Client
 
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
+from app.schemas.tracking import PortfolioInsightsResponse
+from app.services.portfolio_insights_service import PortfolioInsightsService
 
 logger = logging.getLogger(__name__)
 
@@ -546,3 +548,23 @@ async def set_portfolio_holdings(
     )
     items = _fetch_portfolio_items(supabase, portfolio_id)
     return _row_to_portfolio(refreshed, items)
+
+
+@router.get(
+    "/{portfolio_id}/insights",
+    response_model=Optional[PortfolioInsightsResponse],
+)
+async def get_portfolio_insights(
+    portfolio_id: str,
+    user: dict = Depends(get_current_user_or_guest),
+    supabase: Client = Depends(get_supabase),
+):
+    """Server-computed Portfolio Insights for ONE portfolio — the 0..100
+    diversification health score, sub-scores, breakdown allocations, and
+    nudges. Scores this portfolio's ``portfolio_items`` holdings joined with
+    the metadata on the user's watchlist rows. Returns ``null`` when the
+    portfolio has fewer than the minimum holdings for a meaningful score.
+    """
+    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    service = PortfolioInsightsService()
+    return await service.compute_insights_for_portfolio(user["id"], portfolio_id)

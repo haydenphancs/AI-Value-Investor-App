@@ -42,6 +42,13 @@ class TrackingViewModel: ObservableObject {
     private static let sortOptionKey = "TrackingView.sortOption"
     private static let sortAscendingKey = "TrackingView.sortAscending"
 
+    /// Server-computed diversification score (the source of truth). Nil until
+    /// loaded, when the user has < 2 holdings, or when the call fails.
+    @Published var portfolioInsights: DiversificationScore?
+    /// True only when the insights call failed for connectivity reasons — used
+    /// to decide whether to fall back to the on-device estimate.
+    @Published var portfolioInsightsLoadFailed: Bool = false
+
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
     @Published var whaleActivities: [WhaleActivity] = []
@@ -349,10 +356,7 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets, portfolios, and whale data in parallel. Diversification
-        // is computed locally from the active portfolio's holdings (see
-        // `portfolioDiversificationScore`), so the server-insights endpoint
-        // isn't called anymore.
+        // Load assets, portfolios, and whale data in parallel.
         async let feedTask: Bool = loadTrackingFeed()
         async let portfoliosTask: () = portfolioStore.loadPortfolios()
         async let whalesTask: () = loadWhaleData()
@@ -366,6 +370,47 @@ class TrackingViewModel: ObservableObject {
         if feedSucceeded {
             await portfolioStore.purgeTickers(notIn: Set(trackedAssets.map(\.ticker)))
         }
+
+        // The diversification score is computed server-side (single source of
+        // truth, richer FMP data). Runs after portfolios load so the active
+        // portfolio id is known.
+        await loadPortfolioInsights()
+    }
+
+    /// Fetch the server-computed diversification health score for the active
+    /// portfolio. On a genuine connectivity failure we flag it so the UI can
+    /// fall back to the on-device estimate; a `null` body (fewer than the
+    /// minimum holdings) just clears the score.
+    func loadPortfolioInsights() async {
+        guard let portfolioId = portfolioStore.activePortfolioId else {
+            portfolioInsights = nil
+            portfolioInsightsLoadFailed = false
+            return
+        }
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .getPortfolioInsightsForPortfolio(id: portfolioId),
+                responseType: PortfolioInsightsDTO?.self
+            )
+            portfolioInsights = dto?.toDiversificationScore()
+            portfolioInsightsLoadFailed = false
+        } catch {
+            portfolioInsights = nil
+            if let apiError = error as? APIError, case .networkError = apiError {
+                portfolioInsightsLoadFailed = true
+            } else {
+                portfolioInsightsLoadFailed = false
+            }
+            print("[TrackingVM] ❌ Portfolio insights failed: \(error)")
+        }
+    }
+
+    /// What the Portfolio Insights card renders: the server score when present,
+    /// the on-device estimate only when the server call failed for connectivity.
+    var displayedDiversificationScore: DiversificationScore? {
+        if let server = portfolioInsights { return server }
+        if portfolioInsightsLoadFailed { return portfolioDiversificationScore }
+        return nil
     }
 
     @discardableResult
@@ -678,10 +723,9 @@ class TrackingViewModel: ObservableObject {
     }
 
     /// Push every row's `shares` / `marketValue` from the config sheet to
-    /// the backend in a single bulk PUT, scoped to the active portfolio.
-    /// The server response is the refreshed portfolio (with per-item
-    /// holdings); PortfolioStore drops it into local state, which triggers
-    /// `portfolioDiversificationScore` to recompute.
+    /// the backend in a single bulk PUT, scoped to the active portfolio, then
+    /// re-fetch the server-computed diversification score so the card reflects
+    /// the new holdings immediately.
     ///
     /// `null` for both fields on a row clears that ticker's holding values —
     /// the row stays in the portfolio but stops counting toward the
@@ -691,6 +735,7 @@ class TrackingViewModel: ObservableObject {
             throw APIError.unknown(message: "No active portfolio selected.")
         }
         try await portfolioStore.setHoldings(items, in: portfolioId)
+        await loadPortfolioInsights()
     }
 
     // MARK: - Navigation

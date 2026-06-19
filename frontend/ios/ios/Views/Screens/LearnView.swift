@@ -117,8 +117,7 @@ struct LearnContentView: View {
                     MoneyMovesSection(
                         concepts: viewModel.moneyMoves,
                         onSeeAll: handleSeeAllMoneyMoves,
-                        onConceptTap: handleMoneyMoveTap,
-                        onBookmark: handleBookmarkMoneyMove
+                        onConceptTap: handleMoneyMoveTap
                     )
                 }
 
@@ -205,10 +204,6 @@ struct LearnContentView: View {
             ?? createArticleFromMove(moneyMove)
     }
 
-    private func handleBookmarkMoneyMove(_ moneyMove: MoneyMove) {
-        viewModel.toggleBookmark(for: moneyMove)
-    }
-
     private func handleSeeAllBooks() {
         showingBookLibrary = true
     }
@@ -265,7 +260,7 @@ struct LearnContentView: View {
             readTimeMinutes: move.estimatedMinutes,
             viewCount: move.learnerCount,
             commentCount: Int.random(in: 20...200),
-            isBookmarked: move.isBookmarked,
+            isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
             tagLabel: move.category == .blueprints ? "BLUEPRINT" : (move.category == .valueTraps ? "CASE STUDY" : "VS"),

@@ -199,47 +199,37 @@ class AllocationResponse(BaseModel):
 
 
 class DiversificationSubScoreResponse(BaseModel):
-    """One dimension of the composite diversification health score.
+    """One additive dimension of the diversification score.
 
-    ``score`` is a normalized 0..100 value (higher = better diversified on this
-    axis). ``zone`` drives the guardrail bar color on iOS.
+    ``points`` is what this dimension earned out of its ``max_points`` budget.
+    The dimensions' ``max_points`` sum to 100, so the bars add up to the overall
+    score (the "old way" — each bar contributes points to the whole). ``zone``
+    drives the bar color on iOS.
     """
 
-    key: str    # "position" | "sector" | "single_top5" | "marketcap" | "region"
-    label: str  # human-readable, e.g. "Position Balance"
-    score: int  # 0..100
-    zone: str   # "green" | "yellow" | "red"
-
-
-class NudgeResponse(BaseModel):
-    """A single actionable suggestion derived from the score breakdown."""
-
-    severity: str  # "info" | "warning" | "critical"
-    title: str
-    detail: str
+    key: str         # "position" | "sector" | "single_top5" | "marketcap"
+    label: str       # human-readable, e.g. "Position Balance"
+    points: int      # earned, 0..max_points
+    max_points: int  # budget for this dimension
+    zone: str        # "green" | "yellow" | "red"
 
 
 class PortfolioInsightsResponse(BaseModel):
     """Server-computed Portfolio Insights payload.
 
-    Returned by ``GET /tracking/portfolio-insights`` — null when the user has
-    fewer than the minimum holdings required for a meaningful score.
-
-    The score is a 0..100 composite of normalized-HHI sub-scores across
-    position / sector / concentration / market-cap / geography. ``effective_holdings``
-    (1 / HHI) is the intuitive headline ("your N stocks behave like ~K bets").
+    Null when the user has fewer than the minimum holdings for a meaningful
+    score. ``score`` (0..100) is the SUM of the sub-score points; the four
+    dimensions (position / sector / concentration / market-cap) each contribute
+    additive points. ``effective_holdings`` (1 / HHI) is an intuitive caption.
     """
 
-    score: int   # 0..100 composite
-    grade: str   # "A".."F"
-    zone: str    # "green" | "yellow" | "red"
+    score: int   # 0..100 = sum of sub-score points
+    zone: str    # "green" | "yellow" | "red" — overall bar color
     effective_holdings: float
     message: str
     sector_count: int
     sub_scores: List[DiversificationSubScoreResponse]
     sector_allocations: List[AllocationResponse]
     marketcap_allocations: List[AllocationResponse]
-    region_allocations: List[AllocationResponse]
-    nudges: List[NudgeResponse]
     holdings_count: int
     total_value: float

@@ -81,20 +81,11 @@ struct MoneyMoveArticleDetailView: View {
                         MoneyMoveArticleContent(article: article, activeTime: readAlongActiveTime)
                         .padding(.top, AppSpacing.lg)
 
-                        // Bottom padding (extra space for mini player). Doubles as a
-                        // "reached the end" sentinel: once it scrolls into view, the article
-                        // counts as read (markCompleted is idempotent).
+                        // Bottom padding (extra space for mini player). Completion is now an
+                        // explicit toggle at the end of the article (and on narration finish),
+                        // so reaching the end no longer auto-marks it read.
                         Color.clear
                             .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
-                            // onScrollVisibilityChange replaces a GeometryReader + UIScreen.main
-                            // bounds check (UIScreen.main is deprecated in iOS 26).
-                            .onScrollVisibilityChange(threshold: 0.01) { visible in
-                                if visible {
-                                    DispatchQueue.main.async {
-                                        MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
-                                    }
-                                }
-                            }
                     }
                     .background(
                         GeometryReader { proxy in

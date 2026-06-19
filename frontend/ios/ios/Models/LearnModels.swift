@@ -328,7 +328,7 @@ struct LibraryBook: Identifiable {
     }
 
     var formattedKeyIdeas: String {
-        "\(keyIdeasCount) Key Ideas"
+        "\(keyIdeasCount) Core Ideas"
     }
 
     /// Always the count of authored cores — derived from coreChapters so it can never

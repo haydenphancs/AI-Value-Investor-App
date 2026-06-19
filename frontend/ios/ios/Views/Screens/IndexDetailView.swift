@@ -100,7 +100,8 @@ struct IndexDetailView: View {
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .index,
                                 chartDataVersion: viewModel.chartDataVersion,
-                                chartEventDates: viewModel.chartEventDates
+                                chartEventDates: viewModel.chartEventDates,
+                                previousClose: indexData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
                         }

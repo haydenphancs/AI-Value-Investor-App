@@ -78,7 +78,6 @@ struct BookLibraryView: View {
                                 book: book,
                                 isMastered: progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount),
                                 onChatWithBook: { handleChatWithBook(book) },
-                                onReadKeyIdeas: { handleReadKeyIdeas(book) },
                                 onReview: { handleReview(book) }
                             )
                             .padding(.horizontal, AppSpacing.lg)
@@ -113,10 +112,6 @@ struct BookLibraryView: View {
 
     private func handleChatWithBook(_ book: LibraryBook) {
         print("Chat with book: \(book.title)")
-    }
-
-    private func handleReadKeyIdeas(_ book: LibraryBook) {
-        print("Read key ideas: \(book.title)")
     }
 
     private func handleReview(_ book: LibraryBook) {

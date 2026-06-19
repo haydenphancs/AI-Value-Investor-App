@@ -88,7 +88,8 @@ struct ETFDetailView: View {
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .etf,
-                                chartDataVersion: viewModel.chartDataVersion
+                                chartDataVersion: viewModel.chartDataVersion,
+                                previousClose: etfData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
                         }

@@ -126,8 +126,7 @@ struct LearnContentView: View {
                         books: viewModel.books,
                         onSeeAll: handleSeeAllBooks,
                         onBookTap: handleBookTap,
-                        onChatWithBook: handleChatWithBook,
-                        onReadKeyIdeas: handleReadKeyIdeas
+                        onChatWithBook: handleChatWithBook
                     )
                 }
 
@@ -219,10 +218,6 @@ struct LearnContentView: View {
 
     private func handleChatWithBook(_ book: EducationBook) {
         viewModel.chatWithBook(book)
-    }
-
-    private func handleReadKeyIdeas(_ book: EducationBook) {
-        viewModel.readKeyIdeas(book)
     }
 
     private func handleSeeAllDiscussions() {

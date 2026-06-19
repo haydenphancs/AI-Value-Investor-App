@@ -12,7 +12,6 @@ struct AIBooksSection: View {
     var onSeeAll: (() -> Void)?
     var onBookTap: ((EducationBook) -> Void)?
     var onChatWithBook: ((EducationBook) -> Void)?
-    var onReadKeyIdeas: ((EducationBook) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -46,8 +45,7 @@ struct AIBooksSection: View {
                     EducationBookCard(
                         book: book,
                         onTap: { onBookTap?(book) },
-                        onChatWithBook: { onChatWithBook?(book) },
-                        onReadKeyIdeas: { onReadKeyIdeas?(book) }
+                        onChatWithBook: { onChatWithBook?(book) }
                     )
                 }
             }

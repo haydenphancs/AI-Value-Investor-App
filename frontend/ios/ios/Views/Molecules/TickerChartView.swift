@@ -29,6 +29,7 @@ struct TickerChartView: View {
     }
 
     @State private var showSettingsSheet = false
+    @State private var showIntervalMenu = false
     @StateObject private var crosshairState = CrosshairState()
     @StateObject private var viewportState = ChartViewportState()
 
@@ -205,23 +206,11 @@ struct TickerChartView: View {
 
                 // Interval selector — only show when multiple intervals are available
                 if selectedRange.allowedIntervals.count > 1 {
-                    Menu {
-                        ForEach(selectedRange.allowedIntervals) { interval in
-                            Button {
-                                var transaction = Transaction()
-                                transaction.disablesAnimations = true
-                                withTransaction(transaction) {
-                                    chartSettings.selectedInterval = interval
-                                }
-                            } label: {
-                                HStack {
-                                    Text(interval.displayName)
-                                    if chartSettings.selectedInterval == interval {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
+                    // Custom Liquid Glass dropdown (see intervalMenuOverlay) —
+                    // matches the Assets-tab Sort popup. Not a native Menu (can't
+                    // shrink/restyle it) and not a popover (has a beak).
+                    Button {
+                        showIntervalMenu.toggle()
                     } label: {
                         HStack(spacing: 2) {
                             Image(systemName: "clock")
@@ -238,6 +227,8 @@ struct TickerChartView: View {
                                 .fill(AppColors.cardBackgroundLight.opacity(0.5))
                         )
                     }
+                    .buttonStyle(.plain)
+                    .anchorPreference(key: ChartIntervalAnchorKey.self, value: .bounds) { $0 }
                 }
 
                 // Settings icon
@@ -252,6 +243,13 @@ struct TickerChartView: View {
             }
             .padding(.horizontal, AppSpacing.lg)
         }
+        // Custom interval dropdown, anchored to the "5 min" chip. Opens UPWARD
+        // over the chart so it floats correctly without the parent's help.
+        .overlayPreferenceValue(ChartIntervalAnchorKey.self) { anchor in
+            GeometryReader { geo in
+                intervalMenuOverlay(anchor: anchor, geo: geo)
+            }
+        }
         .sheet(isPresented: $showSettingsSheet) {
             ChartSettingsSheet(chartSettings: chartSettings, assetContext: assetContext)
                 .transaction { $0.disablesAnimations = true }
@@ -259,6 +257,7 @@ struct TickerChartView: View {
         .onChange(of: selectedRange) {
             crosshairState.selectedIndex = nil
             crosshairState.isDragging = false
+            showIntervalMenu = false
         }
         .onChange(of: chartDataVersion) {
             // Reset viewport when new data is loaded, offsetting past warm-up data
@@ -295,6 +294,85 @@ struct TickerChartView: View {
         } else {
             return String(format: "%.0f", volume)
         }
+    }
+
+    // MARK: - Interval dropdown (custom Liquid Glass popup)
+
+    private static let intervalMenuWidth: CGFloat = 124
+    private static let intervalRowHeight: CGFloat = 33
+
+    /// Scrim (tap to dismiss) + the glass panel positioned just ABOVE the chip.
+    @ViewBuilder
+    private func intervalMenuOverlay(anchor: Anchor<CGRect>?, geo: GeometryProxy) -> some View {
+        if showIntervalMenu, let anchor {
+            let rect = geo[anchor]
+            let intervals = selectedRange.allowedIntervals
+            let width = Self.intervalMenuWidth
+            let panelHeight = CGFloat(intervals.count) * Self.intervalRowHeight + AppSpacing.sm
+            // Right-align to the chip, clamped to the chart bounds.
+            let x = min(max(AppSpacing.sm, rect.maxX - width), geo.size.width - width - AppSpacing.sm)
+            // Open upward so the panel never spills under the tabs below.
+            let y = rect.minY - AppSpacing.xs - panelHeight
+
+            ZStack(alignment: .topLeading) {
+                Color.black.opacity(0.001)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { showIntervalMenu = false }
+
+                VStack(spacing: 0) {
+                    ForEach(intervals) { interval in
+                        intervalRow(interval)
+                    }
+                }
+                .frame(width: width, alignment: .leading)
+                .padding(.vertical, AppSpacing.xs)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                .offset(x: x, y: y)
+            }
+            .transition(.identity)
+        }
+    }
+
+    private func intervalRow(_ interval: ChartInterval) -> some View {
+        Button {
+            // Preserve the no-animation interval switch from the old menu.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                chartSettings.selectedInterval = interval
+            }
+            showIntervalMenu = false
+        } label: {
+            HStack(spacing: AppSpacing.sm) {
+                ZStack {
+                    if chartSettings.selectedInterval == interval {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
+                }
+                .frame(width: 16)
+
+                Text(interval.displayName)
+                    .font(.system(size: 14))
+                    .foregroundColor(AppColors.textPrimary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Carries the interval chip's bounds up so the dropdown can anchor to it.
+private struct ChartIntervalAnchorKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
     }
 }
 

@@ -89,7 +89,8 @@ struct CommodityDetailView: View {
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .commodity,
-                                chartDataVersion: viewModel.chartDataVersion
+                                chartDataVersion: viewModel.chartDataVersion,
+                                previousClose: commodityData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
                         }

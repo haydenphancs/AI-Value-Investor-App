@@ -2,7 +2,7 @@
 //  EducationBookCard.swift
 //  ios
 //
-//  Molecule: Card showing an educational book with chat and key ideas buttons
+//  Molecule: Card showing an educational book with an Ask the Author Agent button
 //
 
 import SwiftUI
@@ -11,7 +11,6 @@ struct EducationBookCard: View {
     let book: EducationBook
     var onTap: (() -> Void)?
     var onChatWithBook: (() -> Void)?
-    var onReadKeyIdeas: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -100,7 +99,7 @@ struct EducationBookCard: View {
                 onTap?()
             }
 
-            // Action button — Chat with Book (not yet wired; to be developed later)
+            // Action button — Ask the Author Agent (not yet wired; to be developed later)
             Button(action: {
                 onChatWithBook?()
             }) {
@@ -108,8 +107,10 @@ struct EducationBookCard: View {
                     Image(systemName: "bubble.left.fill")
                         .font(AppTypography.iconXS)
 
-                    Text("Chat with Book")
+                    Text("Ask the Author Agent")
                         .font(AppTypography.bodySmallEmphasis)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(maxWidth: .infinity)

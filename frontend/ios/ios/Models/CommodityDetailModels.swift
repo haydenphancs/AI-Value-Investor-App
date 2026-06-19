@@ -125,6 +125,12 @@ struct CommodityDetailData: Identifiable {
         priceChange >= 0
     }
 
+    /// Previous close (current price − today's change). Anchors the chart's
+    /// dashed baseline to prior close, like Apple Stocks / Robinhood.
+    var previousClose: Double {
+        currentPrice - priceChange
+    }
+
     var formattedPrice: String {
         if currentPrice >= 100 {
             return String(format: "$%.2f", currentPrice)

@@ -10,7 +10,6 @@ import SwiftUI
 struct SearchBookCard: View {
     let book: SearchBookItem
     var onChatWithBook: (() -> Void)?
-    var onReadKeyIdeas: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -108,26 +107,10 @@ struct SearchBookCard: View {
                         Image(systemName: "bubble.left.fill")
                             .font(AppTypography.iconXS)
 
-                        Text("Chat with Book")
+                        Text("Ask the Author Agent")
                             .font(AppTypography.bodySmallEmphasis)
-                    }
-                    .foregroundColor(AppColors.textPrimary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.cardBackgroundLight)
-                    .cornerRadius(AppCornerRadius.medium)
-                }
-                .buttonStyle(PlainButtonStyle())
-
-                Button(action: {
-                    onReadKeyIdeas?()
-                }) {
-                    HStack(spacing: AppSpacing.sm) {
-                        Image(systemName: "lightbulb.fill")
-                            .font(AppTypography.iconXS)
-
-                        Text("Read Key Ideas")
-                            .font(AppTypography.bodySmallEmphasis)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)

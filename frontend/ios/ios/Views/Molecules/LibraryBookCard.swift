@@ -12,7 +12,6 @@ struct LibraryBookCard: View {
     /// Whether every core in the book has been completed (real progress, from BookProgressStore).
     var isMastered: Bool = false
     var onChatWithBook: (() -> Void)?
-    var onReadKeyIdeas: (() -> Void)?
     var onReview: (() -> Void)?
 
     var body: some View {
@@ -123,18 +122,20 @@ struct LibraryBookCard: View {
                         Image(systemName: "bubble.left.fill")
                             .font(AppTypography.iconXS)
 
-                        Text("Chat with Book")
+                        Text("Ask the Author Agent")
                             .font(AppTypography.bodySmallEmphasis)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
-                    .foregroundColor(AppColors.textPrimary)
+                    .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.cardBackgroundLight)
+                    .background(AppColors.primaryBlue.opacity(0.15))
                     .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                // Dynamic button based on mastered state
+                // Mastered books expose a Review action; otherwise the Ask button stands alone
                 if isMastered {
                     Button(action: {
                         onReview?()
@@ -150,24 +151,6 @@ struct LibraryBookCard: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)
                         .background(AppColors.bullish.opacity(0.15))
-                        .cornerRadius(AppCornerRadius.medium)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                } else {
-                    Button(action: {
-                        onReadKeyIdeas?()
-                    }) {
-                        HStack(spacing: AppSpacing.sm) {
-                            Image(systemName: "lightbulb.fill")
-                                .font(AppTypography.iconXS)
-
-                            Text("Read Key Ideas")
-                                .font(AppTypography.bodySmallEmphasis)
-                        }
-                        .foregroundColor(AppColors.primaryBlue)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.primaryBlue.opacity(0.15))
                         .cornerRadius(AppCornerRadius.medium)
                     }
                     .buttonStyle(PlainButtonStyle())

@@ -253,10 +253,6 @@ class SearchViewModel: ObservableObject {
         print("💬 SearchViewModel: Chat with book — \(book.title)")
     }
 
-    func readKeyIdeas(_ book: SearchBookItem) {
-        print("💡 SearchViewModel: Read key ideas — \(book.title)")
-    }
-
     /// Dismiss error after user acknowledges
     func dismissError() {
         error = nil

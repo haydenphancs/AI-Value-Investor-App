@@ -90,7 +90,8 @@ struct CryptoDetailView: View {
                                 selectedRange: $viewModel.selectedChartRange,
                                 chartSettings: viewModel.chartSettings,
                                 assetContext: .crypto,
-                                chartDataVersion: viewModel.chartDataVersion
+                                chartDataVersion: viewModel.chartDataVersion,
+                                previousClose: cryptoData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
                         }

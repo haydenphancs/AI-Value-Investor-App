@@ -588,6 +588,9 @@ struct InstitutionalActivity: Identifiable {
     let changeInMillions: Double  // Positive = bought, Negative = sold
     let changePercent: Double
     let totalHeldInBillions: Double
+    // Brand-new position this quarter (prev held 0). Defaulted so sample/mock
+    // construction sites don't need to set it.
+    var isNewPosition: Bool = false
 
     var isPositive: Bool {
         changeInMillions >= 0
@@ -602,6 +605,9 @@ struct InstitutionalActivity: Identifiable {
     }
 
     var formattedChangePercent: String {
+        // A new position is FMP's "+100%" — show "New" so it doesn't read as
+        // "the stake doubled".
+        if isNewPosition { return "New" }
         let sign = changePercent >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", changePercent))%"
     }
@@ -630,6 +636,16 @@ struct RecentActivitiesFlowSummary {
     let quarterDescription: String  // e.g., "Q4"
     let inFlowInBillions: Double
     let outFlowInBillions: Double
+
+    /// Quarter + year for the header, e.g. "Q1 2026". Year is the trailing token
+    /// of `periodDescription` ("Jan - Mar 2026"); falls back to the quarter alone
+    /// if the year can't be parsed.
+    var quarterYearDescription: String {
+        if let year = periodDescription.split(separator: " ").last, year.count == 4 {
+            return "\(quarterDescription) \(year)"
+        }
+        return quarterDescription
+    }
 
     var netFlowInMillions: Double {
         (inFlowInBillions - outFlowInBillions) * 1000

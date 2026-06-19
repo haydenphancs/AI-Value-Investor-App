@@ -110,7 +110,7 @@ struct RecentActivitiesSection: View {
 
         return VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Period label
-            Text("Latest Filings (\(data.institutionalFlowSummary.periodDescription))")
+            Text("Latest 13F filings · \(data.institutionalFlowSummary.quarterYearDescription)")
                 .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textMuted)
                 .padding(.top, AppSpacing.xs)

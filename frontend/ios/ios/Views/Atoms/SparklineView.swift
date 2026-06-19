@@ -12,6 +12,10 @@ import SwiftUI
 struct SparklineView: View {
     let data: [Double]
     let isPositive: Bool
+    /// Baseline for the dotted reference line + green/red split. When set (e.g.
+    /// the previous trading day's close) the chart anchors to it instead of the
+    /// first data point — matching Apple Stocks / Robinhood.
+    var referencePrice: Double? = nil
 
     private let dotRadius: CGFloat = 3
     private let lineWidth: CGFloat = 1.5
@@ -22,8 +26,12 @@ struct SparklineView: View {
             let height = geometry.size.height
 
             if data.count > 1 {
-                let minValue = data.min() ?? 0
-                let maxValue = data.max() ?? 1
+                // Baseline = previous trading day's close when provided, else the
+                // first point. Included in the scale so the dotted line is always
+                // visible even if price never traded back to it.
+                let referenceValue = referencePrice ?? data[0]
+                let minValue = min(data.min() ?? 0, referenceValue)
+                let maxValue = max(data.max() ?? 1, referenceValue)
                 let range = max(maxValue - minValue, .ulpOfOne)
                 let stepX = width / CGFloat(data.count - 1)
 
@@ -33,7 +41,6 @@ struct SparklineView: View {
                     return CGPoint(x: x, y: y)
                 }
 
-                let referenceValue = data[0]
                 let referenceY = height - (CGFloat((referenceValue - minValue) / range) * height)
 
                 let lastPoint = points.last!

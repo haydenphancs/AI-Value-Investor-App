@@ -2223,6 +2223,8 @@ struct InstitutionalActivityDTO: Codable {
     let changeInMillions: Double
     let changePercent: Double
     let totalHeldInBillions: Double
+    // Optional so an older backend (no key) still decodes cleanly.
+    let isNewPosition: Bool?
 
     enum CodingKeys: String, CodingKey {
         case category, date
@@ -2230,6 +2232,7 @@ struct InstitutionalActivityDTO: Codable {
         case changeInMillions = "change_in_millions"
         case changePercent = "change_percent"
         case totalHeldInBillions = "total_held_in_billions"
+        case isNewPosition = "is_new_position"
     }
 
     func toDisplayModel() -> InstitutionalActivity {
@@ -2241,7 +2244,8 @@ struct InstitutionalActivityDTO: Codable {
             date: parsedDate,
             changeInMillions: changeInMillions,
             changePercent: changePercent,
-            totalHeldInBillions: totalHeldInBillions
+            totalHeldInBillions: totalHeldInBillions,
+            isNewPosition: isNewPosition ?? false
         )
     }
 }

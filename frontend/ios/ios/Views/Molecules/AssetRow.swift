@@ -32,7 +32,8 @@ struct AssetRow: View {
                 // Sparkline Chart
                 SparklineView(
                     data: asset.sparklineData,
-                    isPositive: asset.isPositive
+                    isPositive: asset.isPositive,
+                    referencePrice: asset.previousClose
                 )
                 .frame(height: 32)
 

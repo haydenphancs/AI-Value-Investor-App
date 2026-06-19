@@ -19,6 +19,10 @@ struct MainChartCanvas: View {
     var chartEventDates: ChartEventDates? = nil
     /// When true, use time-based X positioning (1D intraday)
     var useIntradayTimeMapping: Bool = false
+    /// Reference price for the dashed baseline (e.g. prior-day close on 1D).
+    /// Folded into the y-range so it's always visible. Falls back to the current
+    /// price when nil.
+    var baselineClose: Double? = nil
 
     private var lineColor: Color {
         isPositive ? AppColors.bullish : AppColors.bearish
@@ -71,15 +75,21 @@ struct MainChartCanvas: View {
                         : ChartCoordinateSystem.from(closes: closes, size: size)
                 }()
 
-                // Expand coordinate range to include overlay values so MA/Bollinger Bands aren't clipped
+                // Expand coordinate range to include overlay values AND the
+                // baseline (prior-day close) so neither is clipped.
                 let coord: ChartCoordinateSystem = {
-                    guard !overlays.isEmpty else { return baseCoord }
+                    var minVal = baseCoord.minValue
+                    var maxVal = baseCoord.maxValue
+
+                    // Keep the dashed baseline inside the visible y-range.
+                    if let baseline = baselineClose {
+                        minVal = min(minVal, baseline)
+                        maxVal = max(maxVal, baseline)
+                    }
+
                     let visibleCloses = pricePoints.map { $0.close }
                     let allCloses = lookbackCloses + visibleCloses
                     let offset = lookbackCloses.count
-
-                    var minVal = baseCoord.minValue
-                    var maxVal = baseCoord.maxValue
 
                     for overlay in overlays {
                         switch overlay {
@@ -112,6 +122,10 @@ struct MainChartCanvas: View {
                         }
                     }
 
+                    // Nothing extended the range → keep the original coord.
+                    if minVal == baseCoord.minValue && maxVal == baseCoord.maxValue {
+                        return baseCoord
+                    }
                     return ChartCoordinateSystem(
                         width: size.width,
                         height: size.height,
@@ -147,12 +161,14 @@ struct MainChartCanvas: View {
                         }
                     }
 
-                    // Current price horizontal dash line
-                    if let lastClose = pricePoints.last?.close {
-                        let currentY = coord.yPosition(for: lastClose)
+                    // Baseline horizontal dash line — prior-day close on 1D
+                    // (else the start-of-range reference). Falls back to the
+                    // current price only when no baseline is supplied.
+                    if let baseline = baselineClose ?? pricePoints.last?.close {
+                        let baselineY = coord.yPosition(for: baseline)
                         Path { path in
-                            path.move(to: CGPoint(x: 0, y: currentY))
-                            path.addLine(to: CGPoint(x: size.width, y: currentY))
+                            path.move(to: CGPoint(x: 0, y: baselineY))
+                            path.addLine(to: CGPoint(x: size.width, y: baselineY))
                         }
                         .stroke(
                             Color.gray.opacity(0.4),

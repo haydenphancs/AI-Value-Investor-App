@@ -617,6 +617,13 @@ class HoldersService:
         """Convert institutional holder analytics into recent activity entries."""
         result = []
         for h in holders[:15]:
+            # Skip unattributed FMP 13F rows — a blank investorName + null holder
+            # (often a bogus "+100% / new" multi-billion stake) can't be shown
+            # to a user as anything but the generic "Asset Management" category.
+            name = (h.get("investorName") or h.get("holder") or "").strip()
+            if not name:
+                continue
+
             # Shared 13F formula — same one whale_service uses to populate
             # Supabase whale_trades.amount — so alert totals match this view.
             shares_change = _safe_float(h, "changeInSharesNumber", 0.0)
@@ -654,15 +661,19 @@ class HoldersService:
             if not date_str:
                 date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+            # Brand-new position: prior quarter held nothing. FMP encodes this as
+            # change% = 100, which misreads as "doubled" — flag it so the UI says
+            # "New" instead.
+            is_new = prev_shares <= 0.0 and total_shares > 0.0 and action == "BOUGHT"
+
             result.append(InstitutionalActivitySchema(
-                institution_name=h.get("investorName", h.get("holder", "Unknown")),
-                category=self._categorize_institution(
-                    h.get("investorName", "")
-                ),
+                institution_name=name,
+                category=self._categorize_institution(name),
                 date=date_str[:10],
                 change_in_millions=round(change_value_millions, 2),
                 change_percent=round(change_pct, 2),
                 total_held_in_billions=round(total_value / 1_000_000_000, 1) if total_value > 0 else 0.0,
+                is_new_position=is_new,
             ))
 
         # Sort by absolute change value descending (caller truncates to top 10)

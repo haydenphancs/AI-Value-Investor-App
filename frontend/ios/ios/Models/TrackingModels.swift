@@ -54,6 +54,15 @@ struct TrackedAsset: Identifiable {
         changePercent >= 0
     }
 
+    /// Previous trading day's close, derived from current price and day-change %
+    /// (price = prevClose × (1 + pct/100)). Used as the sparkline baseline so the
+    /// dotted line anchors to prior close, not the day's first point.
+    var previousClose: Double? {
+        let factor = 1 + changePercent / 100
+        guard factor != 0 else { return nil }
+        return price / factor
+    }
+
     /// `true` when this ticker is opted into Portfolio Insights — i.e. the
     /// user has provided either a share count or a dollar amount for it.
     var isHolding: Bool {

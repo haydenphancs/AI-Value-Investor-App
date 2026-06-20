@@ -15,9 +15,6 @@ struct MoneyMoveArticleHeroHeader: View {
     var audioEpisode: AudioEpisode?
     var onBackTapped: (() -> Void)?
     var onShareTapped: (() -> Void)?
-    var isBookmarked: Bool = false
-    var onBookmarkTapped: (() -> Void)?
-    var onMoreTapped: (() -> Void)?
 
     private var gradientColors: [Color] {
         article.heroGradientColors.map { Color(hex: $0) }
@@ -81,47 +78,18 @@ struct MoneyMoveArticleHeroHeader: View {
 
                     Spacer()
 
-                    // Action buttons
-                    HStack(spacing: AppSpacing.sm) {
-                        // Share button
-                        Button(action: { onShareTapped?() }) {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(AppTypography.iconDefault).fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .frame(width: 36, height: 36)
-                                .background(
-                                    Circle()
-                                        .fill(Color.white.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        // Bookmark button
-                        Button(action: { onBookmarkTapped?() }) {
-                            Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                                .font(AppTypography.iconDefault).fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .frame(width: 36, height: 36)
-                                .background(
-                                    Circle()
-                                        .fill(Color.white.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        // More button
-                        Button(action: { onMoreTapped?() }) {
-                            Image(systemName: "ellipsis")
-                                .font(AppTypography.iconDefault).fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .frame(width: 36, height: 36)
-                                .background(
-                                    Circle()
-                                        .fill(Color.white.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(PlainButtonStyle())
+                    // Share button
+                    Button(action: { onShareTapped?() }) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(
+                                Circle()
+                                    .fill(Color.white.opacity(0.15))
+                            )
                     }
+                    .buttonStyle(PlainButtonStyle())
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.md)
@@ -252,8 +220,7 @@ struct GrainyTextureOverlay: View {
     ScrollView {
         MoneyMoveArticleHeroHeader(
             article: MoneyMoveArticle.sampleDigitalFinance,
-            audioEpisode: .sampleMoneyMoves,
-            isBookmarked: false
+            audioEpisode: .sampleMoneyMoves
         )
 
         Text("Content goes here")

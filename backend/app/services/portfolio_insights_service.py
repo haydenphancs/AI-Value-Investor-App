@@ -9,16 +9,17 @@ The score is a 0..100 composite of **normalized-HHI** sub-scores. HHI = Σ wᵢ�
 normalized so an equal-weighted split scores 100 and full concentration scores
 0 — which is what makes the score respond to weight changes (the old additive
 "penalty" rubric saturated to ~0 for any small, single-sector book and never
-moved). Dimensions:
+moved). The dimensions each earn additive points whose budgets sum to 100, so
+the bars add up to the overall score:
 
-  position    — per-ticker weight balance
-  sector      — spread across GICS sectors
-  single_top5 — largest single position + top-5 weight
-  marketcap   — mega / large / mid / small mix
-  region      — US vs international
+  position   — per-ticker weight balance (normalized HHI; this already captures
+               single-name concentration, so there is no separate one)
+  sector     — spread across the GICS sectors held
+  marketcap  — mega / large / mid / small mix (its budget folds into the other
+               two when no market-cap data is available)
 
-``effective_holdings`` (1 / HHI) is reported as the intuitive headline
-("your N stocks behave like ~K independent bets").
+``effective_holdings`` (1 / HHI) is still computed (intuitive "behaves like ~K
+holdings") even though the card no longer surfaces it.
 
 The scoring itself is a pure function (``score_holdings``) so it's unit-tested
 without Supabase / FMP. The service wraps it with data fetching: for holdings
@@ -51,19 +52,21 @@ MIN_HOLDINGS = 2
 
 # Additive point budgets per dimension — they SUM TO 100, so the bars add up to
 # the overall score (the "old way" the bars contribute points to the whole).
-# Market-cap is the minor one; when its data is unavailable its budget is
-# redistributed across the other three (see _BUDGETS_NO_CAP) so the total can
-# still reach 100. (Geography is intentionally excluded — US-only universe.)
+# Position Balance is the normalized HHI of position weights, which already
+# captures single-name concentration (HHI is quadratic, so a dominant holding
+# is heavily penalized) — so there is NO separate concentration dimension (it
+# would double-count). Market-cap is the minor one; when its data is
+# unavailable its budget is redistributed across the other two (see
+# _BUDGETS_NO_CAP) so the total can still reach 100. (Geography is excluded —
+# US-only universe.)
 _BUDGETS = [
-    ("position", "Position Balance", 30),
-    ("sector", "Sector Spread", 30),
-    ("single_top5", "Concentration", 25),
-    ("marketcap", "Market-Cap Mix", 15),
+    ("position", "Position Balance", 40),
+    ("sector", "Sector Spread", 40),
+    ("marketcap", "Market-Cap Mix", 20),
 ]
 _BUDGETS_NO_CAP = [
-    ("position", "Position Balance", 35),
-    ("sector", "Sector Spread", 35),
-    ("single_top5", "Concentration", 30),
+    ("position", "Position Balance", 50),
+    ("sector", "Sector Spread", 50),
 ]
 
 # Market-cap bucket cutoffs (USD).
@@ -102,17 +105,6 @@ def normalized_hhi_score(weights: List[float], n: int) -> float:
         return 100.0
     norm = (observed - min_hhi) / (1.0 - min_hhi)  # 0 (equal) .. 1 (concentrated)
     return _clamp((1.0 - norm) * 100.0, 0.0, 100.0)
-
-
-def _top5_score(weights: List[float], n: int) -> float:
-    """Penalize when the 5 largest positions dominate. For n<=5 the top-5 IS
-    the whole book, so there's nothing to penalize (returns 100)."""
-    if n <= 5:
-        return 100.0
-    top5 = sum(sorted(weights, reverse=True)[:5])
-    ideal = 5.0 / n
-    excess = max(0.0, (top5 - ideal) / (1.0 - ideal))
-    return _clamp((1.0 - excess) * 100.0, 0.0, 100.0)
 
 
 def _cap_bucket(market_cap: Optional[float]) -> Optional[str]:
@@ -193,11 +185,6 @@ def score_holdings(
     )
     sector_q = normalized_hhi_score(list(sector_group.values()), len(sector_group))
 
-    max_w = max(weights)
-    single = _clamp(100.0 - max_w * 100.0, 0.0, 100.0)
-    top5 = _top5_score(weights, n)
-    concentration_q = 0.5 * single + 0.5 * top5
-
     # Market-cap mix (scored only over holdings with a known cap).
     cap_group: Dict[str, float] = {}
     known_cap_weight = 0.0
@@ -218,7 +205,6 @@ def score_holdings(
     qualities = {
         "position": position_q,
         "sector": sector_q,
-        "single_top5": concentration_q,
         "marketcap": marketcap_q,
     }
 

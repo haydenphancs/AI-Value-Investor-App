@@ -49,10 +49,6 @@ struct DiversificationCalculator {
         }
         let sectorQ = normalizedHHI(Array(sectorWeights.values), sectorWeights.count)
 
-        let maxWeight = weights.max() ?? 0
-        let single = max(0.0, min(100.0, 100.0 - maxWeight * 100.0))
-        let concentrationQ = 0.5 * single + 0.5 * top5Score(weights, n)
-
         // Market-cap mix (scored only over holdings with a known cap).
         var capWeights: [String: Double] = [:]
         var knownCapWeight = 0.0
@@ -68,14 +64,15 @@ struct DiversificationCalculator {
             : 0.0
 
         // ── Additive points (budgets sum to 100; bars add up to the score) ──
-        // Market-cap present → 30/30/25/15; absent → 35/35/30.
+        // Position Balance (normalized HHI) already captures single-name
+        // concentration, so there's no separate concentration bar. Cap present
+        // → 40/40/20; absent → 50/50.
         var budgets: [(key: String, label: String, quality: Double, max: Int)] = [
-            ("position", "Position Balance", positionQ, marketcapAvailable ? 30 : 35),
-            ("sector", "Sector Spread", sectorQ, marketcapAvailable ? 30 : 35),
-            ("single_top5", "Concentration", concentrationQ, marketcapAvailable ? 25 : 30),
+            ("position", "Position Balance", positionQ, marketcapAvailable ? 40 : 50),
+            ("sector", "Sector Spread", sectorQ, marketcapAvailable ? 40 : 50),
         ]
         if marketcapAvailable {
-            budgets.append(("marketcap", "Market-Cap Mix", marketcapQ, 15))
+            budgets.append(("marketcap", "Market-Cap Mix", marketcapQ, 20))
         }
 
         var subScores: [DiversificationSubScore] = []
@@ -129,16 +126,6 @@ struct DiversificationCalculator {
         guard 1.0 - minHHI > 0 else { return 100 }
         let norm = (hhi - minHHI) / (1.0 - minHHI)
         return max(0.0, min(100.0, (1.0 - norm) * 100.0))
-    }
-
-    /// Penalize when the 5 largest positions dominate. For n ≤ 5 the top-5 is
-    /// the whole book, so there's nothing to penalize.
-    private static func top5Score(_ weights: [Double], _ n: Int) -> Double {
-        guard n > 5 else { return 100 }
-        let top5 = weights.sorted(by: >).prefix(5).reduce(0, +)
-        let ideal = 5.0 / Double(n)
-        let excess = max(0.0, (top5 - ideal) / (1.0 - ideal))
-        return max(0.0, min(100.0, (1.0 - excess) * 100.0))
     }
 
     /// Market-cap bucket (USD cutoffs mirror the backend).

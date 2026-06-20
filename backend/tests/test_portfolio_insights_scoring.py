@@ -26,7 +26,6 @@ from app.services import portfolio_insights_service as svc
 from app.services.portfolio_insights_service import (
     MIN_HOLDINGS,
     _cap_bucket,
-    _top5_score,
     _zone,
     effective_holdings,
     hhi,
@@ -100,17 +99,6 @@ def test_normalized_hhi_score_monotonic_in_skew():
         assert 0.0 <= s <= 100.0
 
 
-@pytest.mark.parametrize("n", [2, 3, 4, 5])
-def test_top5_score_full_for_small_books(n):
-    assert _top5_score([1.0 / n] * n, n) == pytest.approx(100.0)
-
-
-def test_top5_score_penalizes_large_books():
-    assert _top5_score([0.1] * 10, 10) == pytest.approx(100.0)
-    weights = [0.18] * 5 + [0.02] * 5
-    assert 0.0 <= _top5_score(weights, 10) < 60.0
-
-
 @pytest.mark.parametrize(
     "cap,bucket",
     [
@@ -168,7 +156,7 @@ def test_max_points_sum_to_100_with_caps():
     res = score_holdings([_h("A", 5000, "Technology", "US", 4e11),
                           _h("B", 5000, "Healthcare", "US", 1e9)])
     assert res is not None
-    assert {s.key for s in res.sub_scores} == {"position", "sector", "single_top5", "marketcap"}
+    assert {s.key for s in res.sub_scores} == {"position", "sector", "marketcap"}
     assert sum(s.max_points for s in res.sub_scores) == 100
 
 
@@ -176,7 +164,7 @@ def test_max_points_sum_to_100_without_caps():
     res = score_holdings([_h("A", 5000, "Technology", "US", None),
                           _h("B", 5000, "Healthcare", "US", None)])
     assert res is not None
-    assert {s.key for s in res.sub_scores} == {"position", "sector", "single_top5"}
+    assert {s.key for s in res.sub_scores} == {"position", "sector"}
     assert sum(s.max_points for s in res.sub_scores) == 100
     assert "marketcap" not in {s.key for s in res.sub_scores}
 

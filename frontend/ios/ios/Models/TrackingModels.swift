@@ -367,7 +367,7 @@ struct SectorAllocation: Identifiable {
 /// overall score. `zone` ("green"/"yellow"/"red") drives the bar color.
 struct DiversificationSubScore: Identifiable {
     let id = UUID()
-    let key: String       // "position" | "sector" | "single_top5" | "marketcap"
+    let key: String       // "position" | "sector" | "marketcap"
     let label: String
     let points: Int       // earned, 0…maxPoints
     let maxPoints: Int    // budget for this dimension

@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
+from app.utils.period_labels import quarterly_period_label
 from app.schemas.earnings import (
     EarningsDailyPriceSchema,
     EarningsQuarterSchema,
@@ -53,18 +54,15 @@ def _cache_set(key: str, value: Any) -> None:
 
 # ── Helpers ────────────────────────────────────────────────────────
 
-def _quarter_label(period: str, fiscal_date: str) -> str:
-    """Build 'Q1 '24' label from income statement fields.
-
-    Uses the calendar year from the fiscal end date for display.
-    period is 'Q1'..'Q4' directly from FMP income statement.
-    """
-    try:
-        dt = datetime.strptime(fiscal_date[:10], "%Y-%m-%d")
-        yr = dt.strftime("%y")
-    except Exception:
-        yr = "??"
-    return f"{period} '{yr}"
+def _fiscal_year_for_quarter(cal_year: int, end_month: int, quarter: int) -> int:
+    """Fiscal year for a quarter ending in (cal_year, end_month), i.e. the
+    calendar year of that fiscal cycle's Q4 (the FY-end). For a December FYE this
+    equals the calendar year; for Oracle (May FYE) fiscal Q1 (ends Aug 2025) →
+    FY2026. Used to keep FORECAST labels (estimates, which lack fiscalYear)
+    fiscal-consistent with the historical labels, so the Earnings Timeline reads
+    monotonically across the actual→forecast boundary."""
+    months_to_q4 = (4 - quarter) * 3
+    return cal_year + ((end_month - 1) + months_to_q4) // 12
 
 
 def _safe_float(d: dict, key: str) -> Optional[float]:
@@ -176,7 +174,15 @@ def _infer_fiscal_label(est_date: str, fiscal_month_map: Dict[int, str]) -> str:
     else:
         year = dt.year
 
-    yr = str(year % 100).zfill(2)
+    # Pair the inferred fiscal quarter with the FISCAL year (not the calendar
+    # year of the estimate date) so off-calendar-FY companies stay monotonic and
+    # match the historical labels built from FMP's fiscalYear field.
+    try:
+        q = int(period[1:])
+        fy = _fiscal_year_for_quarter(year, best_month, q)
+    except (ValueError, IndexError):
+        fy = year
+    yr = str(fy % 100).zfill(2)
     return f"{period} '{yr}"
 
 
@@ -435,9 +441,11 @@ class EarningsService:
 
         # ── Phase A: Historical quarters ──
         for rec in income_sorted:
-            period = rec.get("period", "Q?")
             fiscal_date = rec["date"]
-            label = _quarter_label(period, fiscal_date)
+            # Fiscal-year display label ("Q4 '26") — uses FMP's fiscalYear so
+            # off-calendar-FY companies (Oracle FY ends May) read monotonically
+            # instead of scrambling fiscal Q1/Q2 to the prior calendar year.
+            label = quarterly_period_label(rec, use_fiscal_year=True)
             fiscal_key = fiscal_date[:10]
 
             # Try to match with earnings-calendar (adjusted/non-GAAP data)

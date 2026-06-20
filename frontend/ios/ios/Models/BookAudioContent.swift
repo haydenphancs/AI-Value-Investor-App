@@ -32,8 +32,8 @@ extension BookAudioInfo {
         ),
         2: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a",
-            totalSeconds: 2244,
-            coreStartSeconds: [1: 0, 2: 165, 3: 346, 4: 554, 5: 757, 6: 961, 7: 1136, 8: 1300, 9: 1484, 10: 1664, 11: 1878, 12: 2056]
+            totalSeconds: 2246,
+            coreStartSeconds: [1: 0, 2: 179, 3: 350, 4: 558, 5: 748, 6: 944, 7: 1114, 8: 1290, 9: 1486, 10: 1663, 11: 1858, 12: 2035]
         ),
         3: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/3_the-psychology-of-money.m4a",

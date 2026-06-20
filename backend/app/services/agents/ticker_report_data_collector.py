@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
+from app.utils.period_labels import quarterly_period_label
 from app.schemas.analyst import (
     AnalystAnalysisResponse,
     AnalystConsensus,
@@ -3500,7 +3501,12 @@ def _history_period_id(
         except ValueError:
             quarter = None
     if quarter is not None and 1 <= quarter <= 4:
-        return (f"{cal_year}-Q{quarter}", f"Q{quarter} '{disp_year % 100:02d}",
+        # Display via the shared helper (single source for the "Q4 '26" form);
+        # the JOIN key below stays calendar for the sector-benchmark lookup.
+        display = quarterly_period_label(
+            {"period": f"Q{quarter}", "fiscalYear": disp_year}, use_fiscal_year=True
+        )
+        return (f"{cal_year}-Q{quarter}", display,
                 cal_year, quarter, date_str or f"{cal_year}-Q{quarter}")
     # Last resort: a per-row unique key (the date) so the row still charts;
     # YoY can't be computed for it (no derivable quarter), which is correct.

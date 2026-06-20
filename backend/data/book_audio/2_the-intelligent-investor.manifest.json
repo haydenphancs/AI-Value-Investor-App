@@ -4,12 +4,13 @@
   "author": "Benjamin Graham",
   "slug": "the-intelligent-investor",
   "audio_file": "2_the-intelligent-investor.m4a",
-  "voice": "Iapetus",
-  "target_wpm": 150,
+  "voice": "clone:graham_iapetus",
+  "engine": "chatterbox",
+  "target_wpm": null,
   "pitch_semitones": 0,
   "break_seconds": 2.5,
-  "total_seconds": 2244.38,
-  "total_label": "37:24",
+  "total_seconds": 2245.62,
+  "total_label": "37:26",
   "cores": [
     {
       "number": 1,
@@ -20,68 +21,68 @@
     {
       "number": 2,
       "title": "The Invisible Enemy",
-      "start_seconds": 164.89,
-      "start_label": "2:45"
+      "start_seconds": 178.62,
+      "start_label": "2:59"
     },
     {
       "number": 3,
       "title": "Mastering the Manic-Depressive Market",
-      "start_seconds": 346.29,
-      "start_label": "5:46"
+      "start_seconds": 349.92,
+      "start_label": "5:50"
     },
     {
       "number": 4,
       "title": "Building the Fortress (The Defensive Strategy)",
-      "start_seconds": 553.65,
-      "start_label": "9:14"
+      "start_seconds": 557.54,
+      "start_label": "9:18"
     },
     {
       "number": 5,
-      "title": "Here is the content for Core 5, where we outline the strict rules for those who want to beat the market.",
-      "start_seconds": 756.87,
-      "start_label": "12:37"
+      "title": "Going on the Offensive (The Enterprising Strategy)",
+      "start_seconds": 748.12,
+      "start_label": "12:28"
     },
     {
       "number": 6,
       "title": "The Mutual Fund Maze",
-      "start_seconds": 961.41,
-      "start_label": "16:01"
+      "start_seconds": 943.66,
+      "start_label": "15:44"
     },
     {
       "number": 7,
       "title": "The Earnings Mirage",
-      "start_seconds": 1136.44,
-      "start_label": "18:56"
+      "start_seconds": 1114.0,
+      "start_label": "18:34"
     },
     {
       "number": 8,
       "title": "The Comparison Test",
-      "start_seconds": 1299.72,
-      "start_label": "21:40"
+      "start_seconds": 1290.22,
+      "start_label": "21:30"
     },
     {
       "number": 9,
       "title": "Filtering for Quality (The Defensive Screen)",
-      "start_seconds": 1484.36,
-      "start_label": "24:44"
+      "start_seconds": 1486.2,
+      "start_label": "24:46"
     },
     {
       "number": 10,
       "title": "Hunting for Bargains (The Enterprising Screen)",
-      "start_seconds": 1664.46,
-      "start_label": "27:44"
+      "start_seconds": 1662.7,
+      "start_label": "27:43"
     },
     {
       "number": 11,
       "title": "Spotting the Red Flags",
-      "start_seconds": 1878.38,
-      "start_label": "31:18"
+      "start_seconds": 1857.6,
+      "start_label": "30:58"
     },
     {
       "number": 12,
       "title": "The Golden Rule (Margin of Safety)",
-      "start_seconds": 2055.58,
-      "start_label": "34:16"
+      "start_seconds": 2034.7,
+      "start_label": "33:55"
     }
   ],
   "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a?"

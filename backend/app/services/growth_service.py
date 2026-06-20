@@ -12,6 +12,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client
+from app.utils.period_labels import quarterly_period_label
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
@@ -160,7 +161,7 @@ def _compute_growth_points(
                 # period = fiscal label for DISPLAY; _match_period = calendar
                 # label for the sector-benchmark join (identical to the
                 # calendar-keyed sector_benchmarks rows so the overlay matches).
-                "period": _quarterly_period_label(rec, use_fiscal_year=True),
+                "period": quarterly_period_label(rec, use_fiscal_year=True),
                 "_match_period": _quarterly_period_label(rec),
                 "value": current_val,
                 "yoy_change_percent": _compute_yoy(current_val, prev_val),

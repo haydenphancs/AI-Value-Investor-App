@@ -197,16 +197,33 @@ def action_recap(action: list[tuple[str, str]]) -> str:
     return f"To put this into practice, here are your action steps: {joined}."
 
 
-def action_plan_narration(action: list[tuple[str, str]]) -> list[str]:
-    """FULL spoken action plan — the heading plus each step's title AND description (unlike
-    action_recap, which only lists titles). Returns spoken blocks (or [] if no action plan). Used by
-    the voice-clone narrator, which reads the whole plan aloud at the end of the core."""
-    if not action:
+_NUM_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+              7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+# Rotated per core so a 12-core book doesn't open every action plan the same way.
+_AP_INTROS = [
+    "Now, let's turn insight into action.",
+    "Knowing is only half the battle — here's the other half.",
+    "Before we move on, let's make this practical.",
+    "Ideas are only worth what you do with them, so let's get to work.",
+    "Here's where the reading becomes doing.",
+]
+
+
+def action_plan_narration(action: list[tuple[str, str]], core_index: int = 0) -> list[str]:
+    """FULL spoken action plan — a natural spoken intro (rotated per core for variety), then each
+    action item read by its name + description. The items are NOT ordered steps, so there's no
+    "first/second/step N" framing — the intro just notes how many there are. Returns spoken blocks
+    (or [] if no action plan). Spoken by the voice-clone narrator at the core's end; NOT highlighted
+    (the action plan renders as on-screen checklist cards)."""
+    items = [(strip_markup(t).strip().rstrip(".:"), strip_markup(d).strip())
+             for t, d in action if t and t.strip()]
+    if not items:
         return []
-    blocks = ["The Action Plan."]
-    for title, desc in action:
-        t = strip_markup(title).strip().rstrip(".:")
-        d = strip_markup(desc).strip()
+    n = len(items)
+    opener = _AP_INTROS[core_index % len(_AP_INTROS)]
+    count = "one thing" if n == 1 else f"{_NUM_WORDS.get(n, str(n))} things"
+    blocks = [f"{opener} Here's your action plan — {count} to put into practice."]
+    for t, d in items:
         blocks.append(f"{t}. {d}" if d else f"{t}.")
     return blocks
 

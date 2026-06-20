@@ -40,7 +40,7 @@ BREAK = gba.BREAK_SECONDS
 
 # Per-book reference voice clip (the clone source) — built from the Gemini audition samples so each
 # book keeps the voice we cast. Add entries here as we roll out to more books.
-REFS = {2: "graham_iapetus.wav"}
+REFS = {2: "graham_iapetus.wav", 5: "fisher_schedar.wav", 6: "bogle_alnilam.wav"}
 
 
 def split_sentences(text: str) -> list[str]:
@@ -50,7 +50,7 @@ def split_sentences(text: str) -> list[str]:
 def core_sentences(idx, title, sections, action, bridges) -> list[str]:
     """Spoken sentences for a core: bridge + body + FULL action plan, sentence-split (one Chatterbox
     call per sentence — same granularity as the approved prototype)."""
-    blocks = [bridges[idx]] + gba.body_blocks(title, sections) + gba.action_plan_narration(action)
+    blocks = [bridges[idx]] + gba.body_blocks(title, sections) + gba.action_plan_narration(action, idx)
     return [s for b in blocks for s in split_sentences(b)]
 
 

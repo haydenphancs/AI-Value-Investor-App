@@ -29,7 +29,9 @@ with contextlib.redirect_stdout(io.StringIO()):
     import gen_books_swift as g  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = ROOT / "data/voice_clone/refs/graham_iapetus.wav"
+REFDIR = ROOT / "data/voice_clone/refs"
+# Per-book reference voice clip (the clone source), matched by author to the cast Gemini voice.
+REFS = {2: "graham_iapetus.wav", 5: "fisher_schedar.wav", 6: "bogle_alnilam.wav"}
 OUTDIR = ROOT / "data/voice_clone"
 
 
@@ -52,6 +54,11 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     order = int(args[0]) if args else 2
     core = int(args[1]) if len(args) > 1 else 1
+    if order not in REFS:
+        raise SystemExit(f"no reference clip mapped for book {order} (add to REFS)")
+    REF = REFDIR / REFS[order]
+    if not REF.exists():
+        raise SystemExit(f"reference clip missing: {REF}")
 
     _, dirname, btitle, bauthor = next(b for b in g.BOOKS if b[0] == order)
     p = g.BD / dirname / f"core {core}.txt"
@@ -60,7 +67,7 @@ def main():
     blocks = [bridge] + body_blocks(sections)
     chunks = [s for b in blocks for s in split_sentences(b)]
 
-    dev = "mps" if torch.backends.mps.is_available() else "cpu"
+    dev = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[clone] book {order} core {core} '{title}' · device={dev} · {len(chunks)} chunks · ref={REF.name}")
     model = ChatterboxTTS.from_pretrained(device=dev)
 

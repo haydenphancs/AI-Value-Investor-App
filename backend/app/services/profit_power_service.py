@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
+from app.utils.period_labels import quarterly_period_label
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
@@ -153,7 +154,7 @@ def _build_margin_points(
             continue
 
         if is_quarterly:
-            label = _quarterly_period_label(rec, use_fiscal_year=True)  # fiscal display
+            label = quarterly_period_label(rec, use_fiscal_year=True)   # fiscal display
             match_period = _quarterly_period_label(rec)                 # calendar join key
         else:
             label = _annual_period_label(rec)

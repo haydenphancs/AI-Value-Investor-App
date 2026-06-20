@@ -57,72 +57,86 @@ struct MetricHistoryChart: View {
     }
 
     private var chart: some View {
-        Chart {
-            ForEach(indexedCompany, id: \.idx) { item in
-                BarMark(
-                    x: .value("i", item.idx),
-                    // Clamp the drawn height into the robust domain so one extreme
-                    // year (e.g. a P/E spike to 5000×) pins to the chart edge
-                    // instead of flattening every other bar to a sliver.
-                    y: .value("Value", clamped(item.point.value ?? 0)),
-                    width: .ratio(0.72)
-                )
-                .foregroundStyle(color(for: item.point))
-                .cornerRadius(3)
-            }
-            // Sector-average overlay: a dashed gray line + dots at the SAME
-            // index positions as the bars (mirrors GrowthChartView).
-            ForEach(sectorValued) { point in
-                if let xi = periodToIndex[point.period] {
-                    LineMark(
-                        x: .value("i", xi),
-                        y: .value("Sector", clamped(point.value ?? 0)),
-                        series: .value("Series", "Sector avg")
+        // GeometryReader so the bar width can be a real point value: on a
+        // CONTINUOUS numeric x-axis a `.ratio(_)` width collapses to a hairline
+        // (Swift Charts infers no category band to take a fraction of), which
+        // made every company bar render invisibly while the sector LineMark —
+        // which needs no band width — still drew. Compute a `.fixed` width ≈72%
+        // of a visible column instead (mirrors SmartMoneyFlowChart/GrowthChartView,
+        // the codebase's other bar charts — none of which use `.ratio`).
+        GeometryReader { geo in
+            // Subtract an approximate leading y-axis label width; the estimate
+            // only affects how fat the bars look (Charts positions them from the
+            // x-scale), so a few points off is harmless.
+            let plotWidth = Swift.max(geo.size.width - 40, 1)
+            let barW = Swift.min(Swift.max((plotWidth / CGFloat(visibleColumns)) * 0.72, 2), 48)
+            Chart {
+                ForEach(indexedCompany, id: \.idx) { item in
+                    BarMark(
+                        x: .value("i", item.idx),
+                        // Clamp the drawn height into the robust domain so one extreme
+                        // year (e.g. a P/E spike to 5000×) pins to the chart edge
+                        // instead of flattening every other bar to a sliver.
+                        y: .value("Value", clamped(item.point.value ?? 0)),
+                        width: .fixed(barW)
                     )
-                    .foregroundStyle(AppColors.textSecondary)
-                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
-                    .interpolationMethod(.catmullRom)
-                    PointMark(
-                        x: .value("i", xi),
-                        y: .value("Sector", clamped(point.value ?? 0))
-                    )
-                    .foregroundStyle(AppColors.textSecondary)
-                    .symbolSize(18)
+                    .foregroundStyle(color(for: item.point))
+                    .cornerRadius(3)
                 }
-            }
-        }
-        .chartYScale(domain: yDomain)
-        .chartXScale(domain: -0.5 ... (Double(orderedPeriods.count) - 0.5))
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine()
-                    .foregroundStyle(AppColors.textMuted.opacity(0.15))
-                AxisValueLabel {
-                    if let d = value.as(Double.self) {
-                        Text(format(d))
-                            .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.textMuted)
+                // Sector-average overlay: a dashed gray line + dots at the SAME
+                // index positions as the bars (mirrors GrowthChartView).
+                ForEach(sectorValued) { point in
+                    if let xi = periodToIndex[point.period] {
+                        LineMark(
+                            x: .value("i", xi),
+                            y: .value("Sector", clamped(point.value ?? 0)),
+                            series: .value("Series", "Sector avg")
+                        )
+                        .foregroundStyle(AppColors.textSecondary)
+                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                        .interpolationMethod(.catmullRom)
+                        PointMark(
+                            x: .value("i", xi),
+                            y: .value("Sector", clamped(point.value ?? 0))
+                        )
+                        .foregroundStyle(AppColors.textSecondary)
+                        .symbolSize(18)
                     }
                 }
             }
-        }
-        .chartXAxis {
-            AxisMarks(values: tickIndices) { value in
-                AxisValueLabel(centered: true) {
-                    if let d = value.as(Double.self), let label = labelAt(d) {
-                        Text(label)
-                            .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.textMuted)
-                            .fixedSize()  // never ellipsize ("Q4…" → "Q4 '26")
+            .chartYScale(domain: yDomain)
+            .chartXScale(domain: -0.5 ... (Double(orderedPeriods.count) - 0.5))
+            .chartYAxis {
+                AxisMarks(position: .leading, values: yTicks) { value in
+                    AxisGridLine()
+                        .foregroundStyle(AppColors.textMuted.opacity(0.15))
+                    AxisValueLabel {
+                        if let d = value.as(Double.self) {
+                            Text(format(d))
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textMuted)
+                        }
                     }
                 }
             }
+            .chartXAxis {
+                AxisMarks(values: tickIndices) { value in
+                    AxisValueLabel(centered: true) {
+                        if let d = value.as(Double.self), let label = labelAt(d) {
+                            Text(label)
+                                .font(AppTypography.labelSmall)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize()  // never ellipsize ("Q4…" → "Q4 '26")
+                        }
+                    }
+                }
+            }
+            // Horizontally scrollable: show a window of columns at a readable width,
+            // opening at the most-recent end; the y-axis stays pinned.
+            .chartScrollableAxes(.horizontal)
+            .chartXVisibleDomain(length: Double(visibleColumns))
+            .chartScrollPosition(initialX: Double(max(0, orderedPeriods.count - visibleColumns)))
         }
-        // Horizontally scrollable: show a window of columns at a readable width,
-        // opening at the most-recent end; the y-axis stays pinned.
-        .chartScrollableAxes(.horizontal)
-        .chartXVisibleDomain(length: Double(visibleColumns))
-        .chartScrollPosition(initialX: Double(max(0, orderedPeriods.count - visibleColumns)))
         .frame(height: 200)
     }
 
@@ -160,21 +174,28 @@ struct MetricHistoryChart: View {
     }
 
     /// Outlier-robust y-axis range that ALWAYS includes zero (so the baseline
-    /// is visible even for an all-negative series) and caps the upper/lower
-    /// bound with an IQR fence (so a single extreme bar can't flatten the
-    /// rest — same idea as GrowthChartView / EarningsTimelineChart). Values
-    /// beyond the fence are clamped to the edge when drawn.
+    /// is visible even for an all-negative series) and clamps only GENUINELY
+    /// extreme bars to the edge (so one spike — a P/E of 5000×, an interest-
+    /// coverage of −5000× — can't flatten the rest). Modest negatives (e.g. a
+    /// −2.9% ROA quarter) must render at TRUE height: the old lower fence
+    /// (`q1 − 1.5·iqr`) could land above zero for a low-magnitude series, which
+    /// drove `bottom` to 0 and collapsed every negative bar onto the baseline
+    /// (they looked "missing").
     private var yDomain: ClosedRange<Double> {
-        // Include sector values so the overlaid line stays in-frame; the IQR
-        // fence below still clamps any single outlier (company or sector).
+        // Include sector values so the overlaid line stays in-frame.
         let vals = (valued.compactMap(\.value) + sectorValued.compactMap(\.value)).sorted()
         guard let lo = vals.first, let hi = vals.last else { return 0...1 }
         let q1 = vals[vals.count / 4]
         let q3 = vals[min(vals.count - 1, (vals.count * 3) / 4)]
         // IQR with a floor so a flat series (iqr≈0) still gets a sane window.
         let iqr = Swift.max(q3 - q1, abs(q3) * 0.1, 1)
+        // Robust scale → the extreme-outlier clamp. A value within ±3·scale is
+        // treated as legitimate and shown at true height; only beyond that does
+        // it clamp to the edge. This keeps ROA −2.9% visible while still taming
+        // a P/E 5000× spike.
+        let scale = Swift.max(abs(q3), abs(q1), iqr)
         let fenceHi = Swift.min(hi, q3 + 1.5 * iqr)
-        let fenceLo = Swift.max(lo, q1 - 1.5 * iqr)
+        let fenceLo = Swift.max(lo, -3.0 * scale)
         // Anchor zero so the baseline is always on-screen.
         var top = Swift.max(fenceHi, 0)
         var bottom = Swift.min(fenceLo, 0)
@@ -184,6 +205,32 @@ struct MetricHistoryChart: View {
         top += (top > 0) ? span * 0.08 : 0
         bottom -= (bottom < 0) ? span * 0.08 : 0
         return bottom...top
+    }
+
+    /// Explicit y-axis ticks anchored on 0 and stepped outward by a "nice"
+    /// increment, so the negative region ALWAYS gets a labeled tick when the
+    /// domain goes below zero (Swift Charts' automatic marks skip a narrow
+    /// negative tail). `bottom` ≤ 0 ≤ `top` always (domain anchors zero).
+    private var yTicks: [Double] {
+        let lo = yDomain.lowerBound, hi = yDomain.upperBound
+        guard hi > lo else { return [lo, hi] }
+        let step = niceStep((hi - lo) / 4)
+        guard step > 0 else { return [lo, 0, hi] }
+        var ticks: [Double] = [0]
+        var t = step
+        while t <= hi + step * 1e-6 { ticks.append(t); t += step }
+        t = -step
+        while t >= lo - step * 1e-6 { ticks.append(t); t -= step }
+        return ticks.sorted()
+    }
+
+    /// Round a raw step up to the nearest 1/2/5 × 10ⁿ for clean axis labels.
+    private func niceStep(_ raw: Double) -> Double {
+        guard raw > 0, raw.isFinite else { return 1 }
+        let mag = pow(10, (log10(raw)).rounded(.down))
+        let n = raw / mag
+        let nice: Double = n < 1.5 ? 1 : (n < 3 ? 2 : (n < 7 ? 5 : 10))
+        return nice * mag
     }
 
     private func format(_ v: Double) -> String {

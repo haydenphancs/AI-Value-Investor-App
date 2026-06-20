@@ -52,11 +52,12 @@ def test_user_scenario_pre_close_report_goes_stale_after_new_close():
 
 def test_weekend_holds_fridays_close():
     # Saturday: the boundary is Friday's close (no Sat/Sun boundary), so a
-    # Friday-evening report stays fresh through the weekend.
-    sat = datetime(2026, 6, 20, 18, 0, tzinfo=timezone.utc)  # ~2pm ET Sat
+    # Friday-evening report stays fresh through the weekend. Dates must sit
+    # AFTER CACHE_SCHEMA_FLOOR (else the floor, not the cycle, marks it stale).
+    sat = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)  # ~2pm ET Sat
     cycle = current_close_cycle_start(sat)
     assert cycle.weekday() == 4  # Friday
-    fri_eve = datetime(2026, 6, 19, 23, 0, tzinfo=timezone.utc)  # ~7pm ET Fri
+    fri_eve = datetime(2026, 6, 26, 23, 0, tzinfo=timezone.utc)  # ~7pm ET Fri
     assert is_cache_fresh(fri_eve, now=sat)
 
 

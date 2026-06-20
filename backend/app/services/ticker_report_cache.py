@@ -118,7 +118,13 @@ TABLE_NAME = "ticker_report_cache"
 # 2026-06-13: bumped so the Future Forecast price overlay re-assembles at WEEKLY
 #     granularity (timeline_prices: monthly → last close per ISO week) for a
 #     smoother, more detailed price line.
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 13, 0, 0, 0, tzinfo=timezone.utc)
+# 2026-06-20: bumped so reports re-assemble with COMPLETE Fundamentals & Growth
+#     sector-average history. Two fixes shipped: earnings_yield is now a populated
+#     (computed) benchmark, and sector_benchmark_lookup now paginates past the
+#     ~1000-row Supabase cap (a 14-metric × ~84-quarter query was truncating, so
+#     whole metrics' quarterly sector lines silently vanished). Existing reports
+#     baked the truncated data — invalidate them so they re-collect cleanly.
+CACHE_SCHEMA_FLOOR = datetime(2026, 6, 20, 19, 54, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

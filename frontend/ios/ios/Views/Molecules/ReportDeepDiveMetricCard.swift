@@ -51,6 +51,15 @@ struct ReportDeepDiveMetricCard: View {
                             .foregroundColor(index < data.starRating ? Color(hex: "F59E0B") : AppColors.textMuted)
                     }
                 }
+
+                // Drill-down affordance — present only when this card carries
+                // a tap-to-expand time series (the section wires the tap).
+                if data.hasHistory {
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconMicro)
+                        .foregroundColor(AppColors.textMuted)
+                        .padding(.leading, 1)
+                }
             }
 
             Divider()

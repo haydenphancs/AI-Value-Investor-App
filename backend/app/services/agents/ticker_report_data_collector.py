@@ -585,11 +585,27 @@ class TickerReportDataCollector:
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
             ("quote", self.fmp.get_stock_price_quote(ticker), {}),
-            ("income", self.fmp.get_income_statement(ticker, "annual", 5), []),
-            ("balance", self.fmp.get_balance_sheet(ticker, "annual", 5), []),
-            ("cash_flow", self.fmp.get_cash_flow_statement(ticker, "annual", 5), []),
-            ("key_metrics", self.fmp.get_key_metrics(ticker, "annual", 5), []),
-            ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 5), []),
+            # 10y annual depth (was 5) so the Fundamentals & Growth cards'
+            # tap-to-expand history charts a full decade. All downstream
+            # consumers use [0]/[1] or iterate — more rows only adds context.
+            ("income", self.fmp.get_income_statement(ticker, "annual", 10), []),
+            ("balance", self.fmp.get_balance_sheet(ticker, "annual", 10), []),
+            ("cash_flow", self.fmp.get_cash_flow_statement(ticker, "annual", 10), []),
+            ("key_metrics", self.fmp.get_key_metrics(ticker, "annual", 10), []),
+            ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 10), []),
+            # Quarterly counterparts — TRANSIENT. These attrs are NOT declared
+            # dataclass fields, so the ticker_data_cache serializer (which
+            # iterates dataclasses.fields) skips them and the cache stays
+            # small. They exist only between _fetch_all and _compute_metrics,
+            # where _build_fundamentals_history folds them into the compact
+            # per-metric series carried on fundamental_metrics_partial. ~12
+            # quarters → the chart's Quarterly toggle (8 YoY points after the
+            # 4-quarter gap). Read later via getattr(out, "<name>", []).
+            ("income_q", self.fmp.get_income_statement(ticker, "quarter", 12), []),
+            ("balance_q", self.fmp.get_balance_sheet(ticker, "quarter", 12), []),
+            ("cash_flow_q", self.fmp.get_cash_flow_statement(ticker, "quarter", 12), []),
+            ("key_metrics_q", self.fmp.get_key_metrics(ticker, "quarter", 12), []),
+            ("ratios_q", self.fmp.get_financial_ratios(ticker, "quarter", 12), []),
             # Pull 10 years of analyst estimates so we have current FY + 3
             # future on-screen (4 bars), plus the FY immediately before the
             # leftmost visible bar as its off-screen YoY anchor. FMP returns
@@ -1454,11 +1470,17 @@ class TickerReportDataCollector:
         # ── Fundamental metrics (4 cards) — deterministic from the
         #    same snapshot services that power TickerDetailView's
         #    Financials tab. AI's Stage A version is discarded. ────────
+        #    Each metric also carries a compact 10y annual + ~quarterly
+        #    series (tap-to-expand history) computed from the raw FMP
+        #    arrays already on `out` plus the transient *_q quarterly
+        #    fetches. Baked here so it travels with the frozen report.
+        fundamentals_history = _build_fundamentals_history(out)
         out.fundamental_metrics_partial = _build_fundamental_metrics_from_snapshots(
             profitability=out.snap_profitability,
             growth=out.snap_growth,
             valuation=out.snap_valuation,
             health=out.snap_health,
+            history_lookup=fundamentals_history,
         )
 
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
@@ -3270,10 +3292,322 @@ def _format_earnings_yield(ey: Optional[float]) -> str:
     return f"{ey:.2f}%"
 
 
+# ── Fundamentals & Growth tap-to-expand history ──────────────────────────
+# Each snapshot metric's display label carries a sector-context suffix
+# ("Gross Margin (1.2x sector avg 35%)"), so we map label → stable history
+# key by PREFIX. These prefixes are mutually non-overlapping.
+_HISTORY_KEY_BY_LABEL_PREFIX: List[Tuple[str, str]] = [
+    ("Gross Margin", "gross_margin"),
+    ("Operating Margin", "operating_margin"),
+    ("Net Margin", "net_margin"),
+    ("Return on Equity", "roe"),
+    ("Return on Assets", "roa"),
+    ("Revenue Growth", "revenue_growth"),
+    ("EPS Growth", "eps_growth"),
+    ("Free Cash Flow Growth", "fcf_growth"),
+    ("Operating Income Growth", "operating_income_growth"),
+    ("P/FCF", "pfcf"),
+    ("P/E", "pe"),
+    ("P/B", "pb"),
+    ("P/S", "ps"),
+    ("EV/EBITDA", "ev_ebitda"),
+    ("Earnings Yield", "earnings_yield"),
+    ("Altman Z-Score", "altman_z"),
+    ("Debt-to-Equity", "debt_to_equity"),
+    ("Current Ratio", "current_ratio"),
+    ("Interest Coverage", "interest_coverage"),
+    ("Quick Ratio", "quick_ratio"),
+]
+
+# iOS chart axis/value formatting per key: "percent" → "42.1%",
+# "x" → "35.8x", "score" → "12.5".
+_HISTORY_UNITS: Dict[str, str] = {
+    "gross_margin": "percent", "operating_margin": "percent",
+    "net_margin": "percent", "roe": "percent", "roa": "percent",
+    "revenue_growth": "percent", "eps_growth": "percent",
+    "fcf_growth": "percent", "operating_income_growth": "percent",
+    "earnings_yield": "percent",
+    "pe": "x", "pb": "x", "ps": "x", "pfcf": "x", "ev_ebitda": "x",
+    "debt_to_equity": "x", "current_ratio": "x", "quick_ratio": "x",
+    "interest_coverage": "x",
+    "altman_z": "score",
+}
+
+
+def _resolve_history_key(label: str) -> Optional[str]:
+    """Map a snapshot metric label to its stable history key, or None."""
+    for prefix, key in _HISTORY_KEY_BY_LABEL_PREFIX:
+        if label.startswith(prefix):
+            return key
+    return None
+
+
+def _history_period_id(
+    rec: Any, quarterly: bool,
+) -> Optional[Tuple[str, str, int, Optional[int]]]:
+    """Return (join_key, display_label, year, quarter|None), or None.
+
+    - `join_key` is a STABLE cross-array identity so the income/ratios/etc.
+      rows for the same period line up (and dedup) deterministically.
+    - `display_label` is what the chart shows ("2024" / "Q1 '24").
+    - Guards non-dict rows (malformed FMP) → None.
+
+    Quarter is taken from FMP's `period` field ("Q1".."Q4"); when that is
+    missing it is derived from the date month so four same-year quarters
+    don't collapse into one key (the bug this replaces). `calendarYear` is
+    preferred over `date[:4]` for fiscal-year companies (matches growth_service).
+    """
+    if not isinstance(rec, dict):
+        return None
+    raw_year = rec.get("calendarYear")
+    date_str = rec.get("date") or ""
+    if raw_year in (None, ""):
+        raw_year = date_str[:4] if len(date_str) >= 4 else None
+    try:
+        year = int(raw_year)
+    except (TypeError, ValueError):
+        return None
+
+    if not quarterly:
+        return (str(year), str(year), year, None)
+
+    quarter: Optional[int] = None
+    period = rec.get("period")
+    if isinstance(period, str):
+        p = period.strip().upper()
+        if p.startswith("Q") and p[1:].isdigit():
+            quarter = int(p[1:])
+    if quarter is None and len(date_str) >= 7:
+        try:
+            month = int(date_str[5:7])
+            if 1 <= month <= 12:
+                quarter = (month - 1) // 3 + 1
+        except ValueError:
+            quarter = None
+    if quarter is not None and 1 <= quarter <= 4:
+        return (f"{year}-Q{quarter}", f"Q{quarter} '{year % 100:02d}", year, quarter)
+    # Last resort: a per-row unique key (the date) so the row still charts;
+    # YoY can't be computed for it (no derivable quarter), which is correct.
+    return (date_str or f"{year}-?",
+            date_str[:7] if len(date_str) >= 7 else str(year), year, None)
+
+
+# P/FCF & EV/EBITDA above this are near-zero-denominator artefacts (FMP data
+# errors / rounding), not real multiples — drop them so one bad year doesn't
+# distort the chart. A genuine high-flyer rarely exceeds a few hundred ×.
+_RECON_RATIO_CEIL = 1000.0
+
+
+def _hist_pfcf(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
+    """P/FCF = market cap ÷ FCF. None for non-positive FCF or an artefact-grade
+    multiple (near-zero FCF → astronomical ratio). Mirrors the reconstruction
+    in sector_benchmark_service / valuation_snapshot_service."""
+    mcap = _safe_float(km, "marketCap")
+    fcf = _safe_float(cf, "freeCashFlow")
+    if mcap <= 0 or fcf <= 0:
+        return None
+    ratio = mcap / fcf
+    return ratio if ratio <= _RECON_RATIO_CEIL else None
+
+
+def _hist_ev_ebitda(
+    km: Dict[str, Any], cf: Dict[str, Any], inc: Dict[str, Any],
+) -> Optional[float]:
+    """EV/EBITDA with the same EBITDA fallback chain used elsewhere
+    (inc.ebitda → operatingIncome + D&A). The fallback requires a POSITIVE
+    operating income — otherwise a deep operating loss + heavy D&A can
+    manufacture a fake positive EBITDA and a misleading multiple. Also drops
+    artefact-grade multiples (near-zero EBITDA)."""
+    ev = _safe_float(km, "enterpriseValue")
+    if ev <= 0:
+        return None
+    ebitda = _safe_float(inc, "ebitda")
+    if ebitda <= 0:
+        op_income = _safe_float(inc, "operatingIncome")
+        if op_income <= 0:
+            return None
+        d_and_a = (
+            _safe_float(cf, "depreciationAndAmortization")
+            or _safe_float(inc, "depreciationAndAmortization")
+        )
+        ebitda = op_income + d_and_a
+    if ebitda <= 0:
+        return None
+    ratio = ev / ebitda
+    return ratio if ratio <= _RECON_RATIO_CEIL else None
+
+
+def _fundamentals_history_for_period(
+    income: List[Dict[str, Any]],
+    balance: List[Dict[str, Any]],
+    cash_flow: List[Dict[str, Any]],
+    key_metrics: List[Dict[str, Any]],
+    ratios: List[Dict[str, Any]],
+    profile: Dict[str, Any],
+    quarterly: bool,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Compute {history_key: [{period, value}, …]} oldest→newest for ONE
+    granularity (annual or quarterly). Cross-array metrics are joined by a
+    stable period KEY; everything is best-effort (missing input → null point).
+
+    Robustness (hardened after the edge-case audit):
+    - Non-dict rows are skipped (a malformed FMP element never crashes the join).
+    - Each array is de-duped keeping the FIRST occurrence; under FMP's
+      newest-first ordering that means a restatement wins over the stale
+      original for the same period.
+    - Periods are SORTED by (year, quarter) ascending, so output is
+      oldest→newest regardless of the input order.
+    - YoY growth compares against the SAME period one year earlier via a
+      direct key lookup (year-1, same quarter) — NOT a positional offset — so
+      a data gap can never pair a quarter with the wrong prior quarter; a
+      genuinely missing prior period yields no growth point (correct)."""
+
+    def index(records: List[Dict[str, Any]]):
+        idx: Dict[str, Dict[str, Any]] = {}
+        meta: Dict[str, Tuple[int, Optional[int], str]] = {}
+        for r in records:
+            pid = _history_period_id(r, quarterly)
+            if pid is None:
+                continue
+            key, label, year, quarter = pid
+            if key not in idx:                      # keep-first → newest wins
+                idx[key] = r
+                meta[key] = (year, quarter, label)
+        return idx, meta
+
+    idx_inc, meta_inc = index(income)
+    idx_bal, _ = index(balance)
+    idx_cf, _ = index(cash_flow)
+    idx_km, _ = index(key_metrics)
+    idx_rat, meta_rat = index(ratios)
+
+    # income anchors growth; ratios is the fallback spine for valuation-only
+    # tickers. Sort ascending by (year, quarter) → oldest→newest output.
+    spine_meta = meta_inc if meta_inc else meta_rat
+    ordered = sorted(
+        spine_meta.items(),
+        key=lambda kv: (kv[1][0], kv[1][1] if kv[1][1] is not None else 0),
+    )
+
+    out_series: Dict[str, List[Dict[str, Any]]] = {}
+
+    def add(metric_key: str, label: str, value: Optional[float]) -> None:
+        out_series.setdefault(metric_key, []).append(
+            {"period": label, "value": round(value, 2) if value is not None else None}
+        )
+
+    def prior_key(year: int, quarter: Optional[int]) -> str:
+        return f"{year - 1}" if quarter is None else f"{year - 1}-Q{quarter}"
+
+    for key, (year, quarter, label) in ordered:
+        inc, bal = idx_inc.get(key), idx_bal.get(key)
+        cf, km, rat = idx_cf.get(key), idx_km.get(key), idx_rat.get(key)
+
+        if rat is not None:
+            add("gross_margin", label, _pct_or_none(rat.get("grossProfitMargin")))
+            add("operating_margin", label, _pct_or_none(rat.get("operatingProfitMargin")))
+            add("net_margin", label, _pct_or_none(rat.get("netProfitMargin")))
+            add("earnings_yield", label, _pct_or_none(rat.get("earningsYield")))
+            add("pe", label, _num_or_none(rat.get("priceToEarningsRatio")))
+            add("pb", label, _num_or_none(rat.get("priceToBookRatio")))
+            add("ps", label, _num_or_none(rat.get("priceToSalesRatio")))
+            add("debt_to_equity", label, _num_or_none(rat.get("debtToEquityRatio")))
+            add("current_ratio", label, _num_or_none(rat.get("currentRatio")))
+            add("quick_ratio", label, _num_or_none(rat.get("quickRatio")))
+            add("interest_coverage", label, _num_or_none(rat.get("interestCoverageRatio")))
+
+        if km is not None:
+            add("roe", label, _pct_or_none(km.get("returnOnEquity")))
+            add("roa", label, _pct_or_none(km.get("returnOnAssets")))
+            if cf is not None:
+                add("pfcf", label, _hist_pfcf(km, cf))
+                if inc is not None:
+                    add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc))
+
+        if bal is not None and inc is not None:
+            add("altman_z", label, _altman_z([bal], [inc], profile))
+
+        # YoY vs the SAME period one year earlier (direct key lookup).
+        pk = prior_key(year, quarter)
+        inc_prev, cf_prev = idx_inc.get(pk), idx_cf.get(pk)
+        if inc is not None and inc_prev is not None:
+            add("revenue_growth", label, _safe_pct_change(
+                _num_or_none(inc.get("revenue")),
+                _num_or_none(inc_prev.get("revenue"))))
+            add("eps_growth", label, _safe_pct_change(
+                _num_or_none(inc.get("epsDiluted")),
+                _num_or_none(inc_prev.get("epsDiluted"))))
+            add("operating_income_growth", label, _safe_pct_change(
+                _num_or_none(inc.get("operatingIncome")),
+                _num_or_none(inc_prev.get("operatingIncome"))))
+        if cf is not None and cf_prev is not None:
+            add("fcf_growth", label, _safe_pct_change(
+                _num_or_none(cf.get("freeCashFlow")),
+                _num_or_none(cf_prev.get("freeCashFlow"))))
+
+    return out_series
+
+
+def _has_history_value(points: List[Dict[str, Any]]) -> bool:
+    return any(pt.get("value") is not None for pt in points)
+
+
+def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[str, Any]]:
+    """Compact per-metric history for the 4 Fundamentals & Growth cards.
+
+    Returns {history_key: {"unit", "annual": [...], "quarterly": [...]}}.
+    Annual uses the (now 10y) statement arrays on `out`; quarterly uses the
+    TRANSIENT `*_q` attrs fetched in _fetch_all. Best-effort: a key with no
+    real datapoint in either granularity is dropped entirely (so iOS leaves
+    that metric row un-charted). Never raises — a bad ticker degrades to {}.
+
+    The two granularities are computed under SEPARATE guards so a failure in
+    one (e.g. a malformed quarterly array) can't take down the other.
+    """
+    profile = out.profile or {}
+
+    def _safe(label: str, fn) -> Dict[str, List[Dict[str, Any]]]:
+        try:
+            return fn()
+        except Exception as exc:  # never block a report on a history glitch
+            logger.warning(
+                "fundamentals %s history failed for %s: %s: %s",
+                label, getattr(out, "ticker", "?"), type(exc).__name__, exc,
+            )
+            return {}
+
+    annual = _safe("annual", lambda: _fundamentals_history_for_period(
+        out.income or [], out.balance or [], out.cash_flow or [],
+        out.key_metrics or [], out.ratios or [], profile, quarterly=False,
+    ))
+    quarterly = _safe("quarterly", lambda: _fundamentals_history_for_period(
+        getattr(out, "income_q", []) or [],
+        getattr(out, "balance_q", []) or [],
+        getattr(out, "cash_flow_q", []) or [],
+        getattr(out, "key_metrics_q", []) or [],
+        getattr(out, "ratios_q", []) or [],
+        profile, quarterly=True,
+    ))
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for key in {k for _, k in _HISTORY_KEY_BY_LABEL_PREFIX}:
+        a = annual.get(key, [])
+        q = quarterly.get(key, [])
+        if not _has_history_value(a) and not _has_history_value(q):
+            continue
+        result[key] = {
+            "unit": _HISTORY_UNITS.get(key, "x"),
+            "annual": a,
+            "quarterly": q,
+        }
+    return result
+
+
 def _snapshot_to_card(
     title: str,
     snap: Optional[SnapshotItemResponse],
     extra_metrics: Optional[List[Dict[str, Any]]] = None,
+    history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Map a SnapshotItemResponse onto a FundamentalMetricCardResponse dict.
 
@@ -3291,10 +3625,18 @@ def _snapshot_to_card(
             "quality_sentiment": "neutral",
         }
 
-    metrics = [
-        {"label": m.name, "value": m.value, "trend": None}
-        for m in snap.metrics
-    ]
+    metrics: List[Dict[str, Any]] = []
+    for m in snap.metrics:
+        md: Dict[str, Any] = {"label": m.name, "value": m.value, "trend": None}
+        # Attach tap-to-expand history when we have a series for this metric.
+        hk = _resolve_history_key(m.name)
+        h = history_lookup.get(hk) if (hk and history_lookup) else None
+        if h is not None:
+            md["history_key"] = hk
+            md["history_unit"] = h.get("unit")
+            md["annual_history"] = h.get("annual") or []
+            md["quarterly_history"] = h.get("quarterly") or []
+        metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)
     return {
@@ -3311,6 +3653,7 @@ def _build_fundamental_metrics_from_snapshots(
     growth: Optional[SnapshotItemResponse],
     valuation: Optional[SnapshotItemResponse],
     health: Optional[SnapshotItemResponse],
+    history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build the 4 fundamental cards from the same snapshot services
     TickerDetailView's Financials tab uses, so the values match exactly.
@@ -3320,10 +3663,10 @@ def _build_fundamental_metrics_from_snapshots(
     itself (with sector context), so no `extra_metrics` is needed.
     """
     return [
-        _snapshot_to_card("Profitability", profitability),
-        _snapshot_to_card("Growth", growth),
-        _snapshot_to_card("Valuation", valuation),
-        _snapshot_to_card("Health", health),
+        _snapshot_to_card("Profitability", profitability, history_lookup=history_lookup),
+        _snapshot_to_card("Growth", growth, history_lookup=history_lookup),
+        _snapshot_to_card("Valuation", valuation, history_lookup=history_lookup),
+        _snapshot_to_card("Health", health, history_lookup=history_lookup),
     ]
 
 

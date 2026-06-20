@@ -38,6 +38,8 @@ from app.api.error_response import (
 from app.schemas.ticker_report import (
     CapitalAllocationResponse,
     CriticalFactorResponse,
+    DeepDiveMetricCardResponse,
+    MetricHistoryPointResponse,
     RevenueForecastResponse,
     TickerReportResponse,
 )
@@ -61,6 +63,7 @@ from app.services.agents.ticker_report_data_collector import (
     TickerReportDataCollector,
     _build_capital_allocation_block,
     _build_fundamental_metrics_from_snapshots,
+    _build_fundamentals_history,
     _build_price_action,
     _compute_price_volatility,
     _snapshot_to_card,
@@ -934,6 +937,170 @@ def test_fundamentals_section_order_is_stable():
     cards = _build_fundamental_metrics_from_snapshots(snap, snap, snap, snap)
     titles = [c["title"] for c in cards]
     assert titles == ["Profitability", "Growth", "Valuation", "Health"]
+
+
+def _annual_statements():
+    """3 newest-first FMP-shaped annual rows for the history builder."""
+    income = [
+        {"calendarYear": "2024", "period": "FY", "date": "2024-09-30",
+         "revenue": 400, "epsDiluted": 6.0, "operatingIncome": 120, "ebitda": 140},
+        {"calendarYear": "2023", "period": "FY", "date": "2023-09-30",
+         "revenue": 380, "epsDiluted": 5.5, "operatingIncome": 110, "ebitda": 130},
+        {"calendarYear": "2022", "period": "FY", "date": "2022-09-30",
+         "revenue": 350, "epsDiluted": 5.0, "operatingIncome": 100, "ebitda": 120},
+    ]
+    balance = [
+        {"calendarYear": y, "date": f"{y}-09-30", "totalAssets": 1000,
+         "totalLiabilities": 600, "totalCurrentAssets": 300,
+         "totalCurrentLiabilities": 280, "retainedEarnings": 200}
+        for y in ("2024", "2023", "2022")
+    ]
+    cash_flow = [
+        {"calendarYear": y, "date": f"{y}-09-30", "freeCashFlow": 90,
+         "depreciationAndAmortization": 20}
+        for y in ("2024", "2023", "2022")
+    ]
+    key_metrics = [
+        {"calendarYear": y, "date": f"{y}-09-30", "returnOnEquity": 0.30,
+         "returnOnAssets": 0.12, "marketCap": 3000, "enterpriseValue": 3200}
+        for y in ("2024", "2023", "2022")
+    ]
+    ratios = [
+        {"calendarYear": "2024", "period": "FY", "date": "2024-09-30",
+         "grossProfitMargin": 0.46, "operatingProfitMargin": 0.30,
+         "netProfitMargin": 0.25, "priceToEarningsRatio": 35.8,
+         "priceToBookRatio": 41.2, "priceToSalesRatio": 9.7,
+         "currentRatio": 1.07, "quickRatio": 1.02, "debtToEquityRatio": 0.8,
+         "interestCoverageRatio": 12.0, "earningsYield": 0.0279},
+        {"calendarYear": "2023", "period": "FY", "date": "2023-09-30",
+         "grossProfitMargin": 0.44, "operatingProfitMargin": 0.29,
+         "netProfitMargin": 0.24, "priceToEarningsRatio": 30.1,
+         "priceToBookRatio": 38.0, "priceToSalesRatio": 9.0,
+         "currentRatio": 1.05, "quickRatio": 1.00, "debtToEquityRatio": 0.9,
+         "interestCoverageRatio": 11.0, "earningsYield": 0.0331},
+        {"calendarYear": "2022", "period": "FY", "date": "2022-09-30",
+         "grossProfitMargin": 0.42, "operatingProfitMargin": 0.28,
+         "netProfitMargin": 0.23, "priceToEarningsRatio": 28.0,
+         "priceToBookRatio": 35.0, "priceToSalesRatio": 8.5,
+         "currentRatio": 1.02, "quickRatio": 0.98, "debtToEquityRatio": 1.0,
+         "interestCoverageRatio": 10.0, "earningsYield": 0.0357},
+    ]
+    return income, balance, cash_flow, key_metrics, ratios
+
+
+def test_fundamentals_history_is_computed_and_oldest_first():
+    """The history builder emits a per-metric series for every card metric,
+    oldest→newest, with correct unit conversions."""
+    income, balance, cash_flow, key_metrics, ratios = _annual_statements()
+    out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
+    out.profile = {"industry": "Consumer Electronics"}
+    out.income, out.balance, out.cash_flow = income, balance, cash_flow
+    out.key_metrics, out.ratios = key_metrics, ratios
+
+    hist = _build_fundamentals_history(out)
+
+    # All four cards' metrics are represented.
+    for key in ("gross_margin", "roe", "pe", "ev_ebitda", "altman_z",
+                "debt_to_equity", "revenue_growth", "earnings_yield"):
+        assert key in hist, f"missing history key {key}"
+
+    # Margins are fractions → percent, oldest first.
+    gm = hist["gross_margin"]["annual"]
+    assert [p["period"] for p in gm] == ["2022", "2023", "2024"]
+    assert gm[-1]["value"] == 42.0 + 4.0  # 2024 = 46.0%
+    assert hist["gross_margin"]["unit"] == "percent"
+
+    # Multiples carry the "x" unit; raw value passthrough.
+    assert hist["pe"]["unit"] == "x"
+    assert hist["pe"]["annual"][-1]["value"] == 35.8
+
+    # YoY growth uses a 1-year gap → the oldest year has no prior, so the
+    # series is one shorter and starts at the second year.
+    rg = hist["revenue_growth"]["annual"]
+    assert [p["period"] for p in rg] == ["2023", "2024"]
+    assert rg[-1]["value"] == 5.3  # 380 → 400
+
+
+def test_fundamentals_history_attaches_and_validates_on_card():
+    """Attached history survives DeepDiveMetricCardResponse.model_validate
+    (the contract the iOS decoder mirrors), and the sector-suffix label still
+    resolves to the right history key."""
+    income, balance, cash_flow, key_metrics, ratios = _annual_statements()
+    out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
+    out.profile = {"industry": "Consumer Electronics"}
+    out.income, out.balance, out.cash_flow = income, balance, cash_flow
+    out.key_metrics, out.ratios = key_metrics, ratios
+    hist = _build_fundamentals_history(out)
+
+    prof = SnapshotItemResponse(
+        category="Profitability", rating=4,
+        metrics=[
+            SnapshotMetricResponse(
+                name="Gross Margin (1.20x sector avg 38.0%)", value="46.0%"),
+            SnapshotMetricResponse(
+                name="Return on Equity (ROE) (1.10x sector avg 27%)", value="30.0%"),
+        ],
+        full_report_available=True,
+    )
+    card_dict = _build_fundamental_metrics_from_snapshots(
+        prof, None, None, None, history_lookup=hist,
+    )[0]
+    card = DeepDiveMetricCardResponse.model_validate(card_dict)
+
+    gm_metric = card.metrics[0]
+    assert gm_metric.history_key == "gross_margin"
+    assert gm_metric.history_unit == "percent"
+    assert gm_metric.annual_history is not None
+    assert len(gm_metric.annual_history) == 3
+    assert isinstance(gm_metric.annual_history[0], MetricHistoryPointResponse)
+    assert card.metrics[1].history_key == "roe"
+
+
+def test_fundamentals_card_validates_without_history():
+    """Backward-compat: a card built with no history_lookup leaves the new
+    fields None and still validates — exactly how legacy/cached reports and
+    older iOS builds must keep working."""
+    snap = SnapshotItemResponse(
+        category="Profitability", rating=3,
+        metrics=[SnapshotMetricResponse(name="Gross Margin", value="46.0%")],
+        full_report_available=True,
+    )
+    card_dict = _build_fundamental_metrics_from_snapshots(snap, None, None, None)[0]
+    card = DeepDiveMetricCardResponse.model_validate(card_dict)
+    assert card.metrics[0].annual_history is None
+    assert card.metrics[0].history_key is None
+
+
+def test_fundamentals_history_survives_full_json_roundtrip():
+    """The history must survive validate → dump(json) → json.dumps → loads →
+    validate — i.e. the exact encode/decode the iOS JSONDecoder performs.
+    Catches any snake_case / optional-field serialization drift."""
+    income, balance, cash_flow, key_metrics, ratios = _annual_statements()
+    out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
+    out.profile = {"industry": "Consumer Electronics"}
+    out.income, out.balance, out.cash_flow = income, balance, cash_flow
+    out.key_metrics, out.ratios = key_metrics, ratios
+    hist = _build_fundamentals_history(out)
+
+    prof = SnapshotItemResponse(
+        category="Profitability", rating=4,
+        metrics=[SnapshotMetricResponse(name="Gross Margin", value="46.0%")],
+        full_report_available=True,
+    )
+    card_dict = _build_fundamental_metrics_from_snapshots(
+        prof, None, None, None, history_lookup=hist)[0]
+
+    card = DeepDiveMetricCardResponse.model_validate(card_dict)
+    blob = json.dumps(card.model_dump(mode="json"))
+    reparsed = DeepDiveMetricCardResponse.model_validate(json.loads(blob))
+
+    metric = reparsed.metrics[0]
+    assert metric.history_key == "gross_margin"
+    assert metric.history_unit == "percent"
+    assert metric.annual_history is not None and len(metric.annual_history) == 3
+    # snake_case key survived the JSON encode (the iOS CodingKey contract).
+    assert '"annual_history"' in blob
+    assert metric.annual_history[0].period == "2022"
 
 
 # ── Price action: volatility math + tier classification ──────────────

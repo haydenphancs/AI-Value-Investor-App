@@ -32,13 +32,13 @@ extension BookAudioInfo {
         ),
         2: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a",
-            totalSeconds: 2235,
-            coreStartSeconds: [1: 0, 2: 165, 3: 357, 4: 560, 5: 757, 6: 959, 7: 1137, 8: 1305, 9: 1494, 10: 1676, 11: 1876, 12: 2046]
+            totalSeconds: 2244,
+            coreStartSeconds: [1: 0, 2: 165, 3: 346, 4: 554, 5: 757, 6: 961, 7: 1136, 8: 1300, 9: 1484, 10: 1664, 11: 1878, 12: 2056]
         ),
         3: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/3_the-psychology-of-money.m4a",
-            totalSeconds: 2845,
-            coreStartSeconds: [1: 0, 2: 235, 3: 454, 4: 660, 5: 863, 6: 1148, 7: 1407, 8: 1645, 9: 1910, 10: 2117, 11: 2328, 12: 2543]
+            totalSeconds: 2878,
+            coreStartSeconds: [1: 0, 2: 229, 3: 455, 4: 659, 5: 871, 6: 1156, 7: 1424, 8: 1658, 9: 1928, 10: 2135, 11: 2368, 12: 2583]
         ),
         4: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a",

@@ -203,6 +203,7 @@ mid3 = ("extension LibraryBook {\n"
         "    static let readMinutesByOrder: [Int: Int] = [\n"
         + "\n".join(read_min) + "\n    ]\n}\n")
 
+OUT.parent.mkdir(parents=True, exist_ok=True)  # pod-safe: create dest dir if missing (no-op on Mac)
 OUT.write_text(header + mid1 + mid2 + mid3)
 
 print(f"{'ord':>3} {'cores':>5} {'words':>6} {'min':>4}  book")

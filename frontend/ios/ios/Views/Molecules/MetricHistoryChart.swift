@@ -43,40 +43,56 @@ struct MetricHistoryChart: View {
         }
     }
 
+    // Bars are plotted on a NUMERIC index x-axis (0, 1, 2, …) rather than a
+    // categorical one — `chartXVisibleDomain` / `chartScrollPosition` only
+    // window + scroll reliably against a numeric domain, which is what lets the
+    // chart open at the latest period and scroll back through the full history.
+    private var indexedCompany: [(idx: Double, point: MetricHistoryPoint)] {
+        valued.enumerated().map { (Double($0.offset), $0.element) }
+    }
+
+    private var periodToIndex: [String: Double] {
+        Dictionary(uniqueKeysWithValues:
+            orderedPeriods.enumerated().map { ($0.element, Double($0.offset)) })
+    }
+
     private var chart: some View {
         Chart {
-            ForEach(valued) { point in
+            ForEach(indexedCompany, id: \.idx) { item in
                 BarMark(
-                    x: .value("Period", point.period),
+                    x: .value("i", item.idx),
                     // Clamp the drawn height into the robust domain so one extreme
                     // year (e.g. a P/E spike to 5000×) pins to the chart edge
                     // instead of flattening every other bar to a sliver.
-                    y: .value("Value", clamped(point.value ?? 0))
+                    y: .value("Value", clamped(item.point.value ?? 0)),
+                    width: .ratio(0.72)
                 )
-                .foregroundStyle(color(for: point))
+                .foregroundStyle(color(for: item.point))
                 .cornerRadius(3)
             }
-            // Sector-average overlay: a dashed gray line + dots, aligned to the
-            // same x-categories as the bars (mirrors GrowthChartView).
+            // Sector-average overlay: a dashed gray line + dots at the SAME
+            // index positions as the bars (mirrors GrowthChartView).
             ForEach(sectorValued) { point in
-                LineMark(
-                    x: .value("Period", point.period),
-                    y: .value("Sector", clamped(point.value ?? 0)),
-                    series: .value("Series", "Sector avg")
-                )
-                .foregroundStyle(AppColors.textSecondary)
-                .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
-                .interpolationMethod(.catmullRom)
-                PointMark(
-                    x: .value("Period", point.period),
-                    y: .value("Sector", clamped(point.value ?? 0))
-                )
-                .foregroundStyle(AppColors.textSecondary)
-                .symbolSize(18)
+                if let xi = periodToIndex[point.period] {
+                    LineMark(
+                        x: .value("i", xi),
+                        y: .value("Sector", clamped(point.value ?? 0)),
+                        series: .value("Series", "Sector avg")
+                    )
+                    .foregroundStyle(AppColors.textSecondary)
+                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                    .interpolationMethod(.catmullRom)
+                    PointMark(
+                        x: .value("i", xi),
+                        y: .value("Sector", clamped(point.value ?? 0))
+                    )
+                    .foregroundStyle(AppColors.textSecondary)
+                    .symbolSize(18)
+                }
             }
         }
         .chartYScale(domain: yDomain)
-        .chartXScale(domain: orderedPeriods)
+        .chartXScale(domain: -0.5 ... (Double(orderedPeriods.count) - 0.5))
         .chartYAxis {
             AxisMarks(position: .leading) { value in
                 AxisGridLine()
@@ -91,10 +107,10 @@ struct MetricHistoryChart: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: tickPeriods) { value in
-                AxisValueLabel(centered: false) {
-                    if let s = value.as(String.self) {
-                        Text(s)
+            AxisMarks(values: tickIndices) { value in
+                AxisValueLabel(centered: true) {
+                    if let d = value.as(Double.self), let label = labelAt(d) {
+                        Text(label)
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
                             .fixedSize()  // never ellipsize ("Q4…" → "Q4 '26")
@@ -102,12 +118,11 @@ struct MetricHistoryChart: View {
                 }
             }
         }
-        // Horizontally scrollable: show a window of columns at a readable
-        // width and let the user scroll back through history (both Annual &
-        // Quarterly). The y-axis stays pinned. Starts at the most-recent end.
+        // Horizontally scrollable: show a window of columns at a readable width,
+        // opening at the most-recent end; the y-axis stays pinned.
         .chartScrollableAxes(.horizontal)
-        .chartXVisibleDomain(length: visibleColumns)
-        .chartScrollPosition(initialX: scrollStart)
+        .chartXVisibleDomain(length: Double(visibleColumns))
+        .chartScrollPosition(initialX: Double(max(0, orderedPeriods.count - visibleColumns)))
         .frame(height: 200)
     }
 
@@ -115,9 +130,18 @@ struct MetricHistoryChart: View {
     /// series (e.g. ~10 annual) just show in full (no scroll).
     private var visibleColumns: Int { Swift.min(orderedPeriods.count, 12) }
 
-    /// Leading edge so the chart opens scrolled to the latest periods.
-    private var scrollStart: String {
-        orderedPeriods[Swift.max(0, orderedPeriods.count - visibleColumns)]
+    /// Index of the period to use as a label tick — thinned for dense charts.
+    private var tickIndices: [Double] {
+        let n = orderedPeriods.count
+        guard n > 8 else { return (0..<n).map(Double.init) }
+        let step = n > 24 ? 4 : 2
+        return stride(from: (n - 1) % step, to: n, by: step).map(Double.init)
+    }
+
+    private func labelAt(_ d: Double) -> String? {
+        let i = Int(d.rounded())
+        guard i >= 0, i < orderedPeriods.count else { return nil }
+        return orderedPeriods[i]
     }
 
     // MARK: - Helpers
@@ -160,18 +184,6 @@ struct MetricHistoryChart: View {
         top += (top > 0) ? span * 0.08 : 0
         bottom -= (bottom < 0) ? span * 0.08 : 0
         return bottom...top
-    }
-
-    /// Thin the x labels so dense (scrollable quarterly) charts don't crowd —
-    /// roughly one label per 3–4 bars for long series, every other for short.
-    /// Anchored to the end so the newest bar always keeps its label.
-    private var tickPeriods: [String] {
-        let n = orderedPeriods.count
-        guard n > 8 else { return orderedPeriods }
-        let step = n > 24 ? 4 : 2
-        return orderedPeriods.enumerated()
-            .filter { ($0.offset % step) == ((n - 1) % step) }
-            .map(\.element)
     }
 
     private func format(_ v: Double) -> String {

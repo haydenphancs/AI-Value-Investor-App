@@ -48,16 +48,29 @@ def test_period_id_non_dict_row_returns_none():
 
 
 def test_period_id_int_year_normalizes_to_string_label():
-    key, label, year, q = _history_period_id(
+    key, label, year, q, sort_date = _history_period_id(
         {"calendarYear": 2024, "date": "2024-09-30"}, quarterly=False)
     assert key == "2024" and label == "2024" and year == 2024 and q is None
+    assert sort_date == "2024-09-30"
 
 
 def test_period_id_quarter_derived_from_date_when_period_missing():
     # No 'period' field → quarter must come from the date month (Jun → Q2).
-    key, label, year, q = _history_period_id(
+    key, label, year, q, _ = _history_period_id(
         {"calendarYear": 2024, "date": "2024-06-30"}, quarterly=True)
     assert q == 2 and key == "2024-Q2" and label == "Q2 '24"
+
+
+def test_period_id_fiscal_label_with_calendar_join_for_offcalendar_company():
+    # Oracle-style: FMP gives fiscalYear + null calendarYear; the date's
+    # calendar year drives the JOIN key, the fiscal year drives the LABEL.
+    # ORCL fiscal Q1 (Aug 2023) → calendar 2023, fiscal 2024 → label "Q1 '24".
+    key, label, cal_year, q, _ = _history_period_id(
+        {"fiscalYear": 2024, "calendarYear": None, "period": "Q1",
+         "date": "2023-08-31"}, quarterly=True)
+    assert cal_year == 2023 and q == 1
+    assert key == "2023-Q1"        # calendar key (for sector join + YoY)
+    assert label == "Q1 '24"       # fiscal label (chronologically monotonic)
 
 
 # ── Quarterly collisions (THE headline bug) ────────────────────────────
@@ -128,6 +141,33 @@ def test_quarterly_missing_intermediate_quarter_no_spurious_yoy():
 
 
 # ── Ordering / sparsity (annual) ───────────────────────────────────────
+
+def test_offcalendar_fiscal_company_orders_chronologically_with_fiscal_labels():
+    # ORCL-style: FY ends May, calendarYear null, fiscalYear set; fiscal Q1
+    # (Aug) and the prior fiscal Q4 (May) share a calendar year. Given
+    # newest-first, output must be fiscal-CHRONOLOGICAL (not scrambled by the
+    # calendar year) with monotonic fiscal labels — the bug that made quarters
+    # look out-of-order / missing.
+    def q(fy, qn, date, rev):
+        return {"fiscalYear": fy, "calendarYear": None, "period": f"Q{qn}",
+                "date": date, "revenue": rev}
+    income = [  # newest-first (as FMP returns)
+        q(2026, 4, "2026-05-31", 140), q(2026, 3, "2026-02-28", 135),
+        q(2026, 2, "2025-11-30", 130), q(2026, 1, "2025-08-31", 125),
+        q(2025, 4, "2025-05-31", 120), q(2025, 3, "2025-02-28", 115),
+        q(2025, 2, "2024-11-30", 110), q(2025, 1, "2024-08-31", 105),
+    ]
+    ratios = [dict(r, priceToEarningsRatio=float(i)) for i, r in enumerate(income)]
+    hist = _fundamentals_history_for_period(income, [], [], [], ratios, {}, quarterly=True)
+    assert _periods(hist, "pe") == [
+        "Q1 '25", "Q2 '25", "Q3 '25", "Q4 '25",
+        "Q1 '26", "Q2 '26", "Q3 '26", "Q4 '26",
+    ]
+    # YoY pairs the SAME FISCAL quarter a year earlier (via the calendar key):
+    # Q1'26 (rev 125) vs Q1'25 (rev 105).
+    rg = dict(_series(hist, "revenue_growth"))
+    assert rg["Q1 '26"] == round((125 - 105) / 105 * 100, 1)
+
 
 def test_unsorted_annual_input_emits_oldest_first():
     income = [
@@ -422,8 +462,9 @@ def test_sector_period_map_parses_and_drops_bad():
 def test_aligned_sector_series_percent_x100_and_alignment():
     company = [{"period": "2022", "value": 42.0}, {"period": "2023", "value": 44.0},
                {"period": "2024", "value": 46.0}]
+    keys = {"2022": (2022, None), "2023": (2023, None), "2024": (2024, None)}
     sector_map = {(2022, None): 0.36, (2024, None): 0.38}  # 2023 missing
-    series, has = _aligned_sector_series(company, sector_map, to_percent=True)
+    series, has = _aligned_sector_series(company, keys, sector_map, to_percent=True)
     assert has is True
     assert series == [
         {"period": "2022", "value": 36.0},   # ×100
@@ -432,10 +473,21 @@ def test_aligned_sector_series_percent_x100_and_alignment():
     ]
 
 
+def test_aligned_sector_series_joins_fiscal_label_via_calendar_key():
+    # Company labels are FISCAL ("Q1 '24"); the calendar key maps them to the
+    # sector benchmark (keyed by calendar (year, quarter)).
+    company = [{"period": "Q1 '24", "value": 46.0}]
+    keys = {"Q1 '24": (2023, 1)}          # fiscal Q1'24 = calendar 2023 Q1
+    sector_map = {(2023, 1): 0.38}
+    series, has = _aligned_sector_series(company, keys, sector_map, to_percent=True)
+    assert has and series == [{"period": "Q1 '24", "value": 38.0}]
+
+
 def test_aligned_sector_series_plain_for_x_metrics():
     company = [{"period": "2023", "value": 30.1}, {"period": "2024", "value": 35.8}]
+    keys = {"2023": (2023, None), "2024": (2024, None)}
     sector_map = {(2023, None): 21.0, (2024, None): 22.0}
-    series, has = _aligned_sector_series(company, sector_map, to_percent=False)
+    series, has = _aligned_sector_series(company, keys, sector_map, to_percent=False)
     assert has and [p["value"] for p in series] == [21.0, 22.0]  # no ×100
 
 
@@ -533,8 +585,9 @@ def test_build_history_tolerates_bad_sector_history_attr():
 def test_sector_delta_guard_no_ratio_when_nonpositive():
     # Direct sanity on the alignment when sector value is negative (e.g. neg D/E)
     company = [{"period": "2023", "value": -0.5}, {"period": "2024", "value": -0.8}]
+    keys = {"2023": (2023, None), "2024": (2024, None)}
     sector_map = {(2024, None): -0.3}
-    series, has = _aligned_sector_series(company, sector_map, to_percent=False)
+    series, has = _aligned_sector_series(company, keys, sector_map, to_percent=False)
     assert has and series[-1]["value"] == -0.3  # truthful pass-through
 
 

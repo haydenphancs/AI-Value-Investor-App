@@ -3448,32 +3448,43 @@ def _resolve_history_key(label: str) -> Optional[str]:
 
 def _history_period_id(
     rec: Any, quarterly: bool,
-) -> Optional[Tuple[str, str, int, Optional[int]]]:
-    """Return (join_key, display_label, year, quarter|None), or None.
+) -> Optional[Tuple[str, str, int, Optional[int], str]]:
+    """Return (join_key, display_label, cal_year, quarter|None, sort_date), or None.
 
-    - `join_key` is a STABLE cross-array identity so the income/ratios/etc.
-      rows for the same period line up (and dedup) deterministically.
-    - `display_label` is what the chart shows ("2024" / "Q1 '24").
-    - Guards non-dict rows (malformed FMP) → None.
-
-    Quarter is taken from FMP's `period` field ("Q1".."Q4"); when that is
-    missing it is derived from the date month so four same-year quarters
-    don't collapse into one key (the bug this replaces). `calendarYear` is
-    preferred over `date[:4]` for fiscal-year companies (matches growth_service).
+    - `join_key` / `cal_year` / `quarter` are CALENDAR-based (calendarYear, or
+      the date's year, + the fiscal quarter). This identity dedups the arrays,
+      looks up the sector benchmark (which pools constituents by calendar
+      label), and anchors same-quarter-prior-year growth.
+    - `display_label` is FISCAL-year-based ("Q1 '26") so an off-calendar fiscal
+      company (e.g. Oracle, FY ends May) reads chronologically monotonic — its
+      fiscal Q1 (Aug) and the prior fiscal Q4 (May) share a calendar year, which
+      would otherwise scramble the axis and look like missing quarters. Mirrors
+      growth_service's use_fiscal_year-display / calendar-join split.
+    - `sort_date` orders the series chronologically (calendar labels can't).
+    - Guards non-dict rows (malformed FMP) → None. Quarter comes from FMP's
+      `period` ("Q1".."Q4"), else the date month.
     """
     if not isinstance(rec, dict):
         return None
-    raw_year = rec.get("calendarYear")
     date_str = rec.get("date") or ""
-    if raw_year in (None, ""):
-        raw_year = date_str[:4] if len(date_str) >= 4 else None
+    raw_cal = rec.get("calendarYear")
+    if raw_cal in (None, ""):
+        raw_cal = date_str[:4] if len(date_str) >= 4 else None
     try:
-        year = int(raw_year)
+        cal_year = int(raw_cal)
     except (TypeError, ValueError):
         return None
 
+    # Fiscal year drives the DISPLAY label only (falls back to the calendar year).
+    fy = rec.get("fiscalYear")
+    try:
+        disp_year = int(fy) if fy not in (None, "") else cal_year
+    except (TypeError, ValueError):
+        disp_year = cal_year
+
     if not quarterly:
-        return (str(year), str(year), year, None)
+        return (str(cal_year), str(disp_year), cal_year, None,
+                date_str or str(cal_year))
 
     quarter: Optional[int] = None
     period = rec.get("period")
@@ -3489,11 +3500,13 @@ def _history_period_id(
         except ValueError:
             quarter = None
     if quarter is not None and 1 <= quarter <= 4:
-        return (f"{year}-Q{quarter}", f"Q{quarter} '{year % 100:02d}", year, quarter)
+        return (f"{cal_year}-Q{quarter}", f"Q{quarter} '{disp_year % 100:02d}",
+                cal_year, quarter, date_str or f"{cal_year}-Q{quarter}")
     # Last resort: a per-row unique key (the date) so the row still charts;
     # YoY can't be computed for it (no derivable quarter), which is correct.
-    return (date_str or f"{year}-?",
-            date_str[:7] if len(date_str) >= 7 else str(year), year, None)
+    return (date_str or f"{cal_year}-?",
+            date_str[:7] if len(date_str) >= 7 else str(disp_year),
+            cal_year, None, date_str or str(cal_year))
 
 
 # P/FCF & EV/EBITDA above this are near-zero-denominator artefacts (FMP data
@@ -3568,15 +3581,15 @@ def _fundamentals_history_for_period(
 
     def index(records: List[Dict[str, Any]]):
         idx: Dict[str, Dict[str, Any]] = {}
-        meta: Dict[str, Tuple[int, Optional[int], str]] = {}
+        meta: Dict[str, Tuple[int, Optional[int], str, str]] = {}
         for r in records:
             pid = _history_period_id(r, quarterly)
             if pid is None:
                 continue
-            key, label, year, quarter = pid
+            key, label, cal_year, quarter, sort_date = pid
             if key not in idx:                      # keep-first → newest wins
                 idx[key] = r
-                meta[key] = (year, quarter, label)
+                meta[key] = (cal_year, quarter, label, sort_date)
         return idx, meta
 
     idx_inc, meta_inc = index(income)
@@ -3586,12 +3599,10 @@ def _fundamentals_history_for_period(
     idx_rat, meta_rat = index(ratios)
 
     # income anchors growth; ratios is the fallback spine for valuation-only
-    # tickers. Sort ascending by (year, quarter) → oldest→newest output.
+    # tickers. Sort ascending by the period-end DATE → true chronological order
+    # (calendar-year labels alone scramble off-calendar fiscal companies).
     spine_meta = meta_inc if meta_inc else meta_rat
-    ordered = sorted(
-        spine_meta.items(),
-        key=lambda kv: (kv[1][0], kv[1][1] if kv[1][1] is not None else 0),
-    )
+    ordered = sorted(spine_meta.items(), key=lambda kv: kv[1][3] or "")
 
     out_series: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -3600,10 +3611,10 @@ def _fundamentals_history_for_period(
             {"period": label, "value": round(value, 2) if value is not None else None}
         )
 
-    def prior_key(year: int, quarter: Optional[int]) -> str:
-        return f"{year - 1}" if quarter is None else f"{year - 1}-Q{quarter}"
+    def prior_key(cal_year: int, quarter: Optional[int]) -> str:
+        return f"{cal_year - 1}" if quarter is None else f"{cal_year - 1}-Q{quarter}"
 
-    for key, (year, quarter, label) in ordered:
+    for key, (year, quarter, label, _sort_date) in ordered:
         inc, bal = idx_inc.get(key), idx_bal.get(key)
         cf, km, rat = idx_cf.get(key), idx_km.get(key), idx_rat.get(key)
 
@@ -3676,20 +3687,44 @@ def _sector_period_map(
     return out
 
 
+def _period_calendar_keys(
+    income: List[Dict[str, Any]],
+    ratios: List[Dict[str, Any]],
+    quarterly: bool,
+) -> Dict[str, Tuple[int, Optional[int]]]:
+    """Map each company DISPLAY label (fiscal, e.g. "Q1 '26") → its CALENDAR
+    (cal_year, quarter) key. The company series is labelled by fiscal year but
+    the sector benchmark is keyed by calendar — so the overlay must join on the
+    calendar key, not by re-parsing the (fiscal) display label."""
+    out: Dict[str, Tuple[int, Optional[int]]] = {}
+    spine = income if income else ratios
+    if not isinstance(spine, list):
+        return out
+    for r in spine:
+        pid = _history_period_id(r, quarterly)
+        if pid is None:
+            continue
+        _join, display_label, cal_year, quarter, _date = pid
+        out.setdefault(display_label, (cal_year, quarter))
+    return out
+
+
 def _aligned_sector_series(
     company_points: List[Dict[str, Any]],
+    label_to_calkey: Dict[str, Tuple[int, Optional[int]]],
     sector_map: Dict[Tuple[int, Optional[int]], float],
     to_percent: bool,
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    """Build a sector series that shares the COMPANY series' period labels
-    (so the chart's LineMark aligns to the BarMark x categories). `to_percent`
-    ×100 for percent-unit metrics (the benchmark table stores margins/ROE/ROA
-    as fractions). Returns (series, has_any_real_value)."""
+    """Build a sector series that shares the COMPANY series' (fiscal) period
+    labels — so the chart's LineMark aligns to the BarMark x categories — but
+    looks the sector value up by the CALENDAR key (`label_to_calkey`). `to_percent`
+    ×100 for percent-unit metrics (the benchmark stores margins/ROE/ROA as
+    fractions). Returns (series, has_any_real_value)."""
     series: List[Dict[str, Any]] = []
     has_value = False
     for pt in company_points:
-        k = _parse_history_label(pt.get("period", ""))
-        v = sector_map.get(k) if k is not None else None
+        ck = label_to_calkey.get(pt.get("period", ""))
+        v = sector_map.get(ck) if ck is not None else None
         if v is not None:
             v = round(v * 100, 2) if to_percent else round(v, 2)
             has_value = True
@@ -3753,15 +3788,22 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
     bench = out.sector_benchmark_history if isinstance(getattr(out, "sector_benchmark_history", None), dict) else {}
     annual_bench = bench.get("annual") or {}
     quarterly_bench = bench.get("quarterly") or {}
+    # fiscal-label → calendar-key, so the (calendar-keyed) sector benchmark can
+    # be joined onto the (fiscal-labelled) company series.
+    ann_keys = _period_calendar_keys(out.income or [], out.ratios or [], quarterly=False)
+    qtr_keys = _period_calendar_keys(
+        getattr(out, "income_q", []) or [], getattr(out, "ratios_q", []) or [], quarterly=True)
     for key, payload in result.items():
         sector_name = _SECTOR_METRIC_BY_HISTORY_KEY.get(key)
         if not sector_name:
             continue  # non-"*" metric → no sector line
         to_percent = _HISTORY_UNITS.get(key) == "percent"
         sa, sa_has = _aligned_sector_series(
-            payload["annual"], _sector_period_map(annual_bench.get(sector_name, {})), to_percent)
+            payload["annual"], ann_keys,
+            _sector_period_map(annual_bench.get(sector_name, {})), to_percent)
         sq, sq_has = _aligned_sector_series(
-            payload["quarterly"], _sector_period_map(quarterly_bench.get(sector_name, {})), to_percent)
+            payload["quarterly"], qtr_keys,
+            _sector_period_map(quarterly_bench.get(sector_name, {})), to_percent)
         if sa_has:
             payload["sector_annual"] = sa
         if sq_has:

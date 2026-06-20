@@ -62,7 +62,10 @@ if not KEY and _env_file.exists():
     for line in _env_file.read_text().splitlines():
         if line.startswith("GEMINI_API_KEY="):
             KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-assert KEY, "GEMINI_API_KEY not found in env or backend/.env"
+# Importable without a key for the clone path (which only uses the text helpers below).
+# Only the Gemini TTS path (direct run) needs the key, so fail fast only when run as __main__.
+if not KEY and __name__ == "__main__":
+    raise SystemExit("GEMINI_API_KEY not found in env or backend/.env")
 
 MODEL = "gemini-2.5-flash-preview-tts"
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={KEY}"

@@ -123,7 +123,13 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     # Dispatch is by the "compute" key — see _compute_ratio_values.
     {"name": "pfcf_ratio",          "type": "computed",      "compute": "pfcf"},
     {"name": "ev_ebitda",           "type": "computed",      "compute": "ev_ebitda"},
-    {"name": "earnings_yield",      "source": "ratios",    "field": "earningsYield",          "type": "direct"},
+    # Earnings yield = netIncome / marketCap (a DECIMAL, e.g. 0.04). FMP's
+    # pre-computed `earningsYield` field is null across the S&P 500 (annual AND
+    # quarterly), so a direct extraction yielded ZERO rows. Reconstructing from
+    # raw mirrors P/FCF / EV/EBITDA and matches the per-ticker fallback
+    # (valuation_snapshot_service: ratios.earningsYield → 1/PE), so the sector
+    # median and a company's own yield use the same definition.
+    {"name": "earnings_yield",      "type": "computed",      "compute": "earnings_yield"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
     {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct"},
@@ -493,6 +499,13 @@ def _compute_ratio_values(
                 value = _pfcf_from_raw(km, cf)
             elif compute_name == "ev_ebitda":
                 value = _ev_ebitda_from_raw(km, cf, inc)
+            elif compute_name == "earnings_yield":
+                # netIncome / marketCap → a DECIMAL (e.g. 0.04). Profitable
+                # companies only (>0 gate below), matching the other computed
+                # ratios; loss-makers are excluded from the sector median.
+                ni = _safe_float(inc, "netIncome")
+                mcap = _safe_float(km, "marketCap")
+                value = (ni / mcap) if (ni is not None and mcap and mcap > 0) else None
             else:
                 continue
 

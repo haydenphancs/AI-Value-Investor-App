@@ -145,13 +145,26 @@ struct FundamentalsHistorySheet: View {
 
     // MARK: - Legend + latest vs-sector delta
 
-    /// Latest period where the company has a value, paired with the sector
-    /// value at that same period (nil when there's no sector line).
-    private func latestPair(_ m: DeepDiveMetric) -> (company: Double, sector: Double?, period: String)? {
-        guard let last = points(m).last(where: { $0.value != nil }),
-              let cval = last.value else { return nil }
-        let sval = sectorPoints(m).first { $0.period == last.period }?.value
-        return (cval, sval, last.period)
+    /// The most recent period where BOTH the company AND the sector have a
+    /// value — so the vs-sector delta stays a valid same-period comparison
+    /// even when the latest quarter's sector median isn't in yet (otherwise it
+    /// would mislead with "Company only" despite earlier sector coverage).
+    private func sectorPair(_ m: DeepDiveMetric) -> (company: Double, sector: Double, period: String)? {
+        var sectorByPeriod: [String: Double] = [:]
+        for p in sectorPoints(m) {
+            if let v = p.value { sectorByPeriod[p.period] = v }
+        }
+        for p in points(m).reversed() {
+            if let c = p.value, let s = sectorByPeriod[p.period] {
+                return (c, s, p.period)
+            }
+        }
+        return nil
+    }
+
+    /// Latest company value (for the "Company only" fallback line).
+    private func latestCompany(_ m: DeepDiveMetric) -> Double? {
+        points(m).last(where: { $0.value != nil })?.value
     }
 
     private func deltaText(company: Double, sector: Double, unit: String?) -> String {
@@ -165,7 +178,7 @@ struct FundamentalsHistorySheet: View {
 
     @ViewBuilder
     private func legendAndDelta(_ m: DeepDiveMetric) -> some View {
-        let pair = latestPair(m)
+        let pair = sectorPair(m)
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             HStack(spacing: AppSpacing.md) {
                 HStack(spacing: 6) {
@@ -189,12 +202,12 @@ struct FundamentalsHistorySheet: View {
                     }
                 }
             }
-            if let pair, let s = pair.sector {
-                Text(deltaText(company: pair.company, sector: s, unit: m.historyUnit))
+            if let pair {
+                Text(deltaText(company: pair.company, sector: pair.sector, unit: m.historyUnit))
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textPrimary)
-            } else if let pair {
-                Text("Latest \(Self.format(pair.company, unit: m.historyUnit)) · Company only")
+            } else if let c = latestCompany(m) {
+                Text("Latest \(Self.format(c, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
             }

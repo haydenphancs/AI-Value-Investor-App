@@ -303,6 +303,62 @@ def test_build_history_quarterly_failure_does_not_kill_annual():
     assert hist["pe"]["quarterly"] == []  # quarterly degraded, annual intact
 
 
+def test_earnings_yield_company_series_falls_back_to_inverse_pe():
+    """FMP's earningsYield is null across most history → the company series
+    must fall back to 1/PE so the chart still appears (issue: no EY chart)."""
+    ratios = [
+        {"calendarYear": "2024", "date": "2024-09-30", "priceToEarningsRatio": 25.0},
+        {"calendarYear": "2023", "date": "2023-09-30", "priceToEarningsRatio": 20.0},
+    ]
+    hist = _fundamentals_history_for_period([], [], [], [], ratios, {}, quarterly=False)
+    assert dict(_series(hist, "earnings_yield")) == {"2024": 4.0, "2023": 5.0}
+
+
+def test_earnings_yield_prefers_real_field_over_pe():
+    ratios = [
+        {"calendarYear": "2024", "date": "2024-09-30",
+         "earningsYield": 0.0279, "priceToEarningsRatio": 25.0},
+        {"calendarYear": "2023", "date": "2023-09-30",
+         "earningsYield": 0.0331, "priceToEarningsRatio": 20.0},
+    ]
+    hist = _fundamentals_history_for_period([], [], [], [], ratios, {}, quarterly=False)
+    assert dict(_series(hist, "earnings_yield")) == {"2024": 2.8, "2023": 3.3}
+
+
+def test_earnings_yield_gets_sector_line():
+    out = _out_with_sector({"earnings_yield": {"2024": 0.025, "2023": 0.030, "2022": 0.035}})
+    # earnings yield needs PE in ratios to produce a company series.
+    out.ratios = [
+        {"calendarYear": "2024", "date": "2024-09-30", "priceToEarningsRatio": 25.0},
+        {"calendarYear": "2023", "date": "2023-09-30", "priceToEarningsRatio": 20.0},
+        {"calendarYear": "2022", "date": "2022-09-30", "priceToEarningsRatio": 16.0},
+    ]
+    hist = _build_fundamentals_history(out)
+    assert "earnings_yield" in hist
+    # sector fraction ×100 (percent unit), aligned to company labels
+    assert [p["value"] for p in hist["earnings_yield"]["sector_annual"]] == [3.5, 3.0, 2.5]
+
+
+def test_benchmark_earnings_yield_is_computed_as_fraction():
+    """The sector benchmark stores earnings_yield as netIncome/marketCap (a
+    DECIMAL), since FMP's earningsYield field is null S&P-500-wide."""
+    from app.services.sector_benchmark_service import _compute_ratio_values
+    company = {
+        "key_metrics_annual": [{"calendarYear": "2024", "date": "2024-09-30", "marketCap": 1000.0}],
+        "income_annual": [{"calendarYear": "2024", "date": "2024-09-30", "netIncome": 40.0}],
+        "cashflow_annual": [], "balance_annual": [],
+    }
+    out = _compute_ratio_values([company], "earnings_yield", "annual")
+    assert out == {"2024": [0.04]}
+    # Loss-makers / missing inputs excluded (no fabricated yield).
+    loss = {
+        "key_metrics_annual": [{"calendarYear": "2024", "date": "2024-09-30", "marketCap": 1000.0}],
+        "income_annual": [{"calendarYear": "2024", "date": "2024-09-30", "netIncome": -10.0}],
+        "cashflow_annual": [], "balance_annual": [],
+    }
+    assert _compute_ratio_values([loss], "earnings_yield", "annual") == {}
+
+
 def test_build_history_drops_keys_with_no_values():
     out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
     _valid_annual(out)  # ratios has only P/E → margins etc. have no datapoints

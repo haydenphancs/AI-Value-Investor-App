@@ -1,0 +1,17 @@
+# Chatterbox voice-clone GPU env — Python 3.11. Frozen from backend/venv_clone.
+#
+# On a CUDA pod, install torch/torchaudio FIRST from the cu124 index (setup_runpod.sh
+# does this) so pip never resolves a CPU-only wheel; then `pip install -r` this file.
+# These pins are exactly what runs on the Mac (MPS), so the only backend difference
+# between Mac and pod is the torch wheel build (CPU/MPS vs cu124), not the versions.
+chatterbox-tts==0.1.7
+torch==2.6.0
+torchaudio==2.6.0
+numpy==1.26.4
+soundfile==0.14.0
+pydub==0.25.1
+librosa==0.11.0
+transformers==5.2.0
+scipy==1.17.1
+resemble-perth==1.0.1
+s3tokenizer==0.3.0

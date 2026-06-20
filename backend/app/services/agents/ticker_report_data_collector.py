@@ -603,14 +603,15 @@ class TickerReportDataCollector:
             # iterates dataclasses.fields) skips them and the cache stays
             # small. They exist only between _fetch_all and _compute_metrics,
             # where _build_fundamentals_history folds them into the compact
-            # per-metric series carried on fundamental_metrics_partial. ~12
-            # quarters → the chart's Quarterly toggle (8 YoY points after the
-            # 4-quarter gap). Read later via getattr(out, "<name>", []).
-            ("income_q", self.fmp.get_income_statement(ticker, "quarter", 12), []),
-            ("balance_q", self.fmp.get_balance_sheet(ticker, "quarter", 12), []),
-            ("cash_flow_q", self.fmp.get_cash_flow_statement(ticker, "quarter", 12), []),
-            ("key_metrics_q", self.fmp.get_key_metrics(ticker, "quarter", 12), []),
-            ("ratios_q", self.fmp.get_financial_ratios(ticker, "quarter", 12), []),
+            # per-metric series carried on fundamental_metrics_partial. 40
+            # quarters (~10y) → a horizontally-scrollable Quarterly chart with
+            # plenty of columns (and more positive-FCF periods for P/FCF).
+            # Read later via getattr(out, "<name>", []).
+            ("income_q", self.fmp.get_income_statement(ticker, "quarter", 40), []),
+            ("balance_q", self.fmp.get_balance_sheet(ticker, "quarter", 40), []),
+            ("cash_flow_q", self.fmp.get_cash_flow_statement(ticker, "quarter", 40), []),
+            ("key_metrics_q", self.fmp.get_key_metrics(ticker, "quarter", 40), []),
+            ("ratios_q", self.fmp.get_financial_ratios(ticker, "quarter", 40), []),
             # Pull 10 years of analyst estimates so we have current FY + 3
             # future on-screen (4 bars), plus the FY immediately before the
             # leftmost visible bar as its off-screen YoY anchor. FMP returns

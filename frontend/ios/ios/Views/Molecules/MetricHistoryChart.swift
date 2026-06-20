@@ -92,16 +92,32 @@ struct MetricHistoryChart: View {
         }
         .chartXAxis {
             AxisMarks(values: tickPeriods) { value in
-                AxisValueLabel {
+                AxisValueLabel(centered: false) {
                     if let s = value.as(String.self) {
                         Text(s)
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textMuted)
+                            .fixedSize()  // never ellipsize ("Q4…" → "Q4 '26")
                     }
                 }
             }
         }
+        // Horizontally scrollable: show a window of columns at a readable
+        // width and let the user scroll back through history (both Annual &
+        // Quarterly). The y-axis stays pinned. Starts at the most-recent end.
+        .chartScrollableAxes(.horizontal)
+        .chartXVisibleDomain(length: visibleColumns)
+        .chartScrollPosition(initialX: scrollStart)
         .frame(height: 200)
+    }
+
+    /// How many bars are visible before scrolling kicks in. Fewer-than-window
+    /// series (e.g. ~10 annual) just show in full (no scroll).
+    private var visibleColumns: Int { Swift.min(orderedPeriods.count, 12) }
+
+    /// Leading edge so the chart opens scrolled to the latest periods.
+    private var scrollStart: String {
+        orderedPeriods[Swift.max(0, orderedPeriods.count - visibleColumns)]
     }
 
     // MARK: - Helpers
@@ -146,12 +162,13 @@ struct MetricHistoryChart: View {
         return bottom...top
     }
 
-    /// Thin the x labels to ~6 so a 10–12 bar chart doesn't crowd.
+    /// Thin the x labels so dense (scrollable quarterly) charts don't crowd —
+    /// roughly one label per 3–4 bars for long series, every other for short.
+    /// Anchored to the end so the newest bar always keeps its label.
     private var tickPeriods: [String] {
         let n = orderedPeriods.count
-        guard n > 6 else { return orderedPeriods }
-        let step = Int((Double(n) / 6).rounded(.up))
-        // Keep the newest bar's label by anchoring the stride to the end.
+        guard n > 8 else { return orderedPeriods }
+        let step = n > 24 ? 4 : 2
         return orderedPeriods.enumerated()
             .filter { ($0.offset % step) == ((n - 1) % step) }
             .map(\.element)

@@ -57,6 +57,10 @@ class DeepDiveMetricResponse(BaseModel):
     history_unit: Optional[str] = None
     annual_history: Optional[List[MetricHistoryPointResponse]] = None
     quarterly_history: Optional[List[MetricHistoryPointResponse]] = None
+    # Sector-average series (the "*" metrics only), aligned to the same period
+    # labels as annual_history/quarterly_history so iOS overlays a sector line.
+    sector_annual_history: Optional[List[MetricHistoryPointResponse]] = None
+    sector_quarterly_history: Optional[List[MetricHistoryPointResponse]] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):

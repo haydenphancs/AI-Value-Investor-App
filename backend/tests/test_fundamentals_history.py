@@ -8,14 +8,23 @@ failures must never silently corrupt or wipe the charted series.
 Pure math — no network, no Supabase. Build inputs inline.
 """
 
+import pytest
+
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
+    TickerReportDataCollector,
+    _aligned_sector_series,
+    _build_fundamental_metrics_from_snapshots,
     _build_fundamentals_history,
     _fundamentals_history_for_period,
     _history_period_id,
     _hist_ev_ebitda,
     _hist_pfcf,
+    _parse_history_label,
+    _sector_period_map,
 )
+from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.ticker_report import DeepDiveMetricCardResponse
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -301,3 +310,194 @@ def test_build_history_drops_keys_with_no_values():
     assert "pe" in hist
     assert "altman_z" not in hist  # no balance sheet provided
     assert "roe" not in hist       # no key_metrics provided
+
+
+# ── Sector-average overlay ─────────────────────────────────────────────
+
+def test_parse_history_label_forms():
+    assert _parse_history_label("2024") == (2024, None)
+    assert _parse_history_label("Q1 '24") == (2024, 1)   # our company label
+    assert _parse_history_label("Q1'24") == (2024, 1)    # sector table label
+    assert _parse_history_label("garbage") is None
+    assert _parse_history_label("") is None
+
+
+def test_sector_period_map_parses_and_drops_bad():
+    m = _sector_period_map({"2024": 0.38, "2023": None, "bad": 1.0, "2022": 0.36})
+    assert m == {(2024, None): 0.38, (2022, None): 0.36}
+
+
+def test_aligned_sector_series_percent_x100_and_alignment():
+    company = [{"period": "2022", "value": 42.0}, {"period": "2023", "value": 44.0},
+               {"period": "2024", "value": 46.0}]
+    sector_map = {(2022, None): 0.36, (2024, None): 0.38}  # 2023 missing
+    series, has = _aligned_sector_series(company, sector_map, to_percent=True)
+    assert has is True
+    assert series == [
+        {"period": "2022", "value": 36.0},   # ×100
+        {"period": "2023", "value": None},    # gap preserved, aligned to company
+        {"period": "2024", "value": 38.0},
+    ]
+
+
+def test_aligned_sector_series_plain_for_x_metrics():
+    company = [{"period": "2023", "value": 30.1}, {"period": "2024", "value": 35.8}]
+    sector_map = {(2023, None): 21.0, (2024, None): 22.0}
+    series, has = _aligned_sector_series(company, sector_map, to_percent=False)
+    assert has and [p["value"] for p in series] == [21.0, 22.0]  # no ×100
+
+
+def _out_with_sector(annual_bench, quarterly_bench=None):
+    out = CollectedTickerData(ticker="AAPL", persona_key="warren_buffett")
+    out.profile = {"industry": "X"}
+    out.income = [
+        {"calendarYear": "2024", "date": "2024-09-30", "revenue": 400},
+        {"calendarYear": "2023", "date": "2023-09-30", "revenue": 380},
+        {"calendarYear": "2022", "date": "2022-09-30", "revenue": 350},
+    ]
+    out.ratios = [
+        {"calendarYear": "2024", "date": "2024-09-30", "grossProfitMargin": 0.46, "priceToEarningsRatio": 35.8},
+        {"calendarYear": "2023", "date": "2023-09-30", "grossProfitMargin": 0.44, "priceToEarningsRatio": 30.1},
+        {"calendarYear": "2022", "date": "2022-09-30", "grossProfitMargin": 0.42, "priceToEarningsRatio": 28.0},
+    ]
+    out.sector_benchmark_history = {
+        "annual": annual_bench or {},
+        "quarterly": quarterly_bench or {},
+    }
+    return out
+
+
+def test_build_history_attaches_sector_series_with_units():
+    out = _out_with_sector({
+        "gross_margin": {"2024": 0.38, "2023": 0.37, "2022": 0.36},  # fractions
+        "pe_ratio": {"2024": 22.0, "2023": 21.0, "2022": 20.0},       # plain
+    })
+    hist = _build_fundamentals_history(out)
+    # percent metric → sector ×100, aligned to company labels
+    assert [p["value"] for p in hist["gross_margin"]["sector_annual"]] == [36.0, 37.0, 38.0]
+    # x metric → mapped via pe→pe_ratio, no conversion
+    assert [p["value"] for p in hist["pe"]["sector_annual"]] == [20.0, 21.0, 22.0]
+
+
+def test_build_history_no_sector_when_benchmark_missing():
+    out = _out_with_sector({})  # empty benchmark dict
+    hist = _build_fundamentals_history(out)
+    assert "sector_annual" not in hist["gross_margin"]
+    assert "sector_annual" not in hist["pe"]
+
+
+def test_build_history_sector_partial_years_kept_if_any_value():
+    out = _out_with_sector({"gross_margin": {"2024": 0.38}})  # only one year
+    hist = _build_fundamentals_history(out)
+    sa = hist["gross_margin"]["sector_annual"]
+    assert [p["value"] for p in sa] == [None, None, 38.0]  # aligned, sparse
+
+
+def test_build_history_non_star_metric_never_gets_sector():
+    # revenue_growth (no "*") must NOT get a sector series even if a (bogus)
+    # benchmark dict carried one under that name.
+    out = _out_with_sector({"revenue_growth": {"2024": 5.0, "2023": 4.0}})
+    out.cash_flow = []
+    hist = _build_fundamentals_history(out)
+    assert "revenue_growth" in hist            # company growth exists
+    assert "sector_annual" not in hist["revenue_growth"]
+
+
+def test_build_history_sector_quarterly_best_effort():
+    out = _out_with_sector(
+        {"gross_margin": {"2024": 0.38}},
+        quarterly_bench={"gross_margin": {"Q1'24": 0.37}},
+    )
+    # add quarterly company data so the quarterly series exists
+    out.ratios_q = [
+        {"calendarYear": "2024", "period": "Q1", "date": "2024-03-31", "grossProfitMargin": 0.45},
+        {"calendarYear": "2023", "period": "Q1", "date": "2023-03-31", "grossProfitMargin": 0.43},
+    ]
+    hist = _build_fundamentals_history(out)
+    sq = hist["gross_margin"].get("sector_quarterly", [])
+    # sector "Q1'24" aligns to company "Q1 '24" → 0.37×100 = 37.0
+    assert any(p["value"] == 37.0 for p in sq)
+
+
+def test_build_history_sector_period_outside_company_ignored():
+    # Sector has 2019 (which the company doesn't) → no floating endpoint.
+    out = _out_with_sector({"gross_margin": {"2024": 0.38, "2019": 0.30}})
+    hist = _build_fundamentals_history(out)
+    periods = [p["period"] for p in hist["gross_margin"]["sector_annual"]]
+    assert "2019" not in periods
+    assert periods == ["2022", "2023", "2024"]  # company periods only
+
+
+def test_build_history_tolerates_bad_sector_history_attr():
+    # A legacy / corrupt value (not a dict) must not crash — just no sector line.
+    for bad in (None, "oops", 123, []):
+        out = _out_with_sector({})
+        out.sector_benchmark_history = bad  # type: ignore[assignment]
+        hist = _build_fundamentals_history(out)
+        assert "sector_annual" not in hist["gross_margin"]
+        assert "pe" in hist  # company series unaffected
+
+
+def test_sector_delta_guard_no_ratio_when_nonpositive():
+    # Direct sanity on the alignment when sector value is negative (e.g. neg D/E)
+    company = [{"period": "2023", "value": -0.5}, {"period": "2024", "value": -0.8}]
+    sector_map = {(2024, None): -0.3}
+    series, has = _aligned_sector_series(company, sector_map, to_percent=False)
+    assert has and series[-1]["value"] == -0.3  # truthful pass-through
+
+
+@pytest.mark.asyncio
+async def test_fetch_sector_benchmark_history_normalizes_sector(monkeypatch):
+    """The collector must look up benchmarks under the CANONICAL sector name
+    (same as the snapshot cards), not the raw FMP name — else the sector line
+    is silently empty for e.g. 'Information Technology' / 'Financials'."""
+    captured: list = []
+
+    class _FakeLookup:
+        def get_sector_benchmarks(self, sector, metrics, period_type):
+            captured.append(sector)
+            return {m: {} for m in metrics}
+
+    monkeypatch.setattr(
+        "app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
+        lambda: _FakeLookup(),
+    )
+    coll = TickerReportDataCollector()
+    # FMP GICS-style raw name → must be queried as canonical "Technology".
+    await coll._fetch_sector_benchmark_history("Information Technology")
+    assert captured and all(s == "Technology" for s in captured), captured
+
+
+@pytest.mark.asyncio
+async def test_fetch_sector_benchmark_history_empty_sector_short_circuits(monkeypatch):
+    called = {"n": 0}
+
+    class _FakeLookup:
+        def get_sector_benchmarks(self, *a, **k):
+            called["n"] += 1
+            return {}
+
+    monkeypatch.setattr(
+        "app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
+        lambda: _FakeLookup(),
+    )
+    coll = TickerReportDataCollector()
+    out = await coll._fetch_sector_benchmark_history("")
+    assert out == {"annual": {}, "quarterly": {}}
+    assert called["n"] == 0  # no query for a missing sector
+
+
+def test_sector_series_survives_card_validation():
+    out = _out_with_sector({"gross_margin": {"2024": 0.38, "2023": 0.37, "2022": 0.36}})
+    hist = _build_fundamentals_history(out)
+    prof = SnapshotItemResponse(
+        category="Profitability", rating=4,
+        metrics=[SnapshotMetricResponse(name="Gross Margin (1.2x sector avg 38%)", value="46.0%")],
+        full_report_available=True,
+    )
+    card_dict = _build_fundamental_metrics_from_snapshots(
+        prof, None, None, None, history_lookup=hist)[0]
+    card = DeepDiveMetricCardResponse.model_validate(card_dict)
+    m = card.metrics[0]
+    assert m.sector_annual_history is not None
+    assert [p.value for p in m.sector_annual_history] == [36.0, 37.0, 38.0]

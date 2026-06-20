@@ -1080,6 +1080,11 @@ def test_fundamentals_history_survives_full_json_roundtrip():
     out.profile = {"industry": "Consumer Electronics"}
     out.income, out.balance, out.cash_flow = income, balance, cash_flow
     out.key_metrics, out.ratios = key_metrics, ratios
+    # Sector-average history (fractions for the margin metric → ×100 downstream).
+    out.sector_benchmark_history = {
+        "annual": {"gross_margin": {"2024": 0.38, "2023": 0.37, "2022": 0.36}},
+        "quarterly": {},
+    }
     hist = _build_fundamentals_history(out)
 
     prof = SnapshotItemResponse(
@@ -1098,9 +1103,13 @@ def test_fundamentals_history_survives_full_json_roundtrip():
     assert metric.history_key == "gross_margin"
     assert metric.history_unit == "percent"
     assert metric.annual_history is not None and len(metric.annual_history) == 3
-    # snake_case key survived the JSON encode (the iOS CodingKey contract).
+    # snake_case keys survived the JSON encode (the iOS CodingKey contract).
     assert '"annual_history"' in blob
+    assert '"sector_annual_history"' in blob
     assert metric.annual_history[0].period == "2022"
+    # Sector overlay survived round-trip, aligned + ×100.
+    assert metric.sector_annual_history is not None
+    assert [p.value for p in metric.sector_annual_history] == [36.0, 37.0, 38.0]
 
 
 # ── Price action: volatility math + tier classification ──────────────

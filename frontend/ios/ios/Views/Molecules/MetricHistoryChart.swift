@@ -13,8 +13,9 @@ import SwiftUI
 import Charts
 
 struct MetricHistoryChart: View {
-    let points: [MetricHistoryPoint]   // oldest→newest
+    let points: [MetricHistoryPoint]   // oldest→newest (company)
     let unit: String?                  // "percent" | "x" | "score"
+    var sector: [MetricHistoryPoint]? = nil  // sector-average overlay (aligned)
 
     /// Only the points that actually have a value (gaps are dropped so the
     /// chart doesn't render zero-height phantom bars).
@@ -23,6 +24,13 @@ struct MetricHistoryChart: View {
     }
 
     private var orderedPeriods: [String] { valued.map(\.period) }
+
+    /// Sector points that have a value AND a matching company bar (so the
+    /// line aligns to the company x-categories — no floating endpoints).
+    private var sectorValued: [MetricHistoryPoint] {
+        let xs = Set(orderedPeriods)
+        return (sector ?? []).filter { $0.value != nil && xs.contains($0.period) }
+    }
 
     var body: some View {
         if valued.count < 2 {
@@ -36,16 +44,36 @@ struct MetricHistoryChart: View {
     }
 
     private var chart: some View {
-        Chart(valued) { point in
-            BarMark(
-                x: .value("Period", point.period),
-                // Clamp the drawn height into the robust domain so one extreme
-                // year (e.g. a P/E spike to 5000×) pins to the chart edge
-                // instead of flattening every other bar to a sliver.
-                y: .value("Value", min(max(point.value ?? 0, yDomain.lowerBound), yDomain.upperBound))
-            )
-            .foregroundStyle(color(for: point))
-            .cornerRadius(3)
+        Chart {
+            ForEach(valued) { point in
+                BarMark(
+                    x: .value("Period", point.period),
+                    // Clamp the drawn height into the robust domain so one extreme
+                    // year (e.g. a P/E spike to 5000×) pins to the chart edge
+                    // instead of flattening every other bar to a sliver.
+                    y: .value("Value", clamped(point.value ?? 0))
+                )
+                .foregroundStyle(color(for: point))
+                .cornerRadius(3)
+            }
+            // Sector-average overlay: a dashed gray line + dots, aligned to the
+            // same x-categories as the bars (mirrors GrowthChartView).
+            ForEach(sectorValued) { point in
+                LineMark(
+                    x: .value("Period", point.period),
+                    y: .value("Sector", clamped(point.value ?? 0)),
+                    series: .value("Series", "Sector avg")
+                )
+                .foregroundStyle(AppColors.textSecondary)
+                .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                .interpolationMethod(.catmullRom)
+                PointMark(
+                    x: .value("Period", point.period),
+                    y: .value("Sector", clamped(point.value ?? 0))
+                )
+                .foregroundStyle(AppColors.textSecondary)
+                .symbolSize(18)
+            }
         }
         .chartYScale(domain: yDomain)
         .chartXScale(domain: orderedPeriods)
@@ -85,13 +113,21 @@ struct MetricHistoryChart: View {
         return isLatest ? AppColors.primaryBlue : AppColors.primaryBlue.opacity(0.5)
     }
 
+    /// Clamp a drawn value into the robust domain (keeps outliers — company OR
+    /// sector — pinned to the edge instead of escaping the frame).
+    private func clamped(_ v: Double) -> Double {
+        Swift.min(Swift.max(v, yDomain.lowerBound), yDomain.upperBound)
+    }
+
     /// Outlier-robust y-axis range that ALWAYS includes zero (so the baseline
     /// is visible even for an all-negative series) and caps the upper/lower
     /// bound with an IQR fence (so a single extreme bar can't flatten the
     /// rest — same idea as GrowthChartView / EarningsTimelineChart). Values
     /// beyond the fence are clamped to the edge when drawn.
     private var yDomain: ClosedRange<Double> {
-        let vals = valued.compactMap(\.value).sorted()
+        // Include sector values so the overlaid line stays in-frame; the IQR
+        // fence below still clamps any single outlier (company or sector).
+        let vals = (valued.compactMap(\.value) + sectorValued.compactMap(\.value)).sorted()
         guard let lo = vals.first, let hi = vals.last else { return 0...1 }
         let q1 = vals[vals.count / 4]
         let q3 = vals[min(vals.count - 1, (vals.count * 3) / 4)]

@@ -303,6 +303,11 @@ class CollectedTickerData:
     # directly competing peer (per grounded research) leads the display.
     peer_ranks: Dict[str, int] = field(default_factory=dict)
     sector_aggregates: Optional[SectorAggregates] = None
+    # Pre-computed sector-median HISTORY ({period_type: {sector_metric_name:
+    # {period_label: value}}}) for the "*" card metrics, read from the
+    # sector_benchmarks table in pass 2. Feeds the drill-down's sector-average
+    # line. Plain nested dict → cache-serializes cheaply; {} when unavailable.
+    sector_benchmark_history: Dict[str, Any] = field(default_factory=dict)
     # Industry-size projection from a FRED BEA value-added series, used
     # as a fallback when AI Stage A didn't extract an explicit TAM quote
     # from the earnings transcript. None when industry isn't in the
@@ -935,13 +940,30 @@ class TickerReportDataCollector:
             if industry else asyncio.sleep(0, result=None)
         )
 
-        peer_profiles, peer_ratios, sector_agg, industry_tam = await asyncio.gather(
+        # Sector-median history for the "*" drill-down line (pre-computed in
+        # the sector_benchmarks table; one cached Supabase read per granularity).
+        sector_bench_task = (
+            self._fetch_sector_benchmark_history(sector)
+            if sector else asyncio.sleep(0, result={})
+        )
+
+        peer_profiles, peer_ratios, sector_agg, industry_tam, sector_bench = await asyncio.gather(
             peer_profiles_task,
             peer_ratios_task,
             sector_agg_task,
             industry_tam_task,
+            sector_bench_task,
             return_exceptions=True,
         )
+
+        if isinstance(sector_bench, Exception):
+            logger.warning(
+                f"Collector pass 2: sector_benchmark_history failed for {ticker}: "
+                f"{type(sector_bench).__name__}: {sector_bench}"
+            )
+            out.sector_benchmark_history = {}
+        else:
+            out.sector_benchmark_history = sector_bench or {}
 
         if isinstance(peer_profiles, Exception):
             logger.warning(
@@ -1071,6 +1093,41 @@ class TickerReportDataCollector:
                 "Moat precompute: grounded fallback failed for %s: %s",
                 out.ticker, exc,
             )
+
+    async def _fetch_sector_benchmark_history(
+        self, sector: str,
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """Pre-computed sector-median history (annual + quarterly) for the
+        "*" card metrics — overlaid as the drill-down's sector-average line.
+
+        The lookup is synchronous (Supabase sync SDK) + 1h-cached, so it's run
+        via `to_thread`. Degrades to {} on any failure — the chart simply omits
+        the sector line. Quarterly is best-effort (the table may only carry
+        annual rows for some sectors/metrics).
+
+        The sector name is NORMALIZED (`_normalize_sector`) exactly as the
+        snapshot services do before they look up the card's "*" comparison —
+        the table is keyed by canonical names (e.g. FMP "Information
+        Technology" → "Technology"), so skipping this would silently return an
+        empty sector line even where the card's asterisk renders."""
+        from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+        from app.services.sector_benchmark_service import _normalize_sector
+
+        sector = _normalize_sector(sector) if sector else ""
+        if not sector:
+            return {"annual": {}, "quarterly": {}}
+
+        lookup = get_sector_benchmark_lookup()
+        metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
+        annual, quarterly = await asyncio.gather(
+            asyncio.to_thread(lookup.get_sector_benchmarks, sector, metrics, "annual"),
+            asyncio.to_thread(lookup.get_sector_benchmarks, sector, metrics, "quarterly"),
+            return_exceptions=True,
+        )
+        return {
+            "annual": annual if isinstance(annual, dict) else {},
+            "quarterly": quarterly if isinstance(quarterly, dict) else {},
+        }
 
     async def _fetch_peer_ratios(
         self, peers: List[str],
@@ -3333,6 +3390,48 @@ _HISTORY_UNITS: Dict[str, str] = {
     "altman_z": "score",
 }
 
+# history_key → sector_benchmarks `metric_name`, for the "*" (sector-compared)
+# metrics ONLY. Growth / earnings_yield / altman_z have no "*" and get no
+# sector line (altman_z isn't in the table anyway). Most names match; the
+# valuation multiples carry a `_ratio` suffix in the benchmark table.
+_SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
+    "gross_margin": "gross_margin",
+    "operating_margin": "operating_margin",
+    "net_margin": "net_margin",
+    "roe": "roe",
+    "roa": "roa",
+    "pe": "pe_ratio",
+    "pb": "pb_ratio",
+    "ps": "ps_ratio",
+    "pfcf": "pfcf_ratio",
+    "ev_ebitda": "ev_ebitda",
+    "debt_to_equity": "debt_to_equity",
+    "current_ratio": "current_ratio",
+    "interest_coverage": "interest_coverage",
+    "quick_ratio": "quick_ratio",
+}
+_SECTOR_HISTORY_METRIC_NAMES = sorted(set(_SECTOR_METRIC_BY_HISTORY_KEY.values()))
+
+
+def _parse_history_label(label: str) -> Optional[Tuple[int, Optional[int]]]:
+    """Parse a period label WE emit ("2024" or "Q1 '24") back to
+    (year, quarter|None) — used to align the sector series to the company
+    series. Also handles the sector table's space-less "Q1'24"."""
+    s = (label or "").strip().upper().replace(" ", "")
+    if s.startswith("Q") and "'" in s:
+        try:
+            qpart, ypart = s.split("'", 1)
+            quarter = int(qpart[1:])
+            yy = int(ypart)
+            year = 2000 + yy if yy < 100 else yy
+            return (year, quarter if 1 <= quarter <= 4 else None)
+        except (ValueError, IndexError):
+            return None
+    try:
+        return (int(s), None)
+    except ValueError:
+        return None
+
 
 def _resolve_history_key(label: str) -> Optional[str]:
     """Map a snapshot metric label to its stable history key, or None."""
@@ -3552,6 +3651,40 @@ def _has_history_value(points: List[Dict[str, Any]]) -> bool:
     return any(pt.get("value") is not None for pt in points)
 
 
+def _sector_period_map(
+    metric_dict: Dict[str, Any],
+) -> Dict[Tuple[int, Optional[int]], float]:
+    """{period_label: value} (from sector_benchmarks) → {(year, quarter): value}."""
+    out: Dict[Tuple[int, Optional[int]], float] = {}
+    for label, value in (metric_dict or {}).items():
+        key = _parse_history_label(label)
+        num = _num_or_none(value)
+        if key is not None and num is not None:
+            out[key] = num
+    return out
+
+
+def _aligned_sector_series(
+    company_points: List[Dict[str, Any]],
+    sector_map: Dict[Tuple[int, Optional[int]], float],
+    to_percent: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Build a sector series that shares the COMPANY series' period labels
+    (so the chart's LineMark aligns to the BarMark x categories). `to_percent`
+    ×100 for percent-unit metrics (the benchmark table stores margins/ROE/ROA
+    as fractions). Returns (series, has_any_real_value)."""
+    series: List[Dict[str, Any]] = []
+    has_value = False
+    for pt in company_points:
+        k = _parse_history_label(pt.get("period", ""))
+        v = sector_map.get(k) if k is not None else None
+        if v is not None:
+            v = round(v * 100, 2) if to_percent else round(v, 2)
+            has_value = True
+        series.append({"period": pt.get("period"), "value": v})
+    return series, has_value
+
+
 def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[str, Any]]:
     """Compact per-metric history for the 4 Fundamentals & Growth cards.
 
@@ -3600,6 +3733,28 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
             "annual": a,
             "quarterly": q,
         }
+
+    # ── Sector-average line (the "*" metrics) ─────────────────────────────
+    # Align the pre-computed sector medians to the company's period labels so
+    # iOS can overlay a dashed line on the bars. Best-effort: missing/sparse
+    # benchmark data → no (or partial) sector series, never an error.
+    bench = out.sector_benchmark_history if isinstance(getattr(out, "sector_benchmark_history", None), dict) else {}
+    annual_bench = bench.get("annual") or {}
+    quarterly_bench = bench.get("quarterly") or {}
+    for key, payload in result.items():
+        sector_name = _SECTOR_METRIC_BY_HISTORY_KEY.get(key)
+        if not sector_name:
+            continue  # non-"*" metric → no sector line
+        to_percent = _HISTORY_UNITS.get(key) == "percent"
+        sa, sa_has = _aligned_sector_series(
+            payload["annual"], _sector_period_map(annual_bench.get(sector_name, {})), to_percent)
+        sq, sq_has = _aligned_sector_series(
+            payload["quarterly"], _sector_period_map(quarterly_bench.get(sector_name, {})), to_percent)
+        if sa_has:
+            payload["sector_annual"] = sa
+        if sq_has:
+            payload["sector_quarterly"] = sq
+
     return result
 
 
@@ -3636,6 +3791,12 @@ def _snapshot_to_card(
             md["history_unit"] = h.get("unit")
             md["annual_history"] = h.get("annual") or []
             md["quarterly_history"] = h.get("quarterly") or []
+            # Sector-average overlay (present only for the "*" metrics that
+            # have benchmark coverage; aligned to the company period labels).
+            if h.get("sector_annual"):
+                md["sector_annual_history"] = h["sector_annual"]
+            if h.get("sector_quarterly"):
+                md["sector_quarterly_history"] = h["sector_quarterly"]
         metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)

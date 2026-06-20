@@ -782,15 +782,10 @@ extension CoreChapterContent {
             ),
             5: CoreChapterContent(
                 chapterNumber: 5,
-                chapterTitle: "Here is the content for Core 5, where we outline the strict rules for those who want to beat the market.",
+                chapterTitle: "Going on the Offensive (The Enterprising Strategy)",
                 bookTitle: "The Intelligent Investor",
                 bookAuthor: "Benjamin Graham",
                 sections: [
-                    CoreChapterSection(
-                        type: .heading,
-                        title: nil,
-                        content: .text("Core 5: Going on the Offensive (The Enterprising Strategy)")
-                    ),
                     CoreChapterSection(
                         type: .heading,
                         title: nil,
@@ -848,7 +843,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 210,
+                audioDurationSeconds: 202,
                 currentProgress: 0.0
             ),
             6: CoreChapterContent(
@@ -7020,7 +7015,7 @@ extension BookCoreChapter {
             BookCoreChapter(number: 2, title: "The Invisible Enemy", description: "The greatest trick the financial industry ever pulled was convincing you that cash is \"safe.\" You look at your bank account, and t…"),
             BookCoreChapter(number: 3, title: "Mastering the Manic-Depressive Market", description: "Imagine you own a house you love. You know its value: good roof, solid foundation, great neighborhood. Now imagine a stranger stan…"),
             BookCoreChapter(number: 4, title: "Building the Fortress (The Defensive Strategy)", description: "There is a persistent lie in finance that \"effort equals return.\" In your job, if you work 80 hours a week, you get a promotion. I…"),
-            BookCoreChapter(number: 5, title: "Here is the content for Core 5, where we outline the strict rules for those who want to beat the market.", description: "Here is the seduction: You believe that if you are smarter, faster, and read more news than your neighbor, you will make more mone…"),
+            BookCoreChapter(number: 5, title: "Going on the Offensive (The Enterprising Strategy)", description: "Here is the seduction: You believe that if you are smarter, faster, and read more news than your neighbor, you will make more mone…"),
             BookCoreChapter(number: 6, title: "The Mutual Fund Maze", description: "The financial industry is built on a single, powerful myth: \"Investing is too complicated for you to do alone; you need an expert.…"),
             BookCoreChapter(number: 7, title: "The Earnings Mirage", description: "The greatest lie on Wall Street is a single number: \"EPS\" (Earnings Per Share). The friction is that you are trained to treat this…"),
             BookCoreChapter(number: 8, title: "The Comparison Test", description: "The biggest mistake you make is falling in love with a stock in isolation. You see a company—let's say a popular coffee chain—and…"),

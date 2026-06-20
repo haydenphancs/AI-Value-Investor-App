@@ -224,4 +224,13 @@ CLAUDE.local.md
 
 # Supabase CLI local cache
 supabase/.temp/
+
+# --- Book narration / voice-clone local artifacts (large + regenerable; never commit) ---
+backend/venv_clone/
+backend/data/book_audio/orig/
+backend/data/book_audio/orig_speed/
+backend/data/book_audio/.cache_*/
+backend/data/book_audio/.clone_cache_*/
+backend/data/book_audio/.tmp_*/
+backend/data/voice_clone/
 dump.rdb

@@ -38,6 +38,13 @@ struct FundamentalsHistorySheet: View {
         }
     }
 
+    private func sectorPoints(_ m: DeepDiveMetric) -> [MetricHistoryPoint] {
+        switch period {
+        case .annual:    return m.sectorAnnualHistory ?? []
+        case .quarterly: return m.sectorQuarterlyHistory ?? []
+        }
+    }
+
     private func quarterlyAvailable(_ m: DeepDiveMetric) -> Bool {
         (m.quarterlyHistory?.compactMap(\.value).count ?? 0) >= 2
     }
@@ -50,11 +57,11 @@ struct FundamentalsHistorySheet: View {
                         metricPicker
                         header(m)
                         if quarterlyAvailable(m) { periodToggle }
-                        MetricHistoryChart(points: points(m), unit: m.historyUnit)
+                        MetricHistoryChart(points: points(m), unit: m.historyUnit, sector: sectorPoints(m))
                             .id("\(m.id.uuidString)-\(period.rawValue)")
                             .animation(.easeInOut(duration: 0.25), value: selectedMetricID)
                             .animation(.easeInOut(duration: 0.25), value: period)
-                        summaryStrip(m)
+                        legendAndDelta(m)
                         footnote
                     } else {
                         Text("No history available.")
@@ -136,43 +143,69 @@ struct FundamentalsHistorySheet: View {
         .pickerStyle(.segmented)
     }
 
-    // MARK: - Summary strip (low / latest / high)
+    // MARK: - Legend + latest vs-sector delta
 
-    private func summaryStrip(_ m: DeepDiveMetric) -> some View {
-        let values = points(m).compactMap(\.value)
-        let lo = values.min()
-        let hi = values.max()
-        let latest = values.last
-        return HStack(spacing: 0) {
-            stat("Low", lo, m.historyUnit)
-            divider
-            stat("Latest", latest, m.historyUnit)
-            divider
-            stat("High", hi, m.historyUnit)
+    /// Latest period where the company has a value, paired with the sector
+    /// value at that same period (nil when there's no sector line).
+    private func latestPair(_ m: DeepDiveMetric) -> (company: Double, sector: Double?, period: String)? {
+        guard let last = points(m).last(where: { $0.value != nil }),
+              let cval = last.value else { return nil }
+        let sval = sectorPoints(m).first { $0.period == last.period }?.value
+        return (cval, sval, last.period)
+    }
+
+    private func deltaText(company: Double, sector: Double, unit: String?) -> String {
+        let c = Self.format(company, unit: unit)
+        let s = Self.format(sector, unit: unit)
+        if sector > 0 && company > 0 {
+            return "Latest \(c) · Sector \(s) · \(String(format: "%.1f×", company / sector)) sector"
+        }
+        return "Latest \(c) · Sector \(s)"
+    }
+
+    @ViewBuilder
+    private func legendAndDelta(_ m: DeepDiveMetric) -> some View {
+        let pair = latestPair(m)
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            HStack(spacing: AppSpacing.md) {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(AppColors.primaryBlue)
+                        .frame(width: 11, height: 11)
+                    Text("Company")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                if m.hasSector {
+                    HStack(spacing: 5) {
+                        HStack(spacing: 2) {  // dashed-line swatch
+                            ForEach(0..<3, id: \.self) { _ in
+                                Capsule().fill(AppColors.textSecondary).frame(width: 4, height: 2)
+                            }
+                        }
+                        Text("Sector avg")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                }
+            }
+            if let pair, let s = pair.sector {
+                Text(deltaText(company: pair.company, sector: s, unit: m.historyUnit))
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textPrimary)
+            } else if let pair {
+                Text("Latest \(Self.format(pair.company, unit: m.historyUnit)) · Company only")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
         .padding(.vertical, AppSpacing.sm)
+        .padding(.horizontal, AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackgroundLight)
         )
-    }
-
-    private func stat(_ label: String, _ value: Double?, _ unit: String?) -> some View {
-        VStack(spacing: 2) {
-            Text(label)
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-            Text(value.map { Self.format($0, unit: unit) } ?? "—")
-                .font(AppTypography.dataMedium)
-                .foregroundColor(AppColors.textPrimary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(AppColors.textMuted.opacity(0.2))
-            .frame(width: 1, height: 28)
     }
 
     private var footnote: some View {
@@ -198,6 +231,9 @@ struct FundamentalsHistorySheet: View {
     let annual = (2015...2024).map {
         MetricHistoryPoint(period: String($0), value: 30 + Double($0 - 2015) * 1.5)
     }
+    let sectorAnnual = (2015...2024).map {
+        MetricHistoryPoint(period: String($0), value: 22 + Double($0 - 2015) * 0.4)
+    }
     let card = DeepDiveMetricCard(
         title: "Profitability",
         starRating: 4,
@@ -209,7 +245,9 @@ struct FundamentalsHistorySheet: View {
                 historyKey: "gross_margin",
                 historyUnit: "percent",
                 annualHistory: annual,
-                quarterlyHistory: nil
+                quarterlyHistory: nil,
+                sectorAnnualHistory: sectorAnnual,
+                sectorQuarterlyHistory: nil
             ),
             DeepDiveMetric(
                 label: "Net Margin",

@@ -214,6 +214,9 @@ struct DeepDiveMetric: Identifiable {
     let historyUnit: String?
     let annualHistory: [MetricHistoryPoint]?
     let quarterlyHistory: [MetricHistoryPoint]?
+    // Sector-average overlay (the "*" metrics), aligned to the company periods.
+    let sectorAnnualHistory: [MetricHistoryPoint]?
+    let sectorQuarterlyHistory: [MetricHistoryPoint]?
 
     init(
         label: String,
@@ -222,7 +225,9 @@ struct DeepDiveMetric: Identifiable {
         historyKey: String? = nil,
         historyUnit: String? = nil,
         annualHistory: [MetricHistoryPoint]? = nil,
-        quarterlyHistory: [MetricHistoryPoint]? = nil
+        quarterlyHistory: [MetricHistoryPoint]? = nil,
+        sectorAnnualHistory: [MetricHistoryPoint]? = nil,
+        sectorQuarterlyHistory: [MetricHistoryPoint]? = nil
     ) {
         self.label = label
         self.value = value
@@ -231,6 +236,15 @@ struct DeepDiveMetric: Identifiable {
         self.historyUnit = historyUnit
         self.annualHistory = annualHistory
         self.quarterlyHistory = quarterlyHistory
+        self.sectorAnnualHistory = sectorAnnualHistory
+        self.sectorQuarterlyHistory = sectorQuarterlyHistory
+    }
+
+    /// True when a sector-average series exists for this metric (the "*"
+    /// metrics with benchmark coverage) → the drill-down overlays a sector line.
+    var hasSector: Bool {
+        (sectorAnnualHistory?.contains { $0.value != nil } ?? false)
+            || (sectorQuarterlyHistory?.contains { $0.value != nil } ?? false)
     }
 
     /// True when this metric has a chartable series (≥2 real annual points).

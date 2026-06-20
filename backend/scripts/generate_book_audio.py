@@ -194,6 +194,20 @@ def action_recap(action: list[tuple[str, str]]) -> str:
     return f"To put this into practice, here are your action steps: {joined}."
 
 
+def action_plan_narration(action: list[tuple[str, str]]) -> list[str]:
+    """FULL spoken action plan — the heading plus each step's title AND description (unlike
+    action_recap, which only lists titles). Returns spoken blocks (or [] if no action plan). Used by
+    the voice-clone narrator, which reads the whole plan aloud at the end of the core."""
+    if not action:
+        return []
+    blocks = ["The Action Plan."]
+    for title, desc in action:
+        t = strip_markup(title).strip().rstrip(".:")
+        d = strip_markup(desc).strip()
+        blocks.append(f"{t}. {d}" if d else f"{t}.")
+    return blocks
+
+
 def chunk_blocks(blocks: list[str], limit: int = MAX_CHUNK_CHARS) -> list[list[str]]:
     """Group blocks into chunks under `limit` chars (never splitting a single block). Returns each
     chunk as a LIST of blocks (so a chunk can be re-split if its take comes back truncated). With the

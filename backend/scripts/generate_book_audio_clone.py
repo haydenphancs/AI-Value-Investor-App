@@ -15,10 +15,12 @@ Run in the ISOLATED venv (from backend/):
 import contextlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -53,6 +55,9 @@ def core_sentences(idx, title, sections, action, bridges) -> list[str]:
 
 
 def main():
+    t_book = time.time()
+    # Cost meter: $/hr of the GPU box. 0 on the Mac (RUNPOD_RATE_USD_PER_HR unset) -> $0, which is correct.
+    rate_usd = float(os.environ.get("RUNPOD_RATE_USD_PER_HR", "0"))
     order = int(sys.argv[1])
     entry = next(b for b in g.BOOKS if b[0] == order)
     _, dirname, btitle, bauthor = entry
@@ -92,6 +97,7 @@ def main():
         sents = core_sentences(idx, title, sections, action, bridges)
         print(f"  core {num} '{title}' · {len(sents)} sentences"
               + (f" · {len(action)} action steps read" if action else ""), flush=True)
+        t_core = time.time()
         pieces = []
         for i, s in enumerate(sents):
             wav = model.generate(s, audio_prompt_path=str(ref))
@@ -102,6 +108,11 @@ def main():
         with wave.open(str(cf), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(seg.tobytes())
         seg_by_num[num] = seg
+        core_secs = time.time() - t_core
+        cum = time.time() - t_book
+        proj = (cum / 3600.0) * rate_usd * (len(parsed) / (idx + 1)) if rate_usd else 0.0
+        print(f"    core {num} done in {core_secs:.0f}s · cum {cum / 60:.1f}m"
+              + (f" · proj book ${proj:.2f} @ ${rate_usd:.2f}/hr" if rate_usd else ""), flush=True)
 
     # assemble cores + a fixed inter-core silence, measure per-core offsets
     sil = np.zeros(int(rate * BREAK), dtype=np.int16)
@@ -130,8 +141,17 @@ def main():
         "total_seconds": round(total, 2), "total_label": gba.fmt_ts(total), "cores": cores_manifest,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    wall = time.time() - t_book
+    cost = wall / 3600.0 * rate_usd
+    (OUT / f"{order}_{slug}.cost_report.json").write_text(json.dumps({
+        "curriculum_order": order, "slug": slug, "device": dev,
+        "rate_usd_per_hr": rate_usd, "wall_seconds": round(wall, 1),
+        "cost_usd": round(cost, 4), "audio_seconds": round(total, 2),
+    }, indent=2))
     shutil.rmtree(cache, ignore_errors=True)             # full book assembled → drop checkpoints
-    print(f"\n  -> {m4a}  ({gba.fmt_ts(total)} @ {rate} Hz)  [voice-clone, action plan read]", flush=True)
+    print(f"\n  -> {m4a}  ({gba.fmt_ts(total)} @ {rate} Hz)  [voice-clone, action plan read]"
+          f"  ·  {wall / 60:.1f}m wall, ${cost:.2f} @ ${rate_usd:.2f}/hr", flush=True)
 
 
 if __name__ == "__main__":

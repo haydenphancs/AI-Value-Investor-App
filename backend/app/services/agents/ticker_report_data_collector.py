@@ -3409,6 +3409,10 @@ _SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
     "current_ratio": "current_ratio",
     "interest_coverage": "interest_coverage",
     "quick_ratio": "quick_ratio",
+    # Earnings yield IS sector-compared on the valuation card (the snapshot
+    # passes a sector median); the benchmark stores it as a decimal fraction,
+    # so it rides the percent-unit ×100 path like the margins.
+    "earnings_yield": "earnings_yield",
 }
 _SECTOR_HISTORY_METRIC_NAMES = sorted(set(_SECTOR_METRIC_BY_HISTORY_KEY.values()))
 
@@ -3606,7 +3610,14 @@ def _fundamentals_history_for_period(
             add("gross_margin", label, _pct_or_none(rat.get("grossProfitMargin")))
             add("operating_margin", label, _pct_or_none(rat.get("operatingProfitMargin")))
             add("net_margin", label, _pct_or_none(rat.get("netProfitMargin")))
-            add("earnings_yield", label, _pct_or_none(rat.get("earningsYield")))
+            # Earnings yield: FMP's `earningsYield` is null across most of the
+            # history, so fall back to 1/PE (the canonical definition) — else
+            # the metric has no series and the chart never appears.
+            _pe_for_ey = _num_or_none(rat.get("priceToEarningsRatio"))
+            _ey = _pct_or_none(rat.get("earningsYield"))
+            if _ey is None and _pe_for_ey is not None and _pe_for_ey > 0:
+                _ey = round(100.0 / _pe_for_ey, 2)
+            add("earnings_yield", label, _ey)
             add("pe", label, _num_or_none(rat.get("priceToEarningsRatio")))
             add("pb", label, _num_or_none(rat.get("priceToBookRatio")))
             add("ps", label, _num_or_none(rat.get("priceToSalesRatio")))

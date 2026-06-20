@@ -7,10 +7,14 @@ Output: frontend/ios/ios/Models/BooksContent.swift  (keyed by curriculumOrder)
 Regenerate from source; do not hand-edit. Rich Dad Poor Dad (order 1) lives separately
 in RichDadPoorDadContent.swift.
 """
+import os
 import re
 from pathlib import Path
 
-ROOT = Path("/Users/haiphan/BIGDATA/myApp/AI-Value-Investor-App")
+# Repo root: env override (used on a RunPod/Linux box) else derive from this file's
+# location (backend/scripts/ -> repo root). parents[2] == the old hardcoded Mac path,
+# so the Mac workflow is byte-for-byte unchanged.
+ROOT = Path(os.environ.get("AI_INVESTOR_ROOT") or Path(__file__).resolve().parents[2])
 BD = ROOT / "documents/books"
 OUT = ROOT / "frontend/ios/ios/Models/BooksContent.swift"
 WPM = 150

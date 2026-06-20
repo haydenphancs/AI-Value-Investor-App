@@ -207,7 +207,7 @@ class DiversificationSubScoreResponse(BaseModel):
     drives the bar color on iOS.
     """
 
-    key: str         # "position" | "sector" | "single_top5" | "marketcap"
+    key: str         # "position" | "sector" | "marketcap"
     label: str       # human-readable, e.g. "Position Balance"
     points: int      # earned, 0..max_points
     max_points: int  # budget for this dimension

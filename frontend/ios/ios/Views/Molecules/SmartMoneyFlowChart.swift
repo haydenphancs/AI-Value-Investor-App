@@ -70,6 +70,10 @@ struct SmartMoneyFlowChart: View {
         self.uniformVolumeAxis = uniformVolumeAxis
     }
 
+    /// Measured size of the value popup, so it can be clamped within the chart
+    /// edges when anchored over the tapped column.
+    @State private var popupSize: CGSize = CGSize(width: 124, height: 58)
+
     // Chart configuration
     private let priceChartHeight: CGFloat = 80
     private let volumeChartHeight: CGFloat = 145
@@ -384,13 +388,13 @@ struct SmartMoneyFlowChart: View {
         .chartOverlay { proxy in
             GeometryReader { geo in
                 if monthlyCounts != nil {
+                    // Tap layer — tap a month to toggle its popup; tap it again
+                    // (or elsewhere in the section) to hide. Discrete tap (not a
+                    // drag) so it coexists with the report ScrollView.
                     Rectangle()
                         .fill(.clear)
                         .contentShape(Rectangle())
                         .gesture(
-                            // Discrete tap (not a drag) so it coexists with the
-                            // report ScrollView. Tap a month to show the popup;
-                            // tap it again (or elsewhere in the section) to hide.
                             SpatialTapGesture().onEnded { tap in
                                 guard let plot = proxy.plotFrame else { return }
                                 let x = tap.location.x - geo[plot].origin.x
@@ -398,22 +402,35 @@ struct SmartMoneyFlowChart: View {
                                 selectedMonth = (hit == selectedMonth) ? nil : hit
                             }
                         )
+
+                    // Value popup anchored OVER the tapped column (clamped to the
+                    // chart's edges so it never spills off-screen). Purely visual
+                    // — `allowsHitTesting(false)` lets taps reach the layer above,
+                    // so a column under the popup is still tappable.
+                    if let sel = selectedMonth,
+                       flowData.contains(where: { $0.month == sel }),
+                       let plot = proxy.plotFrame,
+                       let xInPlot = proxy.position(forX: sel) {
+                        let columnX = geo[plot].origin.x + xInPlot
+                        let half = popupSize.width / 2
+                        let centerX = min(max(columnX, half + 4), geo.size.width - half - 4)
+                        insiderPopup(month: sel)
+                            .background(
+                                GeometryReader { g in
+                                    Color.clear.preference(
+                                        key: InsiderPopupSizeKey.self, value: g.size
+                                    )
+                                }
+                            )
+                            .position(x: centerX, y: popupSize.height / 2 + 4)
+                            .allowsHitTesting(false)
+                            .transition(.scale.combined(with: .opacity))
+                    }
                 }
             }
+            .onPreferenceChange(InsiderPopupSizeKey.self) { popupSize = $0 }
         }
         .frame(height: volumeChartHeight)
-        // Value popup FLOATED over the chart's top-left (like the Institutions
-        // chart) — an overlay, NOT a chart annotation, so it never reserves
-        // space above the bars / shifts the layout. Card content unchanged.
-        .overlay(alignment: .topLeading) {
-            if monthlyCounts != nil, let sel = selectedMonth,
-               flowData.contains(where: { $0.month == sel }) {
-                insiderPopup(month: sel)
-                    .padding(.top, 4)
-                    .padding(.leading, 8)
-                    .transition(.scale.combined(with: .opacity))
-            }
-        }
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: selectedMonth)
     }
 
@@ -636,6 +653,15 @@ struct SmartMoneyFlowChart: View {
                 .foregroundStyle(.white)
                 .fixedSize()
         }
+    }
+}
+
+// Captures the value popup's rendered size so it can be clamped within the
+// chart's edges when anchored over the tapped column.
+private struct InsiderPopupSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
     }
 }
 

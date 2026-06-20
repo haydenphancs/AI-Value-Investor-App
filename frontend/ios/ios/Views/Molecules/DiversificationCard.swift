@@ -68,10 +68,12 @@ struct DiversificationCard: View {
                 gradientColors: [zoneColor(score.zone), zoneColor(score.zone).opacity(0.6)]
             )
 
-            HStack(spacing: AppSpacing.sm) {
-                Text("Behaves like ~\(score.effectiveHoldingsText) independent holdings")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+            HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
+                // Total = sum of the four bars' points, colored by zone.
+                // Matches the whale card's "$162K" amount (bodySmallEmphasis).
+                Text("\(score.score)/100")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(zoneColor(score.zone))
                 if let coverageNote {
                     Spacer(minLength: AppSpacing.sm)
                     Text(coverageNote)

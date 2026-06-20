@@ -158,13 +158,28 @@ struct CoreThesisDTO: Codable {
 
 // MARK: - Fundamentals
 
+struct MetricHistoryPointDTO: Codable {
+    let period: String
+    let value: Double?
+}
+
 struct DeepDiveMetricDTO: Codable {
     let label: String
     let value: String
     let trend: String?
+    // Optional tap-to-expand history — absent on reports generated before
+    // this feature (and ignored by older app builds). All nil → not charted.
+    let historyKey: String?
+    let historyUnit: String?
+    let annualHistory: [MetricHistoryPointDTO]?
+    let quarterlyHistory: [MetricHistoryPointDTO]?
 
     enum CodingKeys: String, CodingKey {
         case label, value, trend
+        case historyKey = "history_key"
+        case historyUnit = "history_unit"
+        case annualHistory = "annual_history"
+        case quarterlyHistory = "quarterly_history"
     }
 }
 
@@ -753,7 +768,19 @@ extension TickerReportAPIResponse {
                         default: return nil
                         }
                     }()
-                    return DeepDiveMetric(label: m.label, value: m.value, trend: trend)
+                    let mapPoints: ([MetricHistoryPointDTO]?) -> [MetricHistoryPoint]? = { pts in
+                        guard let pts else { return nil }
+                        return pts.map { MetricHistoryPoint(period: $0.period, value: $0.value) }
+                    }
+                    return DeepDiveMetric(
+                        label: m.label,
+                        value: m.value,
+                        trend: trend,
+                        historyKey: m.historyKey,
+                        historyUnit: m.historyUnit,
+                        annualHistory: mapPoints(m.annualHistory),
+                        quarterlyHistory: mapPoints(m.quarterlyHistory)
+                    )
                 },
                 qualityLabel: card.qualityLabel,
                 qualitySentiment: card.qualitySentiment ?? "neutral"

@@ -37,10 +37,26 @@ class CoreThesisResponse(BaseModel):
 # ── Deep Dive: Fundamentals ───────────────────────────────────────────────────
 
 
+class MetricHistoryPointResponse(BaseModel):
+    """One point in a fundamentals metric's time series (oldest→newest)."""
+    period: str               # "2024" (annual) or "Q1 '24" (quarterly)
+    value: Optional[float] = None  # None = no datapoint for that period
+
+
 class DeepDiveMetricResponse(BaseModel):
     label: str
     value: str
     trend: Optional[str] = None  # "up" | "down" | "flat" | null
+    # ── Tap-to-expand history (optional; baked at report generation) ──
+    # When present, iOS makes the parent card tappable and charts this
+    # metric's 5–10y trend. All optional so legacy reports (and older app
+    # versions) decode unchanged — a metric without history is simply not
+    # charted. `history_key` is a stable id; `history_unit` ∈
+    # {"percent","x","score"} tells iOS how to format the axis/values.
+    history_key: Optional[str] = None
+    history_unit: Optional[str] = None
+    annual_history: Optional[List[MetricHistoryPointResponse]] = None
+    quarterly_history: Optional[List[MetricHistoryPointResponse]] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):

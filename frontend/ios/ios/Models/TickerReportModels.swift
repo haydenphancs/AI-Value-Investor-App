@@ -146,7 +146,10 @@ struct ReportCoreThesis {
 // MARK: - Deep Dive Metric Card Data
 
 struct DeepDiveMetricCard: Identifiable {
-    let id = UUID()
+    // Stable identity = the (unique) card title. Using a fresh UUID per decode
+    // would make `.sheet(item:)` dismiss the open drill-down whenever the
+    // report re-decodes in the background.
+    var id: String { title }
     let title: String           // "Profitability", "Valuation", "Growth", "Health"
     let starRating: Int         // 1-5
     let metrics: [DeepDiveMetric]
@@ -178,15 +181,77 @@ struct DeepDiveMetricCard: Identifiable {
         // Matches the non-breaking-space suffix `displayLabel` appends (U+00A0).
         metrics.contains { $0.displayLabel.hasSuffix("\u{00A0}*") }
     }
+
+    /// Metrics in this card that carry a chartable time series — drives the
+    /// drill-down's metric picker.
+    var chartableMetrics: [DeepDiveMetric] { metrics.filter(\.hasHistory) }
+
+    /// True when at least one metric has history → the card is tappable and
+    /// opens the time-series drill-down. Legacy reports → false (inert card).
+    var hasHistory: Bool { metrics.contains(where: \.hasHistory) }
 }
 
 // MARK: - Deep Dive Metric
+
+/// One point in a fundamentals metric's time series (oldest→newest).
+struct MetricHistoryPoint: Identifiable {
+    let id = UUID()
+    let period: String   // "2024" (annual) or "Q1 '24" (quarterly)
+    let value: Double?    // nil = no datapoint for that period
+}
 
 struct DeepDiveMetric: Identifiable {
     let id = UUID()
     let label: String
     let value: String
     let trend: MetricTrend?
+    // ── Tap-to-expand history (optional; baked into the frozen report) ──
+    // Absent on legacy/cached reports → the metric simply isn't chartable.
+    // `historyUnit` ∈ {"percent","x","score"} drives axis/value formatting.
+    // Defaults keep the memberwise init backward-compatible (mocks call
+    // `DeepDiveMetric(label:value:trend:)`).
+    let historyKey: String?
+    let historyUnit: String?
+    let annualHistory: [MetricHistoryPoint]?
+    let quarterlyHistory: [MetricHistoryPoint]?
+
+    init(
+        label: String,
+        value: String,
+        trend: MetricTrend?,
+        historyKey: String? = nil,
+        historyUnit: String? = nil,
+        annualHistory: [MetricHistoryPoint]? = nil,
+        quarterlyHistory: [MetricHistoryPoint]? = nil
+    ) {
+        self.label = label
+        self.value = value
+        self.trend = trend
+        self.historyKey = historyKey
+        self.historyUnit = historyUnit
+        self.annualHistory = annualHistory
+        self.quarterlyHistory = quarterlyHistory
+    }
+
+    /// True when this metric has a chartable series (≥2 real annual points).
+    /// Drives whether the parent card is tappable and whether this metric
+    /// appears in the drill-down's metric picker.
+    var hasHistory: Bool {
+        (annualHistory?.compactMap(\.value).count ?? 0) >= 2
+    }
+
+    /// Clean metric title for the chart header / picker — strips the sector
+    /// suffix and "(YoY)" but keeps full words (unlike the compact
+    /// `displayLabel` used in the narrow card grid).
+    var historyTitle: String {
+        label
+            .replacingOccurrences(
+                of: #"\s*\([^)]*sector[^)]*\)"#, with: "",
+                options: .regularExpression)
+            .replacingOccurrences(
+                of: #"\s*\(YoY\)"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
 
     /// Compact label suitable for the narrow 2-column metric grid.
     /// Strips verbose sector-comparison suffix (e.g. "(0.98x sector avg 27)"

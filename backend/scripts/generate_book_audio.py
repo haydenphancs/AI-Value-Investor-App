@@ -86,7 +86,7 @@ DEFAULT_BOOK = {"voice": "Achird", "wpm": TARGET_WPM,
                          "conversational tone, never robotic. "}
 BOOK_VOICES: dict[int, dict] = {
     1:  {**DEFAULT_BOOK},  # Rich Dad Poor Dad — Kiyosaki (already shipped on Achird)
-    2:  {"voice": "Iapetus",       "wpm": 150, "style": "Narrate as Benjamin Graham, an erudite, classically-educated finance professor — precise, measured and dignified, with dry wit and calm authority. "},
+    2:  {"voice": "Iapetus",       "wpm": 150, "style": "Read this as an erudite, classically-educated finance professor — articulate, precise, emotionally detached and measured, with dry wit and dignified, calm authority. "},  # matches the 1_graham_Iapetus audition (descriptor, not "Narrate as <person>")
     3:  {"voice": "Puck",          "wpm": 172, "style": "Read this as a calm, thoughtful modern essayist — reflective, intimate and understated, with gentle pacing. "},  # matches the 4_housel_Puck audition (no person-name imitation, which pulled Puck off-character)
     4:  {"voice": "Enceladus",     "wpm": 170, "style": "Narrate as Peter Lynch, a seasoned, sharp stock-picker — engaging and lively, but in a mature, refined older man's voice; not folksy, not regional. "},
     5:  {"voice": "Schedar",       "wpm": 160, "style": "Narrate as Philip Fisher, a meticulous, reserved, scholarly analyst — even, careful, methodical and precise, slightly formal. "},

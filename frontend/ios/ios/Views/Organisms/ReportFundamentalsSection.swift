@@ -11,6 +11,10 @@ struct ReportFundamentalsSection: View {
     let metrics: [DeepDiveMetricCard]
     let assessment: ReportOverallAssessment
 
+    // Tapping a card with baked history opens the time-series drill-down.
+    // Legacy reports (no history) leave cards inert — selectedCard stays nil.
+    @State private var selectedCard: DeepDiveMetricCard?
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // 2x2 metric grid
@@ -22,7 +26,14 @@ struct ReportFundamentalsSection: View {
                 spacing: AppSpacing.md
             ) {
                 ForEach(metrics) { metric in
-                    ReportDeepDiveMetricCard(data: metric)
+                    if metric.hasHistory {
+                        Button { selectedCard = metric } label: {
+                            ReportDeepDiveMetricCard(data: metric)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        ReportDeepDiveMetricCard(data: metric)
+                    }
                 }
             }
 
@@ -63,6 +74,9 @@ struct ReportFundamentalsSection: View {
                     .lineSpacing(3)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(item: $selectedCard) { card in
+            FundamentalsHistorySheet(card: card)
         }
     }
 }

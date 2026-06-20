@@ -19,9 +19,9 @@ ssh -p "$POD_PORT" "$REMOTE" \
 
 # code + book source text + the gitignored reference clip(s). Explicit paths keep the
 # transfer minimal and secret-free.
-rsync -avz --partial -e "$SSH" "$REPO/backend/scripts/"               "$REMOTE:$DEST/backend/scripts/"
-rsync -avz --partial -e "$SSH" "$REPO/backend/requirements_clone.txt" "$REMOTE:$DEST/backend/requirements_clone.txt"
-rsync -avz --partial -e "$SSH" "$REPO/documents/books/"              "$REMOTE:$DEST/documents/books/"
-rsync -avz --partial -e "$SSH" "$REPO/backend/data/voice_clone/refs/" "$REMOTE:$DEST/backend/data/voice_clone/refs/"
+rsync -avz --no-o --no-g --partial -e "$SSH" "$REPO/backend/scripts/"               "$REMOTE:$DEST/backend/scripts/"
+rsync -avz --no-o --no-g --partial -e "$SSH" "$REPO/backend/requirements_clone.txt" "$REMOTE:$DEST/backend/requirements_clone.txt"
+rsync -avz --no-o --no-g --partial -e "$SSH" "$REPO/documents/books/"              "$REMOTE:$DEST/documents/books/"
+rsync -avz --no-o --no-g --partial -e "$SSH" "$REPO/backend/data/voice_clone/refs/" "$REMOTE:$DEST/backend/data/voice_clone/refs/"
 
 echo "sync_up complete -> $REMOTE:$DEST   (NO .env, NO app/ pushed)."

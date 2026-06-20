@@ -62,6 +62,7 @@ struct FundamentalsHistorySheet: View {
                             .animation(.easeInOut(duration: 0.25), value: selectedMetricID)
                             .animation(.easeInOut(duration: 0.25), value: period)
                         legendAndDelta(m)
+                        omissionNote(m)
                         footnote
                     } else {
                         Text("No history available.")
@@ -219,6 +220,27 @@ struct FundamentalsHistorySheet: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackgroundLight)
         )
+    }
+
+    /// A ratio can be undefined for a period (e.g. P/FCF when free cash flow
+    /// is negative, P/E or Earnings Yield when earnings are negative). Those
+    /// bars are dropped — so when the current value reads "Neg."/"—" or any
+    /// historical period was dropped, say so instead of leaving a silent gap.
+    @ViewBuilder
+    private func omissionNote(_ m: DeepDiveMetric) -> some View {
+        let omitted = points(m).filter { $0.value == nil }.count
+        let v = m.value.lowercased()
+        let nonNumeric = v.contains("neg") || v.contains("n/a") || m.value == "—"
+        if omitted > 0 || nonNumeric {
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: "info.circle")
+                    .font(AppTypography.labelSmall)
+                Text("Periods where this ratio is negative or undefined are omitted from the chart.")
+                    .font(AppTypography.labelSmall)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundColor(AppColors.textMuted)
+        }
     }
 
     private var footnote: some View {

@@ -64,25 +64,48 @@ class SectorBenchmarkLookup:
         _cache_set(cache_key, result)
         return result
 
+    # PostgREST / Supabase caps a single response at ~1000 rows by default.
+    # A multi-metric quarterly lookup (e.g. 14 metrics × ~84 quarters ≈ 1176
+    # rows) silently TRUNCATES at 1000, dropping whole metrics — which is why
+    # the drill-down's quarterly sector lines went missing. Page through with
+    # .range() so the result is always complete, regardless of row count.
+    _PAGE = 1000
+
+    def _fetch_rows(
+        self, columns: str, sector: str, metrics: List[str], period_type: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        start = 0
+        while True:
+            resp = (
+                self.supabase.table("sector_benchmarks")
+                .select(columns)
+                .eq("sector", sector)
+                .eq("period_type", period_type)
+                .in_("metric_name", metrics)
+                .range(start, start + self._PAGE - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            rows.extend(batch)
+            if len(batch) < self._PAGE:
+                break
+            start += self._PAGE
+        return rows
+
     def _query(
         self,
         sector: str,
         metrics: List[str],
         period_type: str,
     ) -> Dict[str, Dict[str, float]]:
-        """Query Supabase for benchmark values."""
+        """Query Supabase for benchmark values (paginated → never truncated)."""
         try:
-            response = (
-                self.supabase.table("sector_benchmarks")
-                .select("metric_name,period_label,median_value")
-                .eq("sector", sector)
-                .eq("period_type", period_type)
-                .in_("metric_name", metrics)
-                .execute()
+            rows = self._fetch_rows(
+                "metric_name,period_label,median_value", sector, metrics, period_type,
             )
-
             result: Dict[str, Dict[str, float]] = {m: {} for m in metrics}
-            for row in response.data or []:
+            for row in rows:
                 metric = row["metric_name"]
                 label = row["period_label"]
                 result.setdefault(metric, {})[label] = row["median_value"]
@@ -119,16 +142,12 @@ class SectorBenchmarkLookup:
             return cached
 
         try:
-            response = (
-                self.supabase.table("sector_benchmarks")
-                .select("metric_name,period_label,median_value,sample_size")
-                .eq("sector", sector)
-                .eq("period_type", period_type)
-                .in_("metric_name", metrics)
-                .execute()
+            rows = self._fetch_rows(
+                "metric_name,period_label,median_value,sample_size",
+                sector, metrics, period_type,
             )
             result: Dict[str, Dict[str, Dict[str, float]]] = {m: {} for m in metrics}
-            for row in response.data or []:
+            for row in rows:
                 metric = row["metric_name"]
                 label = row["period_label"]
                 result.setdefault(metric, {})[label] = {

@@ -15,7 +15,7 @@ ORDER="${1:-}"
 GLOB="${ORDER:+${ORDER}_*}"; GLOB="${GLOB:-*}"
 
 mkdir -p "$REPO/backend/data/book_audio"
-rsync -avz --partial -e "ssh -p $POD_PORT" \
+rsync -avz --no-o --no-g --partial -e "ssh -p $POD_PORT" \
   --include="${GLOB}.m4a" \
   --include="${GLOB}.manifest.json" \
   --include="${GLOB}.cost_report.json" \

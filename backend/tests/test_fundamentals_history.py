@@ -303,6 +303,42 @@ def test_build_history_quarterly_failure_does_not_kill_annual():
     assert hist["pe"]["quarterly"] == []  # quarterly degraded, annual intact
 
 
+class _FakeResp:
+    def __init__(self, data): self.data = data
+
+
+class _FakeQuery:
+    def __init__(self, rows): self._rows = rows; self._slice = (0, len(rows) - 1)
+    def select(self, *a, **k): return self
+    def eq(self, *a, **k): return self
+    def in_(self, *a, **k): return self
+    def range(self, start, end): self._slice = (start, end); return self
+    def execute(self):
+        s, e = self._slice
+        return _FakeResp(self._rows[s:e + 1])
+
+
+class _FakeSupa:
+    def __init__(self, rows): self._rows = rows
+    def table(self, name): return _FakeQuery(self._rows)
+
+
+def test_sector_lookup_paginates_beyond_1000_rows():
+    """The benchmark lookup must page past the Supabase ~1000-row cap — else a
+    14-metric × ~84-quarter query truncates and whole metrics' quarterly
+    sector lines silently vanish (the real bug behind the missing lines)."""
+    from app.services.sector_benchmark_lookup import SectorBenchmarkLookup
+    rows = [
+        {"metric_name": "pe_ratio" if i % 2 else "roe",
+         "period_label": f"P{i}", "median_value": float(i)}
+        for i in range(2500)
+    ]
+    lk = SectorBenchmarkLookup.__new__(SectorBenchmarkLookup)  # skip __init__/get_supabase
+    lk.supabase = _FakeSupa(rows)
+    got = lk._fetch_rows("c", "Technology", ["pe_ratio", "roe"], "quarterly")
+    assert len(got) == 2500  # all 3 pages collected, NOT truncated at 1000
+
+
 def test_earnings_yield_company_series_falls_back_to_inverse_pe():
     """FMP's earningsYield is null across most history → the company series
     must fall back to 1/PE so the chart still appears (issue: no EY chart)."""

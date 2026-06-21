@@ -1,0 +1,53 @@
+{
+  "curriculum_order": 5,
+  "book_title": "Common Stocks and Uncommon Profits",
+  "author": "Philip Fisher",
+  "slug": "common-stocks-and-uncommon-profits",
+  "audio_file": "5_common-stocks-and-uncommon-profits.m4a",
+  "voice": "clone:fisher_schedar",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 1141.42,
+  "total_label": "19:01",
+  "cores": [
+    {
+      "number": 1,
+      "title": "The 'Scuttlebutt' Investigation",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "Auditing the Engine (Sales & Innovation)",
+      "start_seconds": 189.42,
+      "start_label": "3:09"
+    },
+    {
+      "number": 3,
+      "title": "Decoding Management DNA",
+      "start_seconds": 395.36,
+      "start_label": "6:35"
+    },
+    {
+      "number": 4,
+      "title": "Sniper Entries & The Myth of Market Timing",
+      "start_seconds": 582.74,
+      "start_label": "9:43"
+    },
+    {
+      "number": 5,
+      "title": "The Art of the 'Forever Hold'",
+      "start_seconds": 779.52,
+      "start_label": "13:00"
+    },
+    {
+      "number": 6,
+      "title": "Immunizing Against Noise",
+      "start_seconds": 956.86,
+      "start_label": "15:57"
+    }
+  ],
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/5_common-stocks-and-uncommon-profits.m4a?"
+}

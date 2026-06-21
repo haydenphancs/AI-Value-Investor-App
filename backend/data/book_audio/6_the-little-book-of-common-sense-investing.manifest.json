@@ -1,0 +1,96 @@
+{
+  "curriculum_order": 6,
+  "book_title": "The Little Book of Common Sense Investing",
+  "author": "John C. Bogle",
+  "slug": "the-little-book-of-common-sense-investing",
+  "audio_file": "6_the-little-book-of-common-sense-investing.m4a",
+  "voice": "clone:bogle_alnilam",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": 0,
+  "break_seconds": 2.273,
+  "total_seconds": 2866.91,
+  "total_label": "47:47",
+  "cores": [
+    {
+      "number": 1,
+      "title": "Escaping the Intermediary Trap",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "Separating Business from Speculation",
+      "start_seconds": 222.49,
+      "start_label": "3:42"
+    },
+    {
+      "number": 3,
+      "title": "Accepting the Zero-Sum Game",
+      "start_seconds": 422.84,
+      "start_label": "7:03"
+    },
+    {
+      "number": 4,
+      "title": "Defeating the Tyranny of Compounding Costs",
+      "start_seconds": 647.29,
+      "start_label": "10:47"
+    },
+    {
+      "number": 5,
+      "title": "Plugging the Tax Leak",
+      "start_seconds": 861.2,
+      "start_label": "14:21"
+    },
+    {
+      "number": 6,
+      "title": "Ignoring the Siren Song of \"Stars\"",
+      "start_seconds": 1046.02,
+      "start_label": "17:26"
+    },
+    {
+      "number": 7,
+      "title": "Buying the Haystack",
+      "start_seconds": 1225.45,
+      "start_label": "20:25"
+    },
+    {
+      "number": 8,
+      "title": "Respecting the Law of Gravity",
+      "start_seconds": 1479.76,
+      "start_label": "24:40"
+    },
+    {
+      "number": 9,
+      "title": "Anchoring with Bonds",
+      "start_seconds": 1668.62,
+      "start_label": "27:49"
+    },
+    {
+      "number": 10,
+      "title": "Navigating the ETF Minefield",
+      "start_seconds": 1892.56,
+      "start_label": "31:33"
+    },
+    {
+      "number": 11,
+      "title": "Avoiding the \"Smart Beta\" Trap",
+      "start_seconds": 2135.38,
+      "start_label": "35:35"
+    },
+    {
+      "number": 12,
+      "title": "Auditing Your Advisor",
+      "start_seconds": 2336.71,
+      "start_label": "38:57"
+    },
+    {
+      "number": 13,
+      "title": "Mastering the Art of Doing Nothing",
+      "start_seconds": 2578.55,
+      "start_label": "42:59"
+    }
+  ],
+  "speed_factor": 1.1,
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/6_the-little-book-of-common-sense-investing.m4a?"
+}

@@ -45,6 +45,16 @@ extension BookAudioInfo {
             totalSeconds: 1987,
             coreStartSeconds: [1: 0, 2: 154, 3: 318, 4: 474, 5: 635, 6: 789, 7: 938, 8: 1081, 9: 1283, 10: 1430, 11: 1582, 12: 1738]
         ),
+        5: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/5_common-stocks-and-uncommon-profits.m4a",
+            totalSeconds: 1141,
+            coreStartSeconds: [1: 0, 2: 189, 3: 395, 4: 583, 5: 780, 6: 957]
+        ),
+        6: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/6_the-little-book-of-common-sense-investing.m4a",
+            totalSeconds: 2867,
+            coreStartSeconds: [1: 0, 2: 222, 3: 423, 4: 647, 5: 861, 6: 1046, 7: 1225, 8: 1480, 9: 1669, 10: 1893, 11: 2135, 12: 2337, 13: 2579]
+        ),
         8: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a",
             totalSeconds: 1076,

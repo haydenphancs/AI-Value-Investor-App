@@ -1,0 +1,1158 @@
+{
+  "curriculum_order": 5,
+  "slug": "common-stocks-and-uncommon-profits",
+  "cores": {
+    "1": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Sanitized\" Trap",
+            "start": 8.220868004223865,
+            "end": 9.420994720168954
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the uncomfortable truth: if you are making investment decisions based solely on annual reports or CNBC headlines, you are already the \"sucker at the table.\"",
+            "start": 10.081064413938755,
+            "end": 19.462054910242873
+          },
+          {
+            "text": "Why?",
+            "start": 20.102122492080255,
+            "end": 20.382152059134107
+          },
+          {
+            "text": "Because that information has been sanitized by lawyers, polished by PR firms, and digested by millions of algorithms before you ever see it.",
+            "start": 21.042221752903906,
+            "end": 28.603020063357974
+          },
+          {
+            "text": "Most investors fail because they analyze a stock like a consumer reading a menu.",
+            "start": 29.143077085533264,
+            "end": 33.56354382259768
+          },
+          {
+            "text": "They look at the price and the description, assuming what is listed is exactly what will be served.",
+            "start": 34.443636747624076,
+            "end": 39.46416684266104
+          },
+          {
+            "text": "But the real story\u2014the one that drives 10x returns or prevents catastrophic losses\u2014is never on the menu.",
+            "start": 39.96421964097149,
+            "end": 46.224880675818376
+          },
+          {
+            "text": "It\u2019s in the kitchen.",
+            "start": 47.10497360084477,
+            "end": 48.02507074973601
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Gossip Network",
+            "start": 48.5651277719113,
+            "end": 49.54523125659979
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher didn\u2019t trust the menu.",
+            "start": 50.52533474128828,
+            "end": 52.22551425554382
+          },
+          {
+            "text": "He coined the term \"Scuttlebutt\"\u2014an old naval term for the gossip around the water cooler.",
+            "start": 52.88558394931362,
+            "end": 57.88611193241817
+          },
+          {
+            "text": "Fisher\u2019s genius wasn't in analyzing balance sheets, but in acting like a detective.",
+            "start": 58.546181626187966,
+            "end": 62.986650475184796
+          },
+          {
+            "text": "He believed that the most honest information about a company (Company A) never came from Company A itself.",
+            "start": 63.506705385427665,
+            "end": 74.40785638859556
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Instead, Fisher would go to Company B\u2014their fiercest competitor\u2014and ask, \"What is Company A doing that worries you?\"",
+            "start": 74.84790285110877,
+            "end": 81.80863780359029
+          },
+          {
+            "text": "He would talk to suppliers, customers, and even former employees.",
+            "start": 82.4887096092925,
+            "end": 85.74905385427667
+          },
+          {
+            "text": "He found that while a CEO might lie about their growth, a competitor will never lie about who they are losing customers to.",
+            "start": 86.38912143611405,
+            "end": 92.62978035902852
+          },
+          {
+            "text": "This triangulation of \"gossip\" creates a 3D picture of reality that a spreadsheet never could.",
+            "start": 93.14983526927139,
+            "end": 98.59040971488912
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Digital Forensics",
+            "start": 99.19047307286166,
+            "end": 100.17057655755016
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Fisher had to rely on telephone calls and lunch meetings; you have a supercomputer in your pocket.",
+            "start": 100.71063357972545,
+            "end": 105.65115522703273
+          },
+          {
+            "text": "Today, \"Scuttlebutt\" is digital forensics.",
+            "start": 106.25121858500528,
+            "end": 108.61146779303063
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Employee Sentiment: Don\u2019t just read the ESG report.",
+            "start": 109.17152692713833,
+            "end": 112.31185850052799
+          },
+          {
+            "text": "Go to Glassdoor or Blind.",
+            "start": 113.03193453009504,
+            "end": 114.89213093980993
+          },
+          {
+            "text": "Are the engineers at that AI startup complaining about \"spaghetti code\" and high turnover?",
+            "start": 115.61220696937698,
+            "end": 120.39271172122493
+          },
+          {
+            "text": "That\u2019s a sell signal no earnings call will reveal.",
+            "start": 121.1327898627244,
+            "end": 123.59304963041183
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Customer Reality: If you\u2019re looking at a consumer brand, ignore the projected sales deck.",
+            "start": 124.2131151003168,
+            "end": 129.25364730728617
+          },
+          {
+            "text": "Go to Reddit or Twitter/X.",
+            "start": 130.01372756071805,
+            "end": 131.97393453009505
+          },
+          {
+            "text": "Are early adopters raving about the product, or are they complaining about shipping delays?",
+            "start": 133.09405279831046,
+            "end": 137.6545343189018
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Supply Chain Checks: In the age of global logistics, tracking import data or supplier contracts can tell you if a company is actually ramping up production before they announce it.",
+            "start": 138.49462302006336,
+            "end": 149.79581626187962
+          }
+        ]
+      }
+    ],
+    "2": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Better Mousetrap\" Fallacy",
+            "start": 193.96044094794092,
+            "end": 195.42058275058275
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is the most expensive mistake you will ever make: assuming the best product wins.",
+            "start": 196.3406721056721,
+            "end": 200.5810839160839
+          },
+          {
+            "text": "You find a tech company with faster chips, cleaner code, or a revolutionary drug.",
+            "start": 201.20114413364414,
+            "end": 205.58156954156954
+          },
+          {
+            "text": "You pile in, convinced the world will beat a path to their door.",
+            "start": 206.10162004662004,
+            "end": 209.30193084693084
+          },
+          {
+            "text": "One year later, the stock is flat, and a competitor with inferior tech is eating their lunch.",
+            "start": 210.00199883449883,
+            "end": 215.06249028749028
+          },
+          {
+            "text": "Why?",
+            "start": 215.6825505050505,
+            "end": 215.9625777000777
+          },
+          {
+            "text": "You fell for the \"Engineer\u2019s Delusion.\"",
+            "start": 216.4826282051282,
+            "end": 218.3228069153069
+          },
+          {
+            "text": "You audited the engine (the innovation) but ignored the transmission (the sales force).",
+            "start": 218.86285936285935,
+            "end": 223.24328477078475
+          },
+          {
+            "text": "An engine without a transmission just makes noise; it doesn't move the car.",
+            "start": 223.9633547008547,
+            "end": 227.8637334887335
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Invisible Army",
+            "start": 228.6238073038073,
+            "end": 229.78391996891997
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher refused to invest in \"lab experiments.\"",
+            "start": 230.70400932400932,
+            "end": 233.46427738927738
+          },
+          {
+            "text": "He tells the story of visiting companies where the R&D department was treated like royalty\u2014pristine labs, unlimited budgets, geniuses in white coats.",
+            "start": 234.06433566433566,
+            "end": 242.26513209013208
+          },
+          {
+            "text": "But when he asked about the sales organization, the executives would wave it off as a necessary evil.",
+            "start": 243.22522533022533,
+            "end": 248.18570707070705
+          },
+          {
+            "text": "Fisher would immediately walk away.",
+            "start": 249.12579836829838,
+            "end": 250.7459557109557
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He knew that without a ruthless, efficient mechanism to educate the customer, innovation is just an expensive hobby.",
+            "start": 251.46602564102562,
+            "end": 257.82664335664333
+          },
+          {
+            "text": "He looked for companies that treated their salespeople with the same reverence as their scientists.",
+            "start": 258.4467035742036,
+            "end": 262.8871348096348
+          },
+          {
+            "text": "Fisher realized that a \"profit squeeze\" rarely comes from high manufacturing costs; it comes from an inefficient sales team that burns cash trying to find customers.",
+            "start": 263.56720085470084,
+            "end": 272.74809246309246
+          },
+          {
+            "text": "The \"Common Stock\" winner wasn't just an inventor; it was a master storyteller.",
+            "start": 273.62817793317794,
+            "end": 278.16861888111885
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Distribution Moat",
+            "start": 279.0487043512044,
+            "end": 280.12880924630923
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the digital age, the most effective salesperson often isn\u2019t a human in a suit; it\u2019s the code itself.",
+            "start": 280.9288869463869,
+            "end": 286.34941336441335
+          },
+          {
+            "text": "Fisher\u2019s obsession with the \"sales organization\" has evolved into what we now call Product-Led Growth (PLG).",
+            "start": 287.2094968919969,
+            "end": 293.3500932400932
+          },
+          {
+            "text": "Look at the battle between Slack and HipChat.",
+            "start": 294.3701923076923,
+            "end": 296.5304020979021
+          },
+          {
+            "text": "HipChat had the first-mover advantage, but Slack didn't just build a chat app; they engineered a viral sales loop directly into the user experience.",
+            "start": 297.11045843045844,
+            "end": 305.29125291375294
+          },
+          {
+            "text": "Fisher would tell you today that if a user needs a manual or a sales call just to start using the software, the engine is already stalling.",
+            "start": 306.13133449883446,
+            "end": 313.3320337995338
+          },
+          {
+            "text": "The product must sell itself before the sales team even picks up the phone.",
+            "start": 313.97209595959595,
+            "end": 317.55244366744364
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This distinction is currently deciding the winners in the AI gold rush.",
+            "start": 318.4125271950272,
+            "end": 322.03287878787876
+          },
+          {
+            "text": "Right now, thousands of startups are wrapping the exact same underlying models (LLMs) and claiming they have a revolutionary engine.",
+            "start": 322.59293317793316,
+            "end": 330.5537062937063
+          },
+          {
+            "text": "They don't.",
+            "start": 331.1537645687646,
+            "end": 331.6538131313131
+          },
+          {
+            "text": "The moat today isn't the algorithm, which is rapidly becoming a commodity; it\u2019s the workflow and the community.",
+            "start": 333.433986013986,
+            "end": 339.19454545454545
+          },
+          {
+            "text": "A crypto project might have groundbreaking sharding technology, but if their Discord server is a ghost town or their documentation is impenetrable, the 'engine' is worthless.",
+            "start": 339.89461344211344,
+            "end": 349.85558080808084
+          },
+          {
+            "text": "You must look for companies that obsess over the integration of their tech into daily life, not just the tech itself.",
+            "start": 350.51564491064494,
+            "end": 356.39621600621604
+          }
+        ]
+      }
+    ],
+    "3": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Visionary\" Trap",
+            "start": 400.12050811272417,
+            "end": 401.20062339880445
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "You watch the keynote.",
+            "start": 401.80068744662685,
+            "end": 402.94080913748934
+          },
+          {
+            "text": "The CEO strides across the stage in a leather jacket, promising to revolutionize the industry with a single algorithm.",
+            "start": 403.50086891545686,
+            "end": 409.88154995730144
+          },
+          {
+            "text": "You are hooked.",
+            "start": 410.5816246797609,
+            "end": 411.42171434671224
+          },
+          {
+            "text": "You buy the stock.",
+            "start": 411.92176771989756,
+            "end": 412.8018616567037
+          },
+          {
+            "text": "Six months later, you are down 40%.",
+            "start": 413.44192997438086,
+            "end": 414.98209436379165
+          },
+          {
+            "text": "Why?",
+            "start": 416.5422608881298,
+            "end": 416.842292912041
+          },
+          {
+            "text": "Because you bought the sales pitch, not the operator.",
+            "start": 417.46235909479077,
+            "end": 420.382670794193
+          },
+          {
+            "text": "You fell for the \"Charisma Trap.\"",
+            "start": 420.8227177625961,
+            "end": 422.2828736122972
+          },
+          {
+            "text": "Most investors fail here because they assess a captain only when the sea is calm.",
+            "start": 422.9629461998292,
+            "end": 427.0433817250214
+          },
+          {
+            "text": "But a CEO\u2019s true DNA isn't revealed in the CNBC interview when the stock is at an all-time high; it is revealed in the silence that follows a disaster.",
+            "start": 427.703452177626,
+            "end": 436.4243830059778
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Clam\" Test",
+            "start": 436.9444385140905,
+            "end": 438.10456233988043
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher had a ruthless litmus test for management: The \"Clam\" Factor.",
+            "start": 438.7646327924851,
+            "end": 442.7050533731853
+          },
+          {
+            "text": "He tells the story of management teams that were the darlings of Wall Street\u2014friendly, accessible, and constantly issuing press releases\u2014as long as the charts were green.",
+            "start": 443.42513023057217,
+            "end": 452.14606105892403
+          },
+          {
+            "text": "But the moment a factory burned down or a product failed, the phone lines went dead.",
+            "start": 452.7861293766012,
+            "end": 457.3666182749787
+          },
+          {
+            "text": "They \"clammed up.\"",
+            "start": 457.8866737830914,
+            "end": 458.78676985482497
+          },
+          {
+            "text": "Fisher instantly sold these stocks.",
+            "start": 459.44684030742957,
+            "end": 461.28703672075153
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He realized that a management team that hides from its shareholders during a crisis lacks the fundamental integrity to build long-term wealth.",
+            "start": 461.9271050384287,
+            "end": 469.44790777113576
+          },
+          {
+            "text": "He hunted for the rare leaders who were more talkative when losing money than when making it.",
+            "start": 470.14798249359524,
+            "end": 474.2884244235696
+          },
+          {
+            "text": "For Fisher, candor in a crisis was the only true indicator of a company\u2019s survival instinct.",
+            "start": 474.82848206660975,
+            "end": 479.84901793339026
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Era of the \"Twitter Meltdown\"",
+            "start": 480.3890755764304,
+            "end": 482.1092591801879
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the modern era, the \"Clam\" has evolved into the \"Deflector.\"",
+            "start": 482.82933603757476,
+            "end": 486.4697245943638
+          },
+          {
+            "text": "We live in the age of the Cult CEO, where leaders often use social media to bypass scrutiny.",
+            "start": 487.2698099914603,
+            "end": 492.79039923142614
+          },
+          {
+            "text": "Look at the crypto collapse of FTX.",
+            "start": 493.6504910333049,
+            "end": 495.81072160546546
+          },
+          {
+            "text": "Investors were blinded by the effective altruism and the media persona, missing the complete lack of internal controls.",
+            "start": 496.53079846285226,
+            "end": 503.3115222032451
+          },
+          {
+            "text": "The red flag wasn't silence; it was the noise of distraction.",
+            "start": 503.9115862510675,
+            "end": 507.1519321093083
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, you must analyze how a CEO handles \"technical debt\" and remote culture.",
+            "start": 507.83200469684033,
+            "end": 512.5125042698548
+          },
+          {
+            "text": "When a tech giant misses a quarter, does the CEO take the blame for over-hiring, or do they blame \"lazy remote workers\" and demand a return to the office?",
+            "start": 513.2125789923143,
+            "end": 521.3734500426986
+          },
+          {
+            "text": "The latter is a modern \"Clam\"\u2014a leader refusing to own their strategic failure.",
+            "start": 521.8935055508113,
+            "end": 526.2339688300598
+          },
+          {
+            "text": "True \"Management DNA\" in the 2020s looks like Jensen Huang at NVIDIA or Satya Nadella at Microsoft, who dissect their own failures publicly before the market can do it for them.",
+            "start": 526.9140414175918,
+            "end": 536.815098206661
+          },
+          {
+            "text": "They treat the shareholders as partners, not an audience to be managed.",
+            "start": 537.6351857386849,
+            "end": 541.0155465414176
+          }
+        ]
+      }
+    ],
+    "4": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Limit Order\" Tragedy",
+            "start": 587.9605305956495,
+            "end": 589.5806952632649
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is how you lose a fortune while trying to save lunch money.",
+            "start": 590.3607745476723,
+            "end": 593.6811120146372
+          },
+          {
+            "text": "You find the perfect company.",
+            "start": 594.3811831673104,
+            "end": 596.0613539337264
+          },
+          {
+            "text": "You\u2019ve done the \"Scuttlebutt.\"",
+            "start": 596.6614149217321,
+            "end": 597.7415247001423
+          },
+          {
+            "text": "You know it\u2019s the next big thing.",
+            "start": 598.2415755234804,
+            "end": 599.8617401910958
+          },
+          {
+            "text": "The stock is trading at $50.50.",
+            "start": 600.5018052449685,
+            "end": 601.7419312868469
+          },
+          {
+            "text": "You, trying to be a \"smart\" trader, put in a limit order at $50.00.",
+            "start": 603.1020695263265,
+            "end": 606.4224069932914
+          },
+          {
+            "text": "You want that psychological win of getting a bargain.",
+            "start": 608.74264281358,
+            "end": 611.4429172596056
+          },
+          {
+            "text": "The stock dips to $50.05, then turns around and runs to $500.",
+            "start": 611.9429680829437,
+            "end": 616.0633868672494
+          },
+          {
+            "text": "You missed a 1,000% return because you were haggling over 50 cents.",
+            "start": 617.6235454360642,
+            "end": 621.6639560886359
+          },
+          {
+            "text": "Most investors fail not because they pick the wrong stock, but because they treat a generational asset like a used car, refusing to buy unless the sticker price is slashed.",
+            "start": 622.3040211425086,
+            "end": 632.0650132140679
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Eighths and Quarters\" Trap",
+            "start": 632.9050985972759,
+            "end": 634.74528562716
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher saw this destroy more wealth than any bear market.",
+            "start": 635.3253445822322,
+            "end": 638.7856962797316
+          },
+          {
+            "text": "He tells the story of an investor who identified a small, high-growth manufacturing company.",
+            "start": 639.2857471030698,
+            "end": 644.266253303517
+          },
+          {
+            "text": "The stock was trading around $35.50.",
+            "start": 645.2863569831267,
+            "end": 646.5864891238057
+          },
+          {
+            "text": "The investor decided the \"fair value\" was exactly $35.00.",
+            "start": 648.5666903842244,
+            "end": 651.4869871925188
+          },
+          {
+            "text": "He refused to pay the extra 50 cents\u2014back then, stocks traded in \"eighths and quarters.\"",
+            "start": 653.6272047164058,
+            "end": 658.7277231144542
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He placed his limit order and waited.",
+            "start": 659.3477861353933,
+            "end": 661.207975198211
+          },
+          {
+            "text": "The stock hovered, touched $35.25, and then the earnings report came out.",
+            "start": 661.9680524496849,
+            "end": 665.8284448058548
+          },
+          {
+            "text": "It skyrocketed.",
+            "start": 666.6285261231958,
+            "end": 667.708635901606
+          },
+          {
+            "text": "Decades later, that company had split multiple times and was worth millions.",
+            "start": 668.4087070542794,
+            "end": 672.9291664972556
+          },
+          {
+            "text": "The investor had been \"right\" about everything\u2014the product, the management, the growth\u2014except the price.",
+            "start": 673.6692417157959,
+            "end": 679.4898332994511
+          },
+          {
+            "text": "Fisher\u2019s rule became absolute: If the company is truly a \"Common Stock\" compounder, the current price is almost irrelevant in the long run.",
+            "start": 680.0098861557227,
+            "end": 687.9506932303314
+          },
+          {
+            "text": "Buying \"at the market\" is the only way to ensure you actually get a seat on the rocket.",
+            "start": 688.6707664159383,
+            "end": 692.4511506403741
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "Algorithm Food",
+            "start": 693.1112177271804,
+            "end": 694.0113092091889
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In Fisher\u2019s day, you were competing with other humans.",
+            "start": 694.6713762959952,
+            "end": 697.3916527749543
+          },
+          {
+            "text": "Today, you are competing with High-Frequency Trading (HFT) algorithms that can see your limit order and front-run it.",
+            "start": 697.951709697093,
+            "end": 704.3123561699533
+          },
+          {
+            "text": "If you are trying to \"time\" an entry into a volatile asset like Bitcoin or a high-beta AI stock like NVIDIA, you are playing a losing game.",
+            "start": 704.8924151250254,
+            "end": 713.3532750559057
+          },
+          {
+            "text": "These assets don't move in straight lines; they move in violent steps.",
+            "start": 714.093350274446,
+            "end": 718.333781256353
+          },
+          {
+            "text": "If you wait for the \"perfect pullback\" in a parabolic trend (like the AI boom), you will likely be left on the platform.",
+            "start": 718.9138402114252,
+            "end": 725.3944988818865
+          },
+          {
+            "text": "The modern market moves too fast for \"sniper\" precision on price.",
+            "start": 725.9945598698923,
+            "end": 729.7949461272617
+          },
+          {
+            "text": "The only precision that matters is \"sniper\" precision on quality.",
+            "start": 730.6950376092702,
+            "end": 735.7955560073185
+          }
+        ]
+      }
+    ],
+    "5": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Taking Profits\" Fallacy",
+            "start": 782.6803564177758,
+            "end": 784.3605459057072
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "This is the most painful lesson you will ever learn: you will likely make more money from the one stock you didn't sell than from all the brilliant trades you did.",
+            "start": 785.1006293706293,
+            "end": 793.1615384615385
+          },
+          {
+            "text": "The amateur investor feels an itch when a stock goes up 50%.",
+            "start": 793.7216016241822,
+            "end": 796.3819016467403
+          },
+          {
+            "text": "They think, \"I should take some chips off the table.\"",
+            "start": 797.9020730882021,
+            "end": 800.3223460410557
+          },
+          {
+            "text": "They sell the winner and put that money into a \"cheaper\" stock that hasn't moved yet.",
+            "start": 800.7623956688473,
+            "end": 804.4428107376494
+          },
+          {
+            "text": "This is called \"watering the weeds and cutting the flowers.\"",
+            "start": 805.1628919467629,
+            "end": 808.0832212948342
+          },
+          {
+            "text": "You are systematically killing your compounders to feed your losers.",
+            "start": 808.8033025039476,
+            "end": 812.1236769681931
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Accidental Billionaire",
+            "start": 812.743746898263,
+            "end": 814.2039115722987
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher noticed something strange about the wealthiest families he advised.",
+            "start": 814.8839882697947,
+            "end": 818.764425896684
+          },
+          {
+            "text": "They didn't get rich by being smart traders; they got rich because they were \"trapped.\"",
+            "start": 819.4245003383713,
+            "end": 823.3849469884954
+          },
+          {
+            "text": "In Fisher's time, capital gains taxes were incredibly high\u2014sometimes over 25-30% on paper profits.",
+            "start": 824.2850484998872,
+            "end": 831.5658696142567
+          },
+          {
+            "text": "He tells the story of investors who bought a great company, watched it double, and wanted to sell.",
+            "start": 832.1459350327092,
+            "end": 837.2265080081208
+          },
+          {
+            "text": "But when they calculated the tax bill, they realized they would lose a third of their wealth to the IRS.",
+            "start": 837.7865711707647,
+            "end": 843.2271847507332
+          },
+          {
+            "text": "So, they gritted their teeth and held.",
+            "start": 843.8472546808031,
+            "end": 846.0875073313782
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Ten years later, that \"forced holding\" had turned a double into a 50-bagger.",
+            "start": 846.7075772614483,
+            "end": 850.5480103767201
+          },
+          {
+            "text": "The tax code had accidentally immunized them against their own stupidity.",
+            "start": 851.16808030679,
+            "end": 854.988511166253
+          },
+          {
+            "text": "Fisher realized that the only time to sell a company is when the business changes (Core 1, 2, or 3 breaks), never because the price has gone up.",
+            "start": 855.5685765847056,
+            "end": 863.5894811639973
+          },
+          {
+            "text": "If the job of the company is to grow, your job is to do nothing.",
+            "start": 864.4095736521542,
+            "end": 868.0099796977216
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Volatility Tax",
+            "start": 868.5900451161741,
+            "end": 869.6701669298443
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "In the crypto and tech era, the \"tax\" isn't just from the IRS; it's the volatility.",
+            "start": 870.4102503947665,
+            "end": 875.4708211143695
+          },
+          {
+            "text": "Look at Amazon or Bitcoin.",
+            "start": 876.3309181141439,
+            "end": 877.9911053462666
+          },
+          {
+            "text": "To capture the 10,000% gains, you had to sit through multiple drawdowns of 50%, 70%, even 90%.",
+            "start": 878.5511685089105,
+            "end": 884.9718926235055
+          },
+          {
+            "text": "If you sold Bitcoin in 2013 because it \"doubled too fast,\" you missed the defining asset class of the decade.",
+            "start": 886.2520369952628,
+            "end": 892.9127881795623
+          },
+          {
+            "text": "The same applies to early Tesla investors.",
+            "start": 893.7128784119107,
+            "end": 896.1131491089556
+          },
+          {
+            "text": "The \"Forever Hold\" isn't about stubbornness; it's about recognizing that true disruption takes decades, not quarters, to play out.",
+            "start": 896.6532100157906,
+            "end": 904.1740581998646
+          },
+          {
+            "text": "If you own an ETF like QQQ, you are effectively outsourcing this \"holding\" discipline\u2014the index automatically holds the winners and drops the losers.",
+            "start": 904.8141303857433,
+            "end": 914.2551951274531
+          },
+          {
+            "text": "But if you are picking individual stocks, you must be the algorithm that refuses to sell just because the ride gets bumpy.",
+            "start": 914.8752650575232,
+            "end": 921.0559621024137
+          }
+        ]
+      }
+    ],
+    "6": [
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Macro\" Illusion",
+            "start": 960.4803923268668,
+            "end": 961.8205375528341
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Here is why you panic-sold at the bottom: You listened to a \"Macro Tourist.\"",
+            "start": 962.4006004118348,
+            "end": 967.1011097864962
+          },
+          {
+            "text": "You let a stranger on television, who has never analyzed the specific company you own, convince you that the entire economy is collapsing.",
+            "start": 967.7611813157039,
+            "end": 974.9819638018857
+          },
+          {
+            "text": "You looked at the \"market\" instead of the business.",
+            "start": 975.8220548390593,
+            "end": 978.0022911022
+          },
+          {
+            "text": "You obsessed over interest rates, election polls, and GDP forecasts\u2014variables you cannot control and definitely cannot predict.",
+            "start": 978.6023561287526,
+            "end": 986.3831993063834
+          },
+          {
+            "text": "Most investors fail because they treat the stock market like a voting machine, trying to guess what other people will do, rather than a weighing machine that measures what the company is doing.",
+            "start": 987.0832751706947,
+            "end": 996.3642809147068
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The \"Dividend\" Trap",
+            "start": 997.2243741194321,
+            "end": 998.3444955023301
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Philip Fisher saw investors constantly seduced by the wrong metrics.",
+            "start": 998.8245475235722,
+            "end": 1002.5249485206459
+          },
+          {
+            "text": "One of his most famous \"Don'ts\" was: \"Don't buy a stock just because the annual report has a nice tone.\"",
+            "start": 1003.2850308876125,
+            "end": 1009.0856594776201
+          },
+          {
+            "text": "But his deeper lesson was about ignoring the crowd\u2019s obsession with \"safety.\"",
+            "start": 1009.5857136664138,
+            "end": 1012.8060626422456
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "He tells the story of investors who would pass on a high-growth technology company because it didn\u2019t pay a dividend.",
+            "start": 1013.6661558469709,
+            "end": 1019.4067779343231
+          },
+          {
+            "text": "They wanted the \"safe,\" tangible check in the mail.",
+            "start": 1020.0468472959792,
+            "end": 1022.707135580362
+          },
+          {
+            "text": "They flocked to stagnant companies that paid 5% yields but whose stock price slowly bled to death over decades.",
+            "start": 1023.507222282432,
+            "end": 1029.1278313644739
+          },
+          {
+            "text": "Fisher realized that \"income\" is often a mask for a dying business.",
+            "start": 1029.747898558578,
+            "end": 1033.3482887178932
+          },
+          {
+            "text": "A company that pays out all its profits has admitted it has no more ideas on how to grow.",
+            "start": 1034.1483754199633,
+            "end": 1038.8088804595209
+          },
+          {
+            "text": "The \"safe\" crowd was actually taking the biggest risk of all: the risk of obsolescence.",
+            "start": 1039.6689736642463,
+            "end": 1044.809530725046
+          },
+          {
+            "text": "He taught that true safety isn't in a dividend check; it's in a profit margin that is expanding.",
+            "start": 1045.5896152595644,
+            "end": 1050.190113796467
+          }
+        ]
+      },
+      {
+        "isHeading": true,
+        "sentences": [
+          {
+            "text": "The Algorithm of Fear",
+            "start": 1050.6901679852606,
+            "end": 1052.0503153787797
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "Today, the noise isn't just a quarterly report; it\u2019s a 24/7 algorithmic assault.",
+            "start": 1052.5503695675734,
+            "end": 1057.8109396336838
+          },
+          {
+            "text": "If you open Twitter/X or turn on CNBC, you are bombarded with \"Recession Imminent\" or \"Crypto is Dead\" headlines.",
+            "start": 1058.4710111628915,
+            "end": 1065.1117307900727
+          },
+          {
+            "text": "These platforms are designed to maximize engagement, and fear drives engagement.",
+            "start": 1065.7918044868322,
+            "end": 1070.6523312019074
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The \"Fed\" Obsession: In 2023, every \"expert\" predicted a recession.",
+            "start": 1071.1523853907013,
+            "end": 1076.372951121708
+          },
+          {
+            "text": "If you sold your tech stocks (like Meta or NVIDIA) because you were scared of the Fed raising rates, you missed one of the greatest rallies in history.",
+            "start": 1077.1530356562264,
+            "end": 1084.0937877966837
+          }
+        ]
+      },
+      {
+        "isHeading": false,
+        "sentences": [
+          {
+            "text": "The \"Narrative\" vs.",
+            "start": 1084.8138658285466,
+            "end": 1085.9939937141
+          },
+          {
+            "text": "Numbers: Look at Netflix in 2022.",
+            "start": 1087.3341389400673,
+            "end": 1089.114331852173
+          },
+          {
+            "text": "The narrative was \"streaming is over.\"",
+            "start": 1090.9945356020376,
+            "end": 1093.19477403273
+          },
+          {
+            "text": "The stock crashed.",
+            "start": 1093.6348217188686,
+            "end": 1094.7349409342148
+          },
+          {
+            "text": "But the numbers (subscribers, revenue per user) showed the engine was still running.",
+            "start": 1095.5550298038365,
+            "end": 1100.3155456811533
+          },
+          {
+            "text": "If you listened to the noise, you sold.",
+            "start": 1101.1556367183266,
+            "end": 1103.3158708139158
+          },
+          {
+            "text": "If you looked at the \"Engine\" (Core 2), you bought.",
+            "start": 1103.8959336729165,
+            "end": 1107.8363606806113
+          }
+        ]
+      }
+    ]
+  }
+}

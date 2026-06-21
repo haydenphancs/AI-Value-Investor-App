@@ -69,7 +69,9 @@ struct MetricHistoryChart: View {
             // only affects how fat the bars look (Charts positions them from the
             // x-scale), so a few points off is harmless.
             let plotWidth = Swift.max(geo.size.width - 40, 1)
-            let barW = Swift.min(Swift.max((plotWidth / CGFloat(visibleColumns)) * 0.72, 2), 48)
+            // Divide by the VISIBLE length (columns + trailing pad) so a bar is
+            // ≈0.72 of one real column even with the trailing breathing room.
+            let barW = Swift.min(Swift.max((plotWidth / CGFloat(chartVisibleLength)) * 0.72, 2), 48)
             Chart {
                 ForEach(indexedCompany, id: \.idx) { item in
                     BarMark(
@@ -105,7 +107,7 @@ struct MetricHistoryChart: View {
                 }
             }
             .chartYScale(domain: yDomain)
-            .chartXScale(domain: -0.5 ... (Double(orderedPeriods.count) - 0.5))
+            .chartXScale(domain: -0.5 ... chartDomainMax)
             .chartYAxis {
                 AxisMarks(position: .leading, values: yTicks) { value in
                     AxisGridLine()
@@ -132,10 +134,12 @@ struct MetricHistoryChart: View {
                 }
             }
             // Horizontally scrollable: show a window of columns at a readable width,
-            // opening at the most-recent end; the y-axis stays pinned.
+            // opening at the most-recent end; the y-axis stays pinned. The window
+            // and domain include one column of TRAILING pad so the latest bar's
+            // centered x-axis label isn't clipped at the right viewport edge.
             .chartScrollableAxes(.horizontal)
-            .chartXVisibleDomain(length: Double(visibleColumns))
-            .chartScrollPosition(initialX: Double(max(0, orderedPeriods.count - visibleColumns)))
+            .chartXVisibleDomain(length: chartVisibleLength)
+            .chartScrollPosition(initialX: scrollInitialX)
         }
         .frame(height: 200)
     }
@@ -143,6 +147,24 @@ struct MetricHistoryChart: View {
     /// How many bars are visible before scrolling kicks in. Fewer-than-window
     /// series (e.g. ~10 annual) just show in full (no scroll).
     private var visibleColumns: Int { Swift.min(orderedPeriods.count, 12) }
+
+    /// One column of blank space appended after the last bar so the latest
+    /// quarter's CENTERED x-axis label has room to render instead of being
+    /// clipped at the right edge (the bars effectively shift left; the y-axis,
+    /// pinned on the leading edge, is unaffected).
+    private let trailingPad: Double = 1.5
+
+    /// Visible window width in x-units = columns + trailing pad. Equals the full
+    /// domain width when the series fits (≤12), so short series never scroll.
+    private var chartVisibleLength: Double { Double(visibleColumns) + trailingPad }
+
+    /// Right edge of the x-domain: half a bar past the last index, plus the pad.
+    private var chartDomainMax: Double { Double(orderedPeriods.count) - 0.5 + trailingPad }
+
+    /// Initial scroll (leading-edge x) so the chart opens fully scrolled to the
+    /// padded right end — latest bar visible WITH its label. Clamps to the
+    /// domain start so a short, non-scrolling series shows from the first bar.
+    private var scrollInitialX: Double { Swift.max(-0.5, chartDomainMax - chartVisibleLength) }
 
     /// Index of the period to use as a label tick — thinned for dense charts.
     private var tickIndices: [Double] {

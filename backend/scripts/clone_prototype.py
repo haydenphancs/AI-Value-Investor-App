@@ -32,7 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REFDIR = ROOT / "data/voice_clone/refs"
 # Per-book reference voice clip (the clone source), matched by author to the cast Gemini voice.
 REFS = {2: "graham_iapetus.wav", 5: "fisher_schedar.wav", 6: "bogle_alnilam.wav",
-        7: "malkiel_orus.wav", 8: "buffett_zubenelgenubi.wav"}
+        7: "malkiel_orus.wav", 8: "buffett_zubenelgenubi.wav",
+        9: "greenblatt_achird.wav", 10: "marks_sadaltager.wav"}
 OUTDIR = ROOT / "data/voice_clone"
 
 

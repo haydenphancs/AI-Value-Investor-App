@@ -1,0 +1,101 @@
+{
+  "curriculum_order": 10,
+  "book_title": "The Most Important Thing",
+  "author": "Howard Marks",
+  "slug": "the-most-important-thing",
+  "audio_file": "10_the-most-important-thing.m4a",
+  "voice": "clone:marks_sadaltager",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 3501.64,
+  "total_label": "58:22",
+  "cores": [
+    {
+      "number": 1,
+      "title": "The Illusion of the Crowded Room",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "The Perfect Machine Fallacy",
+      "start_seconds": 231.1,
+      "start_label": "3:51"
+    },
+    {
+      "number": 3,
+      "title": "The Fatal Halo Effect",
+      "start_seconds": 473.06,
+      "start_label": "7:53"
+    },
+    {
+      "number": 4,
+      "title": "The Volatility Illusion",
+      "start_seconds": 690.08,
+      "start_label": "11:30"
+    },
+    {
+      "number": 5,
+      "title": "The Illusion of the Risk-Reward Contract",
+      "start_seconds": 905.98,
+      "start_label": "15:06"
+    },
+    {
+      "number": 6,
+      "title": "The Crystal Ball Delusion",
+      "start_seconds": 1144.96,
+      "start_label": "19:05"
+    },
+    {
+      "number": 7,
+      "title": "Combating Emotional Gravity",
+      "start_seconds": 1389.4,
+      "start_label": "23:09"
+    },
+    {
+      "number": 8,
+      "title": "The Illusion of Safety in Numbers",
+      "start_seconds": 1637.8,
+      "start_label": "27:18"
+    },
+    {
+      "number": 9,
+      "title": "Scavenging for Neglected Value",
+      "start_seconds": 1903.7,
+      "start_label": "31:44"
+    },
+    {
+      "number": 10,
+      "title": "The Discipline of Inaction",
+      "start_seconds": 2123.42,
+      "start_label": "35:23"
+    },
+    {
+      "number": 11,
+      "title": "Surviving the Coin Toss",
+      "start_seconds": 2443.24,
+      "start_label": "40:43"
+    },
+    {
+      "number": 12,
+      "title": "Winning by Not Losing",
+      "start_seconds": 2715.16,
+      "start_label": "45:15"
+    },
+    {
+      "number": 13,
+      "title": "Designing the Asymmetric Trade",
+      "start_seconds": 2940.68,
+      "start_label": "49:01"
+    },
+    {
+      "number": 14,
+      "title": "The Final Checkmate",
+      "start_seconds": 3211.1,
+      "start_label": "53:31"
+    }
+  ],
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/10_the-most-important-thing.m4a?"
+}

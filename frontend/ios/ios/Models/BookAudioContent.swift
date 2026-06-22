@@ -65,5 +65,15 @@ extension BookAudioInfo {
             totalSeconds: 1286,
             coreStartSeconds: [1: 0, 2: 180, 3: 423, 4: 669, 5: 860, 6: 1096]
         ),
+        9: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/9_the-little-book-that-still-beats-the-market.m4a",
+            totalSeconds: 1446,
+            coreStartSeconds: [1: 0, 2: 237, 3: 495, 4: 876, 5: 1181]
+        ),
+        10: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/10_the-most-important-thing.m4a",
+            totalSeconds: 3502,
+            coreStartSeconds: [1: 0, 2: 231, 3: 473, 4: 690, 5: 906, 6: 1145, 7: 1389, 8: 1638, 9: 1904, 10: 2123, 11: 2443, 12: 2715, 13: 2941, 14: 3211]
+        ),
     ]
 }

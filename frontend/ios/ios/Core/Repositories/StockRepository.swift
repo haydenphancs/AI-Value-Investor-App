@@ -1572,8 +1572,10 @@ struct GrowthResponseDTO: Codable {
                 GrowthDataPoint(
                     period: $0.period,
                     value: $0.value,
-                    yoyChangePercent: $0.yoyChangePercent ?? 0.0,
-                    sectorAverageYoY: $0.sectorAverageYoy ?? 0.0
+                    // Preserve nil ("not meaningful") — do NOT coalesce to 0.0,
+                    // which would render a fake flat green +0.0% / 0% sector point.
+                    yoyChangePercent: $0.yoyChangePercent,
+                    sectorAverageYoY: $0.sectorAverageYoy
                 )
             }
         }

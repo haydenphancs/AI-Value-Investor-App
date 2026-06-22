@@ -22,7 +22,12 @@ struct FundamentalsHistorySheet: View {
 
     init(card: DeepDiveMetricCard) {
         self.card = card
-        _selectedMetricID = State(initialValue: card.chartableMetrics.first?.id ?? UUID())
+        let first = card.chartableMetrics.first
+        _selectedMetricID = State(initialValue: first?.id ?? UUID())
+        // Open on Quarterly when the initial metric is quarterly-only (no ≥2 annual
+        // points) — otherwise the user would land on an empty "Not enough history"
+        // annual chart despite the metric having a real quarterly series.
+        _period = State(initialValue: (first?.hasAnnualHistory ?? true) ? .annual : .quarterly)
     }
 
     private var metrics: [DeepDiveMetric] { card.chartableMetrics }
@@ -94,9 +99,13 @@ struct FundamentalsHistorySheet: View {
                     let isSelected = m.id == selectedMetricID
                     Button {
                         selectedMetricID = m.id
-                        // A metric may lack quarterly data — fall back to annual.
+                        // Keep the toggle on a granularity this metric actually has:
+                        // a metric may lack quarterly data (→ annual), or be
+                        // quarterly-only with no annual chart (→ quarterly).
                         if period == .quarterly && !quarterlyAvailable(m) {
                             period = .annual
+                        } else if period == .annual && !m.hasAnnualHistory && quarterlyAvailable(m) {
+                            period = .quarterly
                         }
                     } label: {
                         Text(m.historyTitle)

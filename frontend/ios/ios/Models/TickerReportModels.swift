@@ -247,10 +247,21 @@ struct DeepDiveMetric: Identifiable {
             || (sectorQuarterlyHistory?.contains { $0.value != nil } ?? false)
     }
 
-    /// True when this metric has a chartable series (≥2 real annual points).
-    /// Drives whether the parent card is tappable and whether this metric
-    /// appears in the drill-down's metric picker.
+    /// True when this metric has a chartable series (≥2 real points in EITHER
+    /// granularity). Drives whether the parent card is tappable and whether this
+    /// metric appears in the drill-down's metric picker. Quarterly is included so
+    /// a metric with rich quarterly history but <2 annual points (e.g. P/FCF
+    /// gated to None in most fiscal years, or a recently-IPO'd company) is still
+    /// reachable rather than silently dropped from the drill-down.
     var hasHistory: Bool {
+        (annualHistory?.compactMap(\.value).count ?? 0) >= 2
+            || (quarterlyHistory?.compactMap(\.value).count ?? 0) >= 2
+    }
+
+    /// True when the metric is chartable at ANNUAL granularity (≥2 real annual
+    /// points). Drives the initial A/Q toggle so a quarterly-only metric opens on
+    /// Quarterly instead of an empty "Not enough history" annual chart.
+    var hasAnnualHistory: Bool {
         (annualHistory?.compactMap(\.value).count ?? 0) >= 2
     }
 

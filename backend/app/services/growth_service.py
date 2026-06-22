@@ -8,6 +8,7 @@ Matches the iOS GrowthSectionData struct.
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,14 +43,22 @@ def _cache_set(key: str, value: Any) -> None:
 # ── Helpers ───────────────────────────────────────────────────────
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
-    """Safely extract a float value from a dict."""
+    """Safely extract a FINITE float from a dict.
+
+    NaN / +-Inf coerce to None so a bad upstream value never reaches the
+    (non-optional) growth-point ``value``. When the report freezes ``growth_chart``,
+    a non-finite value would otherwise break serialization — Postgres JSONB rejects
+    bare ``NaN`` / ``Infinity``, so the conditional report write would raise and the
+    whole report would flip to ``status="failed"`` rather than degrading the point.
+    A None value is skipped by the callers (``if current_val is None: continue``)."""
     val = record.get(key)
     if val is None:
         return None
     try:
-        return float(val)
+        result = float(val)
     except (ValueError, TypeError):
         return None
+    return result if math.isfinite(result) else None
 
 
 def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optional[float]:

@@ -16,21 +16,30 @@ struct GrowthChartView: View {
     private let yAxisWidth: CGFloat = 45
     private let visibleColumnCount: CGFloat = 6  // columns visible before scrolling kicks in
     
-    // Computed properties for chart bounds
-    private var maxBarValue: Double {
-        (dataPoints.map { $0.value }.max() ?? 1) * 1.15
+    // Computed properties for chart bounds — SIGN-AWARE so loss-maker metrics
+    // (negative Net Income / FCF / Operating Profit / EPS) render downward from a
+    // visible zero baseline instead of being clipped, and an all-negative series
+    // doesn't produce an inverted/empty `0...negative` domain (which traps
+    // chartYScale at runtime: ClosedRange requires lowerBound <= upperBound).
+    private var barValues: [Double] { dataPoints.map { $0.value } }
+
+    /// Bar value domain. Always lowerBound <= 0 <= upperBound and never empty.
+    private var yDomain: ClosedRange<Double> {
+        var lo = Swift.min(barValues.min() ?? 0, 0)
+        var hi = Swift.max(barValues.max() ?? 1, 0)
+        if hi > 0 { hi *= 1.15 }        // headroom above zero
+        if lo < 0 { lo *= 1.15 }        // headroom below zero
+        if lo == hi { hi = lo + 1 }     // all-zero degenerate → tiny non-empty band
+        return lo...hi
     }
 
-    private var minBarValue: Double {
-        0 // Start from 0 for bar charts
-    }
-
+    // Only meaningful (non-nil) YoY / sector values feed the normalization range.
     private var yoyValues: [Double] {
-        dataPoints.map { $0.yoyChangePercent }
+        dataPoints.compactMap { $0.yoyChangePercent }
     }
 
     private var sectorValues: [Double] {
-        dataPoints.map { $0.sectorAverageYoY }
+        dataPoints.compactMap { $0.sectorAverageYoY }
     }
 
     private var allPercentValues: [Double] {
@@ -56,10 +65,39 @@ struct GrowthChartView: View {
         return (rangeMin - padding, rangeMax + padding)
     }
 
-    // Grid line values (4 horizontal lines)
+    // Grid lines: the zero baseline plus interior lines across the (sign-aware)
+    // domain, so a chart with negative bars still shows a visible 0 line.
     private var gridValues: [Double] {
-        let step = maxBarValue / 4
-        return [step, step * 2, step * 3]
+        let hi = yDomain.upperBound, lo = yDomain.lowerBound
+        var vals: [Double] = [0]
+        if hi > 0 { vals += [hi / 3, 2 * hi / 3] }
+        if lo < 0 { vals += [lo / 3, 2 * lo / 3] }
+        return vals
+    }
+
+    /// Group consecutive non-nil points into segments (id increments across each
+    /// nil gap) so a percentage LineMark BREAKS at "not meaningful" periods
+    /// instead of bridging them with a fabricated straight segment.
+    private func percentSegments(
+        _ valueFor: @escaping (GrowthDataPoint) -> Double?
+    ) -> [(point: GrowthDataPoint, value: Double, seg: Int)] {
+        var out: [(point: GrowthDataPoint, value: Double, seg: Int)] = []
+        var seg = 0
+        var prevWasNil = true
+        for p in dataPoints {
+            guard let v = valueFor(p) else { prevWasNil = true; continue }
+            if prevWasNil { seg += 1; prevWasNil = false }
+            out.append((point: p, value: v, seg: seg))
+        }
+        return out
+    }
+
+    private var yoySegments: [(point: GrowthDataPoint, value: Double, seg: Int)] {
+        percentSegments { $0.yoyChangePercent }
+    }
+
+    private var sectorSegments: [(point: GrowthDataPoint, value: Double, seg: Int)] {
+        percentSegments { $0.sectorAverageYoY }
     }
     
     // Font sizes - Since we only show 5 labels for both annual and quarterly,
@@ -131,56 +169,58 @@ struct GrowthChartView: View {
                     .lineStyle(StrokeStyle(lineWidth: 0.5))
             }
 
-            // Bar marks for absolute values
+            // Bar marks for absolute values — negative bars render red and
+            // downward from the zero baseline (sign-aware yDomain).
             ForEach(dataPoints) { dataPoint in
                 BarMark(
                     x: .value("Period", dataPoint.period),
                     y: .value("Value", dataPoint.value),
                     width: dataPoints.count > 6 ? .fixed(20) : .automatic
                 )
-                .foregroundStyle(AppColors.growthBarBlue)
+                .foregroundStyle(dataPoint.value < 0 ? AppColors.bearish : AppColors.growthBarBlue)
                 .cornerRadius(4)
             }
 
-            // YoY line - single continuous line
-            ForEach(dataPoints) { dataPoint in
+            // YoY line — one segment per contiguous non-nil run, so the line
+            // BREAKS at "not meaningful" (nil) periods instead of bridging them.
+            ForEach(Array(yoySegments.enumerated()), id: \.offset) { _, item in
                 LineMark(
-                    x: .value("Period", dataPoint.period),
-                    y: .value("YoY", normalizeYoY(dataPoint.yoyChangePercent)),
-                    series: .value("Series", "YoY")
+                    x: .value("Period", item.point.period),
+                    y: .value("YoY", normalizeYoY(item.value)),
+                    series: .value("Series", "YoY-\(item.seg)")
                 )
                 .foregroundStyle(AppColors.growthYoYYellow)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                 .interpolationMethod(.linear)
             }
 
-            // YoY points
-            ForEach(dataPoints) { dataPoint in
+            // YoY points (only meaningful periods)
+            ForEach(Array(yoySegments.enumerated()), id: \.offset) { _, item in
                 PointMark(
-                    x: .value("Period", dataPoint.period),
-                    y: .value("YoY", normalizeYoY(dataPoint.yoyChangePercent))
+                    x: .value("Period", item.point.period),
+                    y: .value("YoY", normalizeYoY(item.value))
                 )
                 .foregroundStyle(AppColors.growthYoYYellow)
                 .symbolSize(50)
             }
 
-            // Sector average line - single continuous dashed line
-            ForEach(dataPoints) { dataPoint in
+            // Sector average line — dashed, also broken at periods with no benchmark.
+            ForEach(Array(sectorSegments.enumerated()), id: \.offset) { _, item in
                 LineMark(
-                    x: .value("Period", dataPoint.period),
-                    y: .value("Sector", normalizeYoY(dataPoint.sectorAverageYoY)),
-                    series: .value("Series", "Sector")
+                    x: .value("Period", item.point.period),
+                    y: .value("Sector", normalizeYoY(item.value)),
+                    series: .value("Series", "Sector-\(item.seg)")
                 )
                 .foregroundStyle(AppColors.growthSectorGray)
                 .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
                 .interpolationMethod(.linear)
             }
 
-            // Sector average points
-            ForEach(dataPoints) { dataPoint in
+            // Sector average points (only periods with a benchmark)
+            ForEach(Array(sectorSegments.enumerated()), id: \.offset) { _, item in
                 PointMark(
-                    x: .value("Period", dataPoint.period),
-                    y: .value("Sector", normalizeYoY(dataPoint.sectorAverageYoY))
+                    x: .value("Period", item.point.period),
+                    y: .value("Sector", normalizeYoY(item.value))
                 )
                 .foregroundStyle(AppColors.growthSectorGray)
                 .symbolSize(35)
@@ -189,7 +229,7 @@ struct GrowthChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: minBarValue...maxBarValue)
+        .chartYScale(domain: yDomain)
         .chartPlotStyle { plotArea in
             plotArea
                 .background(Color.clear)
@@ -199,26 +239,32 @@ struct GrowthChartView: View {
     // MARK: - Y-Axis Labels
 
     private var barYAxisLabels: some View {
-        VStack {
-            Text(formatLargeNumber(maxBarValue * 0.9))
+        // Evenly-spaced labels at the 0% / 33% / 66% / 100% plot positions of the
+        // sign-aware domain (top→bottom). For an all-positive series lo==0 so the
+        // bottom label is "0"; for negatives it shows the real negative floor.
+        let hi = yDomain.upperBound
+        let lo = yDomain.lowerBound
+        let span = hi - lo
+        return VStack {
+            Text(formatLargeNumber(hi))
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
-            Text(formatLargeNumber(maxBarValue * 0.6))
+            Text(formatLargeNumber(hi - span / 3))
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
-            Text(formatLargeNumber(maxBarValue * 0.3))
+            Text(formatLargeNumber(lo + span / 3))
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
-            Text("0")
+            Text(lo < 0 ? formatLargeNumber(lo) : "0")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
@@ -259,9 +305,13 @@ struct GrowthChartView: View {
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 if shouldShowLabel(for: dataPoint) {
-                    Text(String(format: "%.1f%%", dataPoint.yoyChangePercent))
+                    // nil YoY ("not meaningful") → muted "—", never a fake green +0.0%.
+                    Text(dataPoint.yoyChangePercent.map { String(format: "%.1f%%", $0) } ?? "—")
                         .font(.system(size: yoyFontSize, weight: .semibold))
-                        .foregroundColor(dataPoint.yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish)
+                        .foregroundColor(
+                            dataPoint.yoyChangePercent.map { $0 >= 0 ? AppColors.bullish : AppColors.bearish }
+                                ?? AppColors.textMuted
+                        )
                         .lineLimit(1)
                         .fixedSize()
                         .position(
@@ -307,7 +357,8 @@ struct GrowthChartView: View {
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 if shouldShowLabel(for: dataPoint) {
-                    Text(String(format: "%.1f%%", dataPoint.sectorAverageYoY))
+                    // nil sector value (no benchmark for this period) → muted "—".
+                    Text(dataPoint.sectorAverageYoY.map { String(format: "%.1f%%", $0) } ?? "—")
                         .font(.system(size: labelFontSize, weight: .regular))
                         .foregroundColor(AppColors.growthSectorGray)
                         .lineLimit(1)
@@ -337,12 +388,14 @@ struct GrowthChartView: View {
     private func normalizeYoY(_ yoyPercent: Double) -> Double {
         let range = yoyDisplayRange
         let span = range.max - range.min
-        guard span > 0 else { return maxBarValue * 0.5 }
+        let hi = yDomain.upperBound, lo = yDomain.lowerBound
+        guard span > 0 else { return (hi + lo) / 2 }
         let normalized = (yoyPercent - range.min) / span
-        let clamped = min(max(normalized, 0.0), 1.0)
-        let targetMin = maxBarValue * 0.10
-        let targetMax = maxBarValue * 0.85
-        return targetMin + clamped * (targetMax - targetMin)
+        let clampedN = min(max(normalized, 0.0), 1.0)
+        // Map the percentage line into the 10%..85% band of the (sign-aware) domain.
+        let targetMin = lo + (hi - lo) * 0.10
+        let targetMax = lo + (hi - lo) * 0.85
+        return targetMin + clampedN * (targetMax - targetMin)
     }
 
     private func formatLargeNumber(_ number: Double) -> String {

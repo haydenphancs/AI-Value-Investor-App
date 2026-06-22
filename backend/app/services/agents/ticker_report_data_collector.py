@@ -2294,12 +2294,18 @@ def _altman_z(
     balance: List[Dict[str, Any]],
     income: List[Dict[str, Any]],
     profile: Dict[str, Any],
+    mkt_cap_override: Optional[float] = None,
 ) -> Optional[float]:
     """Altman Z (manufacturing). Returns None when inputs are unusable.
 
     No more silent `or 1` divide-by-zero masks — a zero-asset balance
     sheet returns None and the report renders 0.0 with a "Data
     unavailable" label, instead of a fake "safe zone" rating.
+
+    ``mkt_cap_override`` lets the per-period HISTORY pass the contemporaneous
+    market cap so an old year's market-value-of-equity term (0.6 * mktCap /
+    totalLiab) reflects that period, not today. None → use the current profile
+    market cap (the snapshot / current-quarter call).
     """
     if not balance or not income:
         return None
@@ -2317,7 +2323,10 @@ def _altman_z(
     )
     re_earn = _safe_float(b, "retainedEarnings")
     ebit = _safe_float(i, "operatingIncome")
-    mkt_cap = _safe_float(profile, "mktCap")
+    mkt_cap = (
+        mkt_cap_override if mkt_cap_override is not None
+        else _safe_float(profile, "mktCap")
+    )
     sales = _safe_float(i, "revenue")
 
     z = (
@@ -3647,6 +3656,25 @@ def _fundamentals_history_for_period(
     spine_meta = meta_inc if meta_inc else meta_rat
     ordered = sorted(spine_meta.items(), key=lambda kv: kv[1][3] or "")
 
+    # Two DISTINCT calendar join keys can collapse to the SAME fiscal display
+    # label when a company changes its fiscal-year-end (two different calendar
+    # quarters both read "Q4 '24" because they share fiscalYear). Duplicate
+    # `period` labels would overlap bars and corrupt the categorical x-axis on
+    # iOS (chartXScale(domain:)), and the sector overlay would bind the label to
+    # only one key. Collapse to the chronologically-latest record per display
+    # label (ordered is ascending by sort_date → a later entry wins), matching
+    # _period_calendar_keys which keeps the newest under FMP's newest-first order.
+    _by_label: Dict[str, Tuple[str, Tuple[int, Optional[int], str, str]]] = {}
+    for _k, _m in ordered:
+        _by_label[_m[2]] = (_k, _m)
+    if len(_by_label) != len(ordered):
+        logger.warning(
+            "fundamentals history: collapsed %d duplicate display label(s) "
+            "(fiscal-year-end change?) — kept newest per label",
+            len(ordered) - len(_by_label),
+        )
+        ordered = sorted(_by_label.values(), key=lambda kv: kv[1][3] or "")
+
     out_series: Dict[str, List[Dict[str, Any]]] = {}
 
     def add(metric_key: str, label: str, value: Optional[float]) -> None:
@@ -3697,7 +3725,12 @@ def _fundamentals_history_for_period(
                     add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc))
 
         if bal is not None and inc is not None:
-            add("altman_z", label, _altman_z([bal], [inc], profile))
+            # Use this period's own market cap (from key_metrics) so the
+            # historical Altman Z reflects the market value of equity AT THAT
+            # period — not today's. Falls back to the current profile mktCap
+            # when the period has no key_metrics row.
+            _km_mcap = _num_or_none(km.get("marketCap")) if isinstance(km, dict) else None
+            add("altman_z", label, _altman_z([bal], [inc], profile, mkt_cap_override=_km_mcap))
 
         # YoY vs the SAME period one year earlier (direct key lookup).
         pk = prior_key(year, quarter)

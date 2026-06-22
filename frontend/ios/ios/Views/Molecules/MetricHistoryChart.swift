@@ -60,6 +60,24 @@ struct MetricHistoryChart: View {
         return (sector ?? []).filter { $0.value != nil && xs.contains($0.period) }
     }
 
+    /// Sector points grouped into segments, with the id incrementing across every
+    /// INTERIOR gap (a period where the sector benchmark is undefined). The sector
+    /// array is aligned to the company timeline (oldest→newest) with nils at gaps,
+    /// so this breaks the dashed line at gaps instead of letting catmullRom
+    /// fabricate a smooth value across periods where no sector median exists.
+    private var sectorSegments: [(point: MetricHistoryPoint, seg: Int)] {
+        let xs = Set(orderedPeriods)
+        var out: [(point: MetricHistoryPoint, seg: Int)] = []
+        var seg = 0
+        var prevBreak = true
+        for p in (sector ?? []) {
+            guard xs.contains(p.period), p.value != nil else { prevBreak = true; continue }
+            if prevBreak { seg += 1; prevBreak = false }
+            out.append((point: p, seg: seg))
+        }
+        return out
+    }
+
     var body: some View {
         if valued.count < 2 {
             Text("Not enough history to chart.")
@@ -143,19 +161,21 @@ struct MetricHistoryChart: View {
                 }
             }
             // Sector-average overlay: a dashed gray line + dots at the company
-            // categories (mirrors GrowthChartView).
-            ForEach(sectorValued) { point in
+            // categories (mirrors GrowthChartView). One series per contiguous run
+            // so the line BREAKS at interior gaps (periods with no sector median)
+            // instead of catmullRom-bridging a fabricated value over them.
+            ForEach(Array(sectorSegments.enumerated()), id: \.offset) { _, item in
                 LineMark(
-                    x: .value("Period", point.period),
-                    y: .value("Sector", clamped(point.value ?? 0)),
-                    series: .value("Series", "Sector avg")
+                    x: .value("Period", item.point.period),
+                    y: .value("Sector", clamped(item.point.value ?? 0)),
+                    series: .value("Series", "Sector-\(item.seg)")
                 )
                 .foregroundStyle(AppColors.textSecondary)
                 .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
                 .interpolationMethod(.catmullRom)
                 PointMark(
-                    x: .value("Period", point.period),
-                    y: .value("Sector", clamped(point.value ?? 0))
+                    x: .value("Period", item.point.period),
+                    y: .value("Sector", clamped(item.point.value ?? 0))
                 )
                 .foregroundStyle(AppColors.textSecondary)
                 .symbolSize(18)
@@ -241,8 +261,14 @@ struct MetricHistoryChart: View {
     private var yDomain: ClosedRange<Double> {
         let vals = (valued.compactMap(\.value) + sectorValued.compactMap(\.value)).sorted()
         guard let lo = vals.first, let hi = vals.last else { return 0...1 }
-        let q1 = vals[vals.count / 4]
-        let q3 = vals[min(vals.count - 1, (vals.count * 3) / 4)]
+        let n = vals.count
+        let q1 = vals[n / 4]
+        // Cap q3 BELOW the absolute max for n >= 3 so a single extreme value can't
+        // BECOME q3 and collapse the upper fence onto itself — which flattened every
+        // normal bar to an invisible sliver (e.g. 4 annual P/E points, one 5000x
+        // spike). Identical to the old `vals[min(n-1, 3n/4)]` for n>=5 and n==2;
+        // only n==3 and n==4 change (the small-N cases the bug is about).
+        let q3 = vals[n >= 3 ? Swift.min((n * 3) / 4, n - 2) : (n - 1)]
         // IQR with a floor so a flat series (iqr≈0) still gets a sane window.
         let iqr = Swift.max(q3 - q1, abs(q3) * 0.1, 1)
         // A value within ±3·scale is treated as legitimate and shown at true

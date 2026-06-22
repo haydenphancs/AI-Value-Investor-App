@@ -1,0 +1,48 @@
+{
+  "curriculum_order": 9,
+  "book_title": "The Little Book that Still Beats the Market",
+  "author": "Joel Greenblatt",
+  "slug": "the-little-book-that-still-beats-the-market",
+  "audio_file": "9_the-little-book-that-still-beats-the-market.m4a",
+  "voice": "clone:greenblatt_achird+aged_v1_mature",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 1445.94,
+  "total_label": "24:06",
+  "cores": [
+    {
+      "number": 1,
+      "title": "The Grand Illusion of Wall Street",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "The Myth of the Rational Machine",
+      "start_seconds": 236.7,
+      "start_label": "3:57"
+    },
+    {
+      "number": 3,
+      "title": "The Casino Chip Delusion",
+      "start_seconds": 495.03,
+      "start_label": "8:15"
+    },
+    {
+      "number": 4,
+      "title": "The Steamroller and the Pennies",
+      "start_seconds": 875.95,
+      "start_label": "14:36"
+    },
+    {
+      "number": 5,
+      "title": "The Spreadsheet Delusion",
+      "start_seconds": 1180.88,
+      "start_label": "19:41"
+    }
+  ],
+  "aging_filter": "asetrate=24000*0.95,aresample=24000,atempo=1/0.95,treble=-2",
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/9_the-little-book-that-still-beats-the-market.m4a?"
+}

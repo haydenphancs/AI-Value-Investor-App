@@ -1477,19 +1477,20 @@ class TickerDetailViewModel: ObservableObject {
     private var financialsContext: String? {
         var parts: [String] = []
 
-        // Growth data
+        // Growth data — skip a metric whose latest YoY is "not meaningful" (nil)
+        // rather than grounding the AI on a fabricated 0%.
         if let gd = growthData {
-            if let latestRevenue = gd.revenueAnnual.last {
-                let sign = latestRevenue.yoyChangePercent >= 0 ? "+" : ""
-                parts.append("Revenue Growth (YoY): \(sign)\(String(format: "%.1f", latestRevenue.yoyChangePercent))%")
+            if let yoy = gd.revenueAnnual.last?.yoyChangePercent {
+                let sign = yoy >= 0 ? "+" : ""
+                parts.append("Revenue Growth (YoY): \(sign)\(String(format: "%.1f", yoy))%")
             }
-            if let latestEPS = gd.epsAnnual.last {
-                let sign = latestEPS.yoyChangePercent >= 0 ? "+" : ""
-                parts.append("EPS Growth (YoY): \(sign)\(String(format: "%.1f", latestEPS.yoyChangePercent))%")
+            if let yoy = gd.epsAnnual.last?.yoyChangePercent {
+                let sign = yoy >= 0 ? "+" : ""
+                parts.append("EPS Growth (YoY): \(sign)\(String(format: "%.1f", yoy))%")
             }
-            if let latestFCF = gd.freeCashFlowAnnual.last {
-                let sign = latestFCF.yoyChangePercent >= 0 ? "+" : ""
-                parts.append("FCF Growth (YoY): \(sign)\(String(format: "%.1f", latestFCF.yoyChangePercent))%")
+            if let yoy = gd.freeCashFlowAnnual.last?.yoyChangePercent {
+                let sign = yoy >= 0 ? "+" : ""
+                parts.append("FCF Growth (YoY): \(sign)\(String(format: "%.1f", yoy))%")
             }
         }
 

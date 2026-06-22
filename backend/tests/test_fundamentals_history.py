@@ -14,6 +14,7 @@ from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
     _aligned_sector_series,
+    _altman_z,
     _build_fundamental_metrics_from_snapshots,
     _build_fundamentals_history,
     _fundamentals_history_for_period,
@@ -681,6 +682,97 @@ async def test_fetch_sector_benchmark_history_empty_sector_short_circuits(monkey
     out = await coll._fetch_sector_benchmark_history("")
     assert out == {"annual": {}, "quarterly": {}}
     assert called["n"] == 0  # no query for a missing sector
+
+
+# ── Altman Z history uses the CONTEMPORANEOUS market cap (not today's) ──
+
+def test_altman_z_mkt_cap_override_beats_profile():
+    """The equity term (0.6 * mktCap / totalLiab) must use the override when
+    given, never the (current) profile market cap."""
+    bal = [{"totalAssets": 100, "totalLiabilities": 50, "totalCurrentAssets": 30,
+            "totalCurrentLiabilities": 20, "retainedEarnings": 20}]
+    inc = [{"operatingIncome": 15, "revenue": 80}]
+    profile = {"mktCap": 1000.0}  # current — must be IGNORED when override given
+    z_override = _altman_z(bal, inc, profile, mkt_cap_override=50.0)
+    z_profile = _altman_z(bal, inc, profile)  # no override → profile mktCap
+    assert z_override is not None and z_profile is not None
+    # profile mktCap (1000) >> override (50) → larger equity term, larger Z.
+    assert z_override < z_profile
+    # Only the equity term differs: 0.6*(1000/50) - 0.6*(50/50) = 12.0 - 0.6 = 11.4
+    # (within rounding — each Z is rounded to 2dp before the subtraction).
+    assert abs((z_profile - z_override) - 0.6 * (1000 / 50 - 50 / 50)) < 0.05
+    # mkt_cap_override=0.0 is honoured (a real zero-equity period), NOT treated
+    # as "absent" → equity term contributes nothing (≈ 0.6 less than override=50).
+    z_zero = _altman_z(bal, inc, profile, mkt_cap_override=0.0)
+    assert z_zero is not None
+    assert abs((z_override - z_zero) - 0.6 * (50.0 / 50.0)) < 0.05
+
+
+def test_altman_z_history_uses_per_period_market_cap_not_current_profile():
+    """Regression: the historical Altman Z line previously applied TODAY's
+    market cap to every past year (overstating/understating older bars). It must
+    now use each period's own key_metrics.marketCap. Balance & income are held
+    identical across both years so the ONLY difference is the equity term."""
+    income = [
+        {"calendarYear": "2023", "date": "2023-12-31", "revenue": 80, "operatingIncome": 15},
+        {"calendarYear": "2024", "date": "2024-12-31", "revenue": 80, "operatingIncome": 15},
+    ]
+    balance = [
+        {"calendarYear": "2023", "date": "2023-12-31", "totalAssets": 100,
+         "totalLiabilities": 50, "totalCurrentAssets": 30,
+         "totalCurrentLiabilities": 20, "retainedEarnings": 20},
+        {"calendarYear": "2024", "date": "2024-12-31", "totalAssets": 100,
+         "totalLiabilities": 50, "totalCurrentAssets": 30,
+         "totalCurrentLiabilities": 20, "retainedEarnings": 20},
+    ]
+    key_metrics = [
+        {"calendarYear": "2023", "date": "2023-12-31", "marketCap": 50.0},   # 1.0x liabs
+        {"calendarYear": "2024", "date": "2024-12-31", "marketCap": 200.0},  # 4.0x liabs
+    ]
+    profile = {"mktCap": 999_999.0}  # huge current cap — must NOT leak into history
+    hist = _fundamentals_history_for_period(
+        income, balance, [], key_metrics, [], profile, quarterly=False)
+    z = dict(_series(hist, "altman_z"))
+    # Equity term: 2023 → 0.6*(50/50)=0.6 ; 2024 → 0.6*(200/50)=2.4 → +1.8.
+    # (If today's profile cap had leaked, both bars would be ~12000.)
+    assert z["2023"] < 5 and z["2024"] < 5            # profile cap did NOT leak
+    assert round(z["2024"] - z["2023"], 2) == 1.8
+
+
+def test_altman_z_history_falls_back_to_profile_when_no_key_metrics():
+    """No key_metrics row for the period → the equity term falls back to the
+    current profile market cap (documented best-effort, not a crash)."""
+    income = [{"calendarYear": "2024", "date": "2024-12-31", "revenue": 80, "operatingIncome": 15}]
+    balance = [{"calendarYear": "2024", "date": "2024-12-31", "totalAssets": 100,
+                "totalLiabilities": 50, "totalCurrentAssets": 30,
+                "totalCurrentLiabilities": 20, "retainedEarnings": 20}]
+    profile = {"mktCap": 50.0}
+    hist = _fundamentals_history_for_period(income, balance, [], [], [], profile, quarterly=False)
+    z = dict(_series(hist, "altman_z"))
+    # profile mktCap 50 / liab 50 → equity term 0.6; full z = 2.29.
+    assert z["2024"] == 2.29
+
+
+# ── Fiscal-year-end change must not produce duplicate display labels ────
+
+def test_fiscal_year_end_change_collapses_duplicate_display_labels():
+    """A fiscal-year-end change can make two DISTINCT calendar quarters both
+    read "Q4 '24" (shared fiscalYear). Duplicate `period` labels would overlap
+    bars and corrupt iOS chartXScale(domain:). The series must keep unique
+    labels — the chronologically-latest record wins."""
+    income = [
+        {"fiscalYear": 2024, "calendarYear": 2023, "period": "Q4", "date": "2023-11-30", "revenue": 100},
+        {"fiscalYear": 2024, "calendarYear": 2024, "period": "Q4", "date": "2024-02-28", "revenue": 110},
+    ]
+    ratios = [
+        {"fiscalYear": 2024, "calendarYear": 2023, "period": "Q4", "date": "2023-11-30", "priceToEarningsRatio": 30.0},
+        {"fiscalYear": 2024, "calendarYear": 2024, "period": "Q4", "date": "2024-02-28", "priceToEarningsRatio": 31.0},
+    ]
+    hist = _fundamentals_history_for_period(income, [], [], [], ratios, {}, quarterly=True)
+    periods = _periods(hist, "pe")
+    assert len(periods) == len(set(periods))   # no duplicate labels
+    assert periods == ["Q4 '24"]               # collapsed to a single column
+    assert [v for _, v in _series(hist, "pe")] == [31.0]  # newest (2024-02-28) wins
 
 
 def test_sector_series_survives_card_validation():

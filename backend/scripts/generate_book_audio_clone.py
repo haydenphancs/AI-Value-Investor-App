@@ -41,7 +41,8 @@ BREAK = gba.BREAK_SECONDS
 # Per-book reference voice clip (the clone source) — built from the Gemini audition samples so each
 # book keeps the voice we cast. Add entries here as we roll out to more books.
 REFS = {2: "iapetus_erudite_professor.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
-        7: "orus_witty_emeritus.wav", 8: "zubenelgenubi_warm_elder.wav"}
+        7: "orus_witty_emeritus.wav", 8: "zubenelgenubi_warm_elder.wav",
+        9: "achird_patient_teacher.wav", 10: "sadaltager_contemplative.wav"}
 
 
 def split_sentences(text: str) -> list[str]:

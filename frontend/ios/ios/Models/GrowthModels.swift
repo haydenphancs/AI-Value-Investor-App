@@ -46,28 +46,31 @@ enum GrowthPeriodType: String, CaseIterable, Identifiable {
 struct GrowthDataPoint: Identifiable, Equatable, Hashable {
     let id = UUID()
     let period: String              // e.g., "2020", "2021" or "Q1 '24"
-    let value: Double               // Absolute value (e.g., 100B)
-    let yoyChangePercent: Double    // Year-over-Year change percentage
-    let sectorAverageYoY: Double    // Sector average YoY for comparison
-    
+    let value: Double               // Absolute value — CAN be negative (loss-makers)
+    // nil = "not meaningful": the backend returns a null YoY for a non-positive
+    // base or a sign-flip into negative (e.g. FCF +$0.4B → -$23.7B). Kept Optional
+    // so the chart shows a GAP / "—" rather than fabricating a flat green +0.0%.
+    let yoyChangePercent: Double?   // Year-over-Year change percentage (nil = n/m)
+    let sectorAverageYoY: Double?   // Sector average YoY (nil = no benchmark)
+
     static func == (lhs: GrowthDataPoint, rhs: GrowthDataPoint) -> Bool {
         lhs.period == rhs.period
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(period)
     }
 
     var isPositiveYoY: Bool {
-        yoyChangePercent >= 0
+        (yoyChangePercent ?? 0) >= 0
     }
 
     var formattedYoY: String {
-        String(format: "%.2f%%", yoyChangePercent)
+        yoyChangePercent.map { String(format: "%.2f%%", $0) } ?? "—"
     }
 
     var yoyColor: Color {
-        yoyChangePercent >= 0 ? AppColors.bullish : AppColors.bearish
+        (yoyChangePercent ?? 0) >= 0 ? AppColors.bullish : AppColors.bearish
     }
 
     var formattedValue: String {
@@ -104,8 +107,9 @@ struct GrowthChartData {
     }
 
     var averageYoY: Double {
-        guard !dataPoints.isEmpty else { return 0 }
-        return dataPoints.map { $0.yoyChangePercent }.reduce(0, +) / Double(dataPoints.count)
+        let vals = dataPoints.compactMap { $0.yoyChangePercent }
+        guard !vals.isEmpty else { return 0 }
+        return vals.reduce(0, +) / Double(vals.count)
     }
 
     var formattedAverageYoY: String {

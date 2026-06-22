@@ -10,14 +10,35 @@ import SwiftUI
 struct ReportFundamentalsSection: View {
     let metrics: [DeepDiveMetricCard]
     let assessment: ReportOverallAssessment
+    // Rich Growth chart (parity with the free Growth chart). When present, the
+    // Growth card is pulled OUT of the grid into a full-width chart; the other
+    // cards stay in the grid. nil on legacy reports → all cards stay in the grid.
+    var growthData: GrowthSectionData? = nil
 
     // Tapping a card with baked history opens the time-series drill-down.
     // Legacy reports (no history) leave cards inert — selectedCard stays nil.
     @State private var selectedCard: DeepDiveMetricCard?
 
+    /// The Growth card to render as the full-width chart (only when we have
+    /// chart data for it). nil → no special Growth card (legacy fallback).
+    private var growthCard: DeepDiveMetricCard? {
+        growthData == nil ? nil : metrics.first { $0.title == "Growth" }
+    }
+
+    /// Cards shown in the 2×2 grid — everything except the Growth card when the
+    /// rich chart is taking its place.
+    private var gridMetrics: [DeepDiveMetricCard] {
+        growthCard == nil ? metrics : metrics.filter { $0.title != "Growth" }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // 2x2 metric grid
+            // Full-width rich Growth chart (replaces the compact Growth grid card).
+            if let growthData, let growthCard {
+                ReportGrowthChartCard(data: growthCard, growthData: growthData)
+            }
+
+            // 2x2 metric grid (the remaining fundamental cards)
             LazyVGrid(
                 columns: [
                     GridItem(.flexible(), spacing: AppSpacing.sm),
@@ -25,7 +46,7 @@ struct ReportFundamentalsSection: View {
                 ],
                 spacing: AppSpacing.md
             ) {
-                ForEach(metrics) { metric in
+                ForEach(gridMetrics) { metric in
                     if metric.hasHistory {
                         Button { selectedCard = metric } label: {
                             ReportDeepDiveMetricCard(data: metric)

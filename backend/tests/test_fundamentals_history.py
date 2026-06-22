@@ -96,6 +96,57 @@ def test_quarterly_period_collision_keeps_all_four_quarters():
     assert [v for _, v in _series(hist, "pe")] == [10.0, 11.0, 12.0, 13.0]
 
 
+def test_price_multiples_drop_nonpositive_but_keep_period():
+    """P/E, P/B, P/S are price multiples: a non-positive value is undefined
+    (negative earnings / book / sales) → value None, but the PERIOD stays in the
+    series (iOS renders an 'undefined' red 0-line marker, not a negative bar).
+    D/E is NOT gated — negative equity is a meaningful, charted condition."""
+    income = [
+        {"calendarYear": 2022, "period": "Q1", "date": "2022-03-31", "revenue": 80},
+        {"calendarYear": 2023, "period": "Q1", "date": "2023-03-31", "revenue": 90},
+        {"calendarYear": 2024, "period": "Q1", "date": "2024-03-31", "revenue": 100},
+    ]
+    ratios = [
+        {"calendarYear": 2022, "period": "Q1", "date": "2022-03-31",
+         "priceToEarningsRatio": -8.0, "priceToBookRatio": -3.0,
+         "priceToSalesRatio": -1.0, "debtToEquityRatio": -12.0},
+        {"calendarYear": 2023, "period": "Q1", "date": "2023-03-31",
+         "priceToEarningsRatio": 0.0, "priceToBookRatio": 5.0,
+         "priceToSalesRatio": 4.0, "debtToEquityRatio": 2.0},
+        {"calendarYear": 2024, "period": "Q1", "date": "2024-03-31",
+         "priceToEarningsRatio": 20.0, "priceToBookRatio": 6.0,
+         "priceToSalesRatio": 5.0, "debtToEquityRatio": 1.5},
+    ]
+    hist = _fundamentals_history_for_period(income, [], [], [], ratios, {}, quarterly=True)
+    # Non-positive (negative AND zero) → None; positive → kept. Periods preserved.
+    assert [v for _, v in _series(hist, "pe")] == [None, None, 20.0]
+    assert [v for _, v in _series(hist, "pb")] == [None, 5.0, 6.0]
+    assert [v for _, v in _series(hist, "ps")] == [None, 4.0, 5.0]
+    # D/E keeps its negative (negative shareholders' equity is real, e.g. ORCL).
+    assert [v for _, v in _series(hist, "debt_to_equity")] == [-12.0, 2.0, 1.5]
+
+
+def test_liquidity_ratios_gate_negatives_interest_coverage_does_not():
+    """Current/Quick ratio are structurally >= 0 (assets & liabilities are
+    non-negative), so a negative is bad data → None (defensive guard). Interest
+    coverage CAN be legitimately negative (operating loss) → kept as a bar."""
+    income = [
+        {"calendarYear": 2023, "period": "Q1", "date": "2023-03-31", "revenue": 90},
+        {"calendarYear": 2024, "period": "Q1", "date": "2024-03-31", "revenue": 100},
+    ]
+    ratios = [
+        {"calendarYear": 2023, "period": "Q1", "date": "2023-03-31",
+         "currentRatio": -2.0, "quickRatio": -1.0, "interestCoverageRatio": -5.0},
+        {"calendarYear": 2024, "period": "Q1", "date": "2024-03-31",
+         "currentRatio": 1.5, "quickRatio": 1.2, "interestCoverageRatio": 8.0},
+    ]
+    hist = _fundamentals_history_for_period(income, [], [], [], ratios, {}, quarterly=True)
+    assert [v for _, v in _series(hist, "current_ratio")] == [None, 1.5]
+    assert [v for _, v in _series(hist, "quick_ratio")] == [None, 1.2]
+    # Interest coverage keeps its negative — real signal (can't cover interest).
+    assert [v for _, v in _series(hist, "interest_coverage")] == [-5.0, 8.0]
+
+
 def test_quarterly_same_quarter_distinct_across_years():
     income = [
         {"calendarYear": 2022, "period": "Q1", "date": "2022-03-31", "revenue": 80},

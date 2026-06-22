@@ -190,7 +190,7 @@ def test_assemble_report_top_level_keys_match_swift_codable():
         "price_close_date",
         "agent", "quality_score", "executive_summary_text",
         "executive_summary_bullets", "core_thesis",
-        "fundamental_metrics", "overall_assessment", "revenue_forecast",
+        "fundamental_metrics", "growth_chart", "overall_assessment", "revenue_forecast",
         "insider_data", "key_management", "price_action", "revenue_engine",
         "moat_competition", "macro_data", "wall_street_consensus",
         "hidden_market_signals",
@@ -204,6 +204,47 @@ def test_assemble_report_top_level_keys_match_swift_codable():
     extra = set(report.keys()) - expected - {"_scoring_inputs"}
     assert not missing, f"missing top-level keys: {missing}"
     assert not extra, f"unexpected top-level keys (would fail iOS decoder): {extra}"
+
+
+def test_growth_chart_frozen_into_report_and_validates():
+    """The rich Growth chart (parity with the free Growth chart) is frozen into
+    the report and round-trips through GrowthResponse / TickerReportResponse —
+    the shape iOS decodes. Absent growth_chart stays None (legacy-safe)."""
+    from app.schemas.growth import GrowthResponse, GrowthDataPointSchema
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.growth_chart = GrowthResponse(
+        symbol="AAPL",
+        eps_annual=[GrowthDataPointSchema(
+            period="2024", value=6.75, yoy_change_percent=10.1, sector_average_yoy=7.2)],
+        eps_quarterly=[],
+        revenue_annual=[GrowthDataPointSchema(
+            period="2024", value=391_000_000_000.0, yoy_change_percent=2.1, sector_average_yoy=5.0)],
+        revenue_quarterly=[],
+        net_income_annual=[], net_income_quarterly=[],
+        operating_profit_annual=[], operating_profit_quarterly=[],
+        free_cash_flow_annual=[], free_cash_flow_quarterly=[],
+    )
+    report = coll.assemble_report(out, stage_a_fallback())
+
+    # Frozen as a JSON-clean dict that validates back to GrowthResponse...
+    assert isinstance(report["growth_chart"], dict)
+    gc = GrowthResponse.model_validate(report["growth_chart"])
+    assert gc.symbol == "AAPL"
+    assert gc.revenue_annual[0].value == 391_000_000_000.0
+    assert gc.eps_annual[0].yoy_change_percent == 10.1
+    assert gc.eps_annual[0].sector_average_yoy == 7.2
+    # ...and the full report validates with growth_chart coerced to the model.
+    validated = TickerReportResponse.model_validate(report)
+    assert validated.growth_chart is not None
+    assert validated.growth_chart.revenue_annual[0].value == 391_000_000_000.0
+
+    # Legacy-safe: no growth_chart → None, report still valid.
+    out.growth_chart = None
+    report2 = coll.assemble_report(out, stage_a_fallback())
+    assert report2["growth_chart"] is None
+    assert TickerReportResponse.model_validate(report2).growth_chart is None
 
 
 def test_pros_cons_capped_at_five():

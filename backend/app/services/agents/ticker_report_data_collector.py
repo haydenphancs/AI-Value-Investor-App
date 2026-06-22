@@ -57,6 +57,7 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
+from app.schemas.growth import GrowthResponse
 from app.services._insider_common import (
     classify_insider_transaction,
     ensure_insider_label,
@@ -284,6 +285,10 @@ class CollectedTickerData:
     snap_health: Optional[SnapshotItemResponse] = None
     snap_growth: Optional[SnapshotItemResponse] = None
     snap_valuation: Optional[SnapshotItemResponse] = None
+    # Full rich Growth chart (parity with the free Growth chart): absolute bars +
+    # YoY% + sector overlay, 5 metrics × A/Q. Frozen into the report. Reuses the
+    # SAME GrowthService data the snapshot derives from (cache hit, no extra fan-out).
+    growth_chart: Optional[GrowthResponse] = None
     revenue_breakdown: Optional[RevenueBreakdownResponse] = None
 
     # ── Peer + sector data for the Moat module (PR 2) ───────────────────
@@ -564,6 +569,7 @@ class TickerReportDataCollector:
         from app.services.growth_snapshot_service import (
             get_growth_snapshot_service,
         )
+        from app.services.growth_service import get_growth_service
         from app.services.valuation_snapshot_service import (
             get_valuation_snapshot_service,
         )
@@ -664,6 +670,15 @@ class TickerReportDataCollector:
             (
                 "snap_growth",
                 get_growth_snapshot_service().get_growth_snapshot(ticker),
+                None,
+            ),
+            # Full rich Growth chart — the SAME GrowthService data the snapshot
+            # derives from (5-min cache → effectively a cache hit here, no extra
+            # FMP fan-out). Frozen into the report so the paid Growth card matches
+            # the free TickerDetailView chart.
+            (
+                "growth_chart",
+                get_growth_service().get_growth(ticker),
                 None,
             ),
             (
@@ -2075,6 +2090,13 @@ class TickerReportDataCollector:
             # snapshot data the user sees in TickerDetailView's
             # Financials tab). AI's array is intentionally discarded.
             "fundamental_metrics": list(out.fundamental_metrics_partial or []),
+            # Rich Growth chart (parity with the free Growth chart), frozen into
+            # the report. JSON-clean dict → TickerReportResponse coerces back to
+            # GrowthResponse. None when the growth fetch failed (legacy-safe).
+            "growth_chart": (
+                out.growth_chart.model_dump(mode="json")
+                if out.growth_chart else None
+            ),
             "overall_assessment": overall_assessment,
 
             "revenue_forecast": revenue_forecast,
@@ -2164,6 +2186,21 @@ def _pct_or_none(v: Any) -> Optional[float]:
     """FMP returns ratios as fractions (0.32 = 32%); convert to display %."""
     n = _num_or_none(v)
     return round(n * 100, 1) if n is not None else None
+
+
+def _positive_or_none(v: Optional[float]) -> Optional[float]:
+    """Return None for a non-positive value so the period renders as an
+    "undefined" 0-line marker instead of a misleading negative bar. Used for:
+      • price MULTIPLES (P/E, P/B, P/S, P/FCF, EV/EBITDA) — a "negative multiple"
+        (negative earnings / book / FCF) is computable but not a meaningful
+        valuation; and
+      • liquidity ratios (current, quick) — STRUCTURALLY ≥ 0 (assets and
+        liabilities are non-negative), so a negative is bad data, not real.
+    Consistent with `_hist_pfcf` / `_hist_ev_ebitda` (gate on a positive
+    denominator). Ratios that CAN be legitimately negative — D/E (negative
+    equity), interest coverage (operating loss), growth rates, margins — are
+    NOT gated."""
+    return v if v is not None and v > 0 else None
 
 
 def compute_earnings_yield(computed: Dict[str, Any]) -> Optional[float]:
@@ -3636,12 +3673,19 @@ def _fundamentals_history_for_period(
             if _ey is None and _pe_for_ey is not None and _pe_for_ey > 0:
                 _ey = round(100.0 / _pe_for_ey, 2)
             add("earnings_yield", label, _ey)
-            add("pe", label, _num_or_none(rat.get("priceToEarningsRatio")))
-            add("pb", label, _num_or_none(rat.get("priceToBookRatio")))
-            add("ps", label, _num_or_none(rat.get("priceToSalesRatio")))
+            # Price multiples are undefined when non-positive → None (renders as
+            # an "undefined" red 0-line marker, like P/FCF / EV/EBITDA — not a
+            # misleading negative bar). D/E etc. below are NOT gated.
+            add("pe", label, _positive_or_none(_num_or_none(rat.get("priceToEarningsRatio"))))
+            add("pb", label, _positive_or_none(_num_or_none(rat.get("priceToBookRatio"))))
+            add("ps", label, _positive_or_none(_num_or_none(rat.get("priceToSalesRatio"))))
             add("debt_to_equity", label, _num_or_none(rat.get("debtToEquityRatio")))
-            add("current_ratio", label, _num_or_none(rat.get("currentRatio")))
-            add("quick_ratio", label, _num_or_none(rat.get("quickRatio")))
+            # Current/Quick ratio are structurally >= 0 (assets & liabilities are
+            # non-negative) → gate a negative as bad data (undefined marker).
+            # Interest coverage is NOT gated — it can legitimately be negative
+            # (operating loss → can't cover interest), which is meaningful.
+            add("current_ratio", label, _positive_or_none(_num_or_none(rat.get("currentRatio"))))
+            add("quick_ratio", label, _positive_or_none(_num_or_none(rat.get("quickRatio"))))
             add("interest_coverage", label, _num_or_none(rat.get("interestCoverageRatio")))
 
         if km is not None:

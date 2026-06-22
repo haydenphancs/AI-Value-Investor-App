@@ -48,6 +48,7 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
+from app.schemas.growth import GrowthResponse
 from app.services.sector_aggregates_service import SectorAggregates
 from app.services.industry_tam_service import IndustryTAM
 
@@ -68,6 +69,7 @@ _PYDANTIC_FIELDS: Dict[str, Any] = {
     "snap_health": SnapshotItemResponse,
     "snap_growth": SnapshotItemResponse,
     "snap_valuation": SnapshotItemResponse,
+    "growth_chart": GrowthResponse,
 }
 
 # Flat dataclass fields → (class, [datetime field names needing ISO round-trip]).

@@ -9,6 +9,8 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
+from app.schemas.growth import GrowthResponse
+
 from app.schemas.holders import (
     SmartMoneyDataSchema,
     CongressActivitySchema,
@@ -520,6 +522,10 @@ class TickerReportResponse(BaseModel):
 
     # Deep Dive: Fundamentals
     fundamental_metrics: List[DeepDiveMetricCardResponse]
+    # Rich Growth chart (parity with the free TickerDetailView Growth chart):
+    # absolute-value bars + YoY% + sector-average overlay, 5 metrics × A/Q.
+    # Frozen into the report at generation. Optional → legacy/old-app safe.
+    growth_chart: Optional[GrowthResponse] = None
     overall_assessment: OverallAssessmentResponse
 
     # Deep Dive: Revenue Forecast

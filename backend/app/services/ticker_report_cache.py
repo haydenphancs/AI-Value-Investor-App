@@ -124,7 +124,12 @@ TABLE_NAME = "ticker_report_cache"
 #     ~1000-row Supabase cap (a 14-metric × ~84-quarter query was truncating, so
 #     whole metrics' quarterly sector lines silently vanished). Existing reports
 #     baked the truncated data — invalidate them so they re-collect cleanly.
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 20, 19, 54, 0, tzinfo=timezone.utc)
+# 2026-06-21: bumped so reports/collections re-collect and bake the new rich
+#     `growth_chart` payload (the paid Growth card now matches the free
+#     TickerDetailView chart: absolute bars + YoY% + sector overlay, 5 metrics).
+#     A field added to CollectedTickerData isn't present in older cached
+#     collections, so the floor invalidates them → fresh fetch populates it.
+CACHE_SCHEMA_FLOOR = datetime(2026, 6, 21, 20, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

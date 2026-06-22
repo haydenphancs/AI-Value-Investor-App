@@ -1344,6 +1344,10 @@ struct TickerReportData: Identifiable {
 
     // Deep Dive: Fundamentals
     let fundamentalMetrics: [DeepDiveMetricCard]
+    // Rich Growth chart (parity with the free Growth chart) — drives the
+    // redesigned full-width Growth card. nil on legacy reports → falls back to
+    // the compact grid card.
+    var growthChart: GrowthSectionData? = nil
     let overallAssessment: ReportOverallAssessment
 
     // Deep Dive: Future Forecast

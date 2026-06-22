@@ -127,7 +127,7 @@ struct FundamentalsHistorySheet: View {
             Text(m.historyTitle)
                 .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
-            Text("Current: \(m.value)")
+            Text("Current: \(currentValueText(m.value))")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
         }
@@ -172,7 +172,7 @@ struct FundamentalsHistorySheet: View {
         let c = Self.format(company, unit: unit)
         let s = Self.format(sector, unit: unit)
         if sector > 0 && company > 0 {
-            return "Latest \(c) · Sector \(s) · \(String(format: "%.1f×", company / sector)) sector"
+            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) vs sector"
         }
         return "Latest \(c) · Sector \(s)"
     }
@@ -180,7 +180,7 @@ struct FundamentalsHistorySheet: View {
     @ViewBuilder
     private func legendAndDelta(_ m: DeepDiveMetric) -> some View {
         let pair = sectorPair(m)
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+        VStack(alignment: .center, spacing: AppSpacing.xs) {
             HStack(spacing: AppSpacing.md) {
                 HStack(spacing: 6) {
                     RoundedRectangle(cornerRadius: 1)
@@ -197,7 +197,7 @@ struct FundamentalsHistorySheet: View {
                                 Capsule().fill(AppColors.textSecondary).frame(width: 4, height: 2)
                             }
                         }
-                        Text("Sector avg")
+                        Text("Sector Average")
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
                     }
@@ -207,15 +207,17 @@ struct FundamentalsHistorySheet: View {
                 Text(deltaText(company: pair.company, sector: pair.sector, unit: m.historyUnit))
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textPrimary)
+                    .multilineTextAlignment(.center)
             } else if let c = latestCompany(m) {
                 Text("Latest \(Self.format(c, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding(.vertical, AppSpacing.sm)
         .padding(.horizontal, AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackgroundLight)
@@ -235,7 +237,7 @@ struct FundamentalsHistorySheet: View {
             HStack(alignment: .top, spacing: 5) {
                 Image(systemName: "info.circle")
                     .font(AppTypography.labelSmall)
-                Text("Periods where this ratio is negative or undefined are omitted from the chart.")
+                Text("A red mark at the 0 line means the ratio was negative or undefined that period (e.g. negative free cash flow).")
                     .font(AppTypography.labelSmall)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -253,11 +255,19 @@ struct FundamentalsHistorySheet: View {
 
     // MARK: - Formatting (shared with MetricHistoryChart's units)
 
+    /// Expand the compact "Neg." sentinel to "Negative" for the sheet header.
+    /// The report card keeps "Neg." (it's space-constrained).
+    private func currentValueText(_ value: String) -> String {
+        value == "Neg." ? "Negative" : value
+    }
+
+    // 2-decimal precision so the legend's "Latest …" matches the header's
+    // "Current: 65.20%" (which renders the backend's 2-decimal value string).
     static func format(_ v: Double, unit: String?) -> String {
         switch unit {
-        case "percent": return String(format: "%.1f%%", v)
-        case "score":   return String(format: "%.1f", v)
-        default:        return String(format: "%.1fx", v)
+        case "percent": return String(format: "%.2f%%", v)
+        case "score":   return String(format: "%.2f", v)
+        default:        return String(format: "%.2fx", v)
         }
     }
 }

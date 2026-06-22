@@ -1,0 +1,78 @@
+{
+  "curriculum_order": 7,
+  "book_title": "A Random Walk Down Wall Street",
+  "author": "Burton G. Malkiel",
+  "slug": "a-random-walk-down-wall-street",
+  "audio_file": "7_a-random-walk-down-wall-street.m4a",
+  "voice": "clone:malkiel_orus+aged_v1_mature",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": 0,
+  "break_seconds": 2.5,
+  "total_seconds": 2080.78,
+  "total_label": "34:41",
+  "cores": [
+    {
+      "number": 1,
+      "title": "The Valuation Duel",
+      "start_seconds": 0.0,
+      "start_label": "0:00"
+    },
+    {
+      "number": 2,
+      "title": "Spotting Financial Hallucinations",
+      "start_seconds": 224.58,
+      "start_label": "3:45"
+    },
+    {
+      "number": 3,
+      "title": "The Technical Analysis Trap",
+      "start_seconds": 425.25,
+      "start_label": "7:05"
+    },
+    {
+      "number": 4,
+      "title": "The Fundamental Illusion",
+      "start_seconds": 626.11,
+      "start_label": "10:26"
+    },
+    {
+      "number": 5,
+      "title": "Respecting the Efficiency Engine",
+      "start_seconds": 830.41,
+      "start_label": "13:50"
+    },
+    {
+      "number": 6,
+      "title": "The Art of Risk Engineering",
+      "start_seconds": 1020.0,
+      "start_label": "17:00"
+    },
+    {
+      "number": 7,
+      "title": "Decoding \"Smart\" Strategies",
+      "start_seconds": 1213.74,
+      "start_label": "20:14"
+    },
+    {
+      "number": 8,
+      "title": "Conquering Your Inner Ape",
+      "start_seconds": 1423.77,
+      "start_label": "23:44"
+    },
+    {
+      "number": 9,
+      "title": "The Indexing Manifesto",
+      "start_seconds": 1625.59,
+      "start_label": "27:06"
+    },
+    {
+      "number": 10,
+      "title": "The Lifecycle Wealth Map",
+      "start_seconds": 1846.29,
+      "start_label": "30:46"
+    }
+  ],
+  "aging_filter": "asetrate=24000*0.95,aresample=24000,atempo=1/0.95,treble=-2",
+  "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/7_a-random-walk-down-wall-street.m4a?"
+}

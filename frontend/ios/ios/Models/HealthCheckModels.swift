@@ -178,13 +178,17 @@ struct HealthCheckMetric: Identifiable {
             return String(format: "%.1f", value)
         case .returnOnEquity:
             return String(format: "%.1f%%", value)
-        case .currentRatio:
-            return String(format: "%.2f", value)
+        case .currentRatio, .quickRatio:
+            // Liquidity ratios are structurally >= 0 (assets & liabilities are
+            // non-negative), so a negative value is bad data — show "Negative"
+            // rather than a nonsensical negative number. The sector "vs X.XX"
+            // still renders (formattedComparison is independent). D/E, ROE and
+            // interest coverage CAN be legitimately negative, so they're left
+            // to show the real number.
+            return value < 0 ? "Negative" : String(format: "%.2f", value)
         case .altmanZScore:
             return String(format: "%.1f", value)
         case .interestCoverage:
-            return String(format: "%.2f", value)
-        case .quickRatio:
             return String(format: "%.2f", value)
         }
     }

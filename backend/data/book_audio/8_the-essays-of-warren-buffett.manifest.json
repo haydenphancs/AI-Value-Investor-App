@@ -4,12 +4,13 @@
   "author": "Warren Buffett",
   "slug": "the-essays-of-warren-buffett",
   "audio_file": "8_the-essays-of-warren-buffett.m4a",
-  "voice": "Iapetus",
-  "target_wpm": 150,
+  "voice": "clone:buffett_zubenelgenubi",
+  "engine": "chatterbox",
+  "target_wpm": null,
   "pitch_semitones": 0,
   "break_seconds": 2.5,
-  "total_seconds": 1075.7,
-  "total_label": "17:56",
+  "total_seconds": 1286.3,
+  "total_label": "21:26",
   "cores": [
     {
       "number": 1,
@@ -20,32 +21,32 @@
     {
       "number": 2,
       "title": "Decoding the True Economics",
-      "start_seconds": 155.28,
-      "start_label": "2:35"
+      "start_seconds": 179.86,
+      "start_label": "3:00"
     },
     {
       "number": 3,
       "title": "Determining the Strength of the Moat",
-      "start_seconds": 360.19,
-      "start_label": "6:00"
+      "start_seconds": 422.64,
+      "start_label": "7:03"
     },
     {
       "number": 4,
       "title": "Mastering Market Psychology",
-      "start_seconds": 553.89,
-      "start_label": "9:14"
+      "start_seconds": 669.3,
+      "start_label": "11:09"
     },
     {
       "number": 5,
       "title": "The Art of Capital Deployment",
-      "start_seconds": 731.18,
-      "start_label": "12:11"
+      "start_seconds": 859.72,
+      "start_label": "14:20"
     },
     {
       "number": 6,
       "title": "Escaping the Institutional Trap",
-      "start_seconds": 906.08,
-      "start_label": "15:06"
+      "start_seconds": 1096.46,
+      "start_label": "18:16"
     }
   ],
   "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a?"

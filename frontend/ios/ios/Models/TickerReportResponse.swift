@@ -27,6 +27,9 @@ struct TickerReportAPIResponse: Codable {
     let executiveSummaryBullets: [ESBulletDTO]
     let coreThesis: CoreThesisDTO
     let fundamentalMetrics: [FundamentalMetricCardDTO]
+    // Rich Growth chart (parity with the free TickerDetailView Growth chart).
+    // Optional → legacy reports without it decode as nil. Reuses GrowthResponseDTO.
+    let growthChart: GrowthResponseDTO?
     let overallAssessment: OverallAssessmentDTO
     let revenueForecast: RevenueForecastDTO
     let insiderData: InsiderDataDTO
@@ -53,6 +56,7 @@ struct TickerReportAPIResponse: Codable {
         case executiveSummaryBullets = "executive_summary_bullets"
         case coreThesis = "core_thesis"
         case fundamentalMetrics = "fundamental_metrics"
+        case growthChart = "growth_chart"
         case overallAssessment = "overall_assessment"
         case revenueForecast = "revenue_forecast"
         case insiderData = "insider_data"
@@ -1085,6 +1089,7 @@ extension TickerReportAPIResponse {
             executiveSummaryBullets: esBullets,
             coreThesis: thesis,
             fundamentalMetrics: fundMetrics,
+            growthChart: growthChart?.toDisplayModel(),
             overallAssessment: assessment,
             revenueForecast: forecast,
             insiderData: insider,

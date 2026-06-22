@@ -55,10 +55,15 @@ extension BookAudioInfo {
             totalSeconds: 2867,
             coreStartSeconds: [1: 0, 2: 222, 3: 423, 4: 647, 5: 861, 6: 1046, 7: 1225, 8: 1480, 9: 1669, 10: 1893, 11: 2135, 12: 2337, 13: 2579]
         ),
+        7: BookAudioInfo(
+            audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/7_a-random-walk-down-wall-street.m4a",
+            totalSeconds: 2081,
+            coreStartSeconds: [1: 0, 2: 225, 3: 425, 4: 626, 5: 830, 6: 1020, 7: 1214, 8: 1424, 9: 1626, 10: 1846]
+        ),
         8: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/8_the-essays-of-warren-buffett.m4a",
-            totalSeconds: 1076,
-            coreStartSeconds: [1: 0, 2: 155, 3: 360, 4: 554, 5: 731, 6: 906]
+            totalSeconds: 1286,
+            coreStartSeconds: [1: 0, 2: 180, 3: 423, 4: 669, 5: 860, 6: 1096]
         ),
     ]
 }

@@ -267,7 +267,8 @@ struct TickerReportView: View {
             ReportFundamentalsSection(
                 metrics: report.fundamentalMetrics,
                 assessment: report.overallAssessment,
-                growthData: report.growthChart
+                growthData: report.growthChart,
+                profitabilityData: report.profitabilityMarginSeries
             )
         case .futureForecast:
             ReportFutureForecastSection(

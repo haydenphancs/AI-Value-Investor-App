@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
 from app.schemas.growth import GrowthResponse
+from app.schemas.profit_power import ProfitPowerResponse
 
 from app.schemas.holders import (
     SmartMoneyDataSchema,
@@ -526,6 +527,10 @@ class TickerReportResponse(BaseModel):
     # absolute-value bars + YoY% + sector-average overlay, 5 metrics × A/Q.
     # Frozen into the report at generation. Optional → legacy/old-app safe.
     growth_chart: Optional[GrowthResponse] = None
+    # Rich Profit Power chart (margins + per-margin sector-average overlay), frozen
+    # at generation so the Profitability drill-down matches the free TickerDetailView
+    # Profit Power chart. Optional → legacy/old-app safe.
+    profit_power: Optional[ProfitPowerResponse] = None
     overall_assessment: OverallAssessmentResponse
 
     # Deep Dive: Revenue Forecast

@@ -94,6 +94,11 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "gross_margin",        "source": "ratios",    "field": "grossProfitMargin",      "type": "direct"},
     {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct"},
     {"name": "net_margin",          "source": "ratios",    "field": "netProfitMargin",        "type": "direct"},
+    # FCF margin = freeCashFlow ÷ revenue — a JOIN across cashflow + income, so it
+    # is "computed" (not a /ratios field). Stored as a DECIMAL (no ×100) so the
+    # consumer's ×100 matches the direct margins; NEGATIVES are kept (cash-burning
+    # companies are real), so it is EXCLUDED from the multiple-winsorization band.
+    {"name": "fcf_margin",          "type": "computed",      "compute": "fcf_margin"},
     # ROA and ROE both come from /key-metrics — FMP's /ratios doesn't reliably
     # expose returnOnAssets across the S&P 500, so sourcing from /ratios drops
     # the sample size below MIN_SAMPLE_SIZE and the sector_benchmarks table
@@ -480,6 +485,20 @@ def _compute_ratio_values(
                     out.setdefault(year, []).append(value)
         return out
 
+    # FCF margin — cashflow ∩ income join, stored as a DECIMAL (freeCashFlow ÷
+    # revenue). Unlike P/FCF / EV/EBITDA (multiples, profitable-only), a margin's
+    # NEGATIVES are real and are kept in the median (mirrors net_margin). No >0 gate.
+    if compute_name == "fcf_margin":
+        for company in all_company_data:
+            cf_by_year = _index_by_period(company.get(cf_key, []), period_type)
+            inc_by_year = _index_by_period(company.get(inc_key, []), period_type)
+            for year in set(cf_by_year) & set(inc_by_year):
+                fcf = _safe_float(cf_by_year[year], "freeCashFlow")
+                rev = _safe_float(inc_by_year[year], "revenue")
+                if fcf is not None and rev and rev > 0:
+                    out.setdefault(year, []).append(fcf / rev)
+        return out
+
     # Existing P/FCF and EV/EBITDA paths — unchanged.
     for company in all_company_data:
         km_by_year = _index_by_period(company.get(km_key, []), period_type)
@@ -730,13 +749,18 @@ class SectorBenchmarkService:
                     #     pull the median upward; healthy ratios are <50.
                     if metric_type in ("yoy", "qoq"):
                         cleaned = _winsorize(values)
-                    elif metric_type == "computed":
+                    elif (
+                        metric_type == "computed"
+                        and metric_config["name"] != "fcf_margin"
+                    ):
                         cleaned = _winsorize(
                             values,
                             floor=COMPUTED_RATIO_FLOOR,
                             ceil=COMPUTED_RATIO_CEIL,
                         )
                     else:
+                        # direct ratios + fcf_margin (a signed decimal margin):
+                        # no multiple-clamp, keep sign (negatives are real).
                         cleaned = values
                     rows_to_upsert.append({
                         "sector": sector,

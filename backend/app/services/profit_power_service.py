@@ -379,41 +379,56 @@ class ProfitPowerService:
         annual_points = _build_margin_points(annual_income, annual_cashflow, is_quarterly=False)
         quarterly_points = _build_margin_points(quarterly_income, quarterly_cashflow, is_quarterly=True)
 
-        # Phase 4: look up pre-computed sector benchmark for net_margin
+        # Phase 4: look up pre-computed sector benchmarks for ALL four margins.
+        # net is the original (the live detail chart's dashed line); gross/operating/
+        # fcf were added so the report's per-metric Profitability drill-down can draw
+        # a sector line for each margin. fcf_margin stays sparse until its historical
+        # backfill runs — the chart degrades to a gapped line, not a crash.
+        _MARGIN_BENCHMARK_METRICS = [
+            "net_margin", "gross_margin", "operating_margin", "fcf_margin",
+        ]
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
             benchmarks_annual = lookup.get_sector_benchmarks(
-                sector, ["net_margin"], "annual"
+                sector, _MARGIN_BENCHMARK_METRICS, "annual"
             )
             benchmarks_quarterly = lookup.get_sector_benchmarks(
-                sector, ["net_margin"], "quarterly"
+                sector, _MARGIN_BENCHMARK_METRICS, "quarterly"
             )
 
-        # Phase 5: attach sector averages and build response
-        # Note: FMP stores netProfitMargin as decimal (0.12 = 12%).
-        # sector_benchmarks stores the raw decimal. Multiply by 100 for percentage.
+        # Phase 5: attach sector averages and build response.
+        # sector_benchmarks stores every margin as a raw DECIMAL (0.12 = 12%), so
+        # ×100 for the percentage scale the chart uses — uniform across all four.
         def _to_schemas(
             points: List[Dict],
             benchmarks: Dict[str, Dict[str, float]],
         ) -> List[ProfitPowerDataPointSchema]:
-            net_margin_benchmarks = benchmarks.get("net_margin", {})
+            net_b = benchmarks.get("net_margin", {})
+            gross_b = benchmarks.get("gross_margin", {})
+            op_b = benchmarks.get("operating_margin", {})
+            fcf_b = benchmarks.get("fcf_margin", {})
+
+            def _pct(table: Dict[str, float], key: str) -> Optional[float]:
+                raw = table.get(key)
+                return round(raw * 100, 2) if raw is not None else None
+
             schemas = []
             for p in points:
                 # Match on the calendar key (_match_period); annual points have
                 # no _match_period and fall back to period (also calendar).
-                raw_benchmark = net_margin_benchmarks.get(
-                    p.get("_match_period", p["period"])
-                )
-                sector_avg = round(raw_benchmark * 100, 2) if raw_benchmark is not None else None
+                k = p.get("_match_period", p["period"])
                 schemas.append(ProfitPowerDataPointSchema(
                     period=p["period"],
                     gross_margin=p["gross_margin"],
                     operating_margin=p["operating_margin"],
                     fcf_margin=p["fcf_margin"],
                     net_margin=p["net_margin"],
-                    sector_average_net_margin=sector_avg,
+                    sector_average_net_margin=_pct(net_b, k),
+                    sector_average_gross_margin=_pct(gross_b, k),
+                    sector_average_operating_margin=_pct(op_b, k),
+                    sector_average_fcf_margin=_pct(fcf_b, k),
                 ))
             return schemas
 

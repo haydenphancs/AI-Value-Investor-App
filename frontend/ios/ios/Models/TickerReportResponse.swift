@@ -30,6 +30,10 @@ struct TickerReportAPIResponse: Codable {
     // Rich Growth chart (parity with the free TickerDetailView Growth chart).
     // Optional → legacy reports without it decode as nil. Reuses GrowthResponseDTO.
     let growthChart: GrowthResponseDTO?
+    // Rich Profit Power chart (margins + per-margin sector medians) — drives the
+    // report's Profitability drill-down. Optional → legacy-safe. Reuses the live
+    // detail-view ProfitPowerResponseDTO.
+    let profitPower: ProfitPowerResponseDTO?
     let overallAssessment: OverallAssessmentDTO
     let revenueForecast: RevenueForecastDTO
     let insiderData: InsiderDataDTO
@@ -57,6 +61,7 @@ struct TickerReportAPIResponse: Codable {
         case coreThesis = "core_thesis"
         case fundamentalMetrics = "fundamental_metrics"
         case growthChart = "growth_chart"
+        case profitPower = "profit_power"
         case overallAssessment = "overall_assessment"
         case revenueForecast = "revenue_forecast"
         case insiderData = "insider_data"
@@ -1090,6 +1095,7 @@ extension TickerReportAPIResponse {
             coreThesis: thesis,
             fundamentalMetrics: fundMetrics,
             growthChart: growthChart?.toDisplayModel(),
+            profitabilityMarginSeries: profitPower?.toMarginSeries(),
             overallAssessment: assessment,
             revenueForecast: forecast,
             insiderData: insider,

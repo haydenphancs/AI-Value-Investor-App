@@ -31,7 +31,8 @@ with contextlib.redirect_stdout(io.StringIO()):
 ROOT = Path(__file__).resolve().parents[1]
 REFDIR = ROOT / "data/voice_clone/refs"
 # Per-book reference voice clip (the clone source), matched by author to the cast Gemini voice.
-REFS = {2: "iapetus_erudite_professor.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
+REFS = {1: "rdpd_achird.wav", 2: "iapetus_erudite_professor.wav", 3: "psychology_puck.wav",
+        4: "oneup_enceladus.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
         7: "orus_witty_emeritus.wav", 8: "zubenelgenubi_warm_elder.wav",
         9: "achird_patient_teacher.wav", 10: "sadaltager_contemplative.wav"}
 OUTDIR = ROOT / "data/voice_clone"

@@ -1359,6 +1359,11 @@ struct TickerReportData: Identifiable {
     // redesigned full-width Growth card. nil on legacy reports → falls back to
     // the compact grid card.
     var growthChart: GrowthSectionData? = nil
+    // The 4 MARGIN series (gross/operating/net/fcf) for the Profitability drill-down,
+    // built from the frozen `profit_power` so they match the free Profit Power chart.
+    // ROE/ROA are added in the sheet from the Profitability card's baked history.
+    // nil on legacy reports → the card falls back to FundamentalsHistorySheet.
+    var profitabilityMarginSeries: [ProfitabilityMetricSeries]? = nil
     let overallAssessment: ReportOverallAssessment
 
     // Deep Dive: Future Forecast

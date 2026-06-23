@@ -58,6 +58,7 @@ from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.schemas.growth import GrowthResponse
+from app.schemas.profit_power import ProfitPowerResponse
 from app.services._insider_common import (
     classify_insider_transaction,
     ensure_insider_label,
@@ -289,6 +290,10 @@ class CollectedTickerData:
     # YoY% + sector overlay, 5 metrics × A/Q. Frozen into the report. Reuses the
     # SAME GrowthService data the snapshot derives from (cache hit, no extra fan-out).
     growth_chart: Optional[GrowthResponse] = None
+    # Full rich Profit Power chart (margins + per-margin sector medians) — parity
+    # with the free TickerDetailView Profit Power chart. Frozen into the report so
+    # the paid Profitability drill-down draws from identical data.
+    profit_power: Optional[ProfitPowerResponse] = None
     revenue_breakdown: Optional[RevenueBreakdownResponse] = None
 
     # ── Peer + sector data for the Moat module (PR 2) ───────────────────
@@ -570,6 +575,7 @@ class TickerReportDataCollector:
             get_growth_snapshot_service,
         )
         from app.services.growth_service import get_growth_service
+        from app.services.profit_power_service import get_profit_power_service
         from app.services.valuation_snapshot_service import (
             get_valuation_snapshot_service,
         )
@@ -679,6 +685,16 @@ class TickerReportDataCollector:
             (
                 "growth_chart",
                 get_growth_service().get_growth(ticker),
+                None,
+            ),
+            # Full rich Profit Power chart (margins + per-margin sector medians) —
+            # the SAME ProfitPowerService data the free TickerDetailView chart uses,
+            # frozen so the paid Profitability drill-down matches it exactly. Unlike
+            # growth_chart this isn't otherwise pre-warmed, so it's a genuine FMP
+            # fan-out on a cold report (its own 2-tier cache covers warm hits).
+            (
+                "profit_power",
+                get_profit_power_service().get_profit_power(ticker),
                 None,
             ),
             (
@@ -2096,6 +2112,13 @@ class TickerReportDataCollector:
             "growth_chart": (
                 out.growth_chart.model_dump(mode="json")
                 if out.growth_chart else None
+            ),
+            # Rich Profit Power chart (margins + per-margin sector medians), frozen
+            # into the report. JSON-clean dict → TickerReportResponse coerces back
+            # to ProfitPowerResponse. None when the fetch failed (legacy-safe).
+            "profit_power": (
+                out.profit_power.model_dump(mode="json")
+                if out.profit_power else None
             ),
             "overall_assessment": overall_assessment,
 

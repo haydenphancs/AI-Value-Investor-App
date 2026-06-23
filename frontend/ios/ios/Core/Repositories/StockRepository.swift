@@ -1603,6 +1603,12 @@ struct ProfitPowerDataPointDTO: Codable {
     let fcfMargin: Double?
     let netMargin: Double?
     let sectorAverageNetMargin: Double?
+    // Per-margin sector medians — added for the report's Profitability drill-down
+    // (the 2-line chart needs a sector line per metric). Optional → the live detail
+    // Profit Power chart, which only draws the NET sector line, ignores these.
+    let sectorAverageGrossMargin: Double?
+    let sectorAverageOperatingMargin: Double?
+    let sectorAverageFcfMargin: Double?
 
     enum CodingKeys: String, CodingKey {
         case period
@@ -1611,6 +1617,9 @@ struct ProfitPowerDataPointDTO: Codable {
         case fcfMargin = "fcf_margin"
         case netMargin = "net_margin"
         case sectorAverageNetMargin = "sector_average_net_margin"
+        case sectorAverageGrossMargin = "sector_average_gross_margin"
+        case sectorAverageOperatingMargin = "sector_average_operating_margin"
+        case sectorAverageFcfMargin = "sector_average_fcf_margin"
     }
 }
 

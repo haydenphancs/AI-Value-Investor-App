@@ -16,17 +16,23 @@ struct ReportFundamentalsSection: View {
     // nil on legacy reports → the Growth card falls back to its per-metric history
     // drill-down if it has one, else it's inert.
     var growthData: GrowthSectionData? = nil
+    // The 4 margin series for the Profitability drill-down (from frozen profit_power).
+    // When present, the Profitability card opens the rich 2-line ProfitabilityChartSheet
+    // instead of the generic bars sheet. nil on legacy reports → generic fallback.
+    var profitabilityData: [ProfitabilityMetricSeries]? = nil
 
     // Tapping a card opens a drill-down sheet:
     //  • Growth (with chart data) → the rich Growth chart (GrowthChartSheet)
-    //  • Profitability / Valuation / Health (with baked history) → FundamentalsHistorySheet
-    // Legacy cards with neither stay inert — selectedCard stays nil.
+    //  • Profitability (with margin data) → the rich 2-line chart (ProfitabilityChartSheet)
+    //  • Valuation / Health (with baked history) → FundamentalsHistorySheet
+    // Legacy cards with none stay inert — selectedCard stays nil.
     @State private var selectedCard: DeepDiveMetricCard?
 
-    /// A card is tappable when it's the Growth card and we have the rich chart
-    /// data, OR it carries a baked per-metric time series.
+    /// A card is tappable when it's Growth/Profitability with rich chart data, OR it
+    /// carries a baked per-metric time series.
     private func isTappable(_ metric: DeepDiveMetricCard) -> Bool {
         if metric.title == "Growth" && growthData != nil { return true }
+        if metric.title == "Profitability" && profitabilityData != nil { return true }
         return metric.hasHistory
     }
 
@@ -97,6 +103,8 @@ struct ReportFundamentalsSection: View {
             // through to its history drill-down (legacy reports).
             if card.title == "Growth", let growthData {
                 GrowthChartSheet(card: card, growthData: growthData)
+            } else if card.title == "Profitability", let profitabilityData {
+                ProfitabilityChartSheet(card: card, marginSeries: profitabilityData)
             } else {
                 FundamentalsHistorySheet(card: card)
             }

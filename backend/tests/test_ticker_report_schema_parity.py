@@ -190,7 +190,8 @@ def test_assemble_report_top_level_keys_match_swift_codable():
         "price_close_date",
         "agent", "quality_score", "executive_summary_text",
         "executive_summary_bullets", "core_thesis",
-        "fundamental_metrics", "growth_chart", "overall_assessment", "revenue_forecast",
+        "fundamental_metrics", "growth_chart", "profit_power",
+        "overall_assessment", "revenue_forecast",
         "insider_data", "key_management", "price_action", "revenue_engine",
         "moat_competition", "macro_data", "wall_street_consensus",
         "hidden_market_signals",
@@ -245,6 +246,50 @@ def test_growth_chart_frozen_into_report_and_validates():
     report2 = coll.assemble_report(out, stage_a_fallback())
     assert report2["growth_chart"] is None
     assert TickerReportResponse.model_validate(report2).growth_chart is None
+
+
+def test_profit_power_frozen_into_report_and_validates():
+    """The rich Profit Power chart (margins + per-margin sector medians) is frozen
+    into the report and round-trips through ProfitPowerResponse / TickerReportResponse
+    — the shape iOS decodes. Absent profit_power stays None (legacy-safe)."""
+    from app.schemas.profit_power import (
+        ProfitPowerResponse, ProfitPowerDataPointSchema,
+    )
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.profit_power = ProfitPowerResponse(
+        symbol="AAPL",
+        annual=[ProfitPowerDataPointSchema(
+            period="2024",
+            gross_margin=46.2, operating_margin=31.5,
+            fcf_margin=27.0, net_margin=25.3,
+            sector_average_net_margin=18.4,
+            sector_average_gross_margin=38.0,
+            sector_average_operating_margin=22.1,
+            sector_average_fcf_margin=12.0,
+        )],
+        quarterly=[],
+    )
+    report = coll.assemble_report(out, stage_a_fallback())
+
+    # Frozen as a JSON-clean dict that validates back to ProfitPowerResponse...
+    assert isinstance(report["profit_power"], dict)
+    pp = ProfitPowerResponse.model_validate(report["profit_power"])
+    assert pp.symbol == "AAPL"
+    assert pp.annual[0].fcf_margin == 27.0
+    assert pp.annual[0].sector_average_fcf_margin == 12.0
+    assert pp.annual[0].sector_average_gross_margin == 38.0
+    # ...and the full report validates with profit_power coerced to the model.
+    validated = TickerReportResponse.model_validate(report)
+    assert validated.profit_power is not None
+    assert validated.profit_power.annual[0].net_margin == 25.3
+
+    # Legacy-safe: no profit_power → None, report still valid.
+    out.profit_power = None
+    report2 = coll.assemble_report(out, stage_a_fallback())
+    assert report2["profit_power"] is None
+    assert TickerReportResponse.model_validate(report2).profit_power is None
 
 
 def test_pros_cons_capped_at_five():

@@ -10,7 +10,7 @@
 //
 //  Deliberately mirrors FundamentalsHistorySheet's chrome 1:1 — same metric
 //  chip picker, "<metric> / Current:" header, segmented Annual/Quarterly toggle,
-//  sheet background, and the "Company / Sector Average · Latest … vs sector"
+//  sheet background, and the "Value / YoY / Sector Average · Latest … vs sector"
 //  legend card — so Growth reads identically to Profitability / Valuation /
 //  Health. Renders chart data baked into the frozen report; no network call.
 //
@@ -78,12 +78,6 @@ struct GrowthChartSheet: View {
         return (c, s)
     }
 
-    /// A charted period has a non-meaningful (nil) YoY → the line breaks / the
-    /// YoY row shows "—". Drives the explanatory footnote.
-    private var hasNonMeaningfulYoY: Bool {
-        current.contains { $0.yoyChangePercent == nil }
-    }
-
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -94,9 +88,7 @@ struct GrowthChartSheet: View {
                     GrowthChartView(dataPoints: current)
                         .id("\(selectedMetric.rawValue)-\(selectedPeriod.rawValue)")
                         .animation(.easeInOut(duration: 0.25), value: selectedMetric)
-                        .animation(.easeInOut(duration: 0.25), value: selectedPeriod)
                     legendAndDelta
-                    footnote
                 }
                 .padding(AppSpacing.lg)
             }
@@ -206,7 +198,7 @@ struct GrowthChartSheet: View {
         // The "×" multiple only means anything when the sector base is non-trivial
         // — a tiny-positive denominator (e.g. 0.5%) explodes into an absurd ratio.
         if company > 0 && sector >= 2.0 {
-            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) (\(spread))"
+            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) vs sector"
         }
         return "Latest \(c) · Sector \(s) · \(spread)"
     }
@@ -219,7 +211,15 @@ struct GrowthChartSheet: View {
                     RoundedRectangle(cornerRadius: 1)
                         .fill(AppColors.growthBarBlue)
                         .frame(width: 11, height: 11)
-                    Text("Company")
+                    Text("Value")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                HStack(spacing: 5) {  // solid yellow YoY line swatch
+                    Capsule()
+                        .fill(AppColors.growthYoYYellow)
+                        .frame(width: 14, height: 3)
+                    Text("YoY")
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -242,7 +242,7 @@ struct GrowthChartSheet: View {
                     .multilineTextAlignment(.center)
             } else if let y = latestYoY {
                 // Latest has a company YoY but no sector benchmark.
-                Text("Latest \(pct(y)) · Company only")
+                Text("Latest \(pct(y)) · Value only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
@@ -268,21 +268,6 @@ struct GrowthChartSheet: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackgroundLight)
         )
-    }
-
-    private var footnote: some View {
-        let base = selectedPeriod == .annual
-            ? "Annual figures by fiscal year. The oldest year is the YoY baseline (not charted)."
-            : "Quarterly figures; growth shown year-over-year. The oldest reported year is the YoY baseline (not charted)."
-        // Explain the "—" so intact negative-period data doesn't read as missing.
-        let nm = hasNonMeaningfulYoY
-            ? " “—” marks a period where a growth % isn’t meaningful (a loss or sign change); the bar still shows the actual value."
-            : ""
-        return Text(base + nm)
-            .font(AppTypography.labelSmall)
-            .foregroundColor(AppColors.textMuted)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

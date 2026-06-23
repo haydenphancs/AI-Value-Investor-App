@@ -129,7 +129,12 @@ TABLE_NAME = "ticker_report_cache"
 #     TickerDetailView chart: absolute bars + YoY% + sector overlay, 5 metrics).
 #     A field added to CollectedTickerData isn't present in older cached
 #     collections, so the floor invalidates them → fresh fetch populates it.
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 21, 20, 0, 0, tzinfo=timezone.utc)
+# 2026-06-23: bumped so reports/collections re-collect and bake the new rich
+#     `profit_power` payload (margins + per-margin sector medians) — the paid
+#     Profitability drill-down now matches the free TickerDetailView Profit Power
+#     chart. Same rationale: a new CollectedTickerData field is absent from older
+#     cached collections, so the floor forces a fresh fetch to populate it.
+CACHE_SCHEMA_FLOOR = datetime(2026, 6, 23, 20, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

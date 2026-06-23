@@ -22,10 +22,12 @@ from app.services.ticker_report_cache import (
 )
 from app.services.agents.ticker_report_data_collector import _latest_completed_close
 
-# 2026-06-22 is a Monday; 06-19 Friday; 06-20 Saturday. All after CACHE_SCHEMA_FLOOR.
-_MON_PRE_CLOSE = datetime(2026, 6, 22, 19, 30, tzinfo=timezone.utc)   # ~3:30pm ET Mon
-_MON_POST_CLOSE = datetime(2026, 6, 23, 0, 30, tzinfo=timezone.utc)   # ~8:30pm ET Mon
-_MON_AFTERNOON = datetime(2026, 6, 22, 18, 0, tzinfo=timezone.utc)    # ~2pm ET Mon
+# 2026-06-29 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-06-23 20:00
+# UTC) so freshness isn't gated by the schema floor — shifted forward a week when the
+# floor was bumped for the profit_power freeze (same dance as the growth_chart bump).
+_MON_PRE_CLOSE = datetime(2026, 6, 29, 19, 30, tzinfo=timezone.utc)   # ~3:30pm ET Mon
+_MON_POST_CLOSE = datetime(2026, 6, 30, 0, 30, tzinfo=timezone.utc)   # ~8:30pm ET Mon
+_MON_AFTERNOON = datetime(2026, 6, 29, 18, 0, tzinfo=timezone.utc)    # ~2pm ET Mon
 
 
 def test_cycle_start_is_at_or_before_now_and_a_weekday():

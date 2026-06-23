@@ -17,22 +17,26 @@ struct RootContainerView: View {
             ContentView()
                 .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode && !audioManager.isCompactMode)
 
-            // Layer 2: Audio Player States
-            // Note: isPlayerHiddenByScroll is only used within detail views (BookCoreDetailView),
-            // not at the root level. The main screen always shows the player when active. A
-            // `.fullScreenCover` draws ABOVE this ZStack and renders its own player, so it simply
-            // occludes this one — no suppression needed (suppressing here was leak-prone).
+            // Layer 2: Audio player. A `.fullScreenCover` draws ABOVE this ZStack and renders its own
+            // player, so it simply occludes this one — no suppression needed.
+            // Note: isPlayerHiddenByScroll is only used within detail views (BookCoreDetailView).
             if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
                 if audioManager.isCompactMode {
-                    // State B: Status Island pinned hugging the Dynamic Island
-                    AudioStatusIsland()
-                        .dynamicIslandPinned()
+                    // Compact (stock screens / chat focus): on a Dynamic Island device the system
+                    // shows Now Playing at the top, so render nothing in-app. On non-DI devices there
+                    // is no system top indicator, so keep an in-app status island.
+                    if !AudioManager.hasDynamicIsland {
+                        VStack {
+                            AudioStatusIsland()
+                                .padding(.top, 8)
+                            Spacer()
+                        }
                         .transition(.asymmetric(
                             insertion: .move(edge: .top).combined(with: .opacity),
                             removal: .move(edge: .top).combined(with: .opacity)
                         ))
+                    }
                 } else {
-                    // State A: Full Mini Player (bottom, floating above tab bar)
                     VStack {
                         Spacer()
                         GlobalMiniPlayer()

@@ -49,11 +49,13 @@ struct GlobalAudioOverlay: ViewModifier {
                     Color.clear.frame(height: 88)
                 }
             }
-            // Top status island pinned hugging the Dynamic Island
+            // Top status island — NON-DYNAMIC-ISLAND DEVICES ONLY. On a DI device the system Now
+            // Playing is the top indicator; on non-DI devices there is none, so keep an in-app island.
             .overlay(alignment: .top) {
-                if audioManager.hasActiveEpisode && audioManager.isCompactMode && !audioManager.showFullScreenPlayer {
+                if audioManager.hasActiveEpisode && audioManager.isCompactMode
+                    && !audioManager.showFullScreenPlayer && !AudioManager.hasDynamicIsland {
                     AudioStatusIsland()
-                        .dynamicIslandPinned()
+                        .padding(.top, 8)
                         .transition(.asymmetric(
                             insertion: .move(edge: .top).combined(with: .opacity),
                             removal: .move(edge: .top).combined(with: .opacity)
@@ -131,21 +133,4 @@ extension View {
         ))
     }
 
-    /// Pin the audio status pill centered at the top, hugging the bottom of the Dynamic Island
-    /// (iOS Now-Playing style) rather than sitting down in the navigation header. The pill is placed
-    /// into the top safe-area inset using the device's real top inset (read by ignoring the top safe
-    /// area), so it adapts across notch / Dynamic-Island devices.
-    func dynamicIslandPinned() -> some View {
-        GeometryReader { proxy in
-            VStack(spacing: 0) {
-                self
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity)
-            // The Dynamic Island bottom sits ~11pt above where the safe area begins; place the pill
-            // just below it. `max(8, …)` keeps it sane on devices with a small/zero top inset.
-            .padding(.top, max(8, proxy.safeAreaInsets.top - 11))
-        }
-        .ignoresSafeArea(.container, edges: .top)
-    }
 }

@@ -50,11 +50,13 @@ struct GrowthSectionCard: View {
             GrowthPeriodToggle(selectedPeriod: $selectedPeriod)
                 .padding(.leading, AppSpacing.xs)
 
-            // Main chart
+            // Main chart — the SAME shared GrowthChartView the report sheet uses
+            // (sign-corrected YoY, robust line scaling, no right axis). No leading
+            // offset, so the fixed $-axis sits flush with the card padding exactly
+            // like the report (the old -AppSpacing.md offset cramped the axis).
             GrowthChartView(dataPoints: currentDataPoints)
                 .id("\(selectedMetric.rawValue)-\(selectedPeriod.rawValue)")
                 .padding(.top, AppSpacing.sm)
-                .padding(.leading, -AppSpacing.md)
                 .animation(.easeInOut(duration: 0.3), value: selectedMetric)
                 .animation(.easeInOut(duration: 0.3), value: selectedPeriod)
 

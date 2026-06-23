@@ -26,18 +26,21 @@ struct BookDetailView: View {
     @State private var aiInputText: String = ""
     /// Set when the player's "Read" button is tapped — the core whose reading view should open.
     @State private var playerTargetCore: BookCoreChapter?
+    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     let book: LibraryBook
 
     /// Bookmark state for this book (BookmarkStore, keyed by title) — shared with every card.
     private var isBookmarked: Bool { bookmarks.isBookmarked(book.title) }
 
-    // Computed property for header opacity based on scroll. The hero's own nav bar (a 44pt button
-    // row + small top padding) clears at ~52px, so the sticky mini-header fades in over 24→64px —
-    // it's essentially solid the instant the hero nav scrolls away, leaving no header-less gap.
+    // Sticky mini-header opacity driven by scroll. The hero's own nav row (44pt button + small top
+    // padding) clears at ~52px, so the mini-header fades in over 12→50px and is fully solid right as
+    // the hero nav leaves — no header-less gap. Its icons are pixel-aligned with the hero nav, so any
+    // brief overlap during the fade is invisible (the two bars draw identically).
     private var headerOpacity: Double {
-        let fadeStart: CGFloat = 24
-        let fadeEnd: CGFloat = 64
+        let fadeStart: CGFloat = 12
+        let fadeEnd: CGFloat = 50
         if scrollOffset < fadeStart { return 0 }
         if scrollOffset > fadeEnd { return 1 }
         return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
@@ -99,7 +102,6 @@ struct BookDetailView: View {
             // pinned at the top throughout scrolling (invisible + non-interactive at the very top, so
             // the hero's own nav bar receives taps there).
             BookDetailMiniHeader(
-                book: book,
                 isBookmarked: isBookmarked,
                 onBackTapped: { dismiss() },
                 onBookmarkTapped: { bookmarks.toggle(book.title) },
@@ -112,28 +114,29 @@ struct BookDetailView: View {
             VStack {
                 Spacer()
 
-                // Global Mini Player (for fullScreenCover presentation)
-                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
+                // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
+                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CaydexAIChatBar(inputText: $aiInputText)
+                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
+                CaydexAIChatBar(
+                    inputText: $aiInputText,
+                    onFocusChange: { focused in
+                        audioManager.setCompactMode(focused, reason: compactToken)
+                    }
+                )
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
-
-            // Full Screen Player (modal overlay) — presented here because this screen is shown as a
-            // fullScreenCover above RootContainerView, whose own full-screen player would be hidden.
-            if audioManager.showFullScreenPlayer {
-                FullScreenAudioPlayer(onNavigateToCore: { coreNumber in
-                    // "Read" → open the reading view for the core the narration is currently in.
-                    playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
-                })
-                    .transition(.move(edge: .bottom))
-                    .zIndex(100)
-            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
+        // Top status island + full-screen player + overlay-host registration (this screen is a
+        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
+        // the reading view to the core the narration is currently in.
+        .globalAudioOverlay(token: compactToken, onNavigateToCore: { coreNumber in
+            playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
+        })
         .navigationBarHidden(true)
         .sheet(isPresented: $showShareSheet) {
             if let url = URL(string: "https://app.example.com/book/\(book.id)") {
@@ -905,53 +908,55 @@ private struct DiscussionCard: View {
 }
 
 // MARK: - Mini Header
+// Sticky top bar pinned over the scroll content. Its icon layout/sizing/positions mirror the hero
+// section's nav row exactly (chevron left; bookmark + share right; 44pt tap targets; same paddings)
+// so that as the hero nav scrolls away and this fades in, it reads as the SAME bar simply gaining a
+// solid background — no visual jump and no title (matches the screen's top bar). The background
+// ignores the top safe area so it covers the status bar while content scrolls underneath.
 private struct BookDetailMiniHeader: View {
-    let book: LibraryBook
     let isBookmarked: Bool
     let onBackTapped: () -> Void
     let onBookmarkTapped: () -> Void
     let onShareTapped: () -> Void
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
+        HStack {
             // Back button
             Button(action: onBackTapped) {
                 Image(systemName: "chevron.left")
-                    .font(AppTypography.iconDefault).fontWeight(.semibold)
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(PlainButtonStyle())
-
-            // Title
-            Text(book.title)
-                .font(AppTypography.bodyEmphasis)
-                .foregroundColor(AppColors.textPrimary)
-                .lineLimit(1)
 
             Spacer()
 
             // Actions
-            HStack(spacing: AppSpacing.lg) {
+            HStack(spacing: AppSpacing.md) {
                 Button(action: onBookmarkTapped) {
                     Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(AppTypography.iconDefault).fontWeight(.medium)
-                        .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textSecondary)
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
+                        .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textPrimary)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(PlainButtonStyle())
 
                 Button(action: onShareTapped) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(AppTypography.iconDefault).fontWeight(.medium)
-                        .foregroundColor(AppColors.textSecondary)
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(PlainButtonStyle())
             }
         }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.top, AppSpacing.sm)
         .background(
             AppColors.background
                 .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+                .ignoresSafeArea(edges: .top)
         )
     }
 }

@@ -9,7 +9,6 @@
 import SwiftUI
 
 struct ChatTabView: View {
-    @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = ChatViewModel()
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
@@ -57,16 +56,14 @@ struct ChatTabView: View {
             .animation(.easeInOut(duration: 0.15), value: showingHistory)
         }
         .onAppear {
-            audioManager.enterCompactMode()
+            // Audio compact/island for the Chat tab is owned reactively by LearnContentView
+            // (isChatTabActive) so it releases correctly when the tab is backgrounded.
             // Pre-fill prompt if provided (e.g., from AI Analyst button)
             if let prompt = initialPrompt, inputText.isEmpty {
                 inputText = prompt
             }
             // Load history for the sidebar
             viewModel.loadHistory()
-        }
-        .onDisappear {
-            audioManager.exitCompactMode()
         }
     }
 

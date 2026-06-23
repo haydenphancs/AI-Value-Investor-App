@@ -9,6 +9,11 @@ import SwiftUI
 
 struct ReportDeepDiveMetricCard: View {
     let data: DeepDiveMetricCard
+    /// Override the drill-down chevron. nil → derive from `data.hasHistory`
+    /// (the default, used by Profitability / Valuation / Health). Set true for a
+    /// card whose tap-to-expand is wired off a SEPARATE data source than the
+    /// per-metric history — e.g. the Growth card opens the rich growth chart.
+    var showsChevron: Bool? = nil
 
     private var ratingColor: Color {
         switch data.starRating {
@@ -52,9 +57,10 @@ struct ReportDeepDiveMetricCard: View {
                     }
                 }
 
-                // Drill-down affordance — present only when this card carries
-                // a tap-to-expand time series (the section wires the tap).
-                if data.hasHistory {
+                // Drill-down affordance — present when this card carries a
+                // tap-to-expand chart (per-metric history, or the Growth card's
+                // rich chart via `showsChevron`). The section wires the tap.
+                if showsChevron ?? data.hasHistory {
                     Image(systemName: "chevron.right")
                         .font(AppTypography.iconMicro)
                         .foregroundColor(AppColors.textMuted)

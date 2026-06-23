@@ -29,6 +29,9 @@ struct BookCoreDetailView: View {
     // player hide/show logic ignores it (read-along auto-scroll shouldn't hide the mini player).
     @State private var isAutoScrolling: Bool = false
 
+    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
+
     let book: LibraryBook
     let allCores: [BookCoreChapter]
     
@@ -211,30 +214,34 @@ struct BookCoreDetailView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // Global Mini Player (show if audio was playing or user started playback)
-                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll && !audioManager.showFullScreenPlayer {
+                // Global Mini Player (show if audio was playing or user started playback);
+                // hidden when collapsed to the top island (chat-bar focused).
+                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CaydexAIChatBar(inputText: $inputText, onSend: handleAISend)
+                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
+                CaydexAIChatBar(
+                    inputText: $inputText,
+                    onSend: handleAISend,
+                    onFocusChange: { focused in
+                        audioManager.setCompactMode(focused, reason: compactToken)
+                    }
+                )
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shouldShowPlayer)
-
-            // Full Screen Player (modal overlay) — presented here because this screen is shown as a
-            // fullScreenCover above RootContainerView, whose own full-screen player would be hidden.
-            if audioManager.showFullScreenPlayer {
-                FullScreenAudioPlayer(onNavigateToCore: { coreNumber in
-                    jumpReadingToCore(coreNumber)
-                })
-                    .transition(.move(edge: .bottom))
-                    .zIndex(100)
-            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
+        // Top status island + full-screen player + overlay-host registration (this screen is a
+        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
+        // the reading view to the core the narration is currently in.
+        .globalAudioOverlay(token: compactToken, onNavigateToCore: { coreNumber in
+            jumpReadingToCore(coreNumber)
+        })
         .navigationBarHidden(true)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
         .onAppear {
             // If audio is already playing, show the player
             if audioManager.hasActiveEpisode && audioManager.isPlaying {

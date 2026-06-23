@@ -14,6 +14,8 @@ struct TickerReportView: View {
 
     // Overflow-menu UI state (••• menu actions)
     @State private var showDeleteConfirm: Bool = false
+    /// Stable token keying this screen's compact-mode request + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
@@ -49,6 +51,9 @@ struct TickerReportView: View {
             }
         }
         .navigationBarHidden(true)
+        // Audio collapses to the top status island while this report screen is open, keeping the
+        // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
+        .globalAudioOverlay(token: compactToken, forceCompact: true)
         .sheet(isPresented: $viewModel.showChatResponse) {
             chatResponseSheet
         }

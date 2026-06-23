@@ -18,6 +18,8 @@ struct MoneyMovesDetailView: View {
     @State private var selectedArticle: MoneyMoveArticle?
     /// Observed so the rows re-sort live (completed moves slide to the end) when a move completes.
     @ObservedObject private var moneyMovesProgress = MoneyMovesProgressStore.shared
+    /// Stable token keying this screen's audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     var body: some View {
         ZStack {
@@ -75,6 +77,8 @@ struct MoneyMovesDetailView: View {
             }
         }
         .navigationBarHidden(true)
+        // Keep the audio player visible above this fullScreenCover (bottom mini player).
+        .globalAudioOverlay(token: compactToken, showBottomMiniPlayer: true)
         .fullScreenCover(item: $selectedArticle) { article in
             MoneyMoveArticleDetailView(article: article)
                 .environmentObject(audioManager)

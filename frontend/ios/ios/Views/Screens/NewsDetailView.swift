@@ -12,6 +12,8 @@ struct NewsDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showShareSheet = false
     @State private var showMoreOptions = false
+    /// Stable token keying this screen's audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     let article: NewsArticle
 
@@ -77,6 +79,9 @@ struct NewsDetailView: View {
         }
         .preferredColorScheme(.dark)
         .navigationBarHidden(true)
+        // Keep the audio player visible above this fullScreenCover (bottom mini player; content is
+        // inset so the fixed "Read Full Story" button isn't covered).
+        .globalAudioOverlay(token: compactToken, showBottomMiniPlayer: true)
         .task {
             viewModel.loadArticleDetail()
         }

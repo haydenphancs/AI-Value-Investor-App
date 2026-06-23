@@ -10,7 +10,26 @@ no network.
 
 import math
 
-from app.services.growth_service import _compute_growth_points, _safe_float
+from app.services.growth_service import _compute_growth_points, _compute_yoy, _safe_float
+
+
+def test_compute_yoy_sign_corrected_for_negative_bases():
+    """YoY uses abs(previous) so the SIGN is always meaningful (improvement = +,
+    deterioration = −) at any sign, and the value is shown verbatim (not nulled)."""
+    # Positive base → standard %.
+    assert _compute_yoy(120.0, 100.0) == 20.0
+    # Deepening loss (worse): correct NEGATIVE (naive ÷ would falsely give +).
+    assert _compute_yoy(-10_000.0, -362.0) < 0
+    # Shrinking loss (better): POSITIVE.
+    assert _compute_yoy(-3_000.0, -10_000.0) == 70.0
+    # Sign-flip into loss: large but CORRECT negative, shown verbatim (not None).
+    v = _compute_yoy(-3_000.0, 71.0)
+    assert v is not None and v < -1000
+    # Recovery into profit: positive.
+    assert _compute_yoy(1_000.0, -3_000.0) > 0
+    # Undefined only when an endpoint is missing or the base is exactly zero.
+    assert _compute_yoy(100.0, 0.0) is None
+    assert _compute_yoy(100.0, None) is None
 
 
 def test_safe_float_coerces_non_finite_to_none():
@@ -45,6 +64,26 @@ def test_compute_growth_points_skips_non_finite_value_annual():
     assert periods == ["2023"]
     assert all(math.isfinite(p["value"]) for p in pts)
     assert pts[0]["value"] == 100.0
+
+
+def test_compute_growth_points_annual_year_gap_keeps_bar_null_yoy():
+    """A multi-year gap must NOT drop the gap year's bar (the old `continue`
+    silently lost a real, finite value). The gap year charts with its value and a
+    null YoY (a discontinuity is not zero growth), so the yellow line just breaks."""
+    records = [
+        {"calendarYear": "2020", "date": "2020-12-31", "revenue": 100.0},
+        {"calendarYear": "2021", "date": "2021-12-31", "revenue": 120.0},
+        {"calendarYear": "2024", "date": "2024-12-31", "revenue": 200.0},  # 2022/2023 missing
+        {"calendarYear": "2025", "date": "2025-12-31", "revenue": 220.0},
+    ]
+    pts = _compute_growth_points(records, "revenue", is_quarterly=False)
+    by = {p["period"]: p for p in pts}
+    # 2020 = YoY baseline (not charted); 2021/2024/2025 all get bars.
+    assert set(by) == {"2021", "2024", "2025"}
+    assert by["2021"]["yoy_change_percent"] == 20.0   # consecutive → YoY
+    assert by["2024"]["value"] == 200.0               # gap year: bar PRESENT (was dropped)
+    assert by["2024"]["yoy_change_percent"] is None   # gap → YoY null (line breaks)
+    assert by["2025"]["yoy_change_percent"] == 10.0    # consecutive again
 
 
 def test_compute_growth_points_skips_non_finite_value_quarterly():

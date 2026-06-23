@@ -9,10 +9,15 @@ import SwiftUI
 
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
+    /// Whether the Wiser tab is the active bottom tab. Drives releasing the Chat sub-tab's audio
+    /// compact/island when this tab is backgrounded (tabs are opacity-mounted — no onDisappear fires).
+    var isWiserSelected: Bool = true
+
     @Environment(\.appState) private var appState
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
+    @State private var chatCompactToken = UUID().uuidString
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
@@ -21,6 +26,12 @@ struct LearnContentView: View {
     @State private var showSearch = false
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
+
+    /// The audio player collapses to the top island only while the AI Chat sub-tab is the foreground
+    /// content (Wiser tab selected AND Chat sub-tab) — keeps the bottom clear for the chat input.
+    private var isChatTabActive: Bool {
+        isWiserSelected && viewModel.selectedTab == .chat
+    }
 
     var body: some View {
         NavigationStack {
@@ -94,6 +105,18 @@ struct LearnContentView: View {
             await JourneyProgressStore.shared.hydrate()
             await MoneyMovesProgressStore.shared.hydrate()
             await bookmarks.hydrate()
+        }
+        // Reactively own the Chat-tab audio compact so it engages/releases as the Chat sub-tab and
+        // the Wiser bottom tab gain/lose foreground — robust against opacity-mounted tabs not firing
+        // onDisappear. (ChatTabView itself no longer toggles compact.)
+        .onAppear {
+            audioManager.setCompactMode(isChatTabActive, reason: chatCompactToken)
+        }
+        .onChange(of: isChatTabActive) { _, active in
+            audioManager.setCompactMode(active, reason: chatCompactToken)
+        }
+        .onDisappear {
+            audioManager.setCompactMode(false, reason: chatCompactToken)
         }
         }
     }

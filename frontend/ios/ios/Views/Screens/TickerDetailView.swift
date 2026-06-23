@@ -19,6 +19,8 @@ struct TickerDetailView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var selectedSearchResult: SearchSelection?
     @StateObject private var chatViewModel = ChatViewModel()
+    /// Stable token keying this screen's compact-mode request + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     let tickerSymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -159,6 +161,9 @@ struct TickerDetailView: View {
         }
         .preferredColorScheme(.dark)
         .navigationBarHidden(true)
+        // Audio collapses to the top status island while this stock screen is open, keeping the
+        // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
+        .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
             viewModel.loadTickerData()
         }

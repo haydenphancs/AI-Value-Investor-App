@@ -55,8 +55,8 @@ struct AudioStatusIsland: View {
                 .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
         )
         .onTapGesture {
-            // Exit compact mode and show full player
-            audioManager.exitCompactMode()
+            // Tap the island to open the full now-playing screen (matches iOS Now-Playing behavior).
+            audioManager.expandPlayer()
         }
     }
 }

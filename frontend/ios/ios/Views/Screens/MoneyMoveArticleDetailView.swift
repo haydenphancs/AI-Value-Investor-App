@@ -20,6 +20,8 @@ struct MoneyMoveArticleDetailView: View {
     @State private var contentHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 0
     @State private var aiInputText: String = ""
+    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     let article: MoneyMoveArticle
 
@@ -127,25 +129,28 @@ struct MoneyMoveArticleDetailView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
+                // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
+                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                CaydexAIChatBar(inputText: $aiInputText)
-            }
-
-            // Full Screen Player (modal overlay)
-            if audioManager.showFullScreenPlayer {
-                FullScreenAudioPlayer()
-                    .transition(.move(edge: .bottom))
-                    .zIndex(100)
+                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
+                CaydexAIChatBar(
+                    inputText: $aiInputText,
+                    onFocusChange: { focused in
+                        audioManager.setCompactMode(focused, reason: compactToken)
+                    }
+                )
             }
         }
+        // Top status island + full-screen player + overlay-host registration (this screen is a
+        // fullScreenCover above RootContainerView, whose own overlay would be hidden).
+        .globalAudioOverlay(token: compactToken)
         .navigationBarHidden(true)
         .preferredColorScheme(.dark)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         .onAppear {
             // Finishing the narration also completes the article.
             audioCompletionCancellable = audioManager.playbackDidComplete

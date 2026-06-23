@@ -297,26 +297,41 @@ def bars_actuals_forecast(
         )
     if len(rows) < 2:
         return ""
-    mx = max(v for _, v, _, _ in rows) or 1.0
+    # Sign-aware domain anchored on zero so a loss year (negative EPS/revenue)
+    # draws a real downward bar instead of a broken negative-height rect, and an
+    # all-negative series still charts (mirrors the iOS GrowthChartView fix).
+    vals = [v for _, v, _, _ in rows]
+    lo = min(min(vals), 0.0)
+    hi = max(max(vals), 0.0)
+    if hi == lo:
+        hi = lo + 1.0
+    rng = hi - lo
     pad_t, pad_b, pad_l, pad_r = 18, 20, 6, 6
     w = width - pad_l - pad_r
     h = height - pad_t - pad_b
     n = len(rows)
     slot = w / n
     bw = min(slot * 0.62, 46)
+
+    def _y_of(val: float) -> float:
+        return pad_t + h * (1 - (val - lo) / rng)
+
+    base_y = _y_of(0.0)
     out = ""
     for i, (lbl, v, fc, vlabel) in enumerate(rows):
         cx = pad_l + slot * (i + 0.5)
-        bh = h * (v / mx)
-        y = pad_t + h - bh
-        color = forecast_color if fc else accent
+        yv = _y_of(v)
+        # Bar spans between the value and the zero baseline (downward for losses).
+        bar_top = min(yv, base_y)
+        bar_h = max(abs(yv - base_y), 0.6)
+        color = (forecast_color if fc else accent) if v >= 0 else _RED
         out += (
-            f'<rect x="{cx - bw/2:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+            f'<rect x="{cx - bw/2:.1f}" y="{bar_top:.1f}" width="{bw:.1f}" height="{bar_h:.1f}" '
             f'rx="2" fill="{color}"/>'
         )
         if vlabel:
             out += (
-                f'<text x="{cx:.1f}" y="{y - 4:.1f}" text-anchor="middle" font-size="8" '
+                f'<text x="{cx:.1f}" y="{bar_top - 4:.1f}" text-anchor="middle" font-size="8" '
                 f'font-weight="700" fill="{INK}" '
                 f'font-family="Helvetica, Arial, sans-serif">{_esc(vlabel)}</text>'
             )
@@ -327,6 +342,158 @@ def bars_actuals_forecast(
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}">{out}</svg>'
+    )
+
+
+# ── Growth: sign-aware bars + YoY% line + dashed sector line ───────────────────
+def growth_bars_line(
+    items: list[dict],
+    *,
+    width: int = 700,
+    height: int = 184,
+    bar_color: str = ACCENT,
+    yoy_color: str = "#F59E0B",
+    sector_color: str = MUTED,
+    value_fmt: str = "money",
+) -> str:
+    """Combined growth chart for the PDF — mirrors the app's Growth card.
+
+    Absolute-value BARS (sign-aware: a loss period draws RED and downward from a
+    visible zero baseline, and an all-negative series still charts) plus a YoY%
+    overlay line and a dashed sector-average line — both BROKEN at periods whose
+    value is "not meaningful" (None) instead of bridging a fabricated point. The
+    % lines are normalized into a band (no second axis) like the app overlay.
+    ``items``: ``{label, value, yoy, sector}`` (value finite float; yoy/sector
+    Optional). Returns "" when there are < 2 charted periods."""
+    def _opt(x: Any) -> "float | None":
+        if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x)):
+            return float(x)
+        return None
+
+    rows: list[tuple[str, float, "float | None", "float | None"]] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        v = it.get("value")
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(float(v)):
+            continue
+        rows.append(
+            (str(it.get("label", "")), float(v), _opt(it.get("yoy")), _opt(it.get("sector")))
+        )
+    if len(rows) < 2:
+        return ""
+
+    vals = [v for _, v, _, _ in rows]
+    lo = min(min(vals), 0.0)
+    hi = max(max(vals), 0.0)
+    if hi == lo:
+        hi = lo + 1.0
+    if hi > 0:
+        hi *= 1.12
+    if lo < 0:
+        lo *= 1.12
+    rng = hi - lo
+
+    pad_t, pad_b, pad_l, pad_r = 16, 26, 42, 8
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    n = len(rows)
+    slot = w / n
+    bw = min(slot * 0.5, 30)
+
+    def cx(i: int) -> float:
+        return pad_l + slot * (i + 0.5)
+
+    def vy(val: float) -> float:
+        return pad_t + h * (1 - (val - lo) / rng)
+
+    base_y = vy(0.0)
+    parts: list[str] = []
+
+    # Value gridlines + left-axis ticks (top / zero / bottom).
+    for tv in sorted({hi, 0.0, lo}, reverse=True):
+        gy = vy(tv)
+        parts.append(
+            f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + w}" y2="{gy:.1f}" '
+            f'stroke="{GRID}" stroke-width="1"/>'
+        )
+        parts.append(
+            f'<text x="{pad_l - 4}" y="{gy + 3:.1f}" text-anchor="end" font-size="7" '
+            f'fill="{MUTED}" font-family="Helvetica, Arial, sans-serif">'
+            f'{_esc(_axis_label(tv, value_fmt))}</text>'
+        )
+
+    # Bars (sign-aware: red & downward for losses).
+    for i, (_, v, _, _) in enumerate(rows):
+        yv = vy(v)
+        bar_top = min(yv, base_y)
+        bar_h = max(abs(yv - base_y), 0.6)
+        col = bar_color if v >= 0 else _RED
+        parts.append(
+            f'<rect x="{cx(i) - bw / 2:.1f}" y="{bar_top:.1f}" width="{bw:.1f}" '
+            f'height="{bar_h:.1f}" rx="2" fill="{col}" opacity="0.85"/>'
+        )
+
+    # % overlay lines, normalized into a band (no second axis — like the app).
+    pcts = [p for _, _, y, s in rows for p in (y, s) if p is not None]
+    if pcts:
+        plo, phi = min(pcts), max(pcts)
+        if phi == plo:
+            phi = plo + 1.0
+        band_top = pad_t + h * 0.12
+        band_bot = pad_t + h * 0.88
+
+        def py(p: float) -> float:
+            return band_bot - (p - plo) / (phi - plo) * (band_bot - band_top)
+
+        def overlay(idx: int, color: str, dashed: bool, label_pts: bool) -> None:
+            run: list[tuple[float, float]] = []
+
+            def flush() -> None:
+                if len(run) >= 2:
+                    d = " ".join(
+                        f"{'M' if k == 0 else 'L'}{x:.1f},{yv:.1f}"
+                        for k, (x, yv) in enumerate(run)
+                    )
+                    dash = ' stroke-dasharray="5,3"' if dashed else ""
+                    parts.append(
+                        f'<path d="{d}" fill="none" stroke="{color}" stroke-width="1.8" '
+                        f'stroke-linejoin="round" stroke-linecap="round"{dash}/>'
+                    )
+                run.clear()
+
+            for i, row in enumerate(rows):
+                p = row[idx]
+                if p is None:
+                    flush()
+                    continue
+                x, yv = cx(i), py(p)
+                run.append((x, yv))
+                parts.append(f'<circle cx="{x:.1f}" cy="{yv:.1f}" r="2" fill="{color}"/>')
+                if label_pts:
+                    parts.append(
+                        f'<text x="{x:.1f}" y="{yv - 4:.1f}" text-anchor="middle" font-size="6.5" '
+                        f'font-weight="700" fill="{color}" '
+                        f'font-family="Helvetica, Arial, sans-serif">{p:+.0f}%</text>'
+                    )
+            flush()
+
+        overlay(3, sector_color, True, False)   # sector dashed line (behind)
+        overlay(2, yoy_color, False, True)       # YoY solid line + labels (front)
+
+    # X-axis labels (thinned).
+    label_step = max(1, math.ceil(n / 8))
+    for i, (lbl, _, _, _) in enumerate(rows):
+        if lbl and (i % label_step == 0 or i == n - 1):
+            parts.append(
+                f'<text x="{cx(i):.1f}" y="{height - 6:.1f}" text-anchor="middle" '
+                f'font-size="7" fill="{MUTED}" '
+                f'font-family="Helvetica, Arial, sans-serif">{_esc(lbl)}</text>'
+            )
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">{"".join(parts)}</svg>'
     )
 
 

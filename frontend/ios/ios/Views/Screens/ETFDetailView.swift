@@ -17,6 +17,8 @@ struct ETFDetailView: View {
     @State private var isTabBarPinned: Bool = false
     @State private var selectedSearchResult: SearchSelection?
     @StateObject private var chatViewModel = ChatViewModel()
+    /// Stable token keying this screen's compact-mode request + audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     let etfSymbol: String
     var onNavigateToResearch: (() -> Void)?
@@ -150,6 +152,9 @@ struct ETFDetailView: View {
         }
         .preferredColorScheme(.dark)
         .navigationBarHidden(true)
+        // Audio collapses to the top status island while this asset screen is open, keeping the
+        // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
+        .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
             viewModel.loadETFData()
         }

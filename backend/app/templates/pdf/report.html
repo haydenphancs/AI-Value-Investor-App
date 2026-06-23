@@ -313,6 +313,13 @@
     {% if fundamentals.overall.average_rating %} <span class="pill">Avg {{ "%.1f"|format(fundamentals.overall.average_rating) }}★ · {{ fundamentals.overall.strong_count }} strong / {{ fundamentals.overall.weak_count }} weak</span>{% endif %}
   </div>
   {% endif %}
+  {% if charts.growth %}
+  <div class="chart-block">
+    <div style="font-size:11px;font-weight:700;color:#0F172A;margin-bottom:2px">{{ growth_metric_label }} Growth — Annual</div>
+    <div class="chart-wrap">{{ charts.growth | safe }}</div>
+    <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>{{ growth_metric_label }}<span class="sw" style="background:#F59E0B"></span>YoY %<span class="sw" style="background:#64748B"></span>Sector avg</div>
+  </div>
+  {% endif %}
 
   <!-- ═══ 6. Future Forecast ═══ -->
   <div class="section-bar"><span class="n">04</span>Future Forecast{% if forecast.forecast_analyst_count %}<span class="hint">{{ forecast.forecast_analyst_count }} analysts</span>{% endif %}</div>

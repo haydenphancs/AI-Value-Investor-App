@@ -14,6 +14,11 @@ struct CaydexAIChatBar: View {
     var suggestions: [String] = []
     var onSuggestionTap: ((String) -> Void)?
     var onSend: (() -> Void)?
+    /// Reports text-field focus changes. Wiser reading screens pass this to collapse the audio player
+    /// to the top status island while the user types. Default nil ⇒ no behavior change elsewhere.
+    var onFocusChange: ((Bool) -> Void)?
+
+    @FocusState private var isFocused: Bool
 
     private var canSend: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -46,6 +51,7 @@ struct CaydexAIChatBar: View {
                 TextField(placeholder, text: $inputText)
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textPrimary)
+                    .focused($isFocused)
 
                 // Send button
                 Button(action: {
@@ -80,6 +86,9 @@ struct CaydexAIChatBar: View {
             )
             .ignoresSafeArea()
         )
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
     }
 }
 

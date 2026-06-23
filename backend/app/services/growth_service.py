@@ -62,21 +62,21 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optional[float]:
-    """Compute YoY growth %. Returns None ("not meaningful") whenever a
-    percentage would mislead rather than inform:
-      - missing data,
-      - a non-positive base (previous <= 0 — there is no meaningful growth rate
-        off zero or a loss), or
-      - a sign change into negative (e.g. FCF swinging from +$0.4B to -$23.7B
-        computes a real but absurd -5911%; downstream renders "—" instead).
-    The growth-rate domain is positive→positive; outside it we report n/m so a
-    sign-flip can't surface a nonsense figure in the report or Financials tab.
+    """Year-over-year % change, SIGN-CORRECTED for negative bases.
+
+    Uses abs(previous) in the denominator so the SIGN is always meaningful — an
+    improvement (current > previous) reads positive and a deterioration reads
+    negative, even when the base is negative (a deepening loss correctly reads
+    negative instead of the +% that naive negative÷negative would give). The
+    magnitude can be large across a sign change (e.g. +$0.4B → -$23.7B ≈ -5900%);
+    that value is still CORRECT and is shown verbatim — the chart's YoY line uses
+    a robust/compressed scale so one outlier doesn't flatten the rest. Matches
+    the collector's _safe_pct_change convention. None only when an endpoint is
+    missing or the base is exactly zero (undefined).
     """
-    if current is None or previous is None:
+    if current is None or previous is None or previous == 0:
         return None
-    if previous <= 0 or current < 0:
-        return None
-    return round((current - previous) / previous * 100, 2)
+    return round((current - previous) / abs(previous) * 100, 2)
 
 
 def _extract_year(record: Dict[str, Any]) -> str:
@@ -178,29 +178,40 @@ def _compute_growth_points(
                 "quarter": period,
             })
     else:
-        # Annual: compare consecutive years (only if exactly 1 year apart)
+        # Annual: every later year with a finite value gets a bar. The year-gap
+        # check only governs whether a YoY is MEANINGFUL — it must NOT drop the
+        # bar (a gap year still has a real, chartable value). Mirror the
+        # negative-value path: emit the bar, null the YoY, break the line.
         for i in range(1, len(sorted_recs)):
             rec = sorted_recs[i]
             prev_rec = sorted_recs[i - 1]
 
-            # Validate year gap is exactly 1 to avoid multi-year growth mislabeled as YoY
+            current_val = _safe_float(rec, metric_key)
+            if current_val is None:
+                continue  # non-finite / missing value: genuinely unchartable
+
+            # YoY only when prev is exactly the prior calendar year; otherwise
+            # emit the bar with a null YoY (a multi-year gap is a discontinuity,
+            # not zero growth) so the value still charts.
             try:
                 cur_year = int(_extract_year(rec))
                 prev_year = int(_extract_year(prev_rec))
-                if cur_year - prev_year != 1:
-                    continue
+                if cur_year - prev_year == 1:
+                    yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
+                else:
+                    logger.warning(
+                        "growth annual year gap %s->%s for metric=%s; "
+                        "emitting bar with null YoY",
+                        prev_year, cur_year, metric_key,
+                    )
+                    yoy = None
             except (ValueError, TypeError):
-                continue
-
-            current_val = _safe_float(rec, metric_key)
-            prev_val = _safe_float(prev_rec, metric_key)
-            if current_val is None:
-                continue
+                yoy = None
 
             results.append({
                 "period": _annual_period_label(rec),
                 "value": current_val,
-                "yoy_change_percent": _compute_yoy(current_val, prev_val),
+                "yoy_change_percent": yoy,
                 "cal_year": _extract_year(rec),
                 "quarter": None,
             })

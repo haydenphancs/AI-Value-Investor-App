@@ -19,25 +19,24 @@ struct RootContainerView: View {
 
             // Layer 2: Audio Player States
             // Note: isPlayerHiddenByScroll is only used within detail views (BookCoreDetailView),
-            // not at the root level. The main screen always shows the player when active.
+            // not at the root level. The main screen always shows the player when active. A
+            // `.fullScreenCover` draws ABOVE this ZStack and renders its own player, so it simply
+            // occludes this one — no suppression needed (suppressing here was leak-prone).
             if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
                 if audioManager.isCompactMode {
-                    // State B: Status Island (top, minimal pill near Dynamic Island)
-                    VStack {
-                        AudioStatusIsland()
-                            .padding(.top, 8) // Below Dynamic Island
-                        Spacer()
-                    }
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .move(edge: .top).combined(with: .opacity)
-                    ))
+                    // State B: Status Island pinned hugging the Dynamic Island
+                    AudioStatusIsland()
+                        .dynamicIslandPinned()
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .top).combined(with: .opacity),
+                            removal: .move(edge: .top).combined(with: .opacity)
+                        ))
                 } else {
                     // State A: Full Mini Player (bottom, floating above tab bar)
                     VStack {
                         Spacer()
                         GlobalMiniPlayer()
-                            .padding(.bottom, 49) // Tab bar height
+                            .padding(.bottom, 58) // Clear the tab bar with a little breathing room
                     }
                     .transition(.asymmetric(
                         insertion: .move(edge: .bottom).combined(with: .opacity),
@@ -46,7 +45,7 @@ struct RootContainerView: View {
                 }
             }
 
-            // Layer 3: Full Screen Player (modal overlay)
+            // Layer 3: Full Screen Player (modal overlay) — zIndex 100 so it covers the tab bar.
             if audioManager.showFullScreenPlayer {
                 FullScreenAudioPlayer()
                     .transition(.move(edge: .bottom))
@@ -78,8 +77,8 @@ extension EnvironmentValues {
 struct MiniPlayerSafeAreaModifier: ViewModifier {
     @Environment(\.miniPlayerVisible) private var miniPlayerVisible
 
-    // Mini player height (72) + padding (8) + extra spacing (8)
-    private let miniPlayerHeight: CGFloat = 88
+    // Mini player height (60) + bottom padding (66) — keep content clear of the lifted capsule.
+    private let miniPlayerHeight: CGFloat = 104
 
     func body(content: Content) -> some View {
         content
@@ -105,7 +104,7 @@ extension View {
 struct MiniPlayerContentInsetModifier: ViewModifier {
     @Environment(\.miniPlayerVisible) private var miniPlayerVisible
 
-    private let miniPlayerHeight: CGFloat = 88
+    private let miniPlayerHeight: CGFloat = 104
 
     func body(content: Content) -> some View {
         content

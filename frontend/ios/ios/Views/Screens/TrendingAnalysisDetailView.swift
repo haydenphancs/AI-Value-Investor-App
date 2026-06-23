@@ -12,6 +12,8 @@ struct TrendingAnalysisDetailView: View {
     let analysis: TrendingAnalysis
     var onAnalyzeTicker: ((String) -> Void)?
     @Environment(\.dismiss) private var dismiss
+    /// Stable token keying this screen's audio overlay host registration.
+    @State private var compactToken = UUID().uuidString
 
     var body: some View {
         ZStack {
@@ -41,6 +43,8 @@ struct TrendingAnalysisDetailView: View {
             }
         }
         .navigationBarHidden(true)
+        // Keep the audio player visible above this fullScreenCover (bottom mini player).
+        .globalAudioOverlay(token: compactToken, showBottomMiniPlayer: true)
     }
 
     // MARK: - Header

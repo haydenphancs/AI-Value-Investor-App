@@ -127,6 +127,9 @@ struct FundamentalsHistorySheet: View {
             }
             .padding(.horizontal, 2)
         }
+        // Breathing room at BOTH scroll ends so the first/last chip clears the
+        // edge (matches GrowthChartSheet's chip picker 1:1).
+        .contentMargins(.horizontal, AppSpacing.lg, for: .scrollContent)
     }
 
     // MARK: - Header (current value)

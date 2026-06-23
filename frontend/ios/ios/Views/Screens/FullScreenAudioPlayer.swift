@@ -77,6 +77,10 @@ struct FullScreenAudioPlayer: View {
                 }
                 .padding(.leading, AppSpacing.sm)
                 .padding(.trailing, AppSpacing.xxxl)
+                // Respect the top safe area for CONTENT while the whole view ignores it for the
+                // BACKGROUND — so the header clears the Dynamic Island in every host (root overlay,
+                // and the modifier's overlay on a cover where the host frame is safe-area-bounded).
+                .padding(.top, geometry.safeAreaInsets.top)
             }
             .offset(y: dragOffset)
             .gesture(
@@ -98,6 +102,9 @@ struct FullScreenAudioPlayer: View {
                     }
             )
         }
+        // Span the full window in every host so the gradient reaches all edges (the GeometryReader
+        // then reports the real safe-area insets used above for content padding).
+        .ignoresSafeArea()
         .sheet(isPresented: $showSpeedPicker) {
             PlaybackSpeedSheet()
                 .environmentObject(audioManager)

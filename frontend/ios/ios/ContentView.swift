@@ -27,10 +27,12 @@ struct ContentView: View {
             )
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)
+            .environment(\.isActiveTab, selectedTab == .home)
 
             UpdatesView(selectedTab: $selectedTab)
                 .opacity(selectedTab == .updates ? 1 : 0)
                 .allowsHitTesting(selectedTab == .updates)
+                .environment(\.isActiveTab, selectedTab == .updates)
 
             ResearchViewWithBinding(
                 selectedTab: $selectedTab,  
@@ -39,6 +41,7 @@ struct ContentView: View {
             )
             .opacity(selectedTab == .research ? 1 : 0)
             .allowsHitTesting(selectedTab == .research)
+            .environment(\.isActiveTab, selectedTab == .research)
 
             TrackingViewWithBinding(
                 selectedTab: $selectedTab,
@@ -46,10 +49,12 @@ struct ContentView: View {
             )
             .opacity(selectedTab == .tracking ? 1 : 0)
             .allowsHitTesting(selectedTab == .tracking)
+            .environment(\.isActiveTab, selectedTab == .tracking)
 
             WiserViewWithBinding(selectedTab: $selectedTab)
                 .opacity(selectedTab == .wiser ? 1 : 0)
                 .allowsHitTesting(selectedTab == .wiser)
+                .environment(\.isActiveTab, selectedTab == .wiser)
         }
         .preferredColorScheme(.dark)
         .onChange(of: selectedTab) { oldValue, newValue in
@@ -517,7 +522,10 @@ struct WiserViewWithBinding: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                LearnContentView()
+                // Pass whether Wiser is the active tab so the Chat sub-tab releases the audio
+                // compact/island when this tab is backgrounded (tabs are opacity-mounted, so
+                // onDisappear never fires on a tab switch).
+                LearnContentView(isWiserSelected: selectedTab == .wiser)
 
                 CustomTabBar(selectedTab: $selectedTab)
             }

@@ -341,6 +341,19 @@ def build_context(
         "value_label": p.get("revenue_label") or "",
         "is_forecast": bool(p.get("is_forecast")),
     } for p in timeline if isinstance(p, dict)]
+
+    # Growth chart — annual Revenue (absolute bars + YoY% line + sector line),
+    # mirroring the app's Growth card. Revenue is the most universal growth series
+    # and isn't otherwise charted in the PDF (EPS is covered by the earnings
+    # timeline). Sign-aware + nil-safe in the chart helper; "" when <2 points.
+    growth_chart = data.get("growth_chart") or {}
+    growth_metric_label = "Revenue"
+    growth_items = [{
+        "label": p.get("period") or "",
+        "value": _num(p.get("value")),
+        "yoy": _num(p.get("yoy_change_percent")),
+        "sector": _num(p.get("sector_average_yoy")),
+    } for p in (growth_chart.get("revenue_annual") or []) if isinstance(p, dict)]
     # Forecast table: use the timeline's FORECAST years so it matches the chart
     # (which plots annual_timeline through the last analyst year, e.g. 2031).
     # Fall back to the curated 4-year window when no annual timeline exists.
@@ -452,6 +465,7 @@ def build_context(
         "sparkline": pdf_charts.price_sparkline(prices, width=700, height=120),
         "earnings_timeline": pdf_charts.bars_actuals_forecast(
             timeline_items, width=700, height=150),
+        "growth": pdf_charts.growth_bars_line(growth_items, width=700, height=184),
         "insider_flow": pdf_charts.diverging_bars(
             insider_flow_items, width=330, height=118, up_color="#16A34A"),
         "capital_returned": pdf_charts.axed_bars(
@@ -490,6 +504,7 @@ def build_context(
         "consensus_total": sum((v or 0) for v in consensus_counts.values()),
         "price_change_pct": _num(price_action.get("change_pct")),
         "window_label": price_action.get("window_label") or "12M",
+        "growth_metric_label": growth_metric_label,
         "vitals": vitals,
         "bull_case": bull_case,
         "bear_case": bear_case,

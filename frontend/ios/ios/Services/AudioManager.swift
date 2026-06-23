@@ -36,8 +36,14 @@ final class AudioManager: ObservableObject {
     // UI State
     @Published var isMiniPlayerExpanded: Bool = false
     @Published var showFullScreenPlayer: Bool = false
-    @Published var isCompactMode: Bool = false  // True when chat keyboard is active (shows status island)
+    @Published private(set) var isCompactMode: Bool = false  // True when collapsed to the top status island
     @Published var isPlayerHiddenByScroll: Bool = false  // True when scroll-based hiding is active
+
+    // Compact-mode is requested by several independent drivers (Wiser chat-bar focus, each stock
+    // screen's lifetime, ChatTabView). Track them as a reason set keyed by a stable per-screen token
+    // so they can't stomp each other and so duplicate appear/disappear or focus on/off are idempotent.
+    // `isCompactMode` is true while ANY reason is active.
+    private var compactReasons: Set<String> = []
 
     // MARK: - Computed Properties
     var isPlaying: Bool {
@@ -248,6 +254,11 @@ final class AudioManager: ObservableObject {
         currentTime = 0
         duration = 0
         showFullScreenPlayer = false
+
+        // Drop any compact-mode requests so a later, unrelated episode doesn't inherit a stale
+        // "collapsed to island" state. Screens re-assert compact on their next appear/focus.
+        compactReasons.removeAll()
+        isCompactMode = false
     }
 
     /// Seek to specific time
@@ -484,17 +495,16 @@ final class AudioManager: ObservableObject {
         }
     }
 
-    /// Enter compact mode (status island at top)
-    func enterCompactMode() {
+    /// Request (or release) compact mode for a given reason token. `isCompactMode` is true while ANY
+    /// reason is active. A stable per-screen token makes appear/disappear and focus on/off idempotent
+    /// and safe under nested presentation (e.g. asset → asset pushes).
+    func setCompactMode(_ active: Bool, reason: String) {
+        let was = !compactReasons.isEmpty
+        if active { compactReasons.insert(reason) } else { compactReasons.remove(reason) }
+        let now = !compactReasons.isEmpty
+        guard now != was else { return }  // no-op: don't emit a redundant animation
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-            isCompactMode = true
-        }
-    }
-
-    /// Exit compact mode (show full mini player at bottom)
-    func exitCompactMode() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-            isCompactMode = false
+            isCompactMode = now
         }
     }
 

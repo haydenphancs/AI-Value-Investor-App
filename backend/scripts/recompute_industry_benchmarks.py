@@ -34,7 +34,10 @@ async def main(args: argparse.Namespace) -> None:
     service = get_industry_benchmark_service()
     skip = args.skip_recent_hours if args.skip_recent_hours and args.skip_recent_hours > 0 else None
     sectors = [args.sector] if args.sector else None
-    result = await service.recompute_all(
+    # --ttm → the trailing-twelve-month current-snapshot rows (period_type='ttm');
+    # default → the fiscal annual/quarterly time-series rows.
+    fn = service.recompute_all_ttm if args.ttm else service.recompute_all
+    result = await fn(
         skip_if_fresh_hours=skip,
         sectors=sectors,
         industries=args.industry,
@@ -55,6 +58,10 @@ if __name__ == "__main__":
         help="Compute + log a sample of the medians and write NOTHING (sanity check before a real run).",
     )
     parser.add_argument("--skip-recent-hours", type=int, default=24, help="Skip sectors computed within N hours (0 = force full)")
+    parser.add_argument(
+        "--ttm", action="store_true",
+        help="Compute the TTM current-snapshot rows (period_type='ttm') instead of the fiscal series. Additive — leaves fiscal rows intact.",
+    )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     asyncio.run(main(parser.parse_args()))

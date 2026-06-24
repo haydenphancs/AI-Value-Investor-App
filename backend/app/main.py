@@ -78,6 +78,12 @@ async def lifespan(app: FastAPI):
         # pre-computed Supabase cache keyed on industry.
         asyncio.create_task(_run_industry_dossier_job())
 
+        # Start background TTM benchmark refresh (weekly). TTM is a CURRENT
+        # snapshot (price ÷ trailing-12mo earnings → drifts daily for every
+        # company), so it must refresh far more often than the quarterly fiscal
+        # recompute. Upserts the period_type='ttm' rows in place (~3.5 min).
+        asyncio.create_task(_run_ttm_benchmark_job())
+
         # Start background whale hydration jobs
         asyncio.create_task(_run_whale_hydration_job())
 
@@ -209,6 +215,49 @@ async def _run_research_reconciliation_job():
 # `sector_benchmark_service.compute_all_benchmarks` still backs the manual
 # admin endpoint but is no longer scheduled — two schedulers writing the
 # industry='' rows would race and re-introduce stale data.
+
+
+async def _run_ttm_benchmark_job():
+    """Weekly TTM (trailing-twelve-month) benchmark refresh — Sunday 04:00 UTC.
+
+    TTM is a CURRENT snapshot (price ÷ TTM earnings drifts daily for EVERY
+    company, so the industry/sector median goes stale as a whole), which is why
+    it refreshes weekly rather than with the quarterly fiscal recompute.
+    `recompute_all_ttm` UPSERTS the period_type='ttm' rows in place — additive,
+    the fiscal annual/quarterly rows are untouched. ~3.5 min / ~11k light FMP
+    calls. `skip_if_fresh_hours=24` makes a re-trigger RESUME (skip sectors done
+    in the last day) rather than redo everything after a dyno restart.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    await asyncio.sleep(180)  # let app fully start
+
+    while True:
+        now = datetime.now(timezone.utc)
+        days_until_sunday = (6 - now.weekday()) % 7  # 6 = Sunday
+        next_run = now.replace(hour=4, minute=0, second=0, microsecond=0) + timedelta(
+            days=days_until_sunday
+        )
+        if next_run <= now:
+            next_run += timedelta(days=7)
+        sleep_seconds = (next_run - now).total_seconds()
+        logger.info(
+            f"TTM benchmark job: next run at {next_run.isoformat()} "
+            f"(sleeping {sleep_seconds / 3600:.1f}h)"
+        )
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            from app.services.industry_benchmark_service import (
+                get_industry_benchmark_service,
+            )
+
+            result = await get_industry_benchmark_service().recompute_all_ttm(
+                skip_if_fresh_hours=24,
+            )
+            logger.info(f"TTM benchmark weekly job completed: {result}")
+        except Exception as e:
+            logger.error(f"TTM benchmark weekly job failed: {e}", exc_info=True)
 
 
 def _next_quarterly_dossier_run(now: "datetime") -> "datetime":

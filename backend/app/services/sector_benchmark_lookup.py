@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 3600  # 1 hour
 
+# period_type of the TTM current-snapshot rows (written by industry_benchmark_service).
+TTM_PERIOD_TYPE = "ttm"
+
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
@@ -334,6 +337,46 @@ class SectorBenchmarkLookup:
             metric: {label: cell["value"] for label, cell in periods.items()}
             for metric, periods in rich.items()
         }
+
+    # ── Current-snapshot benchmark: TTM-first, mature-annual fallback ────
+
+    def get_current_benchmarks(
+        self,
+        industry: str,
+        sector: str,
+        metrics: List[str],
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """The CURRENT single-value benchmark per metric for the "vs industry/sector
+        avg" comparisons. Prefers the TTM row (a complete trailing-12-months median —
+        no partial-fiscal-year spike); falls back PER METRIC to the latest *mature*
+        annual value when no TTM row exists yet (a thin/uncovered industry, or before
+        the TTM recompute has run). Returns {metric: cell | None} where cell carries
+        value / level / peer_group_name / n."""
+        ttm = self.get_benchmarks(industry, sector, metrics, TTM_PERIOD_TYPE)
+        annual: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+        result: Dict[str, Optional[Dict[str, Any]]] = {}
+        for metric in metrics:
+            cells = ttm.get(metric) or {}
+            if cells:
+                # exactly one TTM cell (period_label == "TTM")
+                result[metric] = next(iter(cells.values()))
+                continue
+            if annual is None:  # lazy — only fetch the fallback layer if needed
+                annual = self.get_benchmarks(industry, sector, metrics, "annual")
+            cell, _held_back = pick_mature_benchmark(annual.get(metric) or {})
+            result[metric] = cell
+        return result
+
+    def get_current_benchmark_values(
+        self,
+        industry: str,
+        sector: str,
+        metrics: List[str],
+    ) -> Dict[str, Optional[float]]:
+        """Flat {metric: value} of get_current_benchmarks (TTM-first, mature-annual
+        fallback). Drop-in for the snapshot services' single-value comparisons."""
+        rich = self.get_current_benchmarks(industry, sector, metrics)
+        return {m: (cell["value"] if cell else None) for m, cell in rich.items()}
 
 
 # ── Singleton ─────────────────────────────────────────────────────

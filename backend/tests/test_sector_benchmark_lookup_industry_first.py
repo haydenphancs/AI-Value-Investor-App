@@ -217,6 +217,63 @@ def test_pick_mature_quarterly_spans_year_boundary():
     assert held_back is True
 
 
+# ── Current-snapshot: TTM-first with mature-annual fallback ──
+
+
+def _make_lookup_by_pt(rows_by_pt_industry):
+    """Lookup whose _fetch_rows returns canned rows keyed by (period_type, is_industry)."""
+    lk = SectorBenchmarkLookup.__new__(SectorBenchmarkLookup)
+
+    def fake_fetch(columns, sector, metrics, period_type, industry=""):
+        return list(rows_by_pt_industry.get((period_type, bool(industry)), []))
+
+    lk._fetch_rows = fake_fetch
+    return lk
+
+
+def test_current_benchmark_prefers_ttm_over_annual():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 30.0, 60)],
+        ("annual", True): [_row("pe_ratio", "2025", 28.0, 50)],  # must NOT be used
+    })
+    cur = lk.get_current_benchmarks("Software - Infrastructure", "Technology", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 30.0
+    assert cur["pe_ratio"]["level"] == "industry"
+
+
+def test_current_benchmark_falls_back_to_mature_annual_when_no_ttm():
+    # No TTM row → use the latest MATURE annual (2025, n=50); the thin 2026 (n=8)
+    # is held back by the floor.
+    lk = _make_lookup_by_pt({
+        ("annual", True): [
+            _row("pe_ratio", "2026", 99.0, 8),
+            _row("pe_ratio", "2025", 28.0, 50),
+        ],
+    })
+    cur = lk.get_current_benchmarks("Software - Infrastructure", "Technology", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 28.0
+    assert cur["pe_ratio"]["level"] == "industry"
+
+
+def test_current_benchmark_per_metric_mix_ttm_and_fallback():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 30.0, 60)],          # pe via TTM
+        ("annual", True): [_row("net_margin", "2025", 0.06, 70)],    # net_margin via fallback
+    })
+    cur = lk.get_current_benchmarks("X", "Y", ["pe_ratio", "net_margin"])
+    assert cur["pe_ratio"]["value"] == 30.0          # TTM
+    assert cur["net_margin"]["value"] == 0.06        # annual fallback
+
+
+def test_current_benchmark_values_flat_and_none_for_missing():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("net_margin", "TTM", 0.08, 76)],
+    })
+    vals = lk.get_current_benchmark_values("X", "Y", ["net_margin", "pe_ratio"])
+    assert vals["net_margin"] == 0.08
+    assert vals["pe_ratio"] is None  # no ttm, no annual → None
+
+
 def test_pick_mature_floor_is_inclusive_at_exactly_20():
     # Boundary: n == floor must COUNT as mature (>= , not >).
     cells = {"2026": _cell(50.0, n=19), "2025": _cell(40.0, n=20)}

@@ -44,6 +44,9 @@ struct ProfitabilityMetricSeries: Identifiable {
     let metric: ProfitabilityMetricType
     let annual: [ProfitabilityChartPoint]
     let quarterly: [ProfitabilityChartPoint]
+    /// "industry" / "sector" / nil — which peer group the dashed line represents,
+    /// from the backend. Drives the "Industry Avg" vs "Sector Avg" label.
+    var peerLevel: String? = nil
 
     var id: String { metric.rawValue }
 
@@ -83,7 +86,8 @@ extension ProfitPowerResponseDTO {
                 }
             }
             return ProfitabilityMetricSeries(
-                metric: metric, annual: pts(annual), quarterly: pts(quarterly)
+                metric: metric, annual: pts(annual), quarterly: pts(quarterly),
+                peerLevel: peerGroupLevel
             )
         }
         return [
@@ -103,7 +107,9 @@ extension DeepDiveMetric {
     /// Build a Profitability series from this metric's baked history (used for
     /// ROE/ROA, which aren't in profit_power). Sector points are joined to the
     /// company periods by label (the backend already aligns them).
-    func toProfitabilitySeries(_ metric: ProfitabilityMetricType) -> ProfitabilityMetricSeries {
+    func toProfitabilitySeries(
+        _ metric: ProfitabilityMetricType, peerLevel: String? = nil
+    ) -> ProfitabilityMetricSeries {
         func pts(
             _ company: [MetricHistoryPoint]?, _ sector: [MetricHistoryPoint]?
         ) -> [ProfitabilityChartPoint] {
@@ -121,7 +127,8 @@ extension DeepDiveMetric {
         return ProfitabilityMetricSeries(
             metric: metric,
             annual: pts(annualHistory, sectorAnnualHistory),
-            quarterly: pts(quarterlyHistory, sectorQuarterlyHistory)
+            quarterly: pts(quarterlyHistory, sectorQuarterlyHistory),
+            peerLevel: peerLevel
         )
     }
 }

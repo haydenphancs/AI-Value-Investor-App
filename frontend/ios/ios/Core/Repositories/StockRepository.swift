@@ -1627,6 +1627,14 @@ struct ProfitPowerResponseDTO: Codable {
     let symbol: String
     let annual: [ProfitPowerDataPointDTO]
     let quarterly: [ProfitPowerDataPointDTO]
+    // "industry" / "sector" — which peer group the benchmark lines represent.
+    // Optional → old payloads decode as nil and the UI keeps the "Sector" wording.
+    let peerGroupLevel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case symbol, annual, quarterly
+        case peerGroupLevel = "peer_group_level"
+    }
 
     func toDisplayModel() -> ProfitPowerSectionData {
         func convert(_ dtos: [ProfitPowerDataPointDTO]) -> [ProfitPowerDataPoint] {

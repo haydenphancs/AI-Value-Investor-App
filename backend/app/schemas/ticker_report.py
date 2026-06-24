@@ -76,6 +76,12 @@ class DeepDiveMetricCardResponse(BaseModel):
     # takeaway reads red even when the star_rating (mirrored from the
     # Financials tab) is high. Defaulted for reports cached before this field.
     quality_sentiment: str = "neutral"
+    # Peer group the card's "vs ___ average" comparisons use: "industry" (the
+    # company's industry peers) or "sector" (sector fallback / undersampled
+    # industry). Drives the "* Compared to its industry/sector average" footnote
+    # and the drill-down legend wording. Optional → reports cached before this
+    # field decode as nil and keep the "sector" wording.
+    peer_group_level: Optional[str] = None
 
 
 class OverallAssessmentResponse(BaseModel):

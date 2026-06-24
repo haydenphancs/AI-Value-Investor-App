@@ -20,10 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import (
-    get_sector_benchmark_lookup,
-    mature_benchmark_value,
-)
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -361,27 +358,26 @@ class ProfitabilitySnapshotService:
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # Rich shape {metric: {period: {value, level, peer_group_name, n}}} so the
-        # mature-period picker can apply the sample-size floor.
-        benchmarks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # CURRENT benchmark per metric: TTM row if present, else latest mature
+        # annual value (fallback). {metric: value | None}.
+        cur_bench: Dict[str, Optional[float]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
-                benchmarks = lookup.get_benchmarks(
+                cur_bench = lookup.get_current_benchmark_values(
                     industry,
                     sector,
                     ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
-                    "annual",
                 )
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        # Score each metric against the mature-period sector/industry median
-        sector_gross = mature_benchmark_value(benchmarks.get("gross_margin", {}))
-        sector_op = mature_benchmark_value(benchmarks.get("operating_margin", {}))
-        sector_net = mature_benchmark_value(benchmarks.get("net_margin", {}))
-        sector_roe = mature_benchmark_value(benchmarks.get("roe", {}))
-        sector_roa = mature_benchmark_value(benchmarks.get("roa", {}))
+        # Score each metric against the CURRENT (TTM-first) sector/industry median
+        sector_gross = cur_bench.get("gross_margin")
+        sector_op = cur_bench.get("operating_margin")
+        sector_net = cur_bench.get("net_margin")
+        sector_roe = cur_bench.get("roe")
+        sector_roa = cur_bench.get("roa")
 
         score_gross = _profitability_score(gross_margin, sector_gross)
         score_op = _profitability_score(op_margin, sector_op)

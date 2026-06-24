@@ -27,3 +27,8 @@ class ProfitPowerResponse(BaseModel):
     symbol: str
     annual: List[ProfitPowerDataPointSchema]
     quarterly: List[ProfitPowerDataPointSchema]
+    # Peer-group level the benchmark lines represent: "industry" (the company's
+    # industry peers) or "sector" (sector fallback). Drives the "Industry Avg" vs
+    # "Sector Avg" legend/footer label on the Profitability drill-down. Optional →
+    # old payloads / the live detail chart decode it as nil and keep "Sector".
+    peer_group_level: Optional[str] = None

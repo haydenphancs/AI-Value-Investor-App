@@ -204,6 +204,9 @@ struct FundamentalMetricCardDTO: Codable {
     let qualityLabel: String
     // Optional: reports cached before this field omit it → nil → "neutral".
     let qualitySentiment: String?
+    // "industry" / "sector" / nil — peer group the card's comparisons use.
+    // Optional → old reports decode nil and keep the "sector" wording.
+    let peerGroupLevel: String?
 
     enum CodingKeys: String, CodingKey {
         case title
@@ -211,6 +214,7 @@ struct FundamentalMetricCardDTO: Codable {
         case metrics
         case qualityLabel = "quality_label"
         case qualitySentiment = "quality_sentiment"
+        case peerGroupLevel = "peer_group_level"
     }
 }
 
@@ -799,7 +803,8 @@ extension TickerReportAPIResponse {
                     )
                 },
                 qualityLabel: card.qualityLabel,
-                qualitySentiment: card.qualitySentiment ?? "neutral"
+                qualitySentiment: card.qualitySentiment ?? "neutral",
+                peerGroupLevel: card.peerGroupLevel
             )
         }
 

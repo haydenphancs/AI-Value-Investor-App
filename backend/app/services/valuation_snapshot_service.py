@@ -23,10 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import (
-    get_sector_benchmark_lookup,
-    mature_benchmark_value,
-)
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -477,28 +474,26 @@ class ValuationSnapshotService:
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # Fetch pre-computed benchmarks (industry-first, sector fallback).
-        # Rich shape {metric: {period: {value, level, peer_group_name, n}}} so the
-        # mature-period picker can apply the sample-size floor.
-        benchmarks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # CURRENT benchmark per metric: TTM row if present, else latest mature
+        # annual value (fallback). {metric: value | None}.
+        cur_bench: Dict[str, Optional[float]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
-                benchmarks = lookup.get_benchmarks(
+                cur_bench = lookup.get_current_benchmark_values(
                     industry,
                     sector,
                     ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
-                    "annual",
                 )
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        sector_pe = mature_benchmark_value(benchmarks.get("pe_ratio", {}))
-        sector_ps = mature_benchmark_value(benchmarks.get("ps_ratio", {}))
-        sector_pb = mature_benchmark_value(benchmarks.get("pb_ratio", {}))
-        sector_pfcf = mature_benchmark_value(benchmarks.get("pfcf_ratio", {}))
-        sector_ev = mature_benchmark_value(benchmarks.get("ev_ebitda", {}))
-        sector_ey = mature_benchmark_value(benchmarks.get("earnings_yield", {}))
+        sector_pe = cur_bench.get("pe_ratio")
+        sector_ps = cur_bench.get("ps_ratio")
+        sector_pb = cur_bench.get("pb_ratio")
+        sector_pfcf = cur_bench.get("pfcf_ratio")
+        sector_ev = cur_bench.get("ev_ebitda")
+        sector_ey = cur_bench.get("earnings_yield")
 
         # Score each metric against sector median (lower = better)
         score_pe = _valuation_score(pe, sector_pe)

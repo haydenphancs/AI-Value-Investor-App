@@ -180,13 +180,19 @@ struct FundamentalsHistorySheet: View {
         points(m).last(where: { $0.value != nil })?.value
     }
 
+    /// "Industry" when the card's benchmark comparison is industry-level, else "Sector".
+    private var peerWord: String {
+        card.peerGroupLevel == "industry" ? "Industry" : "Sector"
+    }
+
     private func deltaText(company: Double, sector: Double, unit: String?) -> String {
         let c = Self.format(company, unit: unit)
         let s = Self.format(sector, unit: unit)
+        let peer = peerWord
         if sector > 0 && company > 0 {
-            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) vs sector"
+            return "Latest \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
         }
-        return "Latest \(c) · Sector \(s)"
+        return "Latest \(c) · \(peer) \(s)"
     }
 
     @ViewBuilder
@@ -209,7 +215,7 @@ struct FundamentalsHistorySheet: View {
                                 Capsule().fill(AppColors.textSecondary).frame(width: 4, height: 2)
                             }
                         }
-                        Text("Sector Average")
+                        Text("\(peerWord) Average")
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
                     }

@@ -190,17 +190,24 @@ struct GrowthChartSheet: View {
         abs(v) >= 100 ? String(format: "%.0f%%", v) : String(format: "%.2f%%", v)
     }
 
+    /// "Industry" when the benchmark line is industry-level, else "Sector".
+    private var peerWord: String {
+        card.peerGroupLevel == "industry" ? "Industry" : "Sector"
+    }
+
     private func deltaText(company: Double, sector: Double) -> String {
         let c = pct(company)
         let s = pct(sector)
+        let peer = peerWord
+        let peerLower = peer.lowercased()
         // Percentage-point spread is meaningful at any sign/magnitude.
-        let spread = String(format: "%+.1f pts vs sector", company - sector)
-        // The "×" multiple only means anything when the sector base is non-trivial
+        let spread = String(format: "%+.1f pts vs \(peerLower)", company - sector)
+        // The "×" multiple only means anything when the peer base is non-trivial
         // — a tiny-positive denominator (e.g. 0.5%) explodes into an absurd ratio.
         if company > 0 && sector >= 2.0 {
-            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) vs sector"
+            return "Latest \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peerLower)"
         }
-        return "Latest \(c) · Sector \(s) · \(spread)"
+        return "Latest \(c) · \(peer) \(s) · \(spread)"
     }
 
     @ViewBuilder
@@ -229,7 +236,7 @@ struct GrowthChartSheet: View {
                             Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
                         }
                     }
-                    Text("Sector Average")
+                    Text("\(peerWord) Average")
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                 }

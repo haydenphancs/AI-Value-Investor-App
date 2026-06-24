@@ -374,6 +374,9 @@ class ProfitPowerService:
         # Phase 2: get sector from profile
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
         sector = _normalize_sector(raw_sector)
+        # Industry-relative benchmarks: prefer the company's INDUSTRY peer group,
+        # fall back to its sector per (metric, period).
+        industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
         # Phase 3: compute company margins for each period
         annual_points = _build_margin_points(annual_income, annual_cashflow, is_quarterly=False)
@@ -391,11 +394,11 @@ class ProfitPowerService:
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            benchmarks_annual = lookup.get_sector_benchmarks(
-                sector, _MARGIN_BENCHMARK_METRICS, "annual"
+            benchmarks_annual = lookup.get_benchmark_values(
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual"
             )
-            benchmarks_quarterly = lookup.get_sector_benchmarks(
-                sector, _MARGIN_BENCHMARK_METRICS, "quarterly"
+            benchmarks_quarterly = lookup.get_benchmark_values(
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "quarterly"
             )
 
         # Phase 5: attach sector averages and build response.

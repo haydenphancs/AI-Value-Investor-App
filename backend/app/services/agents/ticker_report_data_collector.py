@@ -976,7 +976,7 @@ class TickerReportDataCollector:
         # Sector-median history for the "*" drill-down line (pre-computed in
         # the sector_benchmarks table; one cached Supabase read per granularity).
         sector_bench_task = (
-            self._fetch_sector_benchmark_history(sector)
+            self._fetch_sector_benchmark_history(industry, sector)
             if sector else asyncio.sleep(0, result={})
         )
 
@@ -1128,7 +1128,7 @@ class TickerReportDataCollector:
             )
 
     async def _fetch_sector_benchmark_history(
-        self, sector: str,
+        self, industry: str, sector: str,
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
         """Pre-computed sector-median history (annual + quarterly) for the
         "*" card metrics — overlaid as the drill-down's sector-average line.
@@ -1152,9 +1152,11 @@ class TickerReportDataCollector:
 
         lookup = get_sector_benchmark_lookup()
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
+        # Industry-first values (sector fallback per cell); the chart overlay
+        # only needs the value — peer-group labelling lands in Phase 3.
         annual, quarterly = await asyncio.gather(
-            asyncio.to_thread(lookup.get_sector_benchmarks, sector, metrics, "annual"),
-            asyncio.to_thread(lookup.get_sector_benchmarks, sector, metrics, "quarterly"),
+            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "annual"),
+            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "quarterly"),
             return_exceptions=True,
         )
         return {

@@ -647,12 +647,14 @@ def test_sector_delta_guard_no_ratio_when_nonpositive():
 async def test_fetch_sector_benchmark_history_normalizes_sector(monkeypatch):
     """The collector must look up benchmarks under the CANONICAL sector name
     (same as the snapshot cards), not the raw FMP name — else the sector line
-    is silently empty for e.g. 'Information Technology' / 'Financials'."""
+    is silently empty for e.g. 'Information Technology' / 'Financials'. It must
+    also pass the company's INDUSTRY through (industry-first lookup)."""
     captured: list = []
 
     class _FakeLookup:
-        def get_sector_benchmarks(self, sector, metrics, period_type):
-            captured.append(sector)
+        # Phase 2: industry-first lookup signature (industry, sector, ...).
+        def get_benchmark_values(self, industry, sector, metrics, period_type):
+            captured.append((industry, sector))
             return {m: {} for m in metrics}
 
     monkeypatch.setattr(
@@ -660,9 +662,14 @@ async def test_fetch_sector_benchmark_history_normalizes_sector(monkeypatch):
         lambda: _FakeLookup(),
     )
     coll = TickerReportDataCollector()
-    # FMP GICS-style raw name → must be queried as canonical "Technology".
-    await coll._fetch_sector_benchmark_history("Information Technology")
-    assert captured and all(s == "Technology" for s in captured), captured
+    # FMP GICS-style raw name → must be queried as canonical "Technology";
+    # the industry name passes through verbatim.
+    await coll._fetch_sector_benchmark_history(
+        "Software - Infrastructure", "Information Technology"
+    )
+    assert captured, captured
+    assert all(s == "Technology" for _, s in captured), captured
+    assert all(i == "Software - Infrastructure" for i, _ in captured), captured
 
 
 @pytest.mark.asyncio
@@ -670,7 +677,7 @@ async def test_fetch_sector_benchmark_history_empty_sector_short_circuits(monkey
     called = {"n": 0}
 
     class _FakeLookup:
-        def get_sector_benchmarks(self, *a, **k):
+        def get_benchmark_values(self, *a, **k):
             called["n"] += 1
             return {}
 
@@ -679,7 +686,7 @@ async def test_fetch_sector_benchmark_history_empty_sector_short_circuits(monkey
         lambda: _FakeLookup(),
     )
     coll = TickerReportDataCollector()
-    out = await coll._fetch_sector_benchmark_history("")
+    out = await coll._fetch_sector_benchmark_history("Software - Infrastructure", "")
     assert out == {"annual": {}, "quarterly": {}}
     assert called["n"] == 0  # no query for a missing sector
 

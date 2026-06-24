@@ -23,7 +23,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    get_sector_benchmark_lookup,
+    mature_benchmark_value,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -137,13 +140,10 @@ def _valuation_score(value: Optional[float], sector_median: Optional[float]) -> 
     return 1        # 50%+ more expensive
 
 
-def _get_latest_benchmark(benchmarks: Dict[str, Dict[str, float]], metric: str) -> Optional[float]:
-    """Get the most recent year's benchmark value for a metric."""
-    metric_data = benchmarks.get(metric, {})
-    if not metric_data:
-        return None
-    latest_year = max(metric_data.keys())
-    return metric_data[latest_year]
+# Single-value sector comparisons use the mature-period picker
+# (`mature_benchmark_value`) — it holds the last fully-reported year instead of a
+# thin just-closed one. (The old `_get_latest_benchmark` max-year helper was
+# replaced; it had no sample-size floor.)
 
 
 def _sector_ctx(val: Optional[float], sector_median: Optional[float]) -> str:
@@ -474,13 +474,18 @@ class ValuationSnapshotService:
         # Get sector for benchmark comparison
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
+        # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
+        industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # Fetch pre-computed sector benchmarks (dynamic, not hardcoded)
-        benchmarks: Dict[str, Dict[str, float]] = {}
+        # Fetch pre-computed benchmarks (industry-first, sector fallback).
+        # Rich shape {metric: {period: {value, level, peer_group_name, n}}} so the
+        # mature-period picker can apply the sample-size floor.
+        benchmarks: Dict[str, Dict[str, Dict[str, Any]]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
-                benchmarks = lookup.get_sector_benchmarks(
+                benchmarks = lookup.get_benchmarks(
+                    industry,
                     sector,
                     ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
                     "annual",
@@ -488,12 +493,12 @@ class ValuationSnapshotService:
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        sector_pe = _get_latest_benchmark(benchmarks, "pe_ratio")
-        sector_ps = _get_latest_benchmark(benchmarks, "ps_ratio")
-        sector_pb = _get_latest_benchmark(benchmarks, "pb_ratio")
-        sector_pfcf = _get_latest_benchmark(benchmarks, "pfcf_ratio")
-        sector_ev = _get_latest_benchmark(benchmarks, "ev_ebitda")
-        sector_ey = _get_latest_benchmark(benchmarks, "earnings_yield")
+        sector_pe = mature_benchmark_value(benchmarks.get("pe_ratio", {}))
+        sector_ps = mature_benchmark_value(benchmarks.get("ps_ratio", {}))
+        sector_pb = mature_benchmark_value(benchmarks.get("pb_ratio", {}))
+        sector_pfcf = mature_benchmark_value(benchmarks.get("pfcf_ratio", {}))
+        sector_ev = mature_benchmark_value(benchmarks.get("ev_ebitda", {}))
+        sector_ey = mature_benchmark_value(benchmarks.get("earnings_yield", {}))
 
         # Score each metric against sector median (lower = better)
         score_pe = _valuation_score(pe, sector_pe)

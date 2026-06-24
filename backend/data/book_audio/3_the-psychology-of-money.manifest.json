@@ -4,12 +4,13 @@
   "author": "Morgan Housel",
   "slug": "the-psychology-of-money",
   "audio_file": "3_the-psychology-of-money.m4a",
-  "voice": "Puck",
-  "target_wpm": 172,
-  "pitch_semitones": 0,
+  "voice": "clone:psychology_puck",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": -1,
   "break_seconds": 2.5,
-  "total_seconds": 2878.5,
-  "total_label": "47:59",
+  "total_seconds": 3039.5,
+  "total_label": "50:40",
   "cores": [
     {
       "number": 1,
@@ -20,68 +21,68 @@
     {
       "number": 2,
       "title": "The Illusion of Complete Control",
-      "start_seconds": 229.02,
-      "start_label": "3:49"
+      "start_seconds": 255.06,
+      "start_label": "4:15"
     },
     {
       "number": 3,
       "title": "The Moving Goalpost Syndrome",
-      "start_seconds": 454.55,
-      "start_label": "7:35"
+      "start_seconds": 476.48,
+      "start_label": "7:56"
     },
     {
       "number": 4,
       "title": "Ignite the Compounding Engine",
-      "start_seconds": 658.77,
-      "start_label": "10:59"
+      "start_seconds": 704.86,
+      "start_label": "11:45"
     },
     {
       "number": 5,
       "title": "The Schizophrenia of Wealth",
-      "start_seconds": 871.19,
-      "start_label": "14:31"
+      "start_seconds": 908.56,
+      "start_label": "15:09"
     },
     {
       "number": 6,
       "title": "The Invisible Chain",
-      "start_seconds": 1156.4,
-      "start_label": "19:16"
+      "start_seconds": 1252.06,
+      "start_label": "20:52"
     },
     {
       "number": 7,
       "title": "The Illusion of the Visible",
-      "start_seconds": 1423.67,
-      "start_label": "23:44"
+      "start_seconds": 1498.56,
+      "start_label": "24:59"
     },
     {
       "number": 8,
       "title": "The Map is Not the Territory",
-      "start_seconds": 1658.48,
-      "start_label": "27:38"
+      "start_seconds": 1730.22,
+      "start_label": "28:50"
     },
     {
       "number": 9,
       "title": "The Mirror Trap",
-      "start_seconds": 1928.48,
-      "start_label": "32:08"
+      "start_seconds": 2028.24,
+      "start_label": "33:48"
     },
     {
       "number": 10,
       "title": "The Intellectual Allure of Doom",
-      "start_seconds": 2135.34,
-      "start_label": "35:35"
+      "start_seconds": 2234.58,
+      "start_label": "37:15"
     },
     {
       "number": 11,
       "title": "The Mirage of Certainty",
-      "start_seconds": 2368.28,
-      "start_label": "39:28"
+      "start_seconds": 2476.96,
+      "start_label": "41:17"
     },
     {
       "number": 12,
       "title": "The Myth of the Master Key",
-      "start_seconds": 2583.22,
-      "start_label": "43:03"
+      "start_seconds": 2748.3,
+      "start_label": "45:48"
     }
   ],
   "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/3_the-psychology-of-money.m4a?"

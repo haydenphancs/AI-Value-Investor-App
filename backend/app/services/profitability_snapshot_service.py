@@ -20,7 +20,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    get_sector_benchmark_lookup,
+    mature_benchmark_value,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -134,14 +137,9 @@ def _profitability_score(value: Optional[float], sector_median_decimal: Optional
     return 1      # 50%+ below sector
 
 
-def _get_latest_benchmark(benchmarks: Dict[str, Dict[str, float]], metric: str) -> Optional[float]:
-    """Get the most recent year's benchmark value for a metric."""
-    metric_data = benchmarks.get(metric, {})
-    if not metric_data:
-        return None
-    # Sort by year descending, pick the most recent
-    latest_year = max(metric_data.keys())
-    return metric_data[latest_year]
+# Single-value sector comparisons use the mature-period picker
+# (`mature_benchmark_value`) so a thin just-closed year never decides the
+# comparison; the old `_get_latest_benchmark` max-year helper had no floor.
 
 
 def _label_with_sector(
@@ -360,12 +358,17 @@ class ProfitabilitySnapshotService:
 
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
+        # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
+        industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        benchmarks: Dict[str, Dict[str, float]] = {}
+        # Rich shape {metric: {period: {value, level, peer_group_name, n}}} so the
+        # mature-period picker can apply the sample-size floor.
+        benchmarks: Dict[str, Dict[str, Dict[str, Any]]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
-                benchmarks = lookup.get_sector_benchmarks(
+                benchmarks = lookup.get_benchmarks(
+                    industry,
                     sector,
                     ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
                     "annual",
@@ -373,12 +376,12 @@ class ProfitabilitySnapshotService:
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        # Score each metric against sector median
-        sector_gross = _get_latest_benchmark(benchmarks, "gross_margin")
-        sector_op = _get_latest_benchmark(benchmarks, "operating_margin")
-        sector_net = _get_latest_benchmark(benchmarks, "net_margin")
-        sector_roe = _get_latest_benchmark(benchmarks, "roe")
-        sector_roa = _get_latest_benchmark(benchmarks, "roa")
+        # Score each metric against the mature-period sector/industry median
+        sector_gross = mature_benchmark_value(benchmarks.get("gross_margin", {}))
+        sector_op = mature_benchmark_value(benchmarks.get("operating_margin", {}))
+        sector_net = mature_benchmark_value(benchmarks.get("net_margin", {}))
+        sector_roe = mature_benchmark_value(benchmarks.get("roe", {}))
+        sector_roa = mature_benchmark_value(benchmarks.get("roa", {}))
 
         score_gross = _profitability_score(gross_margin, sector_gross)
         score_op = _profitability_score(op_margin, sector_op)

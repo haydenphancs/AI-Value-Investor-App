@@ -21,7 +21,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    get_sector_benchmark_lookup,
+    mature_benchmark_value,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -980,12 +983,17 @@ class HealthCheckService:
         # Phase 3: get sector and look up benchmarks
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
         sector = _normalize_sector(raw_sector)
-        logger.info(f"Health check {ticker}: raw_sector={raw_sector!r}, normalized={sector!r}")
+        # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
+        industry = profile.get("industry", "") if isinstance(profile, dict) else ""
+        logger.info(f"Health check {ticker}: raw_sector={raw_sector!r}, normalized={sector!r}, industry={industry!r}")
 
         benchmarks: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            benchmarks = lookup.get_sector_benchmarks(
+            # Rich shape {metric: {period: {value, level, peer_group_name, n}}};
+            # mature_benchmark_value applies the sample-size floor per metric.
+            benchmarks = lookup.get_benchmarks(
+                industry,
                 sector,
                 [
                     "debt_to_equity",
@@ -1082,13 +1090,12 @@ class HealthCheckService:
             if mdef["is_percentage"]:
                 display_val = round(company_val * 100, 2)
 
-            # Get most recent sector benchmark
+            # Latest MATURE sector/industry benchmark (sample-size floor — a thin
+            # just-closed year is held back in favour of the last full year).
             metric_benchmarks = benchmarks.get(mdef["benchmark_name"], {})
-            sector_val = None
+            sector_val = mature_benchmark_value(metric_benchmarks)
             sector_display = None
-            if metric_benchmarks:
-                latest_key = max(metric_benchmarks.keys())
-                sector_val = metric_benchmarks[latest_key]
+            if sector_val is not None:
                 if mdef["is_percentage"]:
                     sector_display = round(sector_val * 100, 2)
                 else:

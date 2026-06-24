@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.integrations.fmp import get_fmp_client
 from app.services.sector_benchmark_service import (
     SectorBenchmarkService,
     METRIC_CONFIGS,
@@ -73,11 +74,71 @@ def _winsorize_for(metric_name: str, metric_type: str, values: List[float]) -> L
     return values
 
 
+# ── TTM (trailing-twelve-month) current-snapshot benchmarks ──────────────────
+# Stored ADDITIVELY as period_type="ttm", period_label="TTM" — one current value
+# per metric per industry/sector. The fiscal annual/quarterly rows are untouched
+# (they remain the chart's historical line + the growth series). Every company
+# contributes a complete rolling 12 months from FMP /ratios-ttm + /key-metrics-ttm
+# (the SAME TTM the company card shows → apples-to-apples), so there is no
+# partial-fiscal-year spike. Rule = positive-only + cap@200 + median (validated
+# vs CSIMarket / stockanalysis across 4 industries; NO trim).
+TTM_PERIOD_TYPE = "ttm"
+TTM_PERIOD_LABEL = "TTM"
+_TTM_CONCURRENCY = 12
+
+# metric -> (source, field, positive_only, cap)   source: "r" ratios-ttm / "k" key-metrics-ttm
+# fcf_margin is computed (freeCashFlowPerShareTTM ÷ revenuePerShareTTM). Only the
+# USER-FACING comparison metrics are TTM'd; Moat-internal metrics (rd/sga/intangibles/
+# deferred_revenue/roic/asset_turnover) stay on the annual series the Moat scorer reads.
+_TTM_METRICS: Dict[str, Tuple[str, Optional[str], bool, Optional[float]]] = {
+    "pe_ratio":          ("r", "priceToEarningsRatioTTM",      True,  200.0),
+    "pb_ratio":          ("r", "priceToBookRatioTTM",          True,  200.0),
+    "ps_ratio":          ("r", "priceToSalesRatioTTM",         True,  200.0),
+    "pfcf_ratio":        ("r", "priceToFreeCashFlowRatioTTM",  True,  200.0),
+    "ev_ebitda":         ("k", "evToEBITDATTM",                True,  200.0),
+    "earnings_yield":    ("k", "earningsYieldTTM",             True,  None),
+    "dividend_yield":    ("r", "dividendYieldTTM",             False, None),
+    "gross_margin":      ("r", "grossProfitMarginTTM",         False, None),
+    "operating_margin":  ("r", "operatingProfitMarginTTM",     False, None),
+    "net_margin":        ("r", "netProfitMarginTTM",           False, None),
+    "fcf_margin":        ("compute", None,                     False, None),
+    "roe":               ("k", "returnOnEquityTTM",            False, None),
+    "roa":               ("k", "returnOnAssetsTTM",            False, None),
+    "current_ratio":     ("r", "currentRatioTTM",              False, None),
+    "quick_ratio":       ("r", "quickRatioTTM",                False, None),
+    "debt_to_equity":    ("r", "debtToEquityRatioTTM",         False, None),
+    "interest_coverage": ("r", "interestCoverageRatioTTM",     True,  100.0),
+}
+
+
+def _num(d: Dict[str, Any], field: str) -> Optional[float]:
+    v = d.get(field)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # drop NaN
+
+
+def _extract_ttm(r0: Dict[str, Any], k0: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """One company's TTM value per metric (raw, pre-filter)."""
+    out: Dict[str, Optional[float]] = {}
+    for name, (src, field, _pos, _cap) in _TTM_METRICS.items():
+        if src == "compute":  # fcf_margin = FCF/share ÷ revenue/share
+            fcf = _num(r0, "freeCashFlowPerShareTTM")
+            rev = _num(r0, "revenuePerShareTTM")
+            out[name] = (fcf / rev) if (fcf is not None and rev not in (None, 0)) else None
+        else:
+            out[name] = _num(r0 if src == "r" else k0, field)
+    return out
+
+
 class IndustryBenchmarkService:
     def __init__(self) -> None:
         self.supabase = get_supabase()
         # Reuse the sector service's FMP fetch + per-group aggregation + throttle.
         self._sb = SectorBenchmarkService()
+        self._fmp = get_fmp_client()  # for the TTM /ratios-ttm + /key-metrics-ttm path
 
     # ── Universe ─────────────────────────────────────────────────────
     def _load_universe(self) -> List[Tuple[str, List[Tuple[str, List[Tuple[str, float]]]]]]:
@@ -281,6 +342,156 @@ class IndustryBenchmarkService:
         return {"industries": seen, "rows_upserted": total, "dry_run": dry_run}
 
     # ── Orchestration ────────────────────────────────────────────────
+    # ── TTM current-snapshot compute (period_type="ttm") ─────────────────
+    async def _fetch_ttm(self, ticker: str, sem: asyncio.Semaphore) -> Dict[str, Optional[float]]:
+        async with sem:
+            try:
+                r, k = await asyncio.gather(
+                    self._fmp.get_ratios_ttm(ticker),
+                    self._fmp.get_key_metrics_ttm(ticker),
+                    return_exceptions=True,
+                )
+            except Exception:
+                return {}
+        r0 = (r[0] if isinstance(r, list) and r else {}) or {}
+        k0 = (k[0] if isinstance(k, list) and k else {}) or {}
+        return _extract_ttm(r0, k0)
+
+    async def _industry_ttm_values(
+        self, ticker_caps: List[Tuple[str, float]], sem: asyncio.Semaphore,
+    ) -> Dict[str, List[float]]:
+        rows = await asyncio.gather(*[self._fetch_ttm(t, sem) for t, _ in ticker_caps])
+        vals: Dict[str, List[float]] = defaultdict(list)
+        for row in rows:
+            for metric, v in row.items():
+                if v is not None:
+                    vals[metric].append(v)
+        return vals
+
+    @staticmethod
+    def _ttm_median(metric: str, values: List[float]) -> Tuple[Optional[float], int]:
+        """positive-only + cap@ceiling (winsorize, NOT trim) + median — the
+        validated rule. cap clamps (min(x, cap)); we never drop the artifacts."""
+        _src, _field, positive_only, cap = _TTM_METRICS[metric]
+        v = [x for x in values if x is not None]
+        if positive_only:
+            v = [x for x in v if x > 0]
+        if cap is not None:
+            v = [min(x, cap) for x in v]
+        if len(v) < MIN_SAMPLE_SIZE:
+            return None, len(v)
+        return round(statistics.median(v), 4), len(v)
+
+    def _ttm_rows(
+        self, sector: str, industry: str,
+        values_by_metric: Dict[str, List[float]], now: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for metric, vals in values_by_metric.items():
+            med, n = self._ttm_median(metric, vals)
+            if med is None:
+                continue
+            rows.append({
+                "sector": sector,
+                "industry": industry,
+                "metric_name": metric,
+                "period_type": TTM_PERIOD_TYPE,
+                "period_label": TTM_PERIOD_LABEL,
+                "median_value": med,
+                "sample_size": n,
+                "computed_at": now,
+            })
+        return rows
+
+    def _ttm_sector_is_fresh(self, sector: str, hours: Optional[int]) -> bool:
+        """Skip a sector whose TTM '' aggregate is newer than N hours (filters
+        period_type='ttm' so it never confuses TTM freshness with the fiscal rows)."""
+        if not hours:
+            return False
+        try:
+            resp = (
+                self.supabase.table("sector_benchmarks")
+                .select("computed_at")
+                .eq("sector", sector).eq("industry", "")
+                .eq("period_type", TTM_PERIOD_TYPE)
+                .order("computed_at", desc=True).limit(1).execute()
+            )
+        except Exception:
+            return False
+        if not resp.data:
+            return False
+        try:
+            last = datetime.fromisoformat(resp.data[0]["computed_at"].replace("Z", "+00:00"))
+        except Exception:
+            return False
+        return (datetime.now(timezone.utc) - last) < timedelta(hours=hours)
+
+    async def recompute_all_ttm(
+        self, *, skip_if_fresh_hours: Optional[int] = None,
+        sectors: Optional[List[str]] = None,
+        industries: Optional[List[str]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Compute the TTM current-snapshot medians (period_type='ttm') for every
+        industry + sector aggregate. Additive — leaves the fiscal rows intact."""
+        start = datetime.now(timezone.utc)
+        now = start.isoformat()
+        sem = asyncio.Semaphore(_TTM_CONCURRENCY)
+        universe = self._load_universe()
+
+        # Validation path: a few named industries only (industry rows, no sector agg).
+        if industries:
+            by_ind = {ind: (sector, tc) for sector, inds in universe for ind, tc in inds}
+            total = done = 0
+            for ind in industries:
+                if ind not in by_ind:
+                    logger.warning("ttm: industry not in universe: %r", ind)
+                    continue
+                sector, tc = by_ind[ind]
+                vals = await self._industry_ttm_values(tc, sem)
+                total += self._emit(self._ttm_rows(sector, ind, vals, now), f"TTM {sector}/{ind}", dry_run)
+                done += 1
+            summary = {
+                "mode": "ttm-industries", "industries_done": done,
+                "rows_upserted": total, "dry_run": dry_run,
+                "elapsed_seconds": round((datetime.now(timezone.utc) - start).total_seconds(), 1),
+            }
+            logger.info("ttm benchmark (industries-only) complete: %s", summary)
+            return summary
+
+        if sectors:
+            universe = [(s, inds) for s, inds in universe if s in sectors]
+        total_rows = done = skipped_fresh = 0
+        for sector, inds in universe:
+            if not dry_run and self._ttm_sector_is_fresh(sector, skip_if_fresh_hours):
+                skipped_fresh += 1
+                logger.info("ttm: %s fresh — skipped", sector)
+                continue
+            try:
+                logger.info("ttm: computing %s (%d industries)...", sector, len(inds))
+                sector_acc: Dict[str, List[float]] = defaultdict(list)
+                n = 0
+                for ind, tc in inds:
+                    vals = await self._industry_ttm_values(tc, sem)
+                    if not vals:
+                        continue
+                    for metric, vlist in vals.items():
+                        sector_acc[metric].extend(vlist)
+                    n += self._emit(self._ttm_rows(sector, ind, vals, now), f"TTM {sector}/{ind}", dry_run)
+                n += self._emit(self._ttm_rows(sector, "", sector_acc, now), f"TTM {sector} (aggregate)", dry_run)
+                total_rows += n
+                done += 1
+                logger.info("ttm: %s done — %d rows", sector, n)
+            except Exception as e:
+                logger.error("ttm: %s failed: %s", sector, e, exc_info=True)
+        summary = {
+            "mode": "ttm", "sectors_done": done, "sectors_skipped_fresh": skipped_fresh,
+            "rows_upserted": total_rows, "dry_run": dry_run,
+            "elapsed_seconds": round((datetime.now(timezone.utc) - start).total_seconds(), 1),
+        }
+        logger.info("ttm benchmark complete: %s", summary)
+        return summary
+
     async def recompute_all(
         self, *, skip_if_fresh_hours: Optional[int] = None,
         sectors: Optional[List[str]] = None,

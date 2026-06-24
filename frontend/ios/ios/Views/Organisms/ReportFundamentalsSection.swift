@@ -36,6 +36,13 @@ struct ReportFundamentalsSection: View {
         return metric.hasHistory
     }
 
+    /// "industry" vs "sector" for the footnote — the peer group is uniform per
+    /// ticker, so the first card carrying a level decides it (nil → "sector").
+    private var peerWord: String {
+        metrics.first(where: { $0.peerGroupLevel != nil })?.peerGroupLevel == "industry"
+            ? "industry" : "sector"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // 2x2 metric grid — ALL fundamental cards (Growth included as a
@@ -62,7 +69,7 @@ struct ReportFundamentalsSection: View {
             // Footnote explaining the " *" on sector-compared metrics
             // (Valuation P/E, P/B, P/S … and Health Debt-to-Equity etc.).
             if metrics.contains(where: { $0.hasSectorComparison }) {
-                Text("* Compared to its sector average.")
+                Text("* Compared to its \(peerWord) average.")
                     .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textMuted)
                     .padding(.horizontal, AppSpacing.xs)

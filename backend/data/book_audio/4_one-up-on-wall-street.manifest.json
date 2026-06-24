@@ -4,12 +4,13 @@
   "author": "Peter Lynch",
   "slug": "one-up-on-wall-street",
   "audio_file": "4_one-up-on-wall-street.m4a",
-  "voice": "Enceladus",
-  "target_wpm": 170,
+  "voice": "clone:oneup_core2",
+  "engine": "chatterbox",
+  "target_wpm": null,
   "pitch_semitones": 0,
   "break_seconds": 2.5,
-  "total_seconds": 1986.81,
-  "total_label": "33:07",
+  "total_seconds": 2361.3,
+  "total_label": "39:21",
   "cores": [
     {
       "number": 1,
@@ -20,68 +21,68 @@
     {
       "number": 2,
       "title": "The Mirror Test & Risk Tolerance",
-      "start_seconds": 154.27,
-      "start_label": "2:34"
+      "start_seconds": 184.86,
+      "start_label": "3:05"
     },
     {
       "number": 3,
       "title": "Ignoring the Macro Noise",
-      "start_seconds": 317.73,
-      "start_label": "5:18"
+      "start_seconds": 368.24,
+      "start_label": "6:08"
     },
     {
       "number": 4,
       "title": "Leveraging Your Daily Routine",
-      "start_seconds": 474.49,
-      "start_label": "7:54"
+      "start_seconds": 549.78,
+      "start_label": "9:10"
     },
     {
       "number": 5,
       "title": "The \"Perfect Stock\" Profile",
-      "start_seconds": 635.47,
-      "start_label": "10:35"
+      "start_seconds": 750.04,
+      "start_label": "12:30"
     },
     {
       "number": 6,
       "title": "The Six Categories of Opportunity",
-      "start_seconds": 788.68,
-      "start_label": "13:09"
+      "start_seconds": 927.06,
+      "start_label": "15:27"
     },
     {
       "number": 7,
       "title": "The Earnings Engine",
-      "start_seconds": 938.01,
-      "start_label": "15:38"
+      "start_seconds": 1107.48,
+      "start_label": "18:27"
     },
     {
       "number": 8,
       "title": "Financial Forensics",
-      "start_seconds": 1081.35,
-      "start_label": "18:01"
+      "start_seconds": 1281.3,
+      "start_label": "21:21"
     },
     {
       "number": 9,
       "title": "Assessing Management & Dividends",
-      "start_seconds": 1283.27,
-      "start_label": "21:23"
+      "start_seconds": 1535.32,
+      "start_label": "25:35"
     },
     {
       "number": 10,
       "title": "Designing the Allocation",
-      "start_seconds": 1429.78,
-      "start_label": "23:50"
+      "start_seconds": 1712.46,
+      "start_label": "28:32"
     },
     {
       "number": 11,
       "title": "The Re-Evaluation Loop",
-      "start_seconds": 1581.94,
-      "start_label": "26:22"
+      "start_seconds": 1895.88,
+      "start_label": "31:36"
     },
     {
       "number": 12,
       "title": "The Exit Protocols",
-      "start_seconds": 1737.99,
-      "start_label": "28:58"
+      "start_seconds": 2092.62,
+      "start_label": "34:53"
     }
   ],
   "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a?"

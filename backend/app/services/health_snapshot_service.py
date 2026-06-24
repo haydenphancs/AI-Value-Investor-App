@@ -24,10 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import (
-    get_sector_benchmark_lookup,
-    mature_benchmark_value,
-)
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -374,17 +371,17 @@ class HealthSnapshotService:
             sector_ic = sector_qr = sector_de = sector_cr = None
             if sector:
                 try:
-                    # Rich shape so the mature-period picker can apply the floor.
-                    bench = get_sector_benchmark_lookup().get_benchmarks(
+                    # CURRENT benchmark per metric: TTM row if present, else latest
+                    # mature annual value (fallback).
+                    cur = get_sector_benchmark_lookup().get_current_benchmark_values(
                         industry,
                         sector,
                         ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
-                        "annual",
                     )
-                    sector_ic = mature_benchmark_value(bench.get("interest_coverage", {}))
-                    sector_qr = mature_benchmark_value(bench.get("quick_ratio", {}))
-                    sector_de = mature_benchmark_value(bench.get("debt_to_equity", {}))
-                    sector_cr = mature_benchmark_value(bench.get("current_ratio", {}))
+                    sector_ic = cur.get("interest_coverage")
+                    sector_qr = cur.get("quick_ratio")
+                    sector_de = cur.get("debt_to_equity")
+                    sector_cr = cur.get("current_ratio")
                 except Exception as e:
                     logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 

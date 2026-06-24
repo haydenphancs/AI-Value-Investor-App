@@ -159,19 +159,25 @@ struct DeepDiveMetricCard: Identifiable {
     /// rating (which mirrors the Financials tab and can disagree with the
     /// takeaway — e.g. a 4★ Health card whose footer is "Debt 4.21, Far Too High").
     let qualitySentiment: String
+    /// "industry" / "sector" / nil — the peer group this card's benchmark
+    /// comparisons use. Drives the "vs industry/sector" footnote + drill-down
+    /// legend wording. nil (legacy reports) → treated as "sector".
+    let peerGroupLevel: String?
 
     init(
         title: String,
         starRating: Int,
         metrics: [DeepDiveMetric],
         qualityLabel: String,
-        qualitySentiment: String = "neutral"
+        qualitySentiment: String = "neutral",
+        peerGroupLevel: String? = nil
     ) {
         self.title = title
         self.starRating = starRating
         self.metrics = metrics
         self.qualityLabel = qualityLabel
         self.qualitySentiment = qualitySentiment
+        self.peerGroupLevel = peerGroupLevel
     }
 
     /// True when any metric in this card has been compared to the sector

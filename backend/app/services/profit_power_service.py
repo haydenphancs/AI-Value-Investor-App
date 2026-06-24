@@ -392,6 +392,9 @@ class ProfitPowerService:
         ]
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
+        # "industry" if the benchmark lines come from the company's industry peers,
+        # "sector" on fallback — labels the drill-down legend/footer.
+        peer_group_level: Optional[str] = None
         if sector:
             lookup = get_sector_benchmark_lookup()
             benchmarks_annual = lookup.get_benchmark_values(
@@ -400,6 +403,22 @@ class ProfitPowerService:
             benchmarks_quarterly = lookup.get_benchmark_values(
                 industry, sector, _MARGIN_BENCHMARK_METRICS, "quarterly"
             )
+            # One ticker-level peer group for the label, by majority of the margin
+            # benchmark cells (rich lookup is a cache hit — same args as above).
+            rich = lookup.get_benchmarks(
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual"
+            )
+            levels = [
+                c.get("level")
+                for periods in rich.values()
+                for c in periods.values()
+            ]
+            if levels:
+                peer_group_level = (
+                    "industry"
+                    if levels.count("industry") >= levels.count("sector")
+                    else "sector"
+                )
 
         # Phase 5: attach sector averages and build response.
         # sector_benchmarks stores every margin as a raw DECIMAL (0.12 = 12%), so
@@ -439,6 +458,7 @@ class ProfitPowerService:
             symbol=ticker,
             annual=_to_schemas(annual_points, benchmarks_annual),
             quarterly=_to_schemas(quarterly_points, benchmarks_quarterly),
+            peer_group_level=peer_group_level,
         )
 
         # Phase 6: extract next earnings date for cache invalidation

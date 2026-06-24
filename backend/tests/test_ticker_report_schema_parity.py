@@ -270,6 +270,7 @@ def test_profit_power_frozen_into_report_and_validates():
             sector_average_fcf_margin=12.0,
         )],
         quarterly=[],
+        peer_group_level="industry",
     )
     report = coll.assemble_report(out, stage_a_fallback())
 
@@ -280,6 +281,8 @@ def test_profit_power_frozen_into_report_and_validates():
     assert pp.annual[0].fcf_margin == 27.0
     assert pp.annual[0].sector_average_fcf_margin == 12.0
     assert pp.annual[0].sector_average_gross_margin == 38.0
+    # peer_group_level drives the iOS "Industry Avg" vs "Sector Avg" label.
+    assert pp.peer_group_level == "industry"
     # ...and the full report validates with profit_power coerced to the model.
     validated = TickerReportResponse.model_validate(report)
     assert validated.profit_power is not None
@@ -290,6 +293,33 @@ def test_profit_power_frozen_into_report_and_validates():
     report2 = coll.assemble_report(out, stage_a_fallback())
     assert report2["profit_power"] is None
     assert TickerReportResponse.model_validate(report2).profit_power is None
+
+
+def test_fundamental_cards_carry_peer_group_level():
+    """All 4 fundamental cards carry the ticker-wide peer_group_level
+    ("industry"/"sector") that labels the "vs ___ average" footnote + drill-down
+    legend on iOS. Optional → legacy reports omit it (None)."""
+    from app.services.agents.ticker_report_data_collector import (
+        _build_fundamental_metrics_from_snapshots,
+    )
+    from app.schemas.ticker_report import DeepDiveMetricCardResponse
+
+    cards = _build_fundamental_metrics_from_snapshots(
+        profitability=None, growth=None, valuation=None, health=None,
+        peer_group_level="industry",
+    )
+    assert len(cards) == 4
+    for c in cards:
+        assert c["peer_group_level"] == "industry"
+        # Validates against the response schema iOS decodes.
+        DeepDiveMetricCardResponse.model_validate(c)
+
+    # Default (legacy-safe) → None on every card.
+    legacy = _build_fundamental_metrics_from_snapshots(
+        profitability=None, growth=None, valuation=None, health=None,
+    )
+    assert all(c["peer_group_level"] is None for c in legacy)
+    assert DeepDiveMetricCardResponse.model_validate(legacy[0]).peer_group_level is None
 
 
 def test_pros_cons_capped_at_five():

@@ -21,10 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
-from app.services.sector_benchmark_lookup import (
-    get_sector_benchmark_lookup,
-    mature_benchmark_value,
-)
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -987,12 +984,12 @@ class HealthCheckService:
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
         logger.info(f"Health check {ticker}: raw_sector={raw_sector!r}, normalized={sector!r}, industry={industry!r}")
 
-        benchmarks: Dict[str, Dict[str, float]] = {}
+        # CURRENT benchmark per metric: TTM row if present, else latest mature annual
+        # value (fallback). Flat {metric: value | None}.
+        cur_bench: Dict[str, Optional[float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            # Rich shape {metric: {period: {value, level, peer_group_name, n}}};
-            # mature_benchmark_value applies the sample-size floor per metric.
-            benchmarks = lookup.get_benchmarks(
+            cur_bench = lookup.get_current_benchmark_values(
                 industry,
                 sector,
                 [
@@ -1003,17 +1000,10 @@ class HealthCheckService:
                     "interest_coverage",
                     "quick_ratio",
                 ],
-                "annual",
             )
-            benchmarks_keys = {
-                k: list(v.keys()) for k, v in benchmarks.items()
-            }
-            logger.info(
-                f"Health check {ticker}: benchmarks returned keys="
-                f"{benchmarks_keys}"
-            )
-            for bm_name, bm_data in benchmarks.items():
-                if not bm_data:
+            logger.info(f"Health check {ticker}: current benchmarks={cur_bench}")
+            for bm_name, bm_val in cur_bench.items():
+                if bm_val is None:
                     logger.warning(f"Health check {ticker}: NO benchmark data for {bm_name}")
         else:
             logger.warning(f"Health check {ticker}: no sector found, skipping benchmark lookup")
@@ -1090,10 +1080,9 @@ class HealthCheckService:
             if mdef["is_percentage"]:
                 display_val = round(company_val * 100, 2)
 
-            # Latest MATURE sector/industry benchmark (sample-size floor — a thin
-            # just-closed year is held back in favour of the last full year).
-            metric_benchmarks = benchmarks.get(mdef["benchmark_name"], {})
-            sector_val = mature_benchmark_value(metric_benchmarks)
+            # CURRENT sector/industry benchmark (TTM row if present, else latest
+            # mature annual value) for this metric.
+            sector_val = cur_bench.get(mdef["benchmark_name"])
             sector_display = None
             if sector_val is not None:
                 if mdef["is_percentage"]:

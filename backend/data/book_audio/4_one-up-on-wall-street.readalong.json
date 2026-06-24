@@ -8,8 +8,8 @@
         "sentences": [
           {
             "text": "The \"Smart Money\" Myth",
-            "start": 8.700563982886036,
-            "end": 9.80063529106703
+            "start": 7.520813676693358,
+            "end": 8.760947846786411
           }
         ]
       },
@@ -18,33 +18,33 @@
         "sentences": [
           {
             "text": "Come closer.",
-            "start": 11.180724750421367,
-            "end": 11.68075716323091
+            "start": 9.52103008006925,
+            "end": 10.26111014931833
           },
           {
             "text": "Let\u2019s be honest about why you\u2019re nervous.",
-            "start": 12.020779203941398,
-            "end": 13.760892000518606
+            "start": 10.881177234364857,
+            "end": 12.721376325470679
           },
           {
             "text": "You think the game is rigged.",
-            "start": 14.28092570984053,
-            "end": 15.841026837806302
+            "start": 13.661478035057348,
+            "end": 15.021625189352955
           },
           {
             "text": "You look at the guys in the glass towers with their Bloomberg terminals, high-frequency trading algorithms, and billion-dollar research budgets, and you feel like a minnow swimming with sharks.",
-            "start": 16.361060547128226,
-            "end": 25.821673797484767
+            "start": 15.521679290196928,
+            "end": 25.56276563514391
           },
           {
             "text": "You assume that to win, you need to play their game.",
-            "start": 26.4417139893686,
-            "end": 29.441908466225854
+            "start": 26.302845704392993,
+            "end": 29.083146505085484
           },
           {
             "text": "But that is exactly why most retail investors get slaughtered\u2014they try to imitate the \"pros\" without realizing that the pros are actually handcuffed.",
-            "start": 30.021946065084922,
-            "end": 38.00246337352522
+            "start": 29.66320926206449,
+            "end": 38.24413763254707
           }
         ]
       },
@@ -53,8 +53,8 @@
         "sentences": [
           {
             "text": "The Institutional Handcuffs",
-            "start": 39.442556722416704,
-            "end": 40.8626487747958
+            "start": 38.74419173339105,
+            "end": 40.16434537978793
           }
         ]
       },
@@ -63,23 +63,23 @@
         "sentences": [
           {
             "text": "Peter Lynch, the legend who ran the Magellan Fund, used to laugh about this.",
-            "start": 42.14273175158823,
-            "end": 45.90297549591599
+            "start": 40.62439515256438,
+            "end": 44.3647998268773
           },
           {
             "text": "He described the \"institutional imperative\" that paralyzes professional fund managers.",
-            "start": 46.42300920523791,
-            "end": 50.60328017632569
+            "start": 45.104879896126384,
+            "end": 49.76538411599221
           },
           {
             "text": "Imagine a fund manager at a cocktail party.",
-            "start": 51.143315182159995,
-            "end": 52.98343446129911
+            "start": 50.68548366154513,
+            "end": 52.745706557022295
           },
           {
             "text": "He explains that he can\u2019t just buy a stock because it\u2019s profitable; he has to buy what is \"acceptable.\"",
-            "start": 53.48346687410865,
-            "end": 58.463789705691696
+            "start": 53.525790954338895,
+            "end": 59.186403375892674
           }
         ]
       },
@@ -88,38 +88,38 @@
         "sentences": [
           {
             "text": "Lynch famously noted that \"You never get fired for losing money on IBM.\"",
-            "start": 60.16389990924414,
-            "end": 64.0241501361338
+            "start": 59.74646396883792,
+            "end": 64.14694005626488
           },
           {
             "text": "If a manager buys IBM and it tanks, his boss shrugs\u2014everyone holds IBM.",
-            "start": 64.62418903150525,
-            "end": 68.86446389213017
+            "start": 64.76700714131141,
+            "end": 70.10758493832505
           },
           {
             "text": "But if that same manager buys a small, obscure company like a donut chain or a motel franchise, and that tanks?",
-            "start": 69.3844976014521,
-            "end": 75.26487877609232
+            "start": 70.94767582774293,
+            "end": 77.06833802207315
           },
           {
             "text": "He\u2019s fired for gambling.",
-            "start": 75.60490081680281,
-            "end": 76.78497731103333
+            "start": 77.50838563081585,
+            "end": 78.78852412897642
           },
           {
             "text": "By the time an institution is \"allowed\" to buy a high-growth stock, the company has usually been performing well for years.",
-            "start": 77.38501620640477,
-            "end": 83.10538700894594
+            "start": 79.28857822982039,
+            "end": 85.88929236096084
           },
           {
             "text": "The \"Smart Money\" is actually the \"Late Money.\"",
-            "start": 83.5854181252431,
-            "end": 85.7655594450927
+            "start": 86.46935511793986,
+            "end": 88.94962345812596
           },
           {
             "text": "They are forced to wait until the coast is clear, leaving the biggest gains on the table for the flexible amateur who saw the lines out the door three years earlier.",
-            "start": 86.18558667185272,
-            "end": 93.70607416050824
+            "start": 89.68970352737504,
+            "end": 97.27052369616968
           }
         ]
       },
@@ -128,8 +128,8 @@
         "sentences": [
           {
             "text": "The ETF Blindspot",
-            "start": 95.26617528847402,
-            "end": 96.52625696875405
+            "start": 97.83058428911492,
+            "end": 99.19073144341053
           }
         ]
       },
@@ -138,18 +138,18 @@
         "sentences": [
           {
             "text": "This dynamic is even more aggressive in the modern era.",
-            "start": 97.0262893815636,
-            "end": 99.82647089329704
+            "start": 100.01082016879465,
+            "end": 102.67110798528458
           },
           {
             "text": "Today, the market is dominated by passive ETFs and Index Funds.",
-            "start": 100.36650589913134,
-            "end": 104.16675223648386
+            "start": 103.3911858904999,
+            "end": 107.8716706340619
           },
           {
             "text": "These funds operate on rigid rules\u2014they must buy the biggest companies (like Apple or NVIDIA) regardless of valuation, and they cannot touch companies below a certain market cap.",
-            "start": 104.72678853883055,
-            "end": 114.7274367950214
+            "start": 108.4117290629734,
+            "end": 119.39291711750705
           }
         ]
       },
@@ -158,33 +158,33 @@
         "sentences": [
           {
             "text": "Think about the early days of Zoom or specialized AI tools.",
-            "start": 115.5874925450538,
-            "end": 118.80770128354726
+            "start": 120.23300800692492,
+            "end": 123.77339104090025
           },
           {
             "text": "You might use a new piece of software at work every day, loving how it solves a problem.",
-            "start": 119.40774017891871,
-            "end": 123.48800466744459
+            "start": 124.3334516338455,
+            "end": 129.27398615018396
           },
           {
             "text": "Meanwhile, Wall Street analysts can\u2019t cover it yet because it\u2019s too small, and the ETFs can\u2019t buy it because it\u2019s not in the S&P 500.",
-            "start": 123.98803708025412,
-            "end": 130.1284351095553
+            "start": 129.79404241506168,
+            "end": 136.73479333477604
           },
           {
             "text": "This creates a massive inefficiency.",
-            "start": 131.3285129002982,
-            "end": 133.26863866199923
+            "start": 138.1549469811729,
+            "end": 140.19516771261632
           },
           {
             "text": "While the algorithms are fighting over fractions of a penny on Tesla, you have free reign in the under-followed small-cap market.",
-            "start": 133.80867366783355,
-            "end": 139.80906262154804
+            "start": 141.3352910625406,
+            "end": 147.97600952174855
           },
           {
             "text": "Your lack of a \"compliance department\" is your greatest competitive advantage.",
-            "start": 140.36909892389474,
-            "end": 143.80932192402437
+            "start": 148.7760960830989,
+            "end": 152.65651590564815
           }
         ]
       }
@@ -195,8 +195,8 @@
         "sentences": [
           {
             "text": "The Casino Fallacy",
-            "start": 159.45063387175722,
-            "end": 160.51076358296623
+            "start": 190.08056937172776,
+            "end": 191.14068499127401
           }
         ]
       },
@@ -205,28 +205,28 @@
         "sentences": [
           {
             "text": "Most people treat the stock market like a casino, hoping for a lucky spin, but panicking the moment the dealer takes a chip.",
-            "start": 162.41099608418992,
-            "end": 168.9918012726383
+            "start": 191.80075698080282,
+            "end": 198.26146160558466
           },
           {
             "text": "They buy high because their neighbor made a killing, and sell low because the news anchor looked worried.",
-            "start": 169.65188203622125,
-            "end": 174.43246696035243
+            "start": 199.18156195462478,
+            "end": 204.78217277486914
           },
           {
             "text": "They fail not because they lack intelligence or data, but because they lack stomach.",
-            "start": 175.0525428291728,
-            "end": 179.2730592266275
+            "start": 205.48224912739965,
+            "end": 210.10275305410124
           },
           {
             "text": "They haven't asked themselves the only question that matters before opening a brokerage account: \"What will I do when\u2014not if\u2014my portfolio drops 50%?\"",
-            "start": 179.85313020068529,
-            "end": 187.87411160058738
+            "start": 210.922842495637,
+            "end": 218.7436954624782
           },
           {
             "text": "If you don't have an answer, you are already the market's prey.",
-            "start": 189.25428046989722,
-            "end": 192.15463534018602
+            "start": 220.30386561954626,
+            "end": 223.2041819371728
           }
         ]
       },
@@ -235,8 +235,8 @@
         "sentences": [
           {
             "text": "The Stomach Over the Brain",
-            "start": 195.01498531571218,
-            "end": 196.37515173764075
+            "start": 223.7042364746946,
+            "end": 225.20440008726004
           }
         ]
       },
@@ -245,23 +245,23 @@
         "sentences": [
           {
             "text": "Peter Lynch calls this \"The Mirror Test.\"",
-            "start": 198.87545766030348,
-            "end": 200.93570974057758
+            "start": 225.70445462478187,
+            "end": 227.96470113438048
           },
           {
             "text": "Before buying a single share, you must stand in front of a mirror and ask yourself three questions: \"Do I own a house?",
-            "start": 201.53578316201666,
-            "end": 208.0765834557024
+            "start": 228.7447862129145,
+            "end": 235.50552356020944
           },
           {
             "text": "Do I need the money before I can get it back?",
-            "start": 208.61664953499758,
-            "end": 210.41686979931475
+            "start": 236.14559336823737,
+            "end": 238.3858376963351
           },
           {
             "text": "Do I have the personal qualities that will bring me success?\"",
-            "start": 211.0369456681351,
-            "end": 213.63726382770437
+            "start": 239.00590532286213,
+            "end": 242.00623254799302
           }
         ]
       },
@@ -270,43 +270,43 @@
         "sentences": [
           {
             "text": "Lynch tells the story of the frantic calls he\u2019d get during market crashes.",
-            "start": 214.47736661771904,
-            "end": 217.71776309348996
+            "start": 242.58629581151834,
+            "end": 246.24669502617803
           },
           {
             "text": "Even when his fund, Magellan, was the best performing in the world, the average investor in his fund actually lost money.",
-            "start": 218.37784385707295,
-            "end": 224.8786392559961
+            "start": 246.80675610820245,
+            "end": 253.00743237347297
           },
           {
             "text": "Why? because they bought in when he was on the cover of a magazine and sold out the moment the market dipped.",
-            "start": 225.47871267743517,
-            "end": 230.8193661282428
+            "start": 253.60749781849916,
+            "end": 259.50814136125655
           },
           {
             "text": "They treated the stock market like a savings account that pays 15% interest.",
-            "start": 231.43944199706317,
-            "end": 235.11989231522273
+            "start": 260.12820898778364,
+            "end": 264.3886736474695
           },
           {
             "text": "It doesn't.",
-            "start": 235.61995349975527,
-            "end": 236.0400048947626
+            "start": 264.84872382198955,
+            "end": 265.3887827225131
           },
           {
             "text": "He explains that the most important organ for investing isn't the brain; it's the stomach.",
-            "start": 236.64007831620168,
-            "end": 241.24064121390114
+            "start": 266.1088612565445,
+            "end": 271.26942408376965
           },
           {
             "text": "If you are susceptible to selling everything in a panic because \"The Big One\" is coming, you should never buy a stock in the first place.",
-            "start": 241.8607170827215,
-            "end": 248.0414733235438
+            "start": 272.0095047993019,
+            "end": 278.8502508726004
           },
           {
             "text": "You are better off in a money market fund than being right about a company but wrong about your own psychology.",
-            "start": 248.6615491923642,
-            "end": 253.66216103768969
+            "start": 279.5503272251309,
+            "end": 284.73089223385693
           }
         ]
       },
@@ -315,8 +315,8 @@
         "sentences": [
           {
             "text": "The Gamification Trap",
-            "start": 256.1424645129711,
-            "end": 257.28260401370534
+            "start": 285.23094677137874,
+            "end": 286.5110863874346
           }
         ]
       },
@@ -325,18 +325,18 @@
         "sentences": [
           {
             "text": "This \"stomach\" problem has only intensified in the age of instant information and gamified trading apps.",
-            "start": 257.8826774351444,
-            "end": 263.883411649535
+            "start": 287.071147469459,
+            "end": 293.7918804537522
           },
           {
             "text": "In Lynch's day, you had to call a broker to sell; that friction saved people from themselves.",
-            "start": 264.543492413118,
-            "end": 269.5841091532061
+            "start": 294.5119589877836,
+            "end": 299.7525305410122
           },
           {
             "text": "Today, you can liquidate your life savings from a notification on your watch while waiting for a latte.",
-            "start": 270.1641801272638,
-            "end": 275.6648531571219
+            "start": 300.2725872600349,
+            "end": 305.3331391797557
           }
         ]
       },
@@ -345,28 +345,28 @@
         "sentences": [
           {
             "text": "Consider the \"Crypto crashes\" or the meme-stock frenzies.",
-            "start": 276.28492902594223,
-            "end": 279.36530592266274
+            "start": 306.1932329842932,
+            "end": 309.3535776614311
           },
           {
             "text": "Investors with high conviction in the technology (like blockchain) often get flushed out by 80% drawdowns because they used leverage or money they needed for next month's rent.",
-            "start": 279.9453768967205,
-            "end": 289.6065589818894
+            "start": 310.153664921466,
+            "end": 320.2947709424084
           },
           {
             "text": "The volatility is the price of admission for the returns.",
-            "start": 290.2666397454724,
-            "end": 293.16699461576115
+            "start": 321.134862565445,
+            "end": 323.9151657940663
           },
           {
             "text": "If you are constantly checking your portfolio app, getting a dopamine hit when it's green and a cortisol spike when it's red, you are failing the Mirror Test every single day.",
-            "start": 293.8470778267254,
-            "end": 303.028201174743
+            "start": 324.5752377835951,
+            "end": 334.0762739965096
           },
           {
             "text": "You are confusing volatility (the price moving around) with risk (permanent loss of capital).",
-            "start": 303.7082843857073,
-            "end": 309.04893783651494
+            "start": 334.7363459860384,
+            "end": 340.3769611692845
           }
         ]
       }
@@ -377,8 +377,8 @@
         "sentences": [
           {
             "text": "The Prediction Addiction",
-            "start": 322.6706303432436,
-            "end": 323.9507936710476
+            "start": 373.04052886734246,
+            "end": 374.82072498898196
           }
         ]
       },
@@ -387,33 +387,33 @@
         "sentences": [
           {
             "text": "The single biggest waste of time for any investor is trying to predict the economy.",
-            "start": 324.5708727829527,
-            "end": 329.2114648462422
+            "start": 375.6808197443808,
+            "end": 380.42134200088145
           },
           {
             "text": "You sit there, paralyzed, watching CNBC, terrified because the Fed might raise rates by a quarter point or because some pundit says a recession is \"imminent\" (they\u2019ve been saying that for six years).",
-            "start": 329.81154140615035,
-            "end": 340.95296286844456
+            "start": 381.24143234905245,
+            "end": 391.92260907888937
           },
           {
             "text": "You think you\u2019re being responsible by waiting for the \"right time\" when the skies clear.",
-            "start": 341.53303687635577,
-            "end": 345.89359321168814
+            "start": 392.3826597620097,
+            "end": 396.3630982811811
           },
           {
             "text": "But here is the brutal truth: the skies never clear.",
-            "start": 346.4536646676024,
-            "end": 349.61406788311854
+            "start": 397.04317320405465,
+            "end": 400.4035434111944
           },
           {
             "text": "There is always something to worry about.",
-            "start": 350.0141189230573,
-            "end": 351.69433329080005
+            "start": 401.36364918466285,
+            "end": 403.2038519171441
           },
           {
             "text": "If you spend 13 minutes a year thinking about economics, you've wasted 10 minutes.",
-            "start": 352.1943970907235,
-            "end": 356.7149738420314
+            "start": 403.8039180255619,
+            "end": 408.704457910974
           }
         ]
       },
@@ -422,8 +422,8 @@
         "sentences": [
           {
             "text": "The Cocktail Party Indicator",
-            "start": 357.9951371698354,
-            "end": 359.2753004976394
+            "start": 409.24451740855005,
+            "end": 410.7646848832085
           }
         ]
       },
@@ -432,18 +432,18 @@
         "sentences": [
           {
             "text": "Peter Lynch loved to poke fun at the \"The Great Worry.\"",
-            "start": 359.8153694015567,
-            "end": 362.7357419931096
+            "start": 411.2847421771706,
+            "end": 414.2650705156457
           },
           {
             "text": "He tells the story of how, in the 1950s, people were terrified of a nuclear war and a depression; in the 1970s, it was oil prices; in the 1980s, it was Japan taking over the world.",
-            "start": 363.29581344902385,
-            "end": 373.79715324741613
+            "start": 414.94514543851915,
+            "end": 426.7264433671221
           },
           {
             "text": "There was never a year where a sensible person couldn\u2019t find a dozen logical reasons to sell everything and hide under the bed.",
-            "start": 374.3172195993365,
-            "end": 380.3579903024116
+            "start": 427.5465337152931,
+            "end": 434.2872763331864
           }
         ]
       },
@@ -452,38 +452,38 @@
         "sentences": [
           {
             "text": "Lynch illustrated this with his \"Cocktail Party Theory.\"",
-            "start": 381.0380770703075,
-            "end": 383.2383577899707
+            "start": 435.06736227412955,
+            "end": 438.1276994270604
           },
           {
             "text": "When he\u2019d go to a party during a market bottom, no one wanted to talk about stocks; they talked about dentistry or the weather.",
-            "start": 383.778426693888,
-            "end": 389.25912594104886
+            "start": 439.047800793301,
+            "end": 445.64852798589686
           },
           {
             "text": "When the market was up 15%, they\u2019d ask him for tips.",
-            "start": 389.69918208498154,
-            "end": 392.17949853260177
+            "start": 446.44861613045396,
+            "end": 449.68897311591013
           },
           {
             "text": "When the market was at a dangerous peak, they were giving him tips.",
-            "start": 392.5595470205436,
-            "end": 395.1398762281485
+            "start": 450.16902600264433,
+            "end": 453.4893918025562
           },
           {
             "text": "His point was simple: the crowd is always reacting to what has happened, not what will happen.",
-            "start": 395.57993237208115,
-            "end": 400.70058568329716
+            "start": 454.26947774349935,
+            "end": 460.1501256059938
           },
           {
             "text": "He famously said, \"If you could predict the economy, you'd be a billionaire.\"",
-            "start": 401.1806469312237,
-            "end": 404.5210731147123
+            "start": 460.67018289995593,
+            "end": 464.63061921551343
           },
           {
             "text": "Since you can't, you must ignore the macro and focus entirely on the micro: the specific earnings of the company in front of you.",
-            "start": 404.941126706648,
-            "end": 411.5419688656374
+            "start": 465.1906809167034,
+            "end": 471.81141031291315
           }
         ]
       },
@@ -492,8 +492,8 @@
         "sentences": [
           {
             "text": "The Doom-Scrolling Tax",
-            "start": 412.7821270894475,
-            "end": 413.8822674492791
+            "start": 472.31146540326137,
+            "end": 473.79162847069193
           }
         ]
       },
@@ -502,18 +502,18 @@
         "sentences": [
           {
             "text": "This is even harder today because the \"noise\" has become a deafening roar.",
-            "start": 414.40233380119946,
-            "end": 418.80289524052574
+            "start": 474.6117188188629,
+            "end": 479.0522080211547
           },
           {
             "text": "In Lynch's time, you had the evening news.",
-            "start": 419.50298456041855,
-            "end": 421.70326528008167
+            "start": 479.63227192595855,
+            "end": 481.972529748788
           },
           {
             "text": "Today, you have a 24/7 feed of \"doom-scrolling\" on X (Twitter) and YouTube thumbnails screaming \"MARKET COLLAPSE IMMINENT!\"",
-            "start": 422.2033290800051,
-            "end": 430.3843728467526
+            "start": 482.73261348611726,
+            "end": 490.2534420449537
           }
         ]
       },
@@ -522,38 +522,38 @@
         "sentences": [
           {
             "text": "Think about the COVID-19 crash.",
-            "start": 431.34449534260557,
-            "end": 432.96470205435753
+            "start": 490.9735213750551,
+            "end": 492.79372190392246
           },
           {
             "text": "Macro-economists predicted a decade-long depression.",
-            "start": 433.4847684062779,
-            "end": 436.3851384458339
+            "start": 493.2937769942706,
+            "end": 496.3541141472014
           },
           {
             "text": "If you listened to the macro noise, you sold everything.",
-            "start": 436.9452099017481,
-            "end": 439.5255391093531
+            "start": 497.41423093873954,
+            "end": 500.69459233142356
           },
           {
             "text": "But if you ignored the economy and looked at the micro, you saw that companies like Zoom, Peloton, and Amazon were seeing explosive, unprecedented demand.",
-            "start": 440.0656080132704,
-            "end": 449.0867589638892
+            "start": 501.3146606434553,
+            "end": 510.15563464081094
           },
           {
             "text": "The economy was closed, but specific businesses were booming.",
-            "start": 449.72684062779126,
-            "end": 452.9672540512952
+            "start": 510.8557117672984,
+            "end": 513.9560533274571
           },
           {
             "text": "The same applies to AI today.",
-            "start": 453.6273382671941,
-            "end": 455.06752201097356
+            "start": 514.6761326575584,
+            "end": 516.4163243719701
           },
           {
             "text": "While pundits argue about a \"soft landing\" or \"hard landing\" for the GDP, specific companies are deploying LLMs and revolutionizing productivity regardless of what the Fed does next week.",
-            "start": 455.5475832589001,
-            "end": 466.24894857726173
+            "start": 516.9963882767739,
+            "end": 529.257739092111
           }
         ]
       }
@@ -564,8 +564,8 @@
         "sentences": [
           {
             "text": "The Wall Street Gatekeeper",
-            "start": 479.5506287276342,
-            "end": 480.8707927435388
+            "start": 554.800501398322,
+            "end": 556.080629244906
           }
         ]
       },
@@ -574,28 +574,28 @@
         "sentences": [
           {
             "text": "You probably think the best stock tips are hidden in a locked room on Wall Street, guarded by men in $5,000 suits whispering about \"proprietary data.\"",
-            "start": 482.130949304175,
-            "end": 490.6920129224652
+            "start": 556.7006911705953,
+            "end": 564.9015101877746
           },
           {
             "text": "So you ignore the most powerful investment tool you own: your eyes.",
-            "start": 491.4521073558648,
-            "end": 495.3725944333996
+            "start": 565.8416040751099,
+            "end": 569.701989612465
           },
           {
             "text": "You walk right past the next Apple or Starbucks every single day, use their products, complain about their competitors, and then go home to buy a stock you\u2019ve never heard of because a stranger on the internet said it was \"ready to pop.\"",
-            "start": 496.11268638170975,
-            "end": 508.3742097415507
+            "start": 570.4620655213744,
+            "end": 582.1032281262485
           },
           {
             "text": "This is madness.",
-            "start": 508.9742842942346,
-            "end": 509.9544060636183
+            "start": 582.6432820615262,
+            "end": 583.5833759488613
           },
           {
             "text": "The best research isn't on a spreadsheet; it's in your shopping cart.",
-            "start": 510.59448558648114,
-            "end": 514.0549155069582
+            "start": 584.3434518577707,
+            "end": 587.7637934478626
           }
         ]
       },
@@ -604,8 +604,8 @@
         "sentences": [
           {
             "text": "The Pantyhose Advantage",
-            "start": 515.0750422465209,
-            "end": 516.4352112326044
+            "start": 588.343851378346,
+            "end": 590.0040171793847
           }
         ]
       },
@@ -614,28 +614,28 @@
         "sentences": [
           {
             "text": "Peter Lynch loved to humiliate the professional class with this concept.",
-            "start": 517.5553503976143,
-            "end": 520.8757629224652
+            "start": 590.7240890930883,
+            "end": 594.2244386735916
           },
           {
             "text": "He tells the story of Hanes, the company that made L\u2019eggs pantyhose.",
-            "start": 521.4158300198807,
-            "end": 524.7762475149106
+            "start": 594.6844846184579,
+            "end": 598.544870155813
           },
           {
             "text": "In the 1970s, Wall Street analysts were busy crunching numbers on steel mills and solar energy.",
-            "start": 525.4163270377734,
-            "end": 530.4769557654075
+            "start": 599.1249280862964,
+            "end": 605.2055353575709
           },
           {
             "text": "Meanwhile, Lynch\u2019s wife, Carolyn, came home raving about these new pantyhose sold in plastic eggs at the grocery store.",
-            "start": 531.0770303180915,
-            "end": 537.2577982107356
+            "start": 606.0456192568917,
+            "end": 612.3862524970036
           },
           {
             "text": "They fit better, they were convenient, and she bought them every week.",
-            "start": 537.7378578528827,
-            "end": 540.6582206759443
+            "start": 613.12632640831,
+            "end": 616.6666799840192
           }
         ]
       },
@@ -644,43 +644,43 @@
         "sentences": [
           {
             "text": "Lynch didn't run a complex discounted cash flow model initially.",
-            "start": 541.4183151093439,
-            "end": 544.3186754473161
+            "start": 617.5867718737514,
+            "end": 620.9271054734319
           },
           {
             "text": "He just looked at the checkout line.",
-            "start": 544.7587301192843,
-            "end": 546.03888916501
+            "start": 621.5271654015181,
+            "end": 623.2673391929684
           },
           {
             "text": "He saw women buying them in droves.",
-            "start": 546.3589289264413,
-            "end": 548.2391625248509
+            "start": 623.7273851378345,
+            "end": 626.0076128645625
           },
           {
             "text": "He realized that Hanes had a monopoly on the \"supermarket pantyhose\" niche.",
-            "start": 548.7592271371769,
-            "end": 552.259662027833
+            "start": 626.5276648022373,
+            "end": 630.5480663204155
           },
           {
             "text": "While the \"smart money\" was ignoring a boring clothing company, the stock went up six-fold.",
-            "start": 552.8397340954274,
-            "end": 557.5003131212724
+            "start": 631.3081422293247,
+            "end": 635.6885797043548
           },
           {
             "text": "He applied the same logic to Dunkin\u2019 Donuts.",
-            "start": 558.1803976143141,
-            "end": 560.0006237574553
+            "start": 636.128623651618,
+            "end": 638.6488753495805
           },
           {
             "text": "He didn't need an annual report to tell him the coffee was good; he just saw that the parking lot was full at 6:00 AM every single morning.",
-            "start": 560.4806833996024,
-            "end": 566.3214090457257
+            "start": 639.2289332800639,
+            "end": 646.4496544147023
           },
           {
             "text": "If you like the product, chances are millions of others do too.",
-            "start": 566.8614761431411,
-            "end": 569.6818265407554
+            "start": 647.3897483020376,
+            "end": 650.9501038753496
           }
         ]
       },
@@ -689,8 +689,8 @@
         "sentences": [
           {
             "text": "The \"User Experience\" Alpha",
-            "start": 570.781963220676,
-            "end": 572.2221421471173
+            "start": 651.6501737914502,
+            "end": 653.5703655613264
           }
         ]
       },
@@ -699,53 +699,53 @@
         "sentences": [
           {
             "text": "In the digital age, this \"local knowledge\" advantage has exploded.",
-            "start": 572.642194333996,
-            "end": 576.6626938369782
+            "start": 654.2104294846184,
+            "end": 658.490856971634
           },
           {
             "text": "You don't just shop at the mall; you work in specialized software environments and live in digital ecosystems.",
-            "start": 577.3227758449304,
-            "end": 583.8435859840954
+            "start": 659.2509328805434,
+            "end": 665.1715241709948
           },
           {
             "text": "Think about the rise of Slack or CrowdStrike.",
-            "start": 584.7436978131212,
-            "end": 587.4440333001988
+            "start": 665.5715641230523,
+            "end": 668.2518318018377
           },
           {
             "text": "Who knew about these first?",
-            "start": 587.9841003976143,
-            "end": 589.2042519880715
+            "start": 668.9919057131442,
+            "end": 670.3920455453456
           },
           {
             "text": "Not the bankers.",
-            "start": 589.7243166003976,
-            "end": 590.4244035785289
+            "start": 670.9721034758289,
+            "end": 671.7721833799441
           },
           {
             "text": "It was the IT professionals and office workers who started using them and realized, \"Wow, this is actually essential.\"",
-            "start": 590.9044632206759,
-            "end": 596.865203777336
+            "start": 672.2522313224131,
+            "end": 678.6728725529365
           },
           {
             "text": "Or consider the Ozempic/Wegovy craze.",
-            "start": 597.8053205765408,
-            "end": 600.06560139165
+            "start": 679.4129464642429,
+            "end": 681.6731721933679
           },
           {
             "text": "Long before the stock chart went parabolic, ordinary people in gyms and doctor\u2019s offices were whispering about a \"miracle shot\" for weight loss.",
-            "start": 600.6256709741551,
-            "end": 608.2466177932406
+            "start": 682.2732321214542,
+            "end": 689.7139752297243
           },
           {
             "text": "If you were a receptionist at a clinic or just a person struggling with weight, you had the \"insider info\" months before the hedge funds caught on.",
-            "start": 608.9066998011929,
-            "end": 616.3076192842942
+            "start": 690.5340571314423,
+            "end": 698.5348561725929
           },
           {
             "text": "Your job, your hobbies, and your subscriptions are a goldmine of data that Wall Street can't access until the quarterly report comes out.",
-            "start": 616.9677012922465,
-            "end": 624.2086008946322
+            "start": 699.3749400719137,
+            "end": 709.8159828206152
           }
         ]
       }
@@ -756,8 +756,8 @@
         "sentences": [
           {
             "text": "The Seduction of \"Sexy\"",
-            "start": 639.1502402088773,
-            "end": 640.6103355091384
+            "start": 753.1603525423728,
+            "end": 754.4004926553672
           }
         ]
       },
@@ -766,33 +766,33 @@
         "sentences": [
           {
             "text": "You are addicted to \"sexy.\"",
-            "start": 641.730408616188,
-            "end": 643.2505078328982
+            "start": 755.3806033898305,
+            "end": 756.6007412429378
           },
           {
             "text": "You want to own the company that\u2019s curing cancer, mining asteroids, or inventing the next iPhone.",
-            "start": 644.0105574412532,
-            "end": 649.3109033942559
+            "start": 757.300820338983,
+            "end": 762.2613807909604
           },
           {
             "text": "You want a stock ticker you can drop into a conversation at a dinner party that makes you look sophisticated and plugged-in.",
-            "start": 649.9509451697128,
-            "end": 655.5713120104439
+            "start": 762.8414463276836,
+            "end": 768.8221220338983
           },
           {
             "text": "But here is the secret that will make you rich while your sophisticated friends go broke: excitement is expensive.",
-            "start": 656.291359007833,
-            "end": 662.2717493472585
+            "start": 769.4421920903955,
+            "end": 776.0029333333333
           },
           {
             "text": "If a company is \"hot,\" it\u2019s already overpriced.",
-            "start": 662.9917963446476,
-            "end": 665.7119738903394
+            "start": 776.6030011299434,
+            "end": 779.3033062146892
           },
           {
             "text": "The path to massive wealth is paved with boredom, disgust, and toxic waste.",
-            "start": 666.5120261096606,
-            "end": 670.9123133159269
+            "start": 779.8633694915254,
+            "end": 784.7439209039547
           }
         ]
       },
@@ -801,8 +801,8 @@
         "sentences": [
           {
             "text": "The Funeral Home Moat",
-            "start": 672.2323994778068,
-            "end": 673.3524725848564
+            "start": 785.2239751412429,
+            "end": 786.5641265536723
           }
         ]
       },
@@ -811,28 +811,28 @@
         "sentences": [
           {
             "text": "Peter Lynch didn\u2019t just tolerate boring companies; he fetishized them.",
-            "start": 674.5725522193212,
-            "end": 678.1727872062663
+            "start": 787.2842079096044,
+            "end": 790.9446214689265
           },
           {
             "text": "He tells the story of his absolute dream stock: Service Corporation International (SCI).",
-            "start": 678.8728328981723,
-            "end": 684.4131945169713
+            "start": 791.7247096045197,
+            "end": 797.5053627118643
           },
           {
             "text": "What did they do?",
-            "start": 685.0732375979112,
-            "end": 685.5332676240209
+            "start": 798.0254214689265,
+            "end": 798.6254892655367
           },
           {
             "text": "They buried people.",
-            "start": 686.1133054830287,
-            "end": 686.9533603133159
+            "start": 799.2655615819209,
+            "end": 800.2456723163841
           },
           {
             "text": "They were a funeral home chain.",
-            "start": 687.2733812010445,
-            "end": 688.4134556135771
+            "start": 800.7257265536723,
+            "end": 802.4659231638418
           }
         ]
       },
@@ -841,23 +841,23 @@
         "sentences": [
           {
             "text": "Lynch loved SCI because it hit every single one of his \"Perfect Stock\" criteria: it had a boring name, it did something disagreeable (nobody likes thinking about death), and rumors about the industry were depressing.",
-            "start": 689.6935391644909,
-            "end": 700.4542415143603
+            "start": 803.005984180791,
+            "end": 814.8273197740112
           },
           {
             "text": "Wall Street analysts refused to cover it because they didn't want to call their clients and say, \"I've got a great deal on coffins.\"",
-            "start": 701.2742950391645,
-            "end": 706.494635770235
+            "start": 815.4873943502824,
+            "end": 822.1281446327683
           },
           {
             "text": "Because the pros ignored it, the stock price stayed low relative to its earnings for years, allowing Lynch to buy in cheap while the company quietly bought up mom-and-pop funeral homes across the country, compounding its value in the shadows.",
-            "start": 707.3746932114883,
-            "end": 718.2754046997389
+            "start": 823.3682847457627,
+            "end": 836.2497401129943
           },
           {
             "text": "He jokingly said if he could find a company with a name like \"Bob\u2019s Toxic Waste & Septic Tank Cleaning,\" he\u2019d buy it immediately.",
-            "start": 719.3154725848565,
-            "end": 725.1558537859008
+            "start": 836.9098146892655,
+            "end": 844.3506553672316
           }
         ]
       },
@@ -866,8 +866,8 @@
         "sentences": [
           {
             "text": "The Boredom Arbitrage",
-            "start": 726.4159360313316,
-            "end": 727.4960065274151
+            "start": 845.1907502824859,
+            "end": 846.7109220338982
           }
         ]
       },
@@ -876,18 +876,18 @@
         "sentences": [
           {
             "text": "This \"Boredom Arbitrage\" is even more potent today because the \"hype cycle\" moves faster than ever.",
-            "start": 728.71608616188,
-            "end": 733.2163798955614
+            "start": 847.5910214689266,
+            "end": 854.0117468926553
           },
           {
             "text": "When \"AI\" became the buzzword, stocks like NVIDIA and Microsoft skyrocketed instantly.",
-            "start": 733.9564281984335,
-            "end": 738.2567088772846
+            "start": 854.8118372881356,
+            "end": 860.3724655367231
           },
           {
             "text": "The premiums were priced in within seconds.",
-            "start": 738.9767558746737,
-            "end": 740.6968681462141
+            "start": 861.1525536723163,
+            "end": 863.692840677966
           }
         ]
       },
@@ -896,43 +896,43 @@
         "sentences": [
           {
             "text": "But look at the \"plumbing\" of the modern world.",
-            "start": 741.336909921671,
-            "end": 743.5970574412534
+            "start": 864.1728949152542,
+            "end": 866.4131480225989
           },
           {
             "text": "While everyone was betting on volatile crypto exchanges, companies like Waste Management (WM) or Cintas (CTAS) (uniform rentals) were printing money.",
-            "start": 744.077088772846,
-            "end": 751.8375953002611
+            "start": 867.1932361581921,
+            "end": 876.7143118644068
           },
           {
             "text": "Think about Costco.",
-            "start": 752.4976383812011,
-            "end": 753.3576945169713
+            "start": 877.394388700565,
+            "end": 878.2744881355932
           },
           {
             "text": "It\u2019s a warehouse.",
-            "start": 753.857727154047,
-            "end": 754.7177832898172
+            "start": 878.9545649717513,
+            "end": 879.7746576271186
           },
           {
             "text": "It sells bulk toilet paper.",
-            "start": 754.8577924281984,
-            "end": 756.2778851174935
+            "start": 880.4347322033898,
+            "end": 882.0149107344632
           },
           {
             "text": "It is the definition of unsexy.",
-            "start": 756.677911227154,
-            "end": 758.6780417754569
+            "start": 882.5349694915254,
+            "end": 884.635206779661
           },
           {
             "text": "Yet, it has crushed the performance of most \"disruptive\" tech stocks over the long run because it dominates a niche, has a recurring revenue model (memberships), and is too boring for the \"get rich quick\" crowd to pump and dump.",
-            "start": 759.2580796344648,
-            "end": 770.51881462141
+            "start": 885.5553107344633,
+            "end": 898.1367322033898
           },
           {
             "text": "In the software world, look for the unsexy B2B SaaS companies that handle payroll or compliance\u2014the stuff that has to happen for the economy to function, regardless of whether ChatGPT takes over the world.",
-            "start": 771.1788577023499,
-            "end": 781.9395600522193
+            "start": 898.916820338983,
+            "end": 910.0980836158192
           }
         ]
       }
@@ -943,8 +943,8 @@
         "sentences": [
           {
             "text": "The One-Size-Fits-All Error",
-            "start": 793.0402919903562,
-            "end": 794.8604138762389
+            "start": 930.9604323725055,
+            "end": 933.1406740576496
           }
         ]
       },
@@ -953,33 +953,33 @@
         "sentences": [
           {
             "text": "You are judging a fish by its ability to climb a tree.",
-            "start": 795.4204513795875,
-            "end": 798.2406402357353
+            "start": 933.8407516629711,
+            "end": 936.5610532150775
           },
           {
             "text": "You buy a utility company and get angry when it doesn't double in six months.",
-            "start": 798.8806830967051,
-            "end": 802.5409282078757
+            "start": 937.1211152993347,
+            "end": 941.281576496674
           },
           {
             "text": "You buy a high-growth tech stock and panic when it drops 20% in a week.",
-            "start": 803.1809710688453,
-            "end": 806.7812121618001
+            "start": 941.8416385809312,
+            "end": 946.4821529933481
           },
           {
             "text": "You are losing money because you are applying the same rules to completely different games.",
-            "start": 807.4412563621752,
-            "end": 811.6815403160996
+            "start": 947.0022106430155,
+            "end": 951.1626718403547
           },
           {
             "text": "You treat every ticker symbol as a \"stock,\" but that is like treating a racehorse, a dairy cow, and a house cat as just \"animals.\"",
-            "start": 812.2215764800428,
-            "end": 819.1220385748727
+            "start": 951.8627494456762,
+            "end": 959.1835609756097
           },
           {
             "text": "If you try to milk the racehorse, you\u2019re going to get kicked.",
-            "start": 819.6620747388159,
-            "end": 821.9422274310206
+            "start": 959.9436452328159,
+            "end": 962.5839379157427
           }
         ]
       },
@@ -988,8 +988,8 @@
         "sentences": [
           {
             "text": "The Taxonomy of Profit",
-            "start": 822.6422743102062,
-            "end": 824.0023653897669
+            "start": 963.2240088691796,
+            "end": 964.4241419068735
           }
         ]
       },
@@ -998,13 +998,13 @@
         "sentences": [
           {
             "text": "Peter Lynch stopped this madness by creating a strict taxonomy.",
-            "start": 824.7224136083578,
-            "end": 827.8626238949905
+            "start": 964.9842039911308,
+            "end": 968.2045609756098
           },
           {
             "text": "Before he bought a single share, he forced the company into one of six boxes: Slow Growers, Stalwarts, Fast Growers, Cyclicals, Asset Plays, or Turnarounds.",
-            "start": 828.4026600589337,
-            "end": 838.3433257433699
+            "start": 968.8446319290465,
+            "end": 979.365798226164
           }
         ]
       },
@@ -1013,38 +1013,38 @@
         "sentences": [
           {
             "text": "He tells the story of how this saved him with the auto industry.",
-            "start": 838.9433659255291,
-            "end": 841.4835360300026
+            "start": 979.9458625277161,
+            "end": 983.0662084257206
           },
           {
             "text": "Most people treated car companies like \"Stalwarts\" (steady reliable growers like Coca-Cola).",
-            "start": 842.0235721939458,
-            "end": 846.2238534690597
+            "start": 983.7662860310421,
+            "end": 989.1468824833703
           },
           {
             "text": "Lynch recognized them as \"Cyclicals\"\u2014companies whose fortunes rise and fall with the economy.",
-            "start": 846.8038923118136,
-            "end": 851.0841789445486
+            "start": 989.8069556541019,
+            "end": 995.4675831485587
           },
           {
             "text": "When Ford was booming, amateurs bought more, thinking the growth was permanent.",
-            "start": 851.6042137690865,
-            "end": 855.0444441467988
+            "start": 996.2676718403548,
+            "end": 1000.1681042128603
           },
           {
             "text": "Lynch sold, knowing the cycle would inevitably turn.",
-            "start": 855.4244695954995,
-            "end": 857.884634342352
+            "start": 1001.1082084257206,
+            "end": 1003.7685033259423
           },
           {
             "text": "He viewed \"Fast Growers\" (like Taco Bell in its early days) as the only ones worth holding through volatility, whereas \"Turnarounds\" (like Chrysler) were pure plays on survival, not growth.",
-            "start": 858.4446718457004,
-            "end": 867.685290650951
+            "start": 1004.4485787139689,
+            "end": 1015.5098048780487
           },
           {
             "text": "If you don't know which category your stock is in, you don't know when to sell.",
-            "start": 868.2253268148942,
-            "end": 871.505546477364
+            "start": 1016.2898913525498,
+            "end": 1020.25033037694
           }
         ]
       },
@@ -1053,8 +1053,8 @@
         "sentences": [
           {
             "text": "The Identity Crisis",
-            "start": 872.2255946959549,
-            "end": 873.2056603268148
+            "start": 1020.9704101995565,
+            "end": 1022.1105365853658
           }
         ]
       },
@@ -1063,53 +1063,53 @@
         "sentences": [
           {
             "text": "In the modern market, misclassification is the primary cause of portfolio death.",
-            "start": 873.6056871149209,
-            "end": 878.406008572194
+            "start": 1022.490578713969,
+            "end": 1027.27110864745
           },
           {
             "text": "Look at Zoom or Peloton during the pandemic.",
-            "start": 878.9260433967318,
-            "end": 881.1861947495312
+            "start": 1027.911179600887,
+            "end": 1030.1914323725055
           },
           {
             "text": "Millions of investors mistook them for \"Fast Growers\" (permanent secular trends).",
-            "start": 881.7262309134744,
-            "end": 886.04652022502
+            "start": 1030.8315033259423,
+            "end": 1035.4720177383592
           },
           {
             "text": "In reality, they were \"Cyclicals\" tied to the \"stay-at-home\" cycle.",
-            "start": 886.506551031342,
-            "end": 889.7467680150013
+            "start": 1035.9920753880265,
+            "end": 1040.112532150776
           },
           {
             "text": "When the world reopened, the cycle turned, and the stocks collapsed.",
-            "start": 890.2067988213233,
-            "end": 893.4270144655773
+            "start": 1040.8526141906873,
+            "end": 1044.3930066518847
           },
           {
             "text": "The same applies to Crypto Miners.",
-            "start": 893.9470492901152,
-            "end": 895.4871524243235
+            "start": 1044.933066518847,
+            "end": 1046.6532572062083
           },
           {
             "text": "They are not \"tech growth stocks\"; they are commodity cyclicals tied to the price of Bitcoin.",
-            "start": 895.8671778730243,
-            "end": 900.2274698633806
+            "start": 1047.4133414634146,
+            "end": 1052.6739246119732
           },
           {
             "text": "If Bitcoin drops, their earnings vanish.",
-            "start": 900.647497990892,
-            "end": 902.5476252343959
+            "start": 1053.2939933481152,
+            "end": 1055.7742682926828
           },
           {
             "text": "Conversely, Microsoft and Apple have transitioned from Fast Growers to \"Stalwarts.\"",
-            "start": 903.1076627377444,
-            "end": 907.3279453522636
+            "start": 1056.3143281596451,
+            "end": 1061.174866962306
           },
           {
             "text": "They won't make you rich overnight anymore, but they offer recession protection that a small-cap AI startup simply cannot.",
-            "start": 907.7079708009643,
-            "end": 913.5083592285025
+            "start": 1061.9349512195122,
+            "end": 1068.6356940133037
           }
         ]
       },
@@ -1118,8 +1118,8 @@
         "sentences": [
           {
             "text": "Match the Strategy",
-            "start": 914.6284342351995,
-            "end": 915.4684904902223
+            "start": 1069.3357716186251,
+            "end": 1070.1558625277162
           }
         ]
       },
@@ -1128,8 +1128,8 @@
         "sentences": [
           {
             "text": "Cyclicals (Chips, Energy, Crypto): Sell when P/E is low (earnings are at peak).",
-            "start": 916.0885320117867,
-            "end": 921.0488641843021
+            "start": 1070.775931263858,
+            "end": 1076.6365809312638
           }
         ]
       },
@@ -1138,8 +1138,8 @@
         "sentences": [
           {
             "text": "Fast Growers (AI, SaaS): Hold as long as the earnings growth story is intact.",
-            "start": 921.5488976694347,
-            "end": 926.3492191267077
+            "start": 1077.0966319290465,
+            "end": 1082.2772062084257
           }
         ]
       },
@@ -1148,8 +1148,8 @@
         "sentences": [
           {
             "text": "Stalwarts (Big Tech): Sell if the valuation gets absurd (e.g., 80x earnings).",
-            "start": 926.7892485936244,
-            "end": 931.169541923386
+            "start": 1082.8572705099778,
+            "end": 1088.4378891352549
           }
         ]
       }
@@ -1160,8 +1160,8 @@
         "sentences": [
           {
             "text": "The Price Tag Distraction",
-            "start": 941.3704688808261,
-            "end": 942.5506335473067
+            "start": 1110.8003820483314,
+            "end": 1112.1405362485616
           }
         ]
       },
@@ -1170,48 +1170,48 @@
         "sentences": [
           {
             "text": "You are hypnotized by the wrong number.",
-            "start": 943.4907647222998,
-            "end": 945.3510242813285
+            "start": 1112.660596087457,
+            "end": 1114.6608262370542
           },
           {
             "text": "You wake up, check your phone, and see a stock price.",
-            "start": 946.1111303377058,
-            "end": 948.6714875802401
+            "start": 1115.3809090909092,
+            "end": 1118.241238204833
           },
           {
             "text": "It\u2019s up $5.",
-            "start": 949.271571308959,
-            "end": 949.4916020094893
+            "start": 1118.7612980437284,
+            "end": 1119.00132566168
           },
           {
             "text": "You feel brilliant.",
-            "start": 950.4717387663968,
-            "end": 951.2318448227742
+            "start": 1119.8414223245109,
+            "end": 1121.1215696202532
           },
           {
             "text": "It\u2019s down $10.",
-            "start": 951.7919229695785,
-            "end": 952.2719899525537
+            "start": 1121.4416064441887,
+            "end": 1122.2216962025316
           },
           {
             "text": "You feel like a failure.",
-            "start": 953.2721295004186,
-            "end": 954.172255093497
+            "start": 1122.8817721518988,
+            "end": 1124.181921749137
           },
           {
             "text": "You are letting the market\u2019s mood swings dictate your emotional state.",
-            "start": 954.9123583589171,
-            "end": 958.1528104939995
+            "start": 1124.781990794016,
+            "end": 1128.1223751438436
           },
           {
             "text": "This is because you view a stock as a piece of paper that magically changes value, rather than what it actually is: a claim on a stream of cash.",
-            "start": 958.8329053865476,
-            "end": 966.8540245604243
+            "start": 1128.7424464902188,
+            "end": 1136.7633693901037
           },
           {
             "text": "If you don't know exactly how the company makes a dollar of profit, you are walking blindfolded into traffic.",
-            "start": 967.5941278258442,
-            "end": 972.8148562656992
+            "start": 1137.7434821634063,
+            "end": 1143.4841426927503
           }
         ]
       },
@@ -1220,8 +1220,8 @@
         "sentences": [
           {
             "text": "The Two-Minute Drill",
-            "start": 973.6949790678202,
-            "end": 974.3950767513257
+            "start": 1144.0242048331415,
+            "end": 1144.9443107019563
           }
         ]
       },
@@ -1230,18 +1230,18 @@
         "sentences": [
           {
             "text": "Peter Lynch had a simple cure for price-fixation: the \"Two-Minute Drill.\"",
-            "start": 975.3352079263187,
-            "end": 978.7956907619314
+            "start": 1145.4043636363635,
+            "end": 1149.1847986191024
           },
           {
             "text": "Before buying, he forced himself to deliver a monologue.",
-            "start": 979.5357940273514,
-            "end": 982.2361708065866
+            "start": 1149.8648768699654,
+            "end": 1152.7452082853856
           },
           {
             "text": "If he couldn't explain to a child in two minutes why the company's earnings were going to go up, he wouldn't buy.",
-            "start": 982.8362545353056,
-            "end": 988.1369941389896
+            "start": 1153.3052727272727,
+            "end": 1158.6858918296894
           }
         ]
       },
@@ -1250,33 +1250,33 @@
         "sentences": [
           {
             "text": "He loved to show charts where the stock price line wobbled all over the place like a drunk, while the earnings line climbed steadily upward like a staircase.",
-            "start": 988.897100195367,
-            "end": 995.8980770304214
+            "start": 1159.4659815880323,
+            "end": 1167.2468768699655
           },
           {
             "text": "His point?",
-            "start": 996.538166341055,
-            "end": 996.8982165782863
+            "start": 1167.6469228998849,
+            "end": 1168.0869735327963
           },
           {
             "text": "The drunk (price) eventually has to come home to the staircase (earnings).",
-            "start": 997.478297516048,
-            "end": 1001.3788417527212
+            "start": 1168.8470609896433,
+            "end": 1172.9075281933256
           },
           {
             "text": "If a company\u2019s earnings grow by 20% a year for a decade, the stock price will eventually follow, regardless of wars, recessions, or bad moods on Wall Street.",
-            "start": 1002.1189450181412,
-            "end": 1010.2000725648898
+            "start": 1173.3475788262372,
+            "end": 1182.3086098964327
           },
           {
             "text": "He famously said, \"If you can\u2019t predict the earnings, you can\u2019t predict the stock.\"",
-            "start": 1010.8601646664806,
-            "end": 1014.64069215741
+            "start": 1182.9886881472958,
+            "end": 1187.0691576524741
           },
           {
             "text": "He didn't care about the \"story\" unless the story ended in a check being cashed.",
-            "start": 1015.2807814680435,
-            "end": 1019.0213033770583
+            "start": 1187.929256616801,
+            "end": 1191.8497077100114
           }
         ]
       },
@@ -1285,8 +1285,8 @@
         "sentences": [
           {
             "text": "The \"Profitless Prosperity\" Myth",
-            "start": 1019.7614066424784,
-            "end": 1021.2016075914039
+            "start": 1192.3297629459148,
+            "end": 1194.369997698504
           }
         ]
       },
@@ -1295,48 +1295,48 @@
         "sentences": [
           {
             "text": "In the modern era, Silicon Valley has tried to convince you that \"Earnings don't matter\"\u2014that \"Growth\" and \"Users\" and \"Total Addressable Market\" are the new metrics.",
-            "start": 1021.7816885291655,
-            "end": 1030.9829723695227
+            "start": 1194.9900690448792,
+            "end": 1204.2911392405063
           },
           {
             "text": "This is a trap.",
-            "start": 1031.6230616801563,
-            "end": 1032.5231872732347
+            "start": 1204.9312128883776,
+            "end": 1206.051341772152
           },
           {
             "text": "Look at the SaaS (Software as a Service) boom of 2020-2021.",
-            "start": 1033.2432877476974,
-            "end": 1036.0036728998045
+            "start": 1206.5914039125432,
+            "end": 1209.4317307249712
           },
           {
             "text": "Companies like Snowflake or Asana were trading at 50x or 100x revenue while losing millions of dollars.",
-            "start": 1038.103965950321,
-            "end": 1044.544864638571
+            "start": 1212.1320414269276,
+            "end": 1219.1528492520138
           },
           {
             "text": "Investors said, \"It's a new paradigm!\"",
-            "start": 1045.14494836729,
-            "end": 1047.0852190901478
+            "start": 1219.712913693901,
+            "end": 1222.1931990794017
           },
           {
             "text": "Then interest rates rose, and the floor fell out.",
-            "start": 1047.7253084007814,
-            "end": 1050.3256712252303
+            "start": 1222.713258918297,
+            "end": 1225.1335373993095
           },
           {
             "text": "The stocks that survived and thrived (like Microsoft or Alphabet) were the ones with massive, undeniable profits.",
-            "start": 1051.0857772816075,
-            "end": 1057.6066871336868
+            "start": 1225.7736110471806,
+            "end": 1232.154345224396
           },
           {
             "text": "Even Uber, the poster child for \"growth at all costs,\" only became a stable investment once it proved it could actually generate positive cash flow.",
-            "start": 1058.3067848171922,
-            "end": 1066.4279179458554
+            "start": 1232.9344349827388,
+            "end": 1241.1353785960875
           },
           {
             "text": "The \"earnings engine\" is the only thing that keeps a stock afloat when the hype cycle ends.",
-            "start": 1067.1280156293608,
-            "end": 1071.5886380128384
+            "start": 1241.8954660529344,
+            "end": 1246.6960184119678
           }
         ]
       }
@@ -1347,8 +1347,8 @@
         "sentences": [
           {
             "text": "The Balance Sheet Blindness",
-            "start": 1085.3904001981177,
-            "end": 1087.0305626547795
+            "start": 1284.6402629921258,
+            "end": 1286.400401574803
           }
         ]
       },
@@ -1357,18 +1357,18 @@
         "sentences": [
           {
             "text": "You are driving a sports car at 150 miles per hour, but you\u2019ve taped over the fuel gauge because \"math is boring.\"",
-            "start": 1088.2506835066863,
-            "end": 1095.051357107479
+            "start": 1287.1404598425197,
+            "end": 1293.3809511811023
           },
           {
             "text": "You love the speed\u2014the rising stock price, the hype, the revolutionary technology.",
-            "start": 1095.731424467558,
-            "end": 1100.471894006934
+            "start": 1294.141011023622,
+            "end": 1298.6413653543307
           },
           {
             "text": "But you are ignoring the only thing that can kill you instantly: running out of gas.",
-            "start": 1101.1119574046556,
-            "end": 1105.932434868747
+            "start": 1299.4014251968504,
+            "end": 1304.2218047244094
           }
         ]
       },
@@ -1377,28 +1377,28 @@
         "sentences": [
           {
             "text": "Most investors treat the Balance Sheet like a terms-and-conditions document\u2014they scroll right past it.",
-            "start": 1107.2525656265477,
-            "end": 1112.3330688459632
+            "start": 1305.121875590551,
+            "end": 1310.6223086614173
           },
           {
             "text": "They assume that if a company is \"changing the world,\" the money will sort itself out.",
-            "start": 1113.0131362060424,
-            "end": 1117.6135918771668
+            "start": 1311.5623826771653,
+            "end": 1315.6427039370078
           },
           {
             "text": "This is a fatal error.",
-            "start": 1118.2336532937097,
-            "end": 1119.313760277365
+            "start": 1316.2227496062992,
+            "end": 1317.9028818897636
           },
           {
             "text": "Companies don't go bankrupt because they lack vision; they go bankrupt because they run out of cash.",
-            "start": 1119.9338216939077,
-            "end": 1124.7943031203565
+            "start": 1318.5829354330708,
+            "end": 1323.8833527559054
           },
           {
             "text": "If you cannot spot the difference between a company that is \"investing in growth\" and one that is bleeding to death, you are not an investor; you are a philanthropist for bad management.",
-            "start": 1125.5743803863297,
-            "end": 1134.6552798415055
+            "start": 1324.8434283464567,
+            "end": 1334.6842031496062
           }
         ]
       },
@@ -1407,8 +1407,8 @@
         "sentences": [
           {
             "text": "The Debt Detective",
-            "start": 1135.9754105993065,
-            "end": 1136.9555076770678
+            "start": 1335.2242456692913,
+            "end": 1336.2643275590551
           }
         ]
       },
@@ -1417,13 +1417,13 @@
         "sentences": [
           {
             "text": "Peter Lynch approached the balance sheet not like an accountant, but like a detective at a crime scene.",
-            "start": 1138.135624566617,
-            "end": 1142.6360703318473
+            "start": 1336.9843842519685,
+            "end": 1342.2247968503937
           },
           {
             "text": "He wasn't looking for \"perfect\" numbers; he was looking for the \"murder weapon\"\u2014usually Debt.",
-            "start": 1143.176123823675,
-            "end": 1147.3765398712233
+            "start": 1342.684833070866,
+            "end": 1347.625222047244
           }
         ]
       },
@@ -1432,33 +1432,33 @@
         "sentences": [
           {
             "text": "He tells the story of Chrysler in the early 1980s.",
-            "start": 1148.59666072313,
-            "end": 1151.0969083704804
+            "start": 1348.545294488189,
+            "end": 1351.1054960629922
           },
           {
             "text": "Everyone thought the company was dead.",
-            "start": 1151.636961862308,
-            "end": 1152.9970965824664
+            "start": 1351.625537007874,
+            "end": 1353.4056771653543
           },
           {
             "text": "The stock was trading at miserable lows.",
-            "start": 1153.3971362060424,
-            "end": 1155.1773125309558
+            "start": 1354.2057401574802,
+            "end": 1356.4859196850393
           },
           {
             "text": "But Lynch dug into the debt structure and found a crucial detail that the market missed: Chrysler\u2019s debt was mostly \"funded debt\" (long-term bonds), not \"bank debt\" (loans the bank can call in immediately).",
-            "start": 1155.8173759286774,
-            "end": 1166.2784120851907
+            "start": 1357.2659811023623,
+            "end": 1369.8869748031495
           },
           {
             "text": "This meant Chrysler had time to turn the ship around.",
-            "start": 1166.938477464091,
-            "end": 1169.158697374938
+            "start": 1370.7870456692913,
+            "end": 1373.707275590551
           },
           {
             "text": "The banks couldn't force them into bankruptcy overnight.",
-            "start": 1169.5387350173353,
-            "end": 1171.7389529470033
+            "start": 1374.4073307086614,
+            "end": 1376.8875259842519
           }
         ]
       },
@@ -1467,38 +1467,38 @@
         "sentences": [
           {
             "text": "He also obsessed over Inventory.",
-            "start": 1172.0189806835065,
-            "end": 1174.0791847449232
+            "start": 1377.6475858267715,
+            "end": 1379.4077244094487
           },
           {
             "text": "Lynch would look at a company\u2019s sales growth versus its inventory growth.",
-            "start": 1174.7592521050024,
-            "end": 1178.239596830114
+            "start": 1380.3678,
+            "end": 1384.0080866141732
           },
           {
             "text": "If sales were up 10% but inventory was up 30%, he ran for the exit.",
-            "start": 1178.7996523031202,
-            "end": 1183.5801258048539
+            "start": 1384.9281590551182,
+            "end": 1390.928631496063
           },
           {
             "text": "Why?",
-            "start": 1184.2201892025755,
-            "end": 1184.4802149578998
+            "start": 1391.1486488188975,
+            "end": 1392.2487354330708
           },
           {
             "text": "Because it meant the company was stuffing warehouses with products nobody wanted.",
-            "start": 1184.9802644873698,
-            "end": 1188.680631005448
+            "start": 1392.9887937007873,
+            "end": 1396.9291039370078
           },
           {
             "text": "In the retail world, unsold inventory is like rotting fish\u2014the longer it sits, the more it stinks, and eventually, you have to pay someone to take it away (mark it down to zero).",
-            "start": 1189.3206944031697,
-            "end": 1198.861639425458
+            "start": 1397.5891559055117,
+            "end": 1407.249916535433
           },
           {
             "text": "He viewed a buildup of inventory as the single most reliable \"sell signal\" in the market, often appearing months before the stock price collapsed.",
-            "start": 1199.6217147102525,
-            "end": 1207.0624517087667
+            "start": 1408.1899905511812,
+            "end": 1415.6105748031496
           }
         ]
       },
@@ -1507,8 +1507,8 @@
         "sentences": [
           {
             "text": "The ZIRP Zombie Apocalypse",
-            "start": 1208.9426379395738,
-            "end": 1210.562798415057
+            "start": 1416.190620472441,
+            "end": 1418.7108188976376
           }
         ]
       },
@@ -1517,18 +1517,18 @@
         "sentences": [
           {
             "text": "In the last decade, we lived through a \"Zero Interest Rate Policy\" (ZIRP) fantasy world where debt was free.",
-            "start": 1211.2828697374937,
-            "end": 1217.4434799405644
+            "start": 1419.290864566929,
+            "end": 1426.5914393700787
           },
           {
             "text": "This created an entire generation of \"Zombie Companies\"\u2014tech startups and growth stocks that survived only by constantly borrowing cheap money or issuing new shares.",
-            "start": 1218.103545319465,
-            "end": 1227.1444408122832
+            "start": 1427.4515070866141,
+            "end": 1436.5722251968505
           },
           {
             "text": "They had great revenue growth but terrible balance sheets.",
-            "start": 1227.6844943041108,
-            "end": 1230.3447578008913
+            "start": 1437.3922897637794,
+            "end": 1440.1725086614174
           }
         ]
       },
@@ -1537,23 +1537,23 @@
         "sentences": [
           {
             "text": "Now that interest rates have normalized, the tide has gone out, and we can see who is swimming naked.",
-            "start": 1231.1048330856859,
-            "end": 1235.6652847944526
+            "start": 1440.7525543307086,
+            "end": 1446.1129763779527
           },
           {
             "text": "Look at the collapse of WeWork or the struggles of Peloton.",
-            "start": 1236.2653442298167,
-            "end": 1238.8656017830608
+            "start": 1446.7330251968503,
+            "end": 1449.7332614173229
           },
           {
             "text": "These companies had incredible \"stories\" and \"revenue growth,\" but their balance sheets were ticking time bombs.",
-            "start": 1239.4656612184249,
-            "end": 1244.4661565131253
+            "start": 1450.3933133858268,
+            "end": 1455.8737448818897
           },
           {
             "text": "They were burning cash faster than they could bring it in.",
-            "start": 1244.9262020802375,
-            "end": 1247.0664140663694
+            "start": 1456.6338047244094,
+            "end": 1459.1940062992126
           }
         ]
       },
@@ -1562,23 +1562,23 @@
         "sentences": [
           {
             "text": "Today, \"Financial Forensics\" means looking past the \"Adjusted EBITDA\" (which Charlie Munger famously called \"bullshit earnings\") and looking at Free Cash Flow.",
-            "start": 1249.0666121842496,
-            "end": 1257.6074581475978
+            "start": 1459.9540661417323,
+            "end": 1469.3148031496062
           },
           {
             "text": "In the SaaS (Software as a Service) world, look at the \"Burn Rate.\"",
-            "start": 1257.6074581475978,
-            "end": 1260.1477097573056
+            "start": 1469.97485511811,
+            "end": 1473.3951244094487
           },
           {
             "text": "If a company has $100 million in the bank but burns $50 million a quarter, they have six months to live.",
-            "start": 1260.6477592867755,
-            "end": 1266.2883179791975
+            "start": 1474.1551842519684,
+            "end": 1479.7956283464566
           },
           {
             "text": "No amount of \"AI integration\" announcements can save a company that cannot pay its server bills.",
-            "start": 1266.8683754333829,
-            "end": 1271.2888132738979
+            "start": 1480.4956834645668,
+            "end": 1488.2362929133858
           }
         ]
       }
@@ -1589,8 +1589,8 @@
         "sentences": [
           {
             "text": "The Empire Builder Complex",
-            "start": 1288.5903631399317,
-            "end": 1289.9904587030717
+            "start": 1540.360569105691,
+            "end": 1541.7607271906052
           }
         ]
       },
@@ -1599,38 +1599,38 @@
         "sentences": [
           {
             "text": "You love a charismatic CEO.",
-            "start": 1290.8305160409557,
-            "end": 1292.4906293515357
+            "start": 1542.52081300813,
+            "end": 1544.241007226739
           },
           {
             "text": "You watch them on TV, radiating confidence, talking about \"synergies\" and \"ecosystems,\" and you think, \"This guy is a visionary.\"",
-            "start": 1293.0506675767917,
-            "end": 1300.2111563139931
+            "start": 1545.1011043360434,
+            "end": 1552.641955736224
           },
           {
             "text": "You are falling for the oldest trick in the book.",
-            "start": 1300.8311986348122,
-            "end": 1302.9313419795221
+            "start": 1553.5220551038842,
+            "end": 1555.3822651309845
           },
           {
             "text": "Most managers, when left unsupervised with a pile of cash, do not act like responsible stewards; they act like emperors.",
-            "start": 1303.6113883959044,
-            "end": 1309.8318129692832
+            "start": 1556.222359981933,
+            "end": 1563.003125564589
           },
           {
             "text": "They get bored with the core business that made them rich and start looking for excitement.",
-            "start": 1310.4718566552901,
-            "end": 1314.1521078498292
+            "start": 1563.8632226738932,
+            "end": 1568.3237262872628
           },
           {
             "text": "They want to buy a movie studio, a sports team, or a competitor they don't understand, just to make their empire bigger.",
-            "start": 1314.6521419795222,
-            "end": 1320.1925201365189
+            "start": 1568.9037917795845,
+            "end": 1575.464532520325
           },
           {
             "text": "And they use your money to do it.",
-            "start": 1320.6325501706485,
-            "end": 1322.1926566552902
+            "start": 1576.1046047877144,
+            "end": 1577.5647696476965
           }
         ]
       },
@@ -1639,8 +1639,8 @@
         "sentences": [
           {
             "text": "The Diworsification Disease",
-            "start": 1323.0727167235495,
-            "end": 1324.572819112628
+            "start": 1578.3048532068653,
+            "end": 1580.04504968383
           }
         ]
       },
@@ -1649,8 +1649,8 @@
         "sentences": [
           {
             "text": "Peter Lynch had a name for this disease: \"Diworsification.\"",
-            "start": 1325.3728737201366,
-            "end": 1328.2330689419796
+            "start": 1580.6451174345077,
+            "end": 1583.905485546522
           }
         ]
       },
@@ -1659,23 +1659,23 @@
         "sentences": [
           {
             "text": "He tells the story of companies that were printing money in a boring, profitable niche (like making razors or cigarettes) and then decided to \"diversify\" by buying completely unrelated businesses\u2014like a razor company buying a turkey farm.",
-            "start": 1329.0531249146757,
-            "end": 1340.1538825938567
+            "start": 1584.6655713640469,
+            "end": 1597.5470257452573
           },
           {
             "text": "Lynch viewed a high dividend not just as a payout, but as a \"discipline.\"",
-            "start": 1341.0139412969284,
-            "end": 1344.3341679180887
+            "start": 1598.347116079494,
+            "end": 1602.3675700090334
           },
           {
             "text": "If a company commits to paying a dividend, the CEO can't waste that cash on a foolish acquisition.",
-            "start": 1344.9542102389078,
-            "end": 1349.3945133105801
+            "start": 1603.3276784101174,
+            "end": 1608.8082971996387
           },
           {
             "text": "The money is gone; it\u2019s in your pocket.",
-            "start": 1349.7345365187714,
-            "end": 1351.7346730375427
+            "start": 1609.3083536585366,
+            "end": 1611.328581752484
           }
         ]
       },
@@ -1684,23 +1684,23 @@
         "sentences": [
           {
             "text": "He loved the \"dull\" management teams that simply raised the dividend every year.",
-            "start": 1352.5747303754265,
-            "end": 1356.2149788395905
+            "start": 1612.0286607949413,
+            "end": 1616.2291350496837
           },
           {
             "text": "It was a signal that the business was real.",
-            "start": 1356.7150129692832,
-            "end": 1358.3551249146758
+            "start": 1616.7891982836495,
+            "end": 1618.7494196025293
           },
           {
             "text": "He famously said that while companies can fake earnings with accounting tricks, \"dividends don't lie.\"",
-            "start": 1358.9551658703072,
-            "end": 1363.3154634812286
+            "start": 1619.4294963866305,
+            "end": 1625.0501309846431
           },
           {
             "text": "You either have the cash to pay them, or you don't.",
-            "start": 1363.6954894197952,
-            "end": 1365.6356218430035
+            "start": 1625.5701897018969,
+            "end": 1627.970460704607
           }
         ]
       },
@@ -1709,8 +1709,8 @@
         "sentences": [
           {
             "text": "The Buyback Charade",
-            "start": 1366.4756791808873,
-            "end": 1367.3957419795222
+            "start": 1628.6105329719962,
+            "end": 1629.67065266486
           }
         ]
       },
@@ -1719,28 +1719,28 @@
         "sentences": [
           {
             "text": "In the modern tech world, \"Diworsification\" has a new face: \"Moonshots.\"",
-            "start": 1368.1357924914676,
-            "end": 1372.996124232082
+            "start": 1630.11070234869,
+            "end": 1634.2711720867208
           },
           {
             "text": "Look at Meta (Facebook) in 2021-2022.",
-            "start": 1373.5761638225256,
-            "end": 1374.9962607508533
+            "start": 1634.7312240289068,
+            "end": 1635.9913663053296
           },
           {
             "text": "They were generating billions in ad revenue, but instead of returning it to shareholders, they burned billions trying to build the \"Metaverse.\"",
-            "start": 1376.8763890784983,
-            "end": 1384.5369119453924
+            "start": 1638.4116395663955,
+            "end": 1645.772470641373
           },
           {
             "text": "The stock collapsed.",
-            "start": 1385.0369460750853,
-            "end": 1386.0570156996587
+            "start": 1646.6125654923214,
+            "end": 1647.7726964769647
           },
           {
             "text": "It was only when Mark Zuckerberg cut costs and initiated a dividend in 2024 that the market truly forgave him.",
-            "start": 1386.597052559727,
-            "end": 1393.1975030716724
+            "start": 1648.2527506775068,
+            "end": 1655.4535636856367
           }
         ]
       },
@@ -1749,23 +1749,23 @@
         "sentences": [
           {
             "text": "Today, the \"Dividend\" has a quieter, more tax-efficient cousin: the Stock Buyback.",
-            "start": 1394.337580887372,
-            "end": 1399.4779317406144
+            "start": 1656.0136269196025,
+            "end": 1660.7741644083108
           },
           {
             "text": "Companies like Apple don't just pay dividends; they use their massive cash piles to buy their own shares, reducing the share count and making your remaining shares more valuable.",
-            "start": 1400.0779726962458,
-            "end": 1408.9985815699658
+            "start": 1661.3142253839205,
+            "end": 1671.0553252032519
           },
           {
             "text": "However, you must watch out for the \"fake buyback\"\u2014where a company buys back stock just to offset the millions of shares they gave to employees as \"Stock-Based Compensation.\"",
-            "start": 1409.5786211604095,
-            "end": 1419.0792696245733
+            "start": 1672.015433604336,
+            "end": 1681.2764792231255
           },
           {
             "text": "That isn't returning capital; it's just treading water.",
-            "start": 1419.5393010238909,
-            "end": 1422.1194771331059
+            "start": 1682.4966169828365,
+            "end": 1686.977122854562
           }
         ]
       }
@@ -1776,8 +1776,8 @@
         "sentences": [
           {
             "text": "Watering the Weeds",
-            "start": 1433.9805521230446,
-            "end": 1434.900673064283
+            "start": 1716.9604907306434,
+            "end": 1718.0406085059979
           }
         ]
       },
@@ -1786,33 +1786,33 @@
         "sentences": [
           {
             "text": "You are likely guilty of the most destructive habit in investing: \"Cutting the flowers and watering the weeds.\"",
-            "start": 1435.7407834888918,
-            "end": 1441.0414802155908
+            "start": 1718.7406848418757,
+            "end": 1724.0812671755725
           },
           {
             "text": "You buy a stock, and it goes up 40%.",
-            "start": 1441.7415722360984,
-            "end": 1443.081748389641
+            "start": 1724.7813435114504,
+            "end": 1726.4015201744821
           },
           {
             "text": "You get nervous.",
-            "start": 1444.1618903641383,
-            "end": 1444.7419666097016
+            "start": 1727.7416663031624,
+            "end": 1728.5417535441659
           },
           {
             "text": "You think, \"I better sell and lock in the profit before it disappears.\"",
-            "start": 1445.2020270803207,
-            "end": 1448.2824319705535
+            "start": 1729.341840785169,
+            "end": 1732.9022290076337
           },
           {
             "text": "Then you look at your other stock that is down 40%.",
-            "start": 1448.9225161035888,
-            "end": 1450.5227264361772
+            "start": 1733.6423097055617,
+            "end": 1735.4025016357689
           },
           {
             "text": "You think, \"I can\u2019t sell this one at a loss; I\u2019ll wait for it to come back.\"",
-            "start": 1451.6028684106743,
-            "end": 1454.7632838175364
+            "start": 1736.8026543075246,
+            "end": 1740.9431057797165
           }
         ]
       },
@@ -1821,23 +1821,23 @@
         "sentences": [
           {
             "text": "So, you sell the winner and keep the loser.",
-            "start": 1455.463375838044,
-            "end": 1457.5636518995661
+            "start": 1741.6031777535443,
+            "end": 1744.1634569247547
           },
           {
             "text": "You have just penalized success and rewarded failure.",
-            "start": 1458.223738661759,
-            "end": 1460.9440962271592
+            "start": 1744.983546346783,
+            "end": 1748.123888767721
           },
           {
             "text": "Over time, this leaves you with a portfolio full of stagnant \"weeds\" and zero \"flowers.\"",
-            "start": 1461.5241724727225,
-            "end": 1466.0847719205995
+            "start": 1748.8239651035988,
+            "end": 1753.9845278080697
           },
           {
             "text": "You are managing your emotions, not your money.",
-            "start": 1466.6648481661628,
-            "end": 1468.6851137110557
+            "start": 1754.8846259541986,
+            "end": 1757.2448833151582
           }
         ]
       },
@@ -1846,8 +1846,8 @@
         "sentences": [
           {
             "text": "The Concentration Edge",
-            "start": 1469.6252372814513,
-            "end": 1470.6853766267911
+            "start": 1757.7849422028353,
+            "end": 1758.7850512540895
           }
         ]
       },
@@ -1856,18 +1856,18 @@
         "sentences": [
           {
             "text": "Peter Lynch viewed portfolio management as gardening.",
-            "start": 1471.4854817930852,
-            "end": 1473.9258025502827
+            "start": 1759.4851275899673,
+            "end": 1762.4454503816794
           },
           {
             "text": "He argued that there is no magic number of stocks to own, but there is a magic rule: only own what you can follow.",
-            "start": 1474.4058656500592,
-            "end": 1480.3266438806363
+            "start": 1763.0455158124319,
+            "end": 1769.3262006543075
           },
           {
             "text": "He mocked the idea of \"diversification\" for its own sake, calling it \"diworsification.\"",
-            "start": 1481.0067332719864,
-            "end": 1485.3473037991323
+            "start": 1769.8862617230097,
+            "end": 1774.7067873500546
           }
         ]
       },
@@ -1876,33 +1876,33 @@
         "sentences": [
           {
             "text": "If you have a distinct \"edge\" in only one company, own one.",
-            "start": 1485.9873879321676,
-            "end": 1488.6477376100959
+            "start": 1775.6468898582334,
+            "end": 1779.0872649945475
           },
           {
             "text": "If you find five great situations, own five.",
-            "start": 1489.14780333903,
-            "end": 1491.4281030629684
+            "start": 1779.6473260632497,
+            "end": 1782.2276074154854
           },
           {
             "text": "But don't buy a 10th stock just to \"spread risk\" if you don't know anything about it.",
-            "start": 1491.8881635335874,
-            "end": 1495.6286551860128
+            "start": 1782.9876902944384,
+            "end": 1787.4881810250818
           },
           {
             "text": "Lynch\u2019s strategy was to constantly rotate capital based on the \"story,\" not the price.",
-            "start": 1496.2887419482056,
-            "end": 1500.589307217037
+            "start": 1788.1082486368593,
+            "end": 1792.928774263904
           },
           {
             "text": "If a \"Stalwart\" (steady grower) went up 50% and got expensive, he would sell it to buy a \"Fast Grower\" or a \"Turnaround\" that was just starting its journey.",
-            "start": 1501.1493808334428,
-            "end": 1508.1903062968317
+            "start": 1793.7488636859325,
+            "end": 1802.469814612868
           },
           {
             "text": "He didn't sell because the price was up; he sold because the opportunity had shifted to a better category.",
-            "start": 1508.7903851715525,
-            "end": 1513.3709872485867
+            "start": 1803.2699018538713,
+            "end": 1808.7504994547437
           }
         ]
       },
@@ -1911,8 +1911,8 @@
         "sentences": [
           {
             "text": "The \"Fake Diversification\" Trap",
-            "start": 1514.0910818982516,
-            "end": 1515.4912659392664
+            "start": 1809.3705670665213,
+            "end": 1812.5309116684841
           }
         ]
       },
@@ -1921,28 +1921,28 @@
         "sentences": [
           {
             "text": "In the modern ETF era, investors have fooled themselves into thinking they are diversified when they are actually just \"closet indexers.\"",
-            "start": 1516.1113474431445,
-            "end": 1524.432441172604
+            "start": 1812.970959651036,
+            "end": 1821.1518516902945
           },
           {
             "text": "You might own an S&P 500 ETF, a \"Tech Growth\" ETF, and a \"US Momentum\" ETF.",
-            "start": 1525.0725253056396,
-            "end": 1531.7133981858815
+            "start": 1821.8519280261723,
+            "end": 1828.9927066521266
           },
           {
             "text": "You think you have three distinct assets.",
-            "start": 1532.313477060602,
-            "end": 1534.513766267911
+            "start": 1829.6927829880044,
+            "end": 1831.9330272628135
           },
           {
             "text": "In reality, all three are heavily weighted in NVIDIA, Microsoft, and Apple.",
-            "start": 1534.9538241093728,
-            "end": 1539.8744708820823
+            "start": 1832.4330817884406,
+            "end": 1837.1535965103599
           },
           {
             "text": "You haven't diversified; you\u2019ve just tripled your exposure to the same five companies.",
-            "start": 1540.4145418693308,
-            "end": 1544.7951176547915
+            "start": 1837.9936881134133,
+            "end": 1842.8542181025082
           }
         ]
       },
@@ -1951,28 +1951,28 @@
         "sentences": [
           {
             "text": "Similarly, \"Crypto Diversification\" is often a myth.",
-            "start": 1545.7152385960298,
-            "end": 1548.6556250821611
+            "start": 1843.554294438386,
+            "end": 1846.8746564885496
           },
           {
             "text": "Buying 20 different \"altcoins\" isn't diversification if they all crash 90% the moment Bitcoin sneezes.",
-            "start": 1549.2156986985672,
-            "end": 1555.5565321414485
+            "start": 1847.4947241003272,
+            "end": 1854.3154678298802
           },
           {
             "text": "True allocation today means understanding correlation.",
-            "start": 1556.2766267911134,
-            "end": 1559.457044827133
+            "start": 1854.9355354416575,
+            "end": 1858.5359280261723
           },
           {
             "text": "If everything in your portfolio turns green on the same day, you aren't diversified; you're just lucky.",
-            "start": 1560.0171184435387,
-            "end": 1565.2778099119232
+            "start": 1859.196,
+            "end": 1864.7166019629226
           },
           {
             "text": "A properly designed portfolio should have parts that zig when others zag\u2014like holding cash or short-term treasuries to deploy when the \"Fast Growers\" crash.",
-            "start": 1565.9578993032733,
-            "end": 1574.1789798869463
+            "start": 1865.5766957470012,
+            "end": 1876.31786695747
           }
         ]
       }
@@ -1983,8 +1983,8 @@
         "sentences": [
           {
             "text": "The Loyalty Penalty",
-            "start": 1584.9601935401179,
-            "end": 1585.9802589079723
+            "start": 1898.8603029686865,
+            "end": 1899.8804066693779
           }
         ]
       },
@@ -1993,33 +1993,33 @@
         "sentences": [
           {
             "text": "You treat your stocks like a marriage, sticking with them \"for better or worse\" long after the love is gone.",
-            "start": 1587.0803294027173,
-            "end": 1592.2406600871573
+            "start": 1900.7204920699473,
+            "end": 1906.2810573403824
           },
           {
             "text": "You bought a company because it had a great new product three years ago.",
-            "start": 1593.0807139195078,
-            "end": 1595.7408843886183
+            "start": 1906.7411041073608,
+            "end": 1910.1614518096787
           },
           {
             "text": "Today, competitors have flooded the market, the CEO quit, and profit margins are shrinking.",
-            "start": 1596.580938220969,
-            "end": 1601.3412432709563
+            "start": 1911.1615534770233,
+            "end": 1916.4020862139082
           },
           {
             "text": "Yet you still hold on, paralyzed by nostalgia.",
-            "start": 1601.961283004358,
-            "end": 1604.6214534734684
+            "start": 1916.9621431476212,
+            "end": 1919.7624278161857
           },
           {
             "text": "You are investing in a memory, not a business.",
-            "start": 1605.5015098692643,
-            "end": 1608.0216713663165
+            "start": 1920.582511183408,
+            "end": 1923.5628141520945
           },
           {
             "text": "The most dangerous phrase in your vocabulary is \"I\u2019ll just hold it for the long term,\" because \"long term\" is often just a euphemism for \"I\u2019m too lazy to check if the thesis is broken.\"",
-            "start": 1608.861725198667,
-            "end": 1618.3423327351961
+            "start": 1924.4429036193576,
+            "end": 1935.3040077267183
           }
         ]
       },
@@ -2028,8 +2028,8 @@
         "sentences": [
           {
             "text": "The Life-Cycle Audit",
-            "start": 1619.602413483722,
-            "end": 1620.542473724686
+            "start": 1936.0440829605532,
+            "end": 1937.2042008946728
           }
         ]
       },
@@ -2038,43 +2038,43 @@
         "sentences": [
           {
             "text": "Peter Lynch didn't \"buy and hold\"; he \"bought and watched.\"",
-            "start": 1621.6225429377084,
-            "end": 1624.9227544219432
+            "start": 1937.7842598617326,
+            "end": 1940.724558763725
           },
           {
             "text": "He treated his portfolio like a constantly evolving narrative.",
-            "start": 1625.7628082542938,
-            "end": 1628.943012048193
+            "start": 1941.1045973973162,
+            "end": 1944.2649186661245
           },
           {
             "text": "He tells the story of Holiday Inn.",
-            "start": 1629.7630645988208,
-            "end": 1631.183155601128
+            "start": 1944.7649694997967,
+            "end": 1946.8651830012202
           },
           {
             "text": "In the 1950s and 60s, it was a classic \"Fast Grower.\"",
-            "start": 1632.0432107152012,
-            "end": 1635.083405537042
+            "start": 1947.4652440016268,
+            "end": 1951.3056344042295
           },
           {
             "text": "You could travel across America and see them popping up at every exit.",
-            "start": 1635.7634491156114,
-            "end": 1638.6636349653936
+            "start": 1951.925697437983,
+            "end": 1955.4860593737292
           },
           {
             "text": "The stock was a rocket ship.",
-            "start": 1639.3836811074084,
-            "end": 1640.663763137657
+            "start": 1956.0461163074422,
+            "end": 1957.8262972753153
           },
           {
             "text": "But by the mid-70s, the growth phase was mathematically over\u2014they were everywhere.",
-            "start": 1641.8038361958472,
-            "end": 1645.604079723148
+            "start": 1958.2663420089468,
+            "end": 1963.1468381455877
           },
           {
             "text": "There was no more room to build.",
-            "start": 1645.8640963855423,
-            "end": 1647.0641732889003
+            "start": 1963.9069154127696,
+            "end": 1965.5670841805613
           }
         ]
       },
@@ -2083,33 +2083,33 @@
         "sentences": [
           {
             "text": "Lynch realized the \"story\" had changed.",
-            "start": 1648.2442489105358,
-            "end": 1650.1443706741861
+            "start": 1966.1271411142743,
+            "end": 1968.6673993493291
           },
           {
             "text": "The company wasn't dying, but it had morphed from a sprinter into a slow jogger.",
-            "start": 1650.9044193796462,
-            "end": 1654.7646667521149
+            "start": 1969.3674705164703,
+            "end": 1973.5878995526639
           },
           {
             "text": "The investors who kept expecting \"Fast Grower\" returns from a saturated \"Stalwart\" got crushed.",
-            "start": 1655.6847257113561,
-            "end": 1660.2250166623944
+            "start": 1974.107952419683,
+            "end": 1979.6885197234649
           },
           {
             "text": "He instituted a \"Two-Minute Drill\" re-check every few months.",
-            "start": 1661.065070494745,
-            "end": 1664.2052717251988
+            "start": 1980.588611224075,
+            "end": 1984.0689650264337
           },
           {
             "text": "If the story had drifted\u2014like a company moving from \"high growth\" to \"cyclical\"\u2014he didn't hesitate to sell, even if he liked the stock.",
-            "start": 1665.005322994104,
-            "end": 1671.3457293001795
+            "start": 1984.6690260268404,
+            "end": 1991.8697580317203
           },
           {
             "text": "He knew that when the story ends, you have to leave the theater.",
-            "start": 1672.1057780056396,
-            "end": 1675.1259715457575
+            "start": 1992.6898413989427,
+            "end": 1996.1501931679545
           }
         ]
       },
@@ -2118,8 +2118,8 @@
         "sentences": [
           {
             "text": "The Disruption Clock",
-            "start": 1676.58606511151,
-            "end": 1677.4661215073058
+            "start": 1996.610239934933,
+            "end": 1997.6303436356243
           }
         ]
       },
@@ -2128,88 +2128,88 @@
         "sentences": [
           {
             "text": "In the modern world, \"stories\" rot faster than ever.",
-            "start": 1678.286174057934,
-            "end": 1681.3063675980518
+            "start": 1998.3504168361123,
+            "end": 2001.4507320048801
           },
           {
             "text": "Technology accelerates the lifecycle of companies.",
-            "start": 1681.8264009228403,
-            "end": 1684.2265547295565
+            "start": 2002.2908174054494,
+            "end": 2005.3511285075235
           },
           {
             "text": "Think about BlackBerry.",
-            "start": 1684.806591899513,
-            "end": 1685.686648295309
+            "start": 2006.0712017080116,
+            "end": 2007.3713338755592
           },
           {
             "text": "For years, it was the standard for business communication.",
-            "start": 1686.126676493207,
-            "end": 1688.5268302999232
+            "start": 2007.951392842619,
+            "end": 2010.7716795445303
           },
           {
             "text": "It was a \"Fast Grower.\"",
-            "start": 1688.9468572160986,
-            "end": 1689.9269200205076
+            "start": 2011.4717507116716,
+            "end": 2012.6918747458317
           },
           {
             "text": "Then the iPhone launched.",
-            "start": 1690.4869559087415,
-            "end": 1691.547023840041
+            "start": 2013.2519316795447,
+            "end": 2014.652074013827
           },
           {
             "text": "The story didn't just change; it evaporated overnight.",
-            "start": 1691.9670507562164,
-            "end": 1694.6872250704948
+            "start": 2015.372147214315,
+            "end": 2018.3124461163075
           },
           {
             "text": "Investors who re-evaluated the \"moat\" (physical keyboards vs. touchscreens) got out.",
-            "start": 1695.3072648038965,
-            "end": 1699.7075467828763
+            "start": 2018.7324888165922,
+            "end": 2025.1331394875967
           },
           {
             "text": "Those who relied on past glory (\"Everyone uses BBM!\") lost everything.",
-            "start": 1700.2075788259422,
-            "end": 1704.167832607024
+            "start": 2025.633190321269,
+            "end": 2030.3936742578285
           },
           {
             "text": "The same happened with Peloton.",
-            "start": 1704.8078736221482,
-            "end": 1705.967947962061
+            "start": 2031.1337494916634,
+            "end": 2032.63390199268
           },
           {
             "text": "The \"story\" was: \"Everyone is working out at home forever.\"",
-            "start": 1706.467980005127,
-            "end": 1708.9681402204565
+            "start": 2033.2939690931273,
+            "end": 2036.6943147620987
           },
           {
             "text": "Then gyms reopened.",
-            "start": 1709.4881735452448,
-            "end": 1710.4282337862087
+            "start": 2037.3543818625458,
+            "end": 2038.5345018300122
           },
           {
             "text": "The story broke.",
-            "start": 1710.6482478851576,
-            "end": 1711.3282914637273
+            "start": 2038.9345424969501,
+            "end": 2039.854636030907
           },
           {
             "text": "If you didn't re-evaluate immediately when vaccines rolled out, you rode the stock all the way down.",
-            "start": 1711.8883273519612,
-            "end": 1716.3686144578314
+            "start": 2040.5947112647418,
+            "end": 2045.9552562017082
           },
           {
             "text": "Today, you must watch for \"AI Disruption.\"",
-            "start": 1717.0286567546784,
-            "end": 1719.1687938990003
+            "start": 2046.4553070353804,
+            "end": 2049.3155978039854
           },
           {
             "text": "Is your \"Stalwart\" software company about to be automated away by a Large Language Model?",
-            "start": 1719.6688259420662,
-            "end": 1723.5490745962575
+            "start": 2050.2556933712895,
+            "end": 2054.8161569743797
           },
           {
             "text": "If the fundamental \"why\" of your investment is threatened by a new technology, you must sell before the earnings report confirms the damage.",
-            "start": 1724.1291117662138,
-            "end": 1730.5695244809024
+            "start": 2055.5962362749087,
+            "end": 2062.9969886132576
           }
         ]
       }
@@ -2220,8 +2220,8 @@
         "sentences": [
           {
             "text": "The Emotional Inversion",
-            "start": 1742.0103231511255,
-            "end": 1743.3904340836013
+            "start": 2095.7602337526987,
+            "end": 2097.3203498846124
           }
         ]
       },
@@ -2230,33 +2230,33 @@
         "sentences": [
           {
             "text": "Buying a stock is like falling in love\u2014it\u2019s exciting, full of promise, and driven by dopamine.",
-            "start": 1744.2905064308682,
-            "end": 1749.3509131832798
+            "start": 2098.260419861535,
+            "end": 2104.1208561006474
           },
           {
             "text": "Selling a stock is like a divorce\u2014it\u2019s painful, confusing, and driven by fear.",
-            "start": 1749.9109581993569,
-            "end": 1754.4713247588425
+            "start": 2104.9209156554753,
+            "end": 2109.541259584605
           },
           {
             "text": "Most investors are terrible at \"the breakup.\"",
-            "start": 1755.1313778135047,
-            "end": 1757.2715498392283
+            "start": 2110.3413191394325,
+            "end": 2112.3214665376313
           },
           {
             "text": "You sell your winners too early because you\u2019re terrified the profit will vanish (locking in a small gain), and you hold your losers too long because you can\u2019t admit you were wrong (praying for a rebound).",
-            "start": 1757.7515884244374,
-            "end": 1767.3123569131833
+            "start": 2113.1215260924587,
+            "end": 2122.722240750391
           },
           {
             "text": "You are emotionally inverted: you are loyal to the things that hurt you and fickle with the things that help you.",
-            "start": 1767.8524003215434,
-            "end": 1773.1328247588424
+            "start": 2123.242279461029,
+            "end": 2128.3826621007966
           },
           {
             "text": "You need a prenup for your portfolio.",
-            "start": 1773.6528665594856,
-            "end": 1775.4930144694533
+            "start": 2128.982706766917,
+            "end": 2130.7228362986675
           }
         ]
       },
@@ -2265,8 +2265,8 @@
         "sentences": [
           {
             "text": "The Cyclical Peak",
-            "start": 1776.6331061093247,
-            "end": 1777.6131848874597
+            "start": 2131.322880964788,
+            "end": 2132.4029613638054
           }
         ]
       },
@@ -2275,18 +2275,18 @@
         "sentences": [
           {
             "text": "Peter Lynch didn\u2019t believe in \"target prices.\"",
-            "start": 1778.4332508038585,
-            "end": 1780.593424437299
+            "start": 2132.882997096702,
+            "end": 2135.14316533909
           },
           {
             "text": "He believed in \"Category Signals.\"",
-            "start": 1780.9334517684888,
-            "end": 1782.5935852090033
+            "start": 2135.623201071987,
+            "end": 2137.4633380480905
           },
           {
             "text": "He realized that the signal to sell a fast-growing restaurant chain is completely different from the signal to sell a boring chemical company.",
-            "start": 1782.9936173633441,
-            "end": 1789.2941237942123
+            "start": 2138.063382714211,
+            "end": 2144.9038919079876
           }
         ]
       },
@@ -2295,53 +2295,53 @@
         "sentences": [
           {
             "text": "He tells the story of the Cyclical Trap.",
-            "start": 1790.0341832797428,
-            "end": 1791.8543295819936
+            "start": 2145.343924663143,
+            "end": 2147.7041003498844
           },
           {
             "text": "Amateur investors love to buy Cyclicals (like auto companies or steel mills) when the P/E ratio is low, thinking they are getting a bargain.",
-            "start": 1792.494381028939,
-            "end": 1799.254924437299
+            "start": 2148.384150971488,
+            "end": 2156.884783741532
           },
           {
             "text": "Lynch whispered the exact opposite: \"Sell the Cyclical when the P/E is low.\"",
-            "start": 1799.734963022508,
-            "end": 1803.8952974276526
+            "start": 2157.3848209632993,
+            "end": 2161.665139581627
           },
           {
             "text": "Why?",
-            "start": 1804.2353247588424,
-            "end": 1804.4753440514469
+            "start": 2162.3651916921012,
+            "end": 2162.6652140251617
           },
           {
             "text": "Because for a Cyclical, a low P/E means earnings are at a record high, the economy is booming, and everything is perfect.",
-            "start": 1805.075392282958,
-            "end": 1811.2358874598071
+            "start": 2163.5852825132138,
+            "end": 2171.1258438174646
           },
           {
             "text": "This is the top.",
-            "start": 1811.5559131832797,
-            "end": 1812.4159823151126
+            "start": 2172.3259331497056,
+            "end": 2173.3060061043698
           },
           {
             "text": "The only place to go is down.",
-            "start": 1812.7560096463023,
-            "end": 1814.1561221864952
+            "start": 2173.9860567259734,
+            "end": 2175.826193702077
           },
           {
             "text": "Conversely, he advised holding Fast Growers (like a young Walmart or Taco Bell) even if the P/E looked high, provided the growth story was still intact.",
-            "start": 1814.7761720257236,
-            "end": 1822.2567733118972
+            "start": 2176.5462473014218,
+            "end": 2185.3869053822673
           },
           {
             "text": "As long as they were opening new stores and same-store sales were rising, he held on.",
-            "start": 1822.6368038585208,
-            "end": 1826.1770884244372
+            "start": 2186.1469619593536,
+            "end": 2191.0273252438024
           },
           {
             "text": "He didn't sell because the stock went up; he sold only when the company stopped growing or the valuation became mathematically impossible (like a Stalwart trading at 50x earnings).",
-            "start": 1826.6571270096463,
-            "end": 1835.4778360128616
+            "start": 2191.8073833097596,
+            "end": 2201.8481307228467
           }
         ]
       },
@@ -2350,8 +2350,8 @@
         "sentences": [
           {
             "text": "The Algorithmic Front-Run",
-            "start": 1835.9778762057879,
-            "end": 1837.1379694533762
+            "start": 2202.708194744286,
+            "end": 2204.148301942976
           }
         ]
       },
@@ -2360,78 +2360,78 @@
         "sentences": [
           {
             "text": "In today\u2019s hyper-speed market, \"The Exit\" is even more critical because algorithms punish missed expectations instantly.",
-            "start": 1837.8780289389067,
-            "end": 1845.5586463022507
+            "start": 2204.688342142485,
+            "end": 2212.1488974912527
           },
           {
             "text": "Look at the Semiconductor Industry (NVIDIA, AMD).",
-            "start": 1846.3787122186495,
-            "end": 1849.0989308681671
+            "start": 2212.9889600238216,
+            "end": 2216.3292086652273
           },
           {
             "text": "These are the ultimate modern Cyclicals.",
-            "start": 1849.8189887459807,
-            "end": 1851.839151125402
+            "start": 2217.189272686667,
+            "end": 2219.449440929055
           },
           {
             "text": "When demand for AI chips is insatiable, their P/E ratios compress because earnings explode.",
-            "start": 1852.379194533762,
-            "end": 1857.8796366559486
+            "start": 2220.2094975061414,
+            "end": 2226.269948633961
           },
           {
             "text": "That is precisely the danger zone.",
-            "start": 1858.3996784565916,
-            "end": 1860.1998231511254
+            "start": 2226.909996277823,
+            "end": 2228.6901287873147
           },
           {
             "text": "If you wait for the headlines to say \"Chip Shortage Over,\" the stock will have already dropped 40%.",
-            "start": 1860.7598681672025,
-            "end": 1865.0402122186495
+            "start": 2229.390180897789,
+            "end": 2233.870514404824
           },
           {
             "text": "The market \"front-runs\" the cycle.",
-            "start": 1866.1803038585208,
-            "end": 1867.700426045016
+            "start": 2235.6506469143155,
+            "end": 2238.010822601057
           },
           {
             "text": "Similarly, look at Crypto.",
-            "start": 1868.5204919614148,
-            "end": 1869.620580385852
+            "start": 2238.5708642894365,
+            "end": 2240.070975954738
           },
           {
             "text": "The \"Sell the News\" phenomenon is real.",
-            "start": 1870.1806254019293,
-            "end": 1872.2207893890675
+            "start": 2240.811031042954,
+            "end": 2243.5112320404974
           },
           {
             "text": "When the Bitcoin ETF was finally approved in early 2024, the price dropped.",
-            "start": 1872.7208295819935,
-            "end": 1876.9011655948552
+            "start": 2244.0112692622642,
+            "end": 2249.111648924291
           },
           {
             "text": "Why?",
-            "start": 1877.301197749196,
-            "end": 1877.5412170418006
+            "start": 2249.5116787017046,
+            "end": 2249.7916995458945
           },
           {
             "text": "Because the anticipation was the trade.",
-            "start": 1877.9612508038585,
-            "end": 1879.8214003215435
+            "start": 2250.1517263455667,
+            "end": 2252.6319109655324
           },
           {
             "text": "Once the event happened, the smart money exited into the liquidity provided by the retail crowd buying the headline.",
-            "start": 1880.3614437299036,
-            "end": 1885.5818633440515
+            "start": 2253.111946698429,
+            "end": 2258.8723754931884
           },
           {
             "text": "And for the \"COVID Winners\" (Zoom, DocuSign): The sell signal wasn't the price; it was the return to the office.",
-            "start": 1886.341924437299,
-            "end": 1892.7624405144695
+            "start": 2259.692436536887,
+            "end": 2266.1129144643787
           },
           {
             "text": "The moment the behavioral trend shifted, the \"Fast Grower\" thesis died, and the exit protocol should have triggered immediately, regardless of the loss.",
-            "start": 1893.2824823151125,
-            "end": 1900.8430900321544
+            "start": 2266.972978485818,
+            "end": 2275.3936053003795
           }
         ]
       },
@@ -2440,8 +2440,8 @@
         "sentences": [
           {
             "text": "Final Words",
-            "start": 1901.9831816720257,
-            "end": 1902.583229903537
+            "start": 2275.433608278121,
+            "end": 2276.6737005881037
           }
         ]
       },
@@ -2450,23 +2450,23 @@
         "sentences": [
           {
             "text": "Wall Street has spent billions constructing an illusion designed to intimidate you, desperate to make you believe that beating the market requires a team of analysts, expensive terminals, or complex deep learning models predicting price movements.",
-            "start": 1903.2232813504822,
-            "end": 1916.6443601286173
+            "start": 2276.6737005881037,
+            "end": 2289.9146862205016
           },
           {
             "text": "In reality, their massive size and rigid institutional compliance rules are their fatal flaws, forcing them to buy late and locking them out of the most lucrative early-stage growth.",
-            "start": 1917.2444083601285,
-            "end": 1927.9252668810288
+            "start": 2290.6947442864584,
+            "end": 2301.355537854537
           },
           {
             "text": "By stripping away the macroeconomic noise and ignoring the seduction of \"sexy\" trends, you\u2019ve discovered that your greatest competitive moat is your own daily life.",
-            "start": 1928.6053215434083,
-            "end": 1938.0660819935692
+            "start": 2301.9355810317875,
+            "end": 2310.516219757314
           },
           {
             "text": "The \"Smart Money\" is handcuffed, but you\u2014the observant amateur\u2014have the agility to spot the next massive winner in your shopping cart, your software stack, or your local neighborhood long before the index funds are allowed to buy in.",
-            "start": 1938.6461286173633,
-            "end": 1950.7671028938908
+            "start": 2311.1762688900467,
+            "end": 2323.617194967617
           }
         ]
       },
@@ -2475,23 +2475,23 @@
         "sentences": [
           {
             "text": "Tomorrow morning, when the opening bell rings and the financial networks scream about the next imminent crisis, you are no longer the market's prey.",
-            "start": 1951.487160771704,
-            "end": 1958.7477443729904
+            "start": 2324.1572351671257,
+            "end": 2331.4177756271865
           },
           {
             "text": "You now operate with a ruthless, resilient system: you know how to leverage your local knowledge, run the financial forensics on an earnings engine, and execute strict exit protocols based on a company's true category rather than its stock price.",
-            "start": 1959.3277909967846,
-            "end": 1972.1088183279742
+            "start": 2332.357845604109,
+            "end": 2345.078792525869
           },
           {
             "text": "You are no longer playing their gamified, high-frequency casino; you are playing the quiet, patient game of business ownership.",
-            "start": 1972.7088665594856,
-            "end": 1979.5294147909967
+            "start": 2345.5788297476365,
+            "end": 2352.279328519318
           },
           {
             "text": "So, trust the balance sheet, and just look around you\u2014the edge has been yours the whole time, and now you finally know how to master it.",
-            "start": 1980.04945659164,
-            "end": 1986.7099919614147
+            "start": 2352.8993746743095,
+            "end": 2361.0199791558102
           }
         ]
       }

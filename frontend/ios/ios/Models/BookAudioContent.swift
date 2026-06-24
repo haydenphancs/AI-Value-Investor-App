@@ -42,8 +42,8 @@ extension BookAudioInfo {
         ),
         4: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a",
-            totalSeconds: 1987,
-            coreStartSeconds: [1: 0, 2: 154, 3: 318, 4: 474, 5: 635, 6: 789, 7: 938, 8: 1081, 9: 1283, 10: 1430, 11: 1582, 12: 1738]
+            totalSeconds: 2361,
+            coreStartSeconds: [1: 0, 2: 185, 3: 368, 4: 550, 5: 750, 6: 927, 7: 1107, 8: 1281, 9: 1535, 10: 1712, 11: 1896, 12: 2093]
         ),
         5: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/5_common-stocks-and-uncommon-profits.m4a",

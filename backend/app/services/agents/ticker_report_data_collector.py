@@ -1152,17 +1152,33 @@ class TickerReportDataCollector:
 
         lookup = get_sector_benchmark_lookup()
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
-        # Industry-first values (sector fallback per cell); the chart overlay
-        # only needs the value — peer-group labelling lands in Phase 3.
-        annual, quarterly = await asyncio.gather(
+        # Industry-first values (sector fallback per cell). Also fetch the TTM
+        # current-snapshot row so we can pin the chart's latest annual point to it.
+        annual, quarterly, ttm = await asyncio.gather(
             asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "annual"),
             asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "quarterly"),
+            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "ttm"),
             return_exceptions=True,
         )
-        return {
-            "annual": annual if isinstance(annual, dict) else {},
-            "quarterly": quarterly if isinstance(quarterly, dict) else {},
-        }
+        annual = annual if isinstance(annual, dict) else {}
+        quarterly = quarterly if isinstance(quarterly, dict) else {}
+        ttm = ttm if isinstance(ttm, dict) else {}
+
+        # "Keep history + TTM current": overwrite the CURRENT calendar year's annual
+        # benchmark point with the TTM value — a full rolling-12-months median, so the
+        # chart's latest sector point doesn't spike on a thin partial fiscal year while
+        # older years keep their complete-fiscal values. A company whose latest period
+        # isn't the current year aligns to its own (complete) fiscal point, so the
+        # injected point is simply unused for it. get_benchmark_values returns fresh
+        # dicts → safe to mutate. Annual only (quarterly multiples are single-quarter
+        # scale; injecting an annual-scale TTM there would mix scales).
+        from datetime import datetime, timezone
+        cur_year = str(datetime.now(timezone.utc).year)
+        for metric, periods in ttm.items():
+            if periods:
+                annual.setdefault(metric, {})[cur_year] = next(iter(periods.values()))
+
+        return {"annual": annual, "quarterly": quarterly}
 
     async def _fetch_peer_ratios(
         self, peers: List[str],
@@ -1567,12 +1583,53 @@ class TickerReportDataCollector:
         #    arrays already on `out` plus the transient *_q quarterly
         #    fetches. Baked here so it travels with the frozen report.
         fundamentals_history = _build_fundamentals_history(out)
+
+        # One peer-group level for the 4 cards' "vs industry/sector" labels:
+        # "industry" when the company's industry has benchmark rows, else "sector".
+        # `_build_sections` is sync, but this is a cache hit — the async
+        # sector-history fetch already warmed the same gb: key (same industry +
+        # normalized sector + metrics). Best-effort: any failure leaves it None →
+        # iOS keeps the "sector" wording.
+        peer_group_level: Optional[str] = None
+        try:
+            from app.services.sector_benchmark_service import _normalize_sector
+            from app.services.sector_benchmark_lookup import (
+                get_sector_benchmark_lookup,
+            )
+
+            _profile = out.profile or {}
+            _raw_sector = _profile.get("sector") or ""
+            _norm_sector = _normalize_sector(_raw_sector) if _raw_sector else ""
+            _industry = _profile.get("industry") or ""
+            if _norm_sector:
+                rich = get_sector_benchmark_lookup().get_benchmarks(
+                    _industry, _norm_sector,
+                    list(_SECTOR_HISTORY_METRIC_NAMES), "annual",
+                )
+                levels = [
+                    c.get("level")
+                    for periods in rich.values()
+                    for c in periods.values()
+                ]
+                if levels:
+                    peer_group_level = (
+                        "industry"
+                        if levels.count("industry") >= levels.count("sector")
+                        else "sector"
+                    )
+        except Exception as exc:
+            logger.warning(
+                "peer-group level computation failed for %s: %s",
+                getattr(out, "ticker", "?"), exc,
+            )
+
         out.fundamental_metrics_partial = _build_fundamental_metrics_from_snapshots(
             profitability=out.snap_profitability,
             growth=out.snap_growth,
             valuation=out.snap_valuation,
             health=out.snap_health,
             history_lookup=fundamentals_history,
+            peer_group_level=peer_group_level,
         )
 
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
@@ -3925,8 +3982,13 @@ def _snapshot_to_card(
     snap: Optional[SnapshotItemResponse],
     extra_metrics: Optional[List[Dict[str, Any]]] = None,
     history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
+    peer_group_level: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Map a SnapshotItemResponse onto a FundamentalMetricCardResponse dict.
+
+    `peer_group_level` ("industry"/"sector"/None) is the ticker-wide peer group
+    the card's benchmark comparisons use — it labels the "vs industry/sector"
+    footnote + drill-down legend.
 
     Honest fallback when the snapshot is missing: star_rating=0, empty
     metrics, quality_label="Data unavailable" — Pydantic still validates
@@ -3940,6 +4002,7 @@ def _snapshot_to_card(
             "metrics": metrics,
             "quality_label": "Data unavailable",
             "quality_sentiment": "neutral",
+            "peer_group_level": peer_group_level,
         }
 
     metrics: List[Dict[str, Any]] = []
@@ -3968,6 +4031,7 @@ def _snapshot_to_card(
         "metrics": metrics,
         "quality_label": "",  # Stage B narrative writes this (+ quality_sentiment)
         "quality_sentiment": "neutral",  # overwritten by the label job's sentiment
+        "peer_group_level": peer_group_level,
     }
 
 
@@ -3977,6 +4041,7 @@ def _build_fundamental_metrics_from_snapshots(
     valuation: Optional[SnapshotItemResponse],
     health: Optional[SnapshotItemResponse],
     history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
+    peer_group_level: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Build the 4 fundamental cards from the same snapshot services
     TickerDetailView's Financials tab uses, so the values match exactly.
@@ -3984,12 +4049,15 @@ def _build_fundamental_metrics_from_snapshots(
     Order matches the existing iOS card order: Profitability, Growth,
     Valuation, Health. Earnings Yield is part of the Valuation snapshot
     itself (with sector context), so no `extra_metrics` is needed.
+
+    `peer_group_level` ("industry"/"sector") is uniform per ticker (the industry
+    either has benchmark rows or it doesn't), so the same value labels all 4 cards.
     """
     return [
-        _snapshot_to_card("Profitability", profitability, history_lookup=history_lookup),
-        _snapshot_to_card("Growth", growth, history_lookup=history_lookup),
-        _snapshot_to_card("Valuation", valuation, history_lookup=history_lookup),
-        _snapshot_to_card("Health", health, history_lookup=history_lookup),
+        _snapshot_to_card("Profitability", profitability, history_lookup=history_lookup, peer_group_level=peer_group_level),
+        _snapshot_to_card("Growth", growth, history_lookup=history_lookup, peer_group_level=peer_group_level),
+        _snapshot_to_card("Valuation", valuation, history_lookup=history_lookup, peer_group_level=peer_group_level),
+        _snapshot_to_card("Health", health, history_lookup=history_lookup, peer_group_level=peer_group_level),
     ]
 
 

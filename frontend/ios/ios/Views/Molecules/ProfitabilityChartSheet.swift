@@ -28,11 +28,15 @@ struct ProfitabilityChartSheet: View {
         // 4 margins (from profit_power) + ROE/ROA (from the card's baked history),
         // in display order.
         var series = marginSeries
+        // ROE/ROA come from the card's baked history and carry no peer level of
+        // their own — reuse the margins' ticker-level peer group so the whole
+        // sheet labels consistently ("Industry" vs "Sector").
+        let peerLevel = marginSeries.first?.peerLevel
         if let roe = card.metrics.first(where: { $0.historyKey == "roe" }) {
-            series.append(roe.toProfitabilitySeries(.roe))
+            series.append(roe.toProfitabilitySeries(.roe, peerLevel: peerLevel))
         }
         if let roa = card.metrics.first(where: { $0.historyKey == "roa" }) {
-            series.append(roa.toProfitabilitySeries(.roa))
+            series.append(roa.toProfitabilitySeries(.roa, peerLevel: peerLevel))
         }
         self.allSeries = series
 
@@ -50,6 +54,14 @@ struct ProfitabilityChartSheet: View {
 
     private func series(_ m: ProfitabilityMetricType) -> ProfitabilityMetricSeries? {
         allSeries.first { $0.metric == m }
+    }
+
+    /// "Industry" when the benchmark line is industry-level, else "Sector".
+    /// Prefer the ticker-wide card level (matches the card footnote + other
+    /// drill-downs); fall back to the profit_power per-series level.
+    private var peerWord: String {
+        let level = card.peerGroupLevel ?? series(selectedMetric)?.peerLevel
+        return level == "industry" ? "Industry" : "Sector"
     }
 
     private var current: [ProfitabilityChartPoint] {
@@ -154,12 +166,26 @@ struct ProfitabilityChartSheet: View {
     // MARK: - Period toggle
 
     private var periodToggle: some View {
-        Picker("Period", selection: $selectedPeriod) {
+        Picker("Period", selection: periodBinding) {
             ForEach(GrowthPeriodType.allCases) { p in
                 Text(p.rawValue).tag(p)
             }
         }
         .pickerStyle(.segmented)
+    }
+
+    /// Toggling Annual/Quarterly commits the state change with animations
+    /// disabled, so the chart swaps instantly instead of cross-fading the
+    /// `.id`-keyed view. (Metric chips are plain Buttons and already don't animate.)
+    private var periodBinding: Binding<GrowthPeriodType> {
+        Binding(
+            get: { selectedPeriod },
+            set: { newValue in
+                var txn = Transaction()
+                txn.disablesAnimations = true
+                withTransaction(txn) { selectedPeriod = newValue }
+            }
+        )
     }
 
     // MARK: - Legend + latest vs-sector delta
@@ -171,12 +197,14 @@ struct ProfitabilityChartSheet: View {
     private func deltaText(company: Double, sector: Double) -> String {
         let c = pct(company)
         let s = pct(sector)
-        let spread = String(format: "%+.1f pts vs sector", company - sector)
-        // The "×" multiple only means anything when the sector base is non-trivial.
+        let peer = peerWord            // "Industry" or "Sector"
+        let peerLower = peer.lowercased()
+        let spread = String(format: "%+.1f pts vs \(peerLower)", company - sector)
+        // The "×" multiple only means anything when the peer base is non-trivial.
         if company > 0 && sector >= 2.0 {
-            return "Latest \(c) · Sector \(s) · \(String(format: "%.2f×", company / sector)) vs sector"
+            return "Current \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peerLower)"
         }
-        return "Latest \(c) · Sector \(s) · \(spread)"
+        return "Current \(c) · \(peer) \(s) · \(spread)"
     }
 
     @ViewBuilder
@@ -197,7 +225,7 @@ struct ProfitabilityChartSheet: View {
                             Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
                         }
                     }
-                    Text("Sector Average")
+                    Text("\(peerWord) Average")
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -208,7 +236,7 @@ struct ProfitabilityChartSheet: View {
                     .foregroundColor(AppColors.textPrimary)
                     .multilineTextAlignment(.center)
             } else if let v = latestPoint?.company {
-                Text("Latest \(pct(v)) · Company only")
+                Text("Current \(pct(v)) · Company only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)

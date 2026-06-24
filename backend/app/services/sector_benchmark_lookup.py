@@ -81,6 +81,10 @@ class SectorBenchmarkLookup:
                 self.supabase.table("sector_benchmarks")
                 .select(columns)
                 .eq("sector", sector)
+                # SECTOR-aggregate rows only — industry rows (industry=<name>) are
+                # served by the Phase-2 industry-first lookup. Without this filter
+                # the sector lookup would mix in industry rows once they exist.
+                .eq("industry", "")
                 .eq("period_type", period_type)
                 .in_("metric_name", metrics)
                 .range(start, start + self._PAGE - 1)

@@ -94,6 +94,86 @@ async def refresh_sector_benchmarks(
         raise HTTPException(status_code=500, detail="Failed to start benchmark refresh")
 
 
+@router.post("/refresh-industry-benchmarks")
+async def refresh_industry_benchmarks(
+    skip_recent_hours: int = 24,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Trigger the broad-universe INDUSTRY + sector benchmark recompute (rebuilds
+    BOTH levels in `sector_benchmarks` over the small-cap-inclusive universe).
+    Returns immediately; runs in the background (~1-3 hrs at FMP Premium, throttled).
+    Resumable: re-trigger to resume — sectors with a '' aggregate row newer than
+    `skip_recent_hours` are skipped (pass 0 to force a full recompute).
+
+    Auth: `X-Admin-Token: <settings.ADMIN_TOKEN>` OR sign in with an admin email.
+    """
+    _authorize_admin(user, x_admin_token)
+    try:
+        from app.services.industry_benchmark_service import (
+            get_industry_benchmark_service,
+        )
+
+        service = get_industry_benchmark_service()
+        skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
+        asyncio.create_task(service.recompute_all(skip_if_fresh_hours=skip))
+        return {
+            "status": "started",
+            "message": "Industry benchmark recompute started in background — ~1-3 hrs; re-trigger to resume.",
+            "skip_if_fresh_hours": skip,
+        }
+    except Exception as e:
+        logger.error(f"Manual industry benchmark refresh failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start industry benchmark refresh")
+
+
+@router.get("/industry-benchmarks-status")
+async def industry_benchmarks_status(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Live progress of the broad-universe benchmark table: total rows, industry
+    rows (industry<>''), sector-aggregate rows (industry=''), and latest computed_at.
+    """
+    _authorize_admin(user, x_admin_token)
+    try:
+        from app.database import get_supabase
+
+        sb = get_supabase()
+
+        def _count(query) -> int:
+            try:
+                return query.execute().count or 0
+            except Exception:
+                return 0
+
+        total = _count(sb.table("sector_benchmarks").select("id", count="exact").limit(1))
+        industry_rows = _count(
+            sb.table("sector_benchmarks").select("id", count="exact").neq("industry", "").limit(1)
+        )
+        sector_rows = _count(
+            sb.table("sector_benchmarks").select("id", count="exact").eq("industry", "").limit(1)
+        )
+        latest = None
+        try:
+            r = (
+                sb.table("sector_benchmarks")
+                .select("computed_at").order("computed_at", desc=True).limit(1).execute()
+            )
+            latest = r.data[0]["computed_at"] if r.data else None
+        except Exception:
+            pass
+        return {
+            "total_rows": total,
+            "industry_rows": industry_rows,
+            "sector_rows": sector_rows,
+            "latest_computed_at": latest,
+        }
+    except Exception as e:
+        logger.error(f"industry-benchmarks-status failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read industry benchmark status")
+
+
 @router.post("/refresh-industry-dossier")
 async def refresh_industry_dossier(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),

@@ -588,6 +588,7 @@ class SectorBenchmarkService:
                 self.supabase.table("sector_benchmarks")
                 .select("metric_name,period_type,period_label")
                 .eq("sector", sector)
+                .eq("industry", "")  # only this service's sector-aggregate rows
                 .execute()
             )
             return {
@@ -764,6 +765,10 @@ class SectorBenchmarkService:
                         cleaned = values
                     rows_to_upsert.append({
                         "sector": sector,
+                        # This service writes only SECTOR-aggregate rows → industry=''.
+                        # Industry-level rows (industry=<name>) are written by
+                        # industry_benchmark_service. See migration 072.
+                        "industry": "",
                         "metric_name": metric_config["name"],
                         "period_type": period_type,
                         "period_label": period_label,
@@ -779,7 +784,7 @@ class SectorBenchmarkService:
             try:
                 self.supabase.table("sector_benchmarks").upsert(
                     batch,
-                    on_conflict="sector,metric_name,period_type,period_label",
+                    on_conflict="sector,industry,metric_name,period_type,period_label",
                 ).execute()
                 upserted += len(batch)
             except Exception as e:

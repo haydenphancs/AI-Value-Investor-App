@@ -27,8 +27,8 @@ extension BookAudioInfo {
     static let byOrder: [Int: BookAudioInfo] = [
         1: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/1_rich-dad-poor-dad.m4a",
-            totalSeconds: 1054,
-            coreStartSeconds: [1: 0, 2: 157, 3: 310, 4: 459, 5: 606, 6: 764, 7: 907]
+            totalSeconds: 1386,
+            coreStartSeconds: [1: 0, 2: 193, 3: 395, 4: 575, 5: 775, 6: 985, 7: 1180]
         ),
         2: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/2_the-intelligent-investor.m4a",
@@ -37,8 +37,8 @@ extension BookAudioInfo {
         ),
         3: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/3_the-psychology-of-money.m4a",
-            totalSeconds: 2878,
-            coreStartSeconds: [1: 0, 2: 229, 3: 455, 4: 659, 5: 871, 6: 1156, 7: 1424, 8: 1658, 9: 1928, 10: 2135, 11: 2368, 12: 2583]
+            totalSeconds: 3040,
+            coreStartSeconds: [1: 0, 2: 255, 3: 476, 4: 705, 5: 909, 6: 1252, 7: 1499, 8: 1730, 9: 2028, 10: 2235, 11: 2477, 12: 2748]
         ),
         4: BookAudioInfo(
             audioUrl: "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/4_one-up-on-wall-street.m4a",

@@ -41,7 +41,7 @@ BREAK = gba.BREAK_SECONDS
 # Per-book reference voice clip (the clone source) — built from the Gemini audition samples so each
 # book keeps the voice we cast. Add entries here as we roll out to more books.
 REFS = {1: "rdpd_achird.wav", 2: "iapetus_erudite_professor.wav", 3: "psychology_puck.wav",
-        4: "oneup_enceladus.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
+        4: "oneup_core2.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
         7: "orus_witty_emeritus.wav", 8: "zubenelgenubi_warm_elder.wav",
         9: "achird_patient_teacher.wav", 10: "sadaltager_contemplative.wav"}
 

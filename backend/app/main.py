@@ -66,8 +66,12 @@ async def lifespan(app: FastAPI):
         # makes some Gemini-grounded calls for cold tickers).
         asyncio.create_task(_run_report_pre_warmer())
 
-        # Start background sector benchmark computation (daily)
-        asyncio.create_task(_run_sector_benchmark_job())
+        # NOTE: the old weekly sector-only benchmark job was RETIRED here.
+        # Sector + industry medians are now computed together by the
+        # industry-benchmark recompute chained into the quarterly batch
+        # (`_run_industry_dossier_job`, base+120 min). Running both would let
+        # two writers race on the industry='' sector-aggregate rows. Manual
+        # refresh remains available via POST /api/v1/admin/refresh-industry-benchmarks.
 
         # Start background industry dossier recompute (weekly).
         # Replaces live FRED+Census calls per ticker report with a
@@ -198,34 +202,13 @@ async def _run_research_reconciliation_job():
         await asyncio.sleep(RECON_SWEEP_INTERVAL_SECONDS)
 
 
-async def _run_sector_benchmark_job():
-    """Background task: recompute sector benchmarks weekly on Sunday at 1 AM."""
-    from datetime import datetime, timedelta
-
-    await asyncio.sleep(60)  # let app fully start
-
-    while True:
-        # Calculate seconds until next Sunday 1:00 AM local time
-        now = datetime.now()
-        days_until_sunday = (6 - now.weekday()) % 7  # 6 = Sunday
-        if days_until_sunday == 0 and now.hour >= 1:
-            days_until_sunday = 7  # already past 1 AM Sunday, wait for next week
-        next_run = now.replace(hour=1, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
-        sleep_seconds = (next_run - now).total_seconds()
-        logger.info(
-            f"Sector benchmark job: next run at {next_run.isoformat()} "
-            f"(sleeping {sleep_seconds / 3600:.1f}h)"
-        )
-        await asyncio.sleep(sleep_seconds)
-
-        try:
-            from app.services.sector_benchmark_service import get_sector_benchmark_service
-
-            service = get_sector_benchmark_service()
-            result = await service.compute_all_benchmarks(force=True)
-            logger.info(f"Sector benchmark job completed: {result}")
-        except Exception as e:
-            logger.error(f"Sector benchmark job failed: {e}", exc_info=True)
+# NOTE: `_run_sector_benchmark_job` (weekly Sunday 1 AM, sector-only over the
+# S&P 500) was RETIRED in the industry-benchmark migration. Sector + industry
+# medians are now produced in one pass by the industry-benchmark recompute
+# chained into `_run_industry_dossier_job` (base+120 min). The old
+# `sector_benchmark_service.compute_all_benchmarks` still backs the manual
+# admin endpoint but is no longer scheduled — two schedulers writing the
+# industry='' rows would race and re-introduce stale data.
 
 
 def _next_quarterly_dossier_run(now: "datetime") -> "datetime":
@@ -277,6 +260,7 @@ async def _run_industry_dossier_job():
     #   base + 30  min → competitor_intel.refresh_top_tickers
     #   base + 60  min → ip_intel.refresh_top_tickers
     #   base + 90  min → industry_moat_benchmark.recompute_all  (longest)
+    #   base + 120 min → industry_benchmark.recompute_all (sector + industry medians)
     #
     # If a sub-job overruns its 30-min window, the next one starts as
     # soon as the previous awaits return — _wait_until clamps to "at
@@ -365,6 +349,35 @@ async def _run_industry_dossier_job():
         except Exception as e:
             logger.error(
                 f"Industry moat benchmark quarterly batch failed: {e}", exc_info=True,
+            )
+
+        # ── Sector + industry benchmarks (vs-industry overlay) @ base + 120 min ──
+        # Replaces the retired weekly sector-only job: ONE pass computes every
+        # industry median AND the industry='' sector aggregate over the broad
+        # ~$500M-floor universe (`benchmark_universe.json`). Started last (after
+        # moat) so its FMP burst can't overlap the upstream refreshes.
+        # `skip_if_fresh_hours=24` keeps the quarterly run from redoing rows an
+        # operator already triggered manually within the last day. The universe
+        # file is regenerated out-of-band (manual `python -m
+        # scripts.build_benchmark_universe`) — industries shift slowly, so the
+        # committed universe is stable between quarterly recomputes.
+        await _wait_until(next_run + _td(minutes=120))
+        try:
+            from app.services.industry_benchmark_service import (
+                get_industry_benchmark_service,
+            )
+
+            industry_bench_summary = (
+                await get_industry_benchmark_service().recompute_all(
+                    skip_if_fresh_hours=24,
+                )
+            )
+            logger.info(
+                f"Industry benchmark quarterly batch completed: {industry_bench_summary}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Industry benchmark quarterly batch failed: {e}", exc_info=True,
             )
 
 

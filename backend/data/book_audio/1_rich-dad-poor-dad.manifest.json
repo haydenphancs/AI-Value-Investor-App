@@ -4,11 +4,13 @@
   "author": "Robert T. Kiyosaki",
   "slug": "rich-dad-poor-dad",
   "audio_file": "1_rich-dad-poor-dad.m4a",
-  "voice": "Achird",
-  "target_wpm": 170,
+  "voice": "clone:rdpd_achird",
+  "engine": "chatterbox",
+  "target_wpm": null,
+  "pitch_semitones": -1,
   "break_seconds": 2.5,
-  "total_seconds": 1053.76,
-  "total_label": "17:34",
+  "total_seconds": 1385.68,
+  "total_label": "23:05",
   "cores": [
     {
       "number": 1,
@@ -19,39 +21,40 @@
     {
       "number": 2,
       "title": "Mastering the Financial Scorecard",
-      "start_seconds": 157.1,
-      "start_label": "2:37"
+      "start_seconds": 192.97,
+      "start_label": "3:23"
     },
     {
       "number": 3,
       "title": "The Corporate Shield Strategy",
-      "start_seconds": 309.61,
-      "start_label": "5:10"
+      "start_seconds": 394.7,
+      "start_label": "6:54"
     },
     {
       "number": 4,
       "title": "The Opportunity Hunter",
-      "start_seconds": 458.58,
-      "start_label": "7:39"
+      "start_seconds": 574.72,
+      "start_label": "10:03"
     },
     {
       "number": 5,
       "title": "Trading Security for Skills",
-      "start_seconds": 605.79,
-      "start_label": "10:06"
+      "start_seconds": 775.16,
+      "start_label": "13:34"
     },
     {
       "number": 6,
       "title": "Conquering the Inner Saboteur",
-      "start_seconds": 763.95,
-      "start_label": "12:44"
+      "start_seconds": 984.55,
+      "start_label": "17:14"
     },
     {
       "number": 7,
       "title": "The \"First 3 Steps\" Launchpad",
-      "start_seconds": 906.58,
-      "start_label": "15:07"
+      "start_seconds": 1180.27,
+      "start_label": "20:39"
     }
   ],
+  "speed_factor": 1.05,
   "audio_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-media/audio/1_rich-dad-poor-dad.m4a?"
 }

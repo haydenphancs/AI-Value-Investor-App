@@ -275,6 +275,10 @@ class GrowthService:
         # Phase 2: get sector from profile (normalize to canonical name for benchmark lookup)
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
         sector = _normalize_sector(raw_sector)
+        # Industry-relative benchmarks: prefer the company's INDUSTRY peer group,
+        # fall back to its sector per (metric, period). FMP industry names match
+        # the benchmark table directly, so no normalization is needed.
+        industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
         # Phase 3: compute target ticker's YoY growth for all 5 metrics
         # EPS & Revenue (from income statement)
@@ -303,14 +307,14 @@ class GrowthService:
         benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            benchmarks_annual = lookup.get_sector_benchmarks(
-                sector, all_yoy_metrics, "annual"
+            benchmarks_annual = lookup.get_benchmark_values(
+                industry, sector, all_yoy_metrics, "annual"
             )
-            benchmarks_quarterly = lookup.get_sector_benchmarks(
-                sector, all_yoy_metrics, "quarterly"
+            benchmarks_quarterly = lookup.get_benchmark_values(
+                industry, sector, all_yoy_metrics, "quarterly"
             )
-            benchmarks_qoq_quarterly = lookup.get_sector_benchmarks(
-                sector, all_qoq_metrics, "quarterly"
+            benchmarks_qoq_quarterly = lookup.get_benchmark_values(
+                industry, sector, all_qoq_metrics, "quarterly"
             )
 
         # Phase 5: assemble response with sector averages matched by period label

@@ -24,7 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    get_sector_benchmark_lookup,
+    mature_benchmark_value,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -366,26 +369,22 @@ class HealthSnapshotService:
             )
             raw_sector = profile.get("sector", "")
             sector = _normalize_sector(raw_sector) if raw_sector else ""
+            # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
+            industry = profile.get("industry", "") if isinstance(profile, dict) else ""
             sector_ic = sector_qr = sector_de = sector_cr = None
             if sector:
                 try:
-                    bench = get_sector_benchmark_lookup().get_sector_benchmarks(
+                    # Rich shape so the mature-period picker can apply the floor.
+                    bench = get_sector_benchmark_lookup().get_benchmarks(
+                        industry,
                         sector,
                         ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
                         "annual",
                     )
-                    ic_data = bench.get("interest_coverage", {})
-                    qr_data = bench.get("quick_ratio", {})
-                    de_data = bench.get("debt_to_equity", {})
-                    cr_data = bench.get("current_ratio", {})
-                    if ic_data:
-                        sector_ic = ic_data[max(ic_data.keys())]
-                    if qr_data:
-                        sector_qr = qr_data[max(qr_data.keys())]
-                    if de_data:
-                        sector_de = de_data[max(de_data.keys())]
-                    if cr_data:
-                        sector_cr = cr_data[max(cr_data.keys())]
+                    sector_ic = mature_benchmark_value(bench.get("interest_coverage", {}))
+                    sector_qr = mature_benchmark_value(bench.get("quick_ratio", {}))
+                    sector_de = mature_benchmark_value(bench.get("debt_to_equity", {}))
+                    sector_cr = mature_benchmark_value(bench.get("current_ratio", {}))
                 except Exception as e:
                     logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 

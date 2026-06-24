@@ -51,14 +51,21 @@ _UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "benchmark_unive
 TOP_TICKERS_PER_INDUSTRY = 300
 DEFAULT_SKIP_IF_FRESH_HOURS = 24
 
-# metric_name → type, for the winsorization dispatch on the sector accumulator.
+# metric_name → type / cap, for the winsorization dispatch on the sector accumulator.
+# (The `positive_only` filter is inherited automatically — we reuse the sector
+# service's `_collect_metric_values`, which already drops non-positive values.)
 _METRIC_TYPE: Dict[str, str] = {mc["name"]: mc["type"] for mc in METRIC_CONFIGS}
+_METRIC_CAP: Dict[str, float] = {mc["name"]: mc["cap"] for mc in METRIC_CONFIGS if "cap" in mc}
 
 
 def _winsorize_for(metric_name: str, metric_type: str, values: List[float]) -> List[float]:
-    """Identical dispatch to SectorBenchmarkService._compute_sector: wide bounds for
+    """Identical dispatch to SectorBenchmarkService._compute_sector: capped positive-
+    only multiples (P/E·P/B·P/S, interest coverage) first, then wide bounds for
     yoy/qoq, tight 0-200 for computed multiples (EXCEPT fcf_margin — a signed decimal
     margin), no clamp for direct ratios + fcf_margin."""
+    cap = _METRIC_CAP.get(metric_name)
+    if cap is not None:
+        return _winsorize(values, floor=0.0, ceil=cap)
     if metric_type in ("yoy", "qoq"):
         return _winsorize(values)
     if metric_type == "computed" and metric_name != "fcf_margin":
@@ -171,58 +178,141 @@ class IndustryBenchmarkService:
                 logger.error("industry_benchmark upsert batch failed: %s", e)
         return n
 
+    def _emit(self, rows: List[Dict[str, Any]], label: str, dry_run: bool) -> int:
+        """Upsert, or (dry_run) log a sample of the computed medians and write nothing."""
+        if dry_run:
+            self._log_sample(label, rows)
+            return 0
+        return self._upsert(rows)
+
+    @staticmethod
+    def _log_sample(label: str, rows: List[Dict[str, Any]]) -> None:
+        """Log a few headline medians at each metric's MOST-SAMPLED annual year (so a
+        thin partial current year doesn't mislead) — a sanity check before a full run."""
+        best: Dict[str, Any] = {}
+        for r in rows:
+            if r["period_type"] != "annual":
+                continue
+            cur = best.get(r["metric_name"])
+            if cur is None or r["sample_size"] > cur["sample_size"] or (
+                r["sample_size"] == cur["sample_size"]
+                and r["period_label"] > cur["period_label"]
+            ):
+                best[r["metric_name"]] = r
+        logger.info(
+            "DRY-RUN %s — %d rows. Median at each metric's most-sampled annual year:",
+            label, len(rows),
+        )
+        for m in ("gross_margin", "operating_margin", "net_margin", "fcf_margin",
+                  "roe", "roa", "pe_ratio", "pb_ratio", "ps_ratio", "interest_coverage"):
+            r = best.get(m)
+            if r:
+                logger.info(
+                    "    %-18s %s: median=%s (n=%d)",
+                    m, r["period_label"], r["median_value"], r["sample_size"],
+                )
+
     # ── Per-sector compute (stream industries, accumulate into the sector) ──
+    async def _industry_value_lists(
+        self, ticker_caps: List[Tuple[str, float]], al: int, ql: int,
+    ) -> Dict[Tuple[str, str, str], List[float]]:
+        """Fetch one industry's companies and return {(metric,period_type,period):[raw values]}."""
+        company_data = await self._fetch_batched([t for t, _ in ticker_caps], al, ql)
+        ind_values: Dict[Tuple[str, str, str], List[float]] = defaultdict(list)
+        if not company_data:
+            return ind_values
+        for mc in METRIC_CONFIGS:
+            for period_type in ("annual", "quarterly"):
+                vals = self._sb._collect_metric_values(company_data, mc, period_type)
+                for period_label, values in vals.items():
+                    ind_values[(mc["name"], period_type, period_label)].extend(values)
+        return ind_values
+
     async def _compute_sector(
         self, sector: str,
         industries: List[Tuple[str, List[Tuple[str, float]]]],
-        al: int, ql: int,
+        al: int, ql: int, dry_run: bool = False,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         sector_acc: Dict[Tuple[str, str, str], List[float]] = defaultdict(list)
         written = 0
         for industry, ticker_caps in industries:
-            tickers = [t for t, _ in ticker_caps]
-            company_data = await self._fetch_batched(tickers, al, ql)
-            if not company_data:
+            ind_values = await self._industry_value_lists(ticker_caps, al, ql)
+            if not ind_values:
                 continue
-            ind_values: Dict[Tuple[str, str, str], List[float]] = defaultdict(list)
-            for mc in METRIC_CONFIGS:
-                for period_type in ("annual", "quarterly"):
-                    vals = self._sb._collect_metric_values(company_data, mc, period_type)
-                    for period_label, values in vals.items():
-                        key = (mc["name"], period_type, period_label)
-                        ind_values[key].extend(values)
-                        sector_acc[key].extend(values)
-            written += self._upsert(self._rows_from_values(sector, industry, ind_values, now))
-            del company_data  # free this industry's raw financials before the next
+            for key, values in ind_values.items():
+                sector_acc[key].extend(values)
+            written += self._emit(
+                self._rows_from_values(sector, industry, ind_values, now),
+                f"{sector} / {industry}", dry_run,
+            )
+            del ind_values  # free this industry's value lists before the next
         # Sector aggregate (industry='') from the accumulated raw value lists.
-        written += self._upsert(self._rows_from_values(sector, "", sector_acc, now))
+        written += self._emit(
+            self._rows_from_values(sector, "", sector_acc, now),
+            f"{sector} (sector aggregate)", dry_run,
+        )
         return written
+
+    async def _compute_industries_only(
+        self, targets: List[str], al: int, ql: int, dry_run: bool,
+    ) -> Dict[str, Any]:
+        """Validation path: compute ONLY the named industries' rows (industry=<name>),
+        NOT the sector aggregate (one industry isn't the whole sector). Lets you
+        cheaply sanity-check a single industry before the full run."""
+        lookup: Dict[str, Tuple[str, List[Tuple[str, float]]]] = {}
+        for sector, inds in self._load_universe():
+            for industry, tc in inds:
+                lookup[industry] = (sector, tc)
+        now = datetime.now(timezone.utc).isoformat()
+        total = 0
+        seen = 0
+        for industry in targets:
+            if industry not in lookup:
+                logger.warning("industry_benchmark: %r not in universe — skipped", industry)
+                continue
+            seen += 1
+            sector, ticker_caps = lookup[industry]
+            ind_values = await self._industry_value_lists(ticker_caps, al, ql)
+            total += self._emit(
+                self._rows_from_values(sector, industry, ind_values, now),
+                f"{sector} / {industry}", dry_run,
+            )
+        return {"industries": seen, "rows_upserted": total, "dry_run": dry_run}
 
     # ── Orchestration ────────────────────────────────────────────────
     async def recompute_all(
         self, *, skip_if_fresh_hours: Optional[int] = None,
         sectors: Optional[List[str]] = None,
+        industries: Optional[List[str]] = None,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
         start = datetime.now(timezone.utc)
+        al, ql = FMP_ANNUAL_LIMIT_BACKFILL, FMP_QUARTERLY_LIMIT_BACKFILL
+
+        # Validation path: a few named industries only (industry rows, no sector
+        # aggregate). Pair with dry_run to write nothing and just eyeball the medians.
+        if industries:
+            summary = await self._compute_industries_only(industries, al, ql, dry_run)
+            summary["elapsed_seconds"] = round((datetime.now(timezone.utc) - start).total_seconds(), 1)
+            logger.info("industry_benchmark (industries-only) complete: %s", summary)
+            return summary
+
         universe = self._load_universe()
         if sectors:
             universe = [(s, inds) for s, inds in universe if s in sectors]
         total_rows = done = skipped_fresh = 0
-        for sector, industries in universe:
-            if self._sector_is_fresh(sector, skip_if_fresh_hours):
+        for sector, inds in universe:
+            if not dry_run and self._sector_is_fresh(sector, skip_if_fresh_hours):
                 skipped_fresh += 1
                 logger.info("industry_benchmark: %s fresh — skipped", sector)
                 continue
             try:
                 logger.info(
                     "industry_benchmark: computing %s (%d industries)...",
-                    sector, len(industries),
+                    sector, len(inds),
                 )
-                n = await self._compute_sector(
-                    sector, industries,
-                    FMP_ANNUAL_LIMIT_BACKFILL, FMP_QUARTERLY_LIMIT_BACKFILL,
-                )
+                n = await self._compute_sector(sector, inds, al, ql, dry_run)
                 total_rows += n
                 done += 1
                 logger.info("industry_benchmark: %s done — %d rows", sector, n)
@@ -233,6 +323,7 @@ class IndustryBenchmarkService:
             "sectors_done": done,
             "sectors_skipped_fresh": skipped_fresh,
             "rows_upserted": total_rows,
+            "dry_run": dry_run,
             "elapsed_seconds": round(elapsed, 1),
         }
         logger.info("industry_benchmark complete: %s", summary)

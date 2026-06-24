@@ -111,12 +111,22 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "current_ratio",       "source": "ratios",    "field": "currentRatio",           "type": "direct"},
     {"name": "quick_ratio",         "source": "ratios",    "field": "quickRatio",             "type": "direct"},
     {"name": "debt_to_equity",      "source": "ratios",    "field": "debtToEquityRatio",      "type": "direct"},
-    {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverageRatio",  "type": "direct"},
+    # Interest coverage: positive-only. Most software / no-debt firms report 0/null,
+    # collapsing a naive MEDIAN to 0.0 (the degenerate bug). Dropping ≤0 (no-debt +
+    # loss-makers) leaves the indebted, profitable peers → a realistic high-teens/~30x
+    # median (matches Damodaran/CSIMarket aggregates). Capped so a tiny-interest
+    # outlier can't run to thousands.
+    {"name": "interest_coverage",   "source": "ratios",    "field": "interestCoverageRatio",  "type": "direct", "positive_only": True, "cap": 100.0},
     {"name": "debt_to_assets",      "source": "ratios",    "field": "debtRatio",              "type": "direct"},
     # Valuation
-    {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct"},
-    {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct"},
-    {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct"},
+    # Price multiples: positive-only + capped. A negative P/E·P/B·P/S is "Neg."/
+    # undefined — the company-side valuation card already hides it (_positive_or_none),
+    # and a negative drags the MEDIAN below the comparable profitable-peer level.
+    # External providers (Damodaran/CSIMarket medians) also exclude loss-makers from
+    # P/E. (P/FCF & EV/EBITDA are already positive-only via their computed >0 gate.)
+    {"name": "pe_ratio",            "source": "ratios",    "field": "priceToEarningsRatio",   "type": "direct", "positive_only": True, "cap": 200.0},
+    {"name": "pb_ratio",            "source": "ratios",    "field": "priceToBookRatio",       "type": "direct", "positive_only": True, "cap": 200.0},
+    {"name": "ps_ratio",            "source": "ratios",    "field": "priceToSalesRatio",      "type": "direct", "positive_only": True, "cap": 200.0},
     # P/FCF and EV/EBITDA are RECONSTRUCTED from raw fundamentals, not
     # extracted as pre-computed ratios. FMP's pre-computed `pfcfRatio` and
     # `enterpriseValueOverEBITDA` fields come back null for too much of the
@@ -748,7 +758,13 @@ class SectorBenchmarkService:
                     #   computed ratios (P/FCF, EV/EBITDA) → tight 0–200 bounds:
                     #     near-zero denominators produce 4-digit multiples that
                     #     pull the median upward; healthy ratios are <50.
-                    if metric_type in ("yoy", "qoq"):
+                    metric_cap = metric_config.get("cap")
+                    if metric_cap is not None:
+                        # positive-only multiples (P/E·P/B·P/S, interest coverage):
+                        # already filtered to > 0; clamp the top so a near-zero
+                        # denominator can't inflate the tail.
+                        cleaned = _winsorize(values, floor=0.0, ceil=metric_cap)
+                    elif metric_type in ("yoy", "qoq"):
                         cleaned = _winsorize(values)
                     elif (
                         metric_type == "computed"
@@ -875,10 +891,16 @@ class SectorBenchmarkService:
                 for label, qoq_val in qoq_points.items():
                     period_values.setdefault(label, []).append(qoq_val)
             else:
-                # Direct value extraction
+                # Direct value extraction. `positive_only` metrics (the price
+                # multiples P/E·P/B·P/S, interest coverage) drop non-positive values:
+                # a negative multiple is "Neg."/undefined (the company side hides it)
+                # and would drag the median below the comparable profitable-peer level.
+                positive_only = metric_config.get("positive_only", False)
                 for rec in records:
                     val = _safe_float(rec, field)
                     if val is None:
+                        continue
+                    if positive_only and val <= 0:
                         continue
                     label = (
                         _quarterly_period_label(rec) if is_quarterly

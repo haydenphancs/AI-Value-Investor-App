@@ -34,13 +34,26 @@ async def main(args: argparse.Namespace) -> None:
     service = get_industry_benchmark_service()
     skip = args.skip_recent_hours if args.skip_recent_hours and args.skip_recent_hours > 0 else None
     sectors = [args.sector] if args.sector else None
-    result = await service.recompute_all(skip_if_fresh_hours=skip, sectors=sectors)
+    result = await service.recompute_all(
+        skip_if_fresh_hours=skip,
+        sectors=sectors,
+        industries=args.industry,
+        dry_run=args.dry_run,
+    )
     logger.info(f"Result: {result}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Recompute industry + sector benchmarks")
     parser.add_argument("--sector", type=str, default=None, help="Process a single sector (e.g. 'Technology')")
+    parser.add_argument(
+        "--industry", type=str, action="append", default=None,
+        help="Compute ONLY this industry (repeatable); industry rows only, no sector aggregate. For validation.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Compute + log a sample of the medians and write NOTHING (sanity check before a real run).",
+    )
     parser.add_argument("--skip-recent-hours", type=int, default=24, help="Skip sectors computed within N hours (0 = force full)")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")

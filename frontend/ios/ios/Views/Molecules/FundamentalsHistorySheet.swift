@@ -32,6 +32,14 @@ struct FundamentalsHistorySheet: View {
 
     private var metrics: [DeepDiveMetric] { card.chartableMetrics }
 
+    /// Valuation + Health render the Profitability-style 2-line chart (yellow
+    /// company + gray dashed benchmark lines, value rows below — no bars). These
+    /// are the only two cards that reach this sheet (Growth/Profitability route to
+    /// their own sheets), so any other/legacy title safely falls back to bars.
+    private var usesLineChart: Bool {
+        card.title == "Valuation" || card.title == "Health"
+    }
+
     private var selected: DeepDiveMetric? {
         metrics.first { $0.id == selectedMetricID } ?? metrics.first
     }
@@ -54,6 +62,16 @@ struct FundamentalsHistorySheet: View {
         (m.quarterlyHistory?.compactMap(\.value).count ?? 0) >= 2
     }
 
+    /// Valuation + Health → 2-line chart; any other/legacy card → bar chart.
+    @ViewBuilder
+    private func chartView(_ m: DeepDiveMetric) -> some View {
+        if usesLineChart {
+            MetricHistoryLineChart(points: points(m), sector: sectorPoints(m), unit: m.historyUnit)
+        } else {
+            MetricHistoryChart(points: points(m), unit: m.historyUnit, sector: sectorPoints(m))
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -62,10 +80,9 @@ struct FundamentalsHistorySheet: View {
                         metricPicker
                         header(m)
                         if quarterlyAvailable(m) { periodToggle }
-                        MetricHistoryChart(points: points(m), unit: m.historyUnit, sector: sectorPoints(m))
+                        chartView(m)
                             .id("\(m.id.uuidString)-\(period.rawValue)")
                             .animation(.easeInOut(duration: 0.25), value: selectedMetricID)
-                            .animation(.easeInOut(duration: 0.25), value: period)
                         legendAndDelta(m)
                         omissionNote(m)
                         footnote
@@ -148,12 +165,26 @@ struct FundamentalsHistorySheet: View {
     // MARK: - Period toggle
 
     private var periodToggle: some View {
-        Picker("Period", selection: $period) {
+        Picker("Period", selection: periodBinding) {
             ForEach(Period.allCases, id: \.self) { p in
                 Text(p.rawValue).tag(p)
             }
         }
         .pickerStyle(.segmented)
+    }
+
+    /// Toggling Annual/Quarterly commits the state change with animations
+    /// disabled, so the chart swaps instantly instead of cross-fading the
+    /// `.id`-keyed view. (Metric switches still animate via `.animation(value:)`.)
+    private var periodBinding: Binding<Period> {
+        Binding(
+            get: { period },
+            set: { newValue in
+                var txn = Transaction()
+                txn.disablesAnimations = true
+                withTransaction(txn) { period = newValue }
+            }
+        )
     }
 
     // MARK: - Legend + latest vs-sector delta
@@ -190,9 +221,9 @@ struct FundamentalsHistorySheet: View {
         let s = Self.format(sector, unit: unit)
         let peer = peerWord
         if sector > 0 && company > 0 {
-            return "Latest \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
+            return "Current \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
         }
-        return "Latest \(c) · \(peer) \(s)"
+        return "Current \(c) · \(peer) \(s)"
     }
 
     @ViewBuilder
@@ -200,13 +231,24 @@ struct FundamentalsHistorySheet: View {
         let pair = sectorPair(m)
         VStack(alignment: .center, spacing: AppSpacing.xs) {
             HStack(spacing: AppSpacing.md) {
-                HStack(spacing: 6) {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(AppColors.primaryBlue)
-                        .frame(width: 11, height: 11)
-                    Text("Company")
-                        .font(AppTypography.labelSmall)
-                        .foregroundColor(AppColors.textSecondary)
+                if usesLineChart {
+                    HStack(spacing: 5) {  // solid yellow company line swatch (matches the chart)
+                        Capsule()
+                            .fill(AppColors.growthYoYYellow)
+                            .frame(width: 14, height: 3)
+                        Text("Company")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(AppColors.primaryBlue)
+                            .frame(width: 11, height: 11)
+                        Text("Company")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
                 }
                 if m.hasSector {
                     HStack(spacing: 5) {
@@ -227,7 +269,7 @@ struct FundamentalsHistorySheet: View {
                     .foregroundColor(AppColors.textPrimary)
                     .multilineTextAlignment(.center)
             } else if let c = latestCompany(m) {
-                Text("Latest \(Self.format(c, unit: m.historyUnit)) · Company only")
+                Text("Current \(Self.format(c, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
@@ -255,7 +297,9 @@ struct FundamentalsHistorySheet: View {
             HStack(alignment: .top, spacing: 5) {
                 Image(systemName: "info.circle")
                     .font(AppTypography.labelSmall)
-                Text("A red mark at the 0 line means the ratio was negative or undefined that period (e.g. negative free cash flow).")
+                Text(usesLineChart
+                     ? "A gap (—) in a line means the ratio was negative or undefined that period (e.g. negative free cash flow)."
+                     : "A red mark at the 0 line means the ratio was negative or undefined that period (e.g. negative free cash flow).")
                     .font(AppTypography.labelSmall)
                     .fixedSize(horizontal: false, vertical: true)
             }

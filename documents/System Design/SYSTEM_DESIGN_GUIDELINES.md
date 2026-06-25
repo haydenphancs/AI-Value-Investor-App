@@ -1,9 +1,9 @@
 # AI Value Investor - System Design Guidelines
 
-**Version:** 1.1
+**Version:** 1.2
 **Author:** Principal Architect
-**Date:** March 2026 (Updated)
-**Status:** CURRENT - Verified against codebase March 2026
+**Date:** June 2026 (Updated)
+**Status:** CURRENT — §7 (Caching) + Appendix B updated June 2026 for the industry-relative / TTM peer-benchmark subsystem; verified against codebase
 
 ---
 
@@ -36,6 +36,7 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 | AI Orchestration | Task Queue + Polling | Long-running tasks without blocking |
 | State Management | Centralized App State | Consistent UX across screens |
 | Error Strategy | Domain-Specific Errors | User-friendly, actionable messages |
+| Peer Benchmarks | Pre-computed industry medians (fiscal history + TTM current snapshot) | Apples-to-apples "vs avg"; point-in-time, no per-request peer fan-out |
 
 ### Architecture Principles
 
@@ -1205,6 +1206,70 @@ class StockService:
         return await self.fmp.get_company_profile(ticker)
 ```
 
+### 7.4 Benchmark & Report Caching (Implemented)
+
+The "vs peer average" comparisons and the AI research reports are backed by purpose-built
+cache layers that go beyond a simple TTL. These are **live in the codebase**, not aspirational.
+
+#### Pre-computed peer benchmarks — `sector_benchmarks`
+
+A single Postgres table holds pre-computed median financial metrics so a report never fans
+out to compute peer medians per request:
+
+- **Dimensions:** `(sector, industry, metric_name, period_type, period_label)` — a 5-column
+  UNIQUE key. `industry = ''` is the **SECTOR aggregate** (the fallback); `industry = <name>`
+  is an **INDUSTRY aggregate** whose `sector` is its parent. The lookup prefers the industry
+  row for a `(metric, period)` and falls back to the sector row **per cell**.
+- **Three `period_type` kinds:**
+  - `annual` + `quarterly` — fiscal **history** (the chart lines + the growth series).
+  - `ttm` — one **trailing-twelve-month current snapshot** median per `(peer group, metric)`
+    (`period_label = 'TTM'`). This is what the single-value "vs avg" comparison reads, computed
+    on the **same TTM basis as the company's own card** (apples-to-apples) so it never spikes
+    on a partially-reported fiscal year.
+- **Read path** (`sector_benchmark_lookup.py`, 1-hour in-memory cache): `get_current_benchmarks()`
+  is **TTM-first with a mature-annual fallback**. A sample-size floor (`MATURE_SAMPLE_FLOOR = 20`)
+  applies to **both** paths — a period with fewer than 20 reporting companies is held back to the
+  last mature period rather than allowed to decide a comparison (a just-closed fiscal year is only
+  partially reported and swings wildly).
+- **Write path** (`industry_benchmark_service.py`): each recompute is **full** over all
+  constituents; the **median** (not mean) protects against 1–2 outlier reporters. Values are
+  positive-only / capped where appropriate (e.g. P/E·P/B·P/S capped at 200, loss-makers excluded)
+  and **finite-guarded** (NaN / ±inf and sign-flipping negative-denominator ratios dropped) before
+  reaching `statistics.median`.
+
+#### Recompute scheduling (two independent jobs)
+
+| Job | Cadence | Writes | Why separate |
+|-----|---------|--------|--------------|
+| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `quarterly` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
+| TTM refresh | Weekly — Sunday 06:00 UTC | `ttm` rows | price ÷ TTM earnings drifts daily for every company, so the current-snapshot median goes stale as a whole |
+
+Operational invariants:
+
+- The jobs write **disjoint `period_type` rows** and run in **non-overlapping windows** (TTM at
+  06:00 UTC, deliberately clearing the fiscal recompute + moat-job tail) so they never race on the
+  shared FMP rate budget.
+- Each job's resume/skip-fresh probe is **scoped to its own `period_type`** — otherwise a fresh
+  weekly TTM write would spoof the quarterly fiscal job into skipping every sector.
+- Background upserts **fail loudly**: a failed batch raises so the per-sector guard aborts *before*
+  stamping the sector "fresh", and the sector is retried next run (no silent partial coverage).
+
+#### Close-aligned report cache
+
+Generated reports are **point-in-time snapshots**, so the three report cache layers
+(`ticker_data_cache` by ticker, `ticker_report_cache`, and the `research_reports` lookup) are
+**not rolling-TTL** — they pin to the **last completed market close** (`is_cache_fresh` /
+`current_close_cycle_start`, a weekday 6pm ET boundary). The first viewer after a new close
+regenerates; everyone that session shares the result.
+
+- **`CACHE_SCHEMA_FLOOR`** is a deploy-time schema-version floor: any report cached before it is
+  treated as stale and re-collected, so a shape/semantics change (e.g. the TTM benchmark rollout)
+  takes effect immediately rather than waiting for the next close. **Invariant: the floor literal
+  must be ≤ the actual deploy wall-clock** — a future-dated floor makes even freshly-written rows
+  fail the freshness check, turning the report cache cold (every view re-collects → cost spike).
+  User-history reports in `research_reports` are **not** invalidated by the floor; they are patched
+  on read.
+
 ---
 
 ## 8. API Contract Standards
@@ -1527,6 +1592,10 @@ backend/
 | Jan 2026 | FastAPI asyncio.create_task for v1 | Quick implementation | Celery, Redis Queue, Dramatiq |
 | Feb 2026 | Supabase DB caching over Redis | Simpler infra, sufficient for current scale | Redis, Memcached |
 | Feb 2026 | Backend services call Supabase directly | Faster development, fewer abstractions | Repository pattern on backend |
+| Jun 2026 | Industry-relative peer benchmarks (sector fallback) over a broad ~$500M universe | Fairer "vs avg" than a large-cap-skewed S&P 500 set; one shared `sector_benchmarks` table | Sector-only benchmarks; a separate industry table |
+| Jun 2026 | TTM current-snapshot benchmark (`period_type='ttm'`); median + positive-only + cap | Apples-to-apples with the company card; no partial-fiscal-year spike; robust to outliers | Latest fiscal year; trimmed mean |
+| Jun 2026 | Close-aligned report cache + `CACHE_SCHEMA_FLOOR` | Reports are point-in-time snapshots pinned to the last close; floor forces re-collect on a schema change | Rolling wall-clock TTL |
+| Jun 2026 | Separate weekly TTM job vs quarterly fiscal recompute; period-type-scoped freshness | TTM drifts daily, fiscal only on earnings; non-overlapping windows avoid FMP contention | One combined recompute job |
 
 ---
 

@@ -174,12 +174,26 @@ struct GrowthChartSheet: View {
     // MARK: - Period toggle (segmented)
 
     private var periodToggle: some View {
-        Picker("Period", selection: $selectedPeriod) {
+        Picker("Period", selection: periodBinding) {
             ForEach(GrowthPeriodType.allCases) { p in
                 Text(p.rawValue).tag(p)
             }
         }
         .pickerStyle(.segmented)
+    }
+
+    /// Toggling Annual/Quarterly commits the state change with animations
+    /// disabled, so the chart swaps instantly instead of cross-fading the
+    /// `.id`-keyed view. (Metric switches still animate via `.animation(value:)`.)
+    private var periodBinding: Binding<GrowthPeriodType> {
+        Binding(
+            get: { selectedPeriod },
+            set: { newValue in
+                var txn = Transaction()
+                txn.disablesAnimations = true
+                withTransaction(txn) { selectedPeriod = newValue }
+            }
+        )
     }
 
     // MARK: - Legend + latest vs-sector delta (YoY growth)
@@ -205,9 +219,9 @@ struct GrowthChartSheet: View {
         // The "×" multiple only means anything when the peer base is non-trivial
         // — a tiny-positive denominator (e.g. 0.5%) explodes into an absurd ratio.
         if company > 0 && sector >= 2.0 {
-            return "Latest \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peerLower)"
+            return "Current \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peerLower)"
         }
-        return "Latest \(c) · \(peer) \(s) · \(spread)"
+        return "Current \(c) · \(peer) \(s) · \(spread)"
     }
 
     @ViewBuilder
@@ -249,20 +263,20 @@ struct GrowthChartSheet: View {
                     .multilineTextAlignment(.center)
             } else if let y = latestYoY {
                 // Latest has a company YoY but no sector benchmark.
-                Text("Latest \(pct(y)) · Value only")
+                Text("Current \(pct(y)) · Value only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
             } else if let lm = lastMeaningful, let y = lm.yoyChangePercent {
                 // Latest is n/m, but an earlier period had meaningful growth.
-                Text("Latest period n/m · last meaningful \(pct(y)) (\(lm.period))")
+                Text("Current period n/m · last meaningful \(pct(y)) (\(lm.period))")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
             } else if let p = latestPoint {
                 // No meaningful YoY anywhere (chronic loss-maker): an explicit,
                 // honest message instead of an empty labelled box.
-                Text("Latest \(p.formattedValue) (\(p.period)) · growth % not meaningful")
+                Text("Current \(p.formattedValue) (\(p.period)) · growth % not meaningful")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)

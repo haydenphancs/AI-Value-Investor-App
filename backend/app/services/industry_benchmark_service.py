@@ -20,6 +20,7 @@ after a dyno restart and it resumes from the first un-fresh sector.
 import asyncio
 import json
 import logging
+import math
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -117,7 +118,11 @@ def _num(d: Dict[str, Any], field: str) -> Optional[float]:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f == f else None  # drop NaN
+    # Drop NaN AND +/-inf. `f == f` only filtered NaN; float('inf') == float('inf')
+    # is True, so an inf field (FMP string 'Infinity', or a computed overflow) would
+    # otherwise ride into statistics.median and corrupt an uncapped metric (roe/roa/
+    # margins/debt_to_equity have cap=None + positive_only=False → no later guard).
+    return f if math.isfinite(f) else None
 
 
 def _extract_ttm(r0: Dict[str, Any], k0: Dict[str, Any]) -> Dict[str, Optional[float]]:
@@ -127,7 +132,12 @@ def _extract_ttm(r0: Dict[str, Any], k0: Dict[str, Any]) -> Dict[str, Optional[f
         if src == "compute":  # fcf_margin = FCF/share ÷ revenue/share
             fcf = _num(r0, "freeCashFlowPerShareTTM")
             rev = _num(r0, "revenuePerShareTTM")
-            out[name] = (fcf / rev) if (fcf is not None and rev not in (None, 0)) else None
+            # Require rev > 0 — MATCHES the fiscal path (sector_benchmark_service
+            # ._compute_ratio_values: `fcf is not None and rev and rev > 0`). The old
+            # `rev not in (None, 0)` admitted NEGATIVE revenue/share (sign-flips the
+            # margin: a cash-generating firm looks deeply negative) — fcf_margin has
+            # cap=None + positive_only=False, so nothing downstream catches it.
+            out[name] = (fcf / rev) if (fcf is not None and rev is not None and rev > 0) else None
         else:
             out[name] = _num(r0 if src == "r" else k0, field)
     return out
@@ -155,11 +165,29 @@ class IndustryBenchmarkService:
             mcaps = entry.get("market_caps") or {}
             if not ind or not sector or sector == "Unknown" or not mcaps:
                 continue
+            # TOTAL coercion: a single non-numeric market cap ('N/A', '', a
+            # CSV-formatted '3,000,000', None) used to raise ValueError INSIDE the
+            # sorted() generator — and since _load_universe is called OUTSIDE the
+            # per-sector try/except, one bad value aborted the ENTIRE recompute (every
+            # sector, zero rows). Drop + warn the bad ticker instead so the job degrades.
+            pairs: List[Tuple[str, float]] = []
+            for t, c in mcaps.items():
+                try:
+                    cap = float(c)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "industry_benchmark: %s — dropping %r, non-numeric market cap %r",
+                        ind, t, c,
+                    )
+                    continue
+                if not math.isfinite(cap):
+                    continue
+                pairs.append((t, cap))
             sorted_tkrs = sorted(
-                ((t, float(c or 0.0)) for t, c in mcaps.items()),
-                key=lambda x: x[1], reverse=True,
+                pairs, key=lambda x: x[1], reverse=True,
             )[:TOP_TICKERS_PER_INDUSTRY]
-            by_sector[sector].append((ind, sorted_tkrs))
+            if sorted_tkrs:
+                by_sector[sector].append((ind, sorted_tkrs))
         return sorted(by_sector.items())
 
     # ── Resumability ─────────────────────────────────────────────────
@@ -171,6 +199,13 @@ class IndustryBenchmarkService:
                 self.supabase.table("sector_benchmarks")
                 .select("computed_at")
                 .eq("sector", sector).eq("industry", "")
+                # FISCAL freshness must inspect ONLY the fiscal aggregate (the
+                # 'annual' '' row that _compute_sector always writes). Without this
+                # filter the probe saw the newest computed_at across ALL period_types
+                # — including the weekly 'ttm' rows — so a fresh Sunday TTM write made
+                # this skip the quarterly fiscal recompute for EVERY sector, freezing
+                # the chart history + growth series. Mirrors _ttm_sector_is_fresh.
+                .eq("period_type", "annual")
                 .order("computed_at", desc=True).limit(1).execute()
             )
         except Exception:
@@ -226,6 +261,13 @@ class IndustryBenchmarkService:
         return rows
 
     def _upsert(self, rows: List[Dict[str, Any]]) -> int:
+        """Upsert in batches. RAISES on any batch failure (after logging) so the
+        caller's per-sector try/except aborts BEFORE writing that sector's '' aggregate
+        row. Otherwise a sector whose industry rows failed mid-write would still get a
+        fresh '' timestamp and be wrongly SKIPPED on the next resume (the freshness
+        probe only checks the '' row) — leaving its industry rows missing for a whole
+        cycle. On abort the per-sector guard logs + continues to the next sector, and
+        the failed sector (never marked fresh) is retried in full next run."""
         n = 0
         for i in range(0, len(rows), UPSERT_BATCH_SIZE):
             batch = rows[i:i + UPSERT_BATCH_SIZE]
@@ -236,7 +278,12 @@ class IndustryBenchmarkService:
                 ).execute()
                 n += len(batch)
             except Exception as e:
-                logger.error("industry_benchmark upsert batch failed: %s", e)
+                logger.error(
+                    "industry_benchmark upsert batch failed (%d rows written before "
+                    "failure; aborting sector for retry): %s: %s",
+                    n, type(e).__name__, e,
+                )
+                raise
         return n
 
     def _emit(self, rows: List[Dict[str, Any]], label: str, dry_run: bool) -> int:

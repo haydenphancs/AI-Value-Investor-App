@@ -357,14 +357,23 @@ class SectorBenchmarkLookup:
         result: Dict[str, Optional[Dict[str, Any]]] = {}
         for metric in metrics:
             cells = ttm.get(metric) or {}
-            if cells:
-                # exactly one TTM cell (period_label == "TTM")
-                result[metric] = next(iter(cells.values()))
+            # exactly one TTM cell (period_label == "TTM"), or None
+            ttm_cell = next(iter(cells.values())) if cells else None
+            # Accept the TTM cell ONLY if it clears the SAME maturity floor the annual
+            # path enforces (MATURE_SAMPLE_FLOOR). TTM rows are written at just
+            # MIN_SAMPLE_SIZE (=5), so a thin industry's TTM median (n in 5..19) is as
+            # noisy as a partial fiscal year — without this gate it would silently
+            # decide the "vs avg" comparison while the annual path holds such a sample
+            # back. Below the floor → fall through to the mature-annual pick.
+            if ttm_cell is not None and (ttm_cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
+                result[metric] = ttm_cell
                 continue
             if annual is None:  # lazy — only fetch the fallback layer if needed
                 annual = self.get_benchmarks(industry, sector, metrics, "annual")
             cell, _held_back = pick_mature_benchmark(annual.get(metric) or {})
-            result[metric] = cell
+            # Prefer a mature annual value; if none exists, a thin TTM value still
+            # beats an empty comparison (better a noisy benchmark than no benchmark).
+            result[metric] = cell if cell is not None else ttm_cell
         return result
 
     def get_current_benchmark_values(

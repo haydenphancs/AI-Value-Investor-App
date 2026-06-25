@@ -134,7 +134,20 @@ TABLE_NAME = "ticker_report_cache"
 #     Profitability drill-down now matches the free TickerDetailView Profit Power
 #     chart. Same rationale: a new CollectedTickerData field is absent from older
 #     cached collections, so the floor forces a fresh fetch to populate it.
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 23, 20, 0, 0, tzinfo=timezone.utc)
+# 2026-06-25: bumped for the TTM industry-benchmark rollout. The "vs sector avg"
+#     comparison is now INDUSTRY-relative (sector fallback) with the current
+#     single-value benchmark computed on trailing-12-months (TTM), and the cards /
+#     drill-downs carry level-aware "Industry/Sector Avg" labels. Older cached
+#     collections lack the new CollectedTickerData fields (TTM benchmark cells +
+#     peer-group level/name), so the floor invalidates them → a fresh collect bakes
+#     the TTM values and correct peer-group labels.
+#     The literal MUST be <= the actual deploy/restart wall-clock: a FUTURE-dated floor
+#     makes is_cache_fresh reject even rows written *now*, so the report cache goes cold
+#     (every view re-collects → FMP/Gemini cost spike) until wall-clock passes it. Set
+#     to a recent PAST instant (01:00 UTC) so the cache stays warm on restart while
+#     still invalidating every pre-rollout cached report. (Guarded by
+#     test_cache_freshness.test_schema_floor_not_in_future.)
+CACHE_SCHEMA_FLOOR = datetime(2026, 6, 25, 1, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

@@ -1602,15 +1602,17 @@ class TickerReportDataCollector:
             _norm_sector = _normalize_sector(_raw_sector) if _raw_sector else ""
             _industry = _profile.get("industry") or ""
             if _norm_sector:
-                rich = get_sector_benchmark_lookup().get_benchmarks(
-                    _industry, _norm_sector,
-                    list(_SECTOR_HISTORY_METRIC_NAMES), "annual",
+                # Derive the label from the SAME current-snapshot lookup that produces
+                # the displayed card values (the snapshot services use
+                # get_current_benchmark_values → get_current_benchmarks: TTM-first with
+                # mature-annual fallback). Voting on the ANNUAL rows instead mislabels a
+                # card whose values fell back to the sector level (e.g. industry has
+                # annual rows but no TTM rows, so the value is the sector TTM) — TTM and
+                # annual rows are populated by two independent jobs and can disagree.
+                cur = get_sector_benchmark_lookup().get_current_benchmarks(
+                    _industry, _norm_sector, list(_SECTOR_HISTORY_METRIC_NAMES),
                 )
-                levels = [
-                    c.get("level")
-                    for periods in rich.values()
-                    for c in periods.values()
-                ]
+                levels = [cell.get("level") for cell in cur.values() if cell]
                 if levels:
                     peer_group_level = (
                         "industry"

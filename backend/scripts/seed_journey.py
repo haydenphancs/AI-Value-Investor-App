@@ -41,6 +41,7 @@ BUCKET = "journey-media"
 # Stable namespace so the same lesson key always maps to the same lessons.id.
 NS = uuid.UUID("a1b2c3d4-0000-4000-8000-000000000000")
 DRY = "--dry-run" in sys.argv
+FORCE = "--force" in sys.argv   # overwrite existing bucket audio (needed to replace the old Gemini clips)
 
 _LEVEL_TOTALS: dict[str, int] = {}
 _EXISTING_AUDIO: set[str] = set()   # objects already in journey-media/audio/ — skip re-upload
@@ -59,11 +60,14 @@ def upload_audio(sb, clip: str) -> str | None:
     """Upload <clip>.m4a to journey-media/audio/ (skipping if already there) and return its public URL."""
     path = f"audio/{clip}.m4a"
     local = AUDIO_DIR / f"{clip}.m4a"
-    if f"{clip}.m4a" in _EXISTING_AUDIO:
+    in_bucket = f"{clip}.m4a" in _EXISTING_AUDIO
+    if in_bucket and not FORCE:
         # Already in the bucket from a prior run — reuse its URL even if the local clip is absent,
         # so a re-seed from an env without backend/data/journey_audio/ never wipes a good audioUrl.
         return sb.storage.from_(BUCKET).get_public_url(path)
     if not local.exists():
+        if in_bucket:
+            return sb.storage.from_(BUCKET).get_public_url(path)  # --force but no local clip: keep existing
         print(f"    ! missing audio {local.name} — skipping (audioUrl will be null)")
         return None
     if not DRY:

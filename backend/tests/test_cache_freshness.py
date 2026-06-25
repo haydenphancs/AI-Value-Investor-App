@@ -22,7 +22,7 @@ from app.services.ticker_report_cache import (
 )
 from app.services.agents.ticker_report_data_collector import _latest_completed_close
 
-# 2026-06-29 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-06-23 20:00
+# 2026-06-29 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-06-25 01:00
 # UTC) so freshness isn't gated by the schema floor — shifted forward a week when the
 # floor was bumped for the profit_power freeze (same dance as the growth_chart bump).
 _MON_PRE_CLOSE = datetime(2026, 6, 29, 19, 30, tzinfo=timezone.utc)   # ~3:30pm ET Mon
@@ -67,6 +67,21 @@ def test_pre_schema_floor_is_stale():
     # Older than CACHE_SCHEMA_FLOOR → always stale regardless of the cycle.
     old = CACHE_SCHEMA_FLOOR - timedelta(days=1)
     assert not is_cache_fresh(old, now=_MON_POST_CLOSE)
+
+
+def test_schema_floor_not_in_future():
+    # A FUTURE-dated floor makes is_cache_fresh reject even rows written *now*, so the
+    # report cache goes cold (every view re-collects → FMP/Gemini cost spike) until
+    # wall-clock passes it. The floor literal must always be <= real now at deploy.
+    assert CACHE_SCHEMA_FLOOR <= datetime.now(timezone.utc)
+
+
+def test_row_written_now_is_fresh():
+    # The load-bearing invariant the future-dated-floor bug violated: a row written at
+    # a post-floor instant, within the current close cycle, must be considered fresh.
+    now = datetime(2026, 6, 25, 14, 0, tzinfo=timezone.utc)  # Thursday, after the floor
+    assert now >= CACHE_SCHEMA_FLOOR
+    assert is_cache_fresh(now, now) is True
 
 
 def test_regen_after_boundary_is_fresh_no_loop():

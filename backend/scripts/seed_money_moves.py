@@ -45,6 +45,7 @@ BUCKET = "money-moves-media"
 # Stable namespace so the same article slug always maps to the same id.
 NS = uuid.UUID("b2c3d4e5-0000-4000-8000-000000000000")
 DRY = "--dry-run" in sys.argv
+FORCE = "--force" in sys.argv   # overwrite existing bucket audio (for re-runs / revoice)
 
 _EXISTING_AUDIO: set[str] = set()   # objects already in money-moves-media/audio/ — skip re-upload
 
@@ -55,10 +56,11 @@ def upload_audio(sb, slug: str) -> str | None:
     wipes a previously-published audio_url. Uploads from the local clip otherwise."""
     path = f"audio/{slug}.m4a"
     local = AUDIO_DIR / f"{slug}.m4a"
-    if f"{slug}.m4a" in _EXISTING_AUDIO:
+    in_bucket = f"{slug}.m4a" in _EXISTING_AUDIO
+    if in_bucket and not FORCE:
         return sb.storage.from_(BUCKET).get_public_url(path)
     if not local.exists():
-        return None
+        return sb.storage.from_(BUCKET).get_public_url(path) if in_bucket else None
     if not DRY:
         sb.storage.from_(BUCKET).upload(
             path,

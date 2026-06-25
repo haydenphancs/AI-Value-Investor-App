@@ -289,3 +289,58 @@ def test_cache_double_expiry_does_not_raise():
     sbl._cache[key] = (time.time() - sbl._CACHE_TTL - 100, {"x": 1})
     assert sbl._cache_get(key) is None
     assert sbl._cache_get(key) is None  # second read: key already gone, no crash
+
+
+# ── TTM maturity floor: a thin TTM cell must not bypass MATURE_SAMPLE_FLOOR ──
+# TTM rows are written at just MIN_SAMPLE_SIZE (=5); the annual path holds back any
+# period with n < MATURE_SAMPLE_FLOOR (=20). get_current_benchmarks must apply the
+# SAME floor to the (preferred) TTM cell, else a 5–19-name industry median silently
+# decides the "vs avg" comparison.
+
+
+def test_thin_ttm_industry_falls_through_to_mature_annual():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 88.0, 6)],        # thin industry TTM (n=6)
+        ("annual", False): [_row("pe_ratio", "2024", 22.0, 85)],  # mature sector annual
+    })
+    cur = lk.get_current_benchmarks("FooIndustry", "Tech", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 22.0       # NOT the thin n=6 TTM (88.0)
+    assert cur["pe_ratio"]["level"] == "sector"
+
+
+def test_ttm_industry_accepted_at_floor_boundary_n20():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 30.0, 20)],       # exactly the floor
+        ("annual", False): [_row("pe_ratio", "2024", 22.0, 85)],
+    })
+    cur = lk.get_current_benchmarks("Foo", "Tech", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 30.0       # n==20 is inclusive
+    assert cur["pe_ratio"]["level"] == "industry"
+
+
+def test_ttm_industry_rejected_just_below_floor_n19():
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 30.0, 19)],       # one below the floor
+        ("annual", False): [_row("pe_ratio", "2024", 22.0, 85)],
+    })
+    cur = lk.get_current_benchmarks("Foo", "Tech", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 22.0       # falls through
+
+
+def test_thin_ttm_kept_when_no_annual_fallback():
+    # A noisy benchmark still beats an empty comparison when there's no mature annual.
+    lk = _make_lookup_by_pt({
+        ("ttm", True): [_row("pe_ratio", "TTM", 88.0, 6)],
+    })
+    cur = lk.get_current_benchmarks("Foo", "Tech", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 88.0
+
+
+def test_large_sector_ttm_accepted_when_industry_absent():
+    # No industry TTM → the merged cell is the (large-n) SECTOR TTM, which clears the floor.
+    lk = _make_lookup_by_pt({
+        ("ttm", False): [_row("pe_ratio", "TTM", 25.0, 300)],
+    })
+    cur = lk.get_current_benchmarks("Foo", "Tech", ["pe_ratio"])
+    assert cur["pe_ratio"]["value"] == 25.0
+    assert cur["pe_ratio"]["level"] == "sector"

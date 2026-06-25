@@ -217,8 +217,34 @@ async def _run_research_reconciliation_job():
 # industry='' rows would race and re-introduce stale data.
 
 
+# TTM weekly refresh fires at 06:00 UTC Sunday — deliberately AFTER the quarterly
+# fiscal recompute window so the two FMP-heavy jobs never overlap. The dossier chain
+# runs the fiscal recompute at base 02:00 + 120 min = 04:00 UTC (first Sunday of
+# Jan/Apr/Jul/Oct), with the moat job at base+90 running up to ~05:00. 06:00 clears
+# both, so on those 4 quarter-start Sundays the jobs no longer race on FMP rate budget.
+_TTM_WEEKLY_HOUR_UTC = 6
+
+
+def _next_weekly_ttm_run(now: "datetime") -> "datetime":
+    """Next Sunday at _TTM_WEEKLY_HOUR_UTC:00 UTC strictly after `now`.
+
+    Module-level + pure so the schedule (and its non-overlap with
+    `_next_quarterly_dossier_run` + 120 min) is unit-testable independently of the
+    long-running loop. `now` must be a timezone-aware UTC datetime.
+    """
+    from datetime import timedelta
+
+    days_until_sunday = (6 - now.weekday()) % 7  # 6 = Sunday
+    candidate = now.replace(
+        hour=_TTM_WEEKLY_HOUR_UTC, minute=0, second=0, microsecond=0
+    ) + timedelta(days=days_until_sunday)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
 async def _run_ttm_benchmark_job():
-    """Weekly TTM (trailing-twelve-month) benchmark refresh — Sunday 04:00 UTC.
+    """Weekly TTM (trailing-twelve-month) benchmark refresh — Sunday 06:00 UTC.
 
     TTM is a CURRENT snapshot (price ÷ TTM earnings drifts daily for EVERY
     company, so the industry/sector median goes stale as a whole), which is why
@@ -227,19 +253,18 @@ async def _run_ttm_benchmark_job():
     the fiscal annual/quarterly rows are untouched. ~3.5 min / ~11k light FMP
     calls. `skip_if_fresh_hours=24` makes a re-trigger RESUME (skip sectors done
     in the last day) rather than redo everything after a dyno restart.
+
+    Fires at 06:00 UTC (not 04:00) to avoid colliding with the quarterly fiscal
+    recompute that runs at ~04:00 UTC on quarter-start Sundays — see
+    `_next_weekly_ttm_run`.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     await asyncio.sleep(180)  # let app fully start
 
     while True:
         now = datetime.now(timezone.utc)
-        days_until_sunday = (6 - now.weekday()) % 7  # 6 = Sunday
-        next_run = now.replace(hour=4, minute=0, second=0, microsecond=0) + timedelta(
-            days=days_until_sunday
-        )
-        if next_run <= now:
-            next_run += timedelta(days=7)
+        next_run = _next_weekly_ttm_run(now)
         sleep_seconds = (next_run - now).total_seconds()
         logger.info(
             f"TTM benchmark job: next run at {next_run.isoformat()} "

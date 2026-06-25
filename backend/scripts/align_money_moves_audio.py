@@ -132,6 +132,7 @@ def align_article(slug: str, article: dict) -> bool:
                 items = block.get("items") or []
                 block["itemsReadAlong"] = [spans_for(("item", si, bi, ii)) for ii in range(len(items))]
                 n_sent += sum(len(x) for x in block["itemsReadAlong"])
+    article["audioDurationSeconds"] = int(round(total))   # refresh to the new clone clip's real length
     print(f"  {slug:32s} {n_sent:3d} sentences  ({total:.0f}s)")
     return True
 

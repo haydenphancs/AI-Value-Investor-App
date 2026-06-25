@@ -9,18 +9,23 @@ Voice/pacing (approved 2026-06-24):
   - reference: caydex_voice_achird_v2.wav (single-clip, expressive)
   - exaggeration 0.65 / cfg_weight 0.40  (energetic, human character)
   - normalized to TARGET_WPM (165 = the Gemini 170 WPM minus 3%)
-  - SENTENCE pause after every '.'/'!'/'?'  +  longer BLOCK pause at paragraph / title->paragraph
-    boundaries (commas stay at Chatterbox's natural shorter pause -> period pause > comma pause)
+
+Two generation modes (CLONE_MODE env var):
+  - "block" (per-paragraph, APPROVED for rollout): one Chatterbox call per block/card, so the pauses
+    INSIDE a paragraph are natural/AI-decided; a fixed BLOCK_PAUSE is inserted only between blocks.
+    Cached per-block in _block_cache (key "BLK|text|exag|cfg|ref").
+  - "sentence" (default/legacy): one call per sentence; fixed SENT_PAUSE between sentences + BLOCK_PAUSE
+    between blocks. Cached per-sentence in _sent_cache.
 
 Pauses are inserted PRE-atempo (scaled by the atempo factor) so they land at the exact target length
 AFTER the WPM tempo pass. Re-alignment runs on the final audio, so the pauses are reflected in the
 read-along timings automatically.
 
 Usage (from backend/):
-    ./venv_clone/bin/python scripts/clone_learn_audio.py journey compound_interest
-    ./venv_clone/bin/python scripts/clone_learn_audio.py moneymoves how-amazon-built-its-moat
-    ./venv_clone/bin/python scripts/clone_learn_audio.py journey --all
-    ./venv_clone/bin/python scripts/clone_learn_audio.py moneymoves --all
+    CLONE_MODE=block ./venv_clone/bin/python scripts/clone_learn_audio.py journey --all
+    CLONE_MODE=block ./venv_clone/bin/python scripts/clone_learn_audio.py moneymoves --all
+    # parallel sharding (disjoint stride; run N processes, shard 0..N-1):
+    CLONE_MODE=block ./venv_clone/bin/python scripts/clone_learn_audio.py journey --all --shard 0 3
 
 Outputs (skip-existing checkpoint):
     data/journey_audio_clone/<audioClip>.m4a      (one per narrated card)
@@ -28,6 +33,7 @@ Outputs (skip-existing checkpoint):
 """
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -44,10 +50,12 @@ REF = ROOT / "data/voice_clone/refs/caydex_voice_achird_v2.wav"
 EXAG = 0.65            # expressiveness / energy (approved)
 CFG = 0.40
 TARGET_WPM = 165       # 170 (Gemini original) - 3%
-SENT_PAUSE = 0.20      # seconds of silence after a sentence (period/!/?)
+SENT_PAUSE = 0.20      # seconds of silence after a sentence (sentence mode only)
 BLOCK_PAUSE = 0.60     # seconds at a paragraph / title->paragraph boundary
 SR = 24000             # Chatterbox sample rate
-CACHE = ROOT / "data/voice_clone/_sent_cache"   # per-sentence wav cache (keyed by text+voice settings)
+CACHE = ROOT / "data/voice_clone/_sent_cache"    # per-sentence wav cache
+BLOCK_CACHE = ROOT / "data/voice_clone/_block_cache"  # per-block (per-paragraph) wav cache
+MODE = os.environ.get("CLONE_MODE", "sentence")  # "block" (per-paragraph, approved) or "sentence"
 
 
 def _json(rel_fe: str, rel_be: str) -> Path:
@@ -89,7 +97,8 @@ def narration_blocks(article: dict) -> list[str]:
 
 
 def journey_items(only: str):
-    """[(audioClip, [[sentences]])] — one block per card (mirrors generate_journey_audio.py:118-130)."""
+    """[(audioClip, [raw_block])] — one raw block (the whole card text) per card.
+    Block text is strip_markup(card.text) UN-stripped, matching the per-block cache prototype."""
     data = json.loads(JOURNEY_JSON.read_text())
     out = []
     for lesson in data["lessons"]:
@@ -101,22 +110,21 @@ def journey_items(only: str):
             clip = card.get("audioClip")
             if not clip:
                 continue
-            sents = split_sentences(strip_markup(card.get("text", "")))
-            if sents:
-                out.append((clip, [sents]))           # a card is one block
+            raw = strip_markup(card.get("text", ""))
+            if raw.strip():
+                out.append((clip, [raw]))             # a card is one block
     return out, ROOT / "data/journey_audio_clone"
 
 
 def moneymoves_items(only: str):
-    """[(slug, [[sentences], ...])] — one block per narration block (title/section/paragraph/...)."""
+    """[(slug, [raw_blocks])] — raw narration block strings (title/section/paragraph/bullet/...)."""
     data = json.loads(MM_JSON.read_text())
     out = []
     for article in data["articles"]:
         slug = article["slug"]
         if only != "--all" and only not in slug:
             continue
-        blocks = [split_sentences(b) for b in narration_blocks(article)]
-        blocks = [b for b in blocks if b]
+        blocks = narration_blocks(article)
         if blocks:
             out.append((slug, blocks))
     return out, ROOT / "data/money_moves_audio_clone"
@@ -136,7 +144,7 @@ def _model():
 
 
 def gen_sentence(sent: str) -> torch.Tensor:
-    """Per-sentence wav, cached by (text + voice settings). Pause/WPM changes reuse the cache."""
+    """Per-sentence wav, cached by (text + voice settings)."""
     key = hashlib.sha1(f"{sent}|{EXAG}|{CFG}|{REF.name}".encode("utf-8")).hexdigest()[:16]
     cpath = CACHE / f"{key}.wav"
     if cpath.exists():
@@ -148,17 +156,40 @@ def gen_sentence(sent: str) -> torch.Tensor:
     return wav
 
 
-def synth_clip(blocks: list[list[str]], out: Path) -> float:
-    """One clip: per-sentence (cached) Chatterbox, normalize to TARGET_WPM, insert sentence/block pauses."""
-    gen: list[tuple] = []          # (wav, is_last_in_block) per sentence, in order
+def gen_block(text: str) -> torch.Tensor:
+    """Per-block (whole paragraph/card) wav — Chatterbox renders the natural pauses inside. Cached by
+    (text + voice settings). Key matches the per-block prototype so warm blocks are reused."""
+    key = hashlib.sha1(f"BLK|{text}|{EXAG}|{CFG}|{REF.name}".encode("utf-8")).hexdigest()[:16]
+    cpath = BLOCK_CACHE / f"{key}.wav"
+    if cpath.exists():
+        wav, _ = ta.load(str(cpath))
+        return wav
+    wav = _model().generate(text, audio_prompt_path=str(REF), exaggeration=EXAG, cfg_weight=CFG)
+    BLOCK_CACHE.mkdir(parents=True, exist_ok=True)
+    ta.save(str(cpath), wav.cpu(), _model().sr)
+    return wav
+
+
+def synth_clip(raw_blocks: list[str], out: Path) -> float:
+    """One clip from raw block strings. MODE 'block' = one Chatterbox call per block (natural intra-block
+    pauses, BLOCK_PAUSE between blocks). MODE 'sentence' = per-sentence calls (SENT_PAUSE within a block,
+    BLOCK_PAUSE between blocks). Both normalize to TARGET_WPM."""
+    gen: list[tuple] = []          # (wav, is_block_end) in order
     words = 0
     speech_samples = 0
-    for block in blocks:
-        for i, sent in enumerate(block):
-            w = gen_sentence(sent)
-            gen.append((w, i == len(block) - 1))
-            words += len(sent.split())
+    for raw in raw_blocks:
+        if MODE == "block":
+            w = gen_block(raw)
+            gen.append((w, True))
+            words += len(raw.split())
             speech_samples += w.shape[-1]
+        else:
+            sents = split_sentences(raw)
+            for i, sent in enumerate(sents):
+                w = gen_sentence(sent)
+                gen.append((w, i == len(sents) - 1))
+                words += len(sent.split())
+                speech_samples += w.shape[-1]
     native_wpm = (words / (speech_samples / SR) * 60) if speech_samples else TARGET_WPM
     atempo = max(0.5, min(2.0, TARGET_WPM / native_wpm))
     # pre-atempo pause lengths so they land at SENT_PAUSE / BLOCK_PAUSE after the tempo pass
@@ -180,33 +211,39 @@ def synth_clip(blocks: list[list[str]], out: Path) -> float:
 
 
 def main():
-    kind = sys.argv[1] if len(sys.argv) > 1 else ""
-    only = sys.argv[2] if len(sys.argv) > 2 else "--all"
+    argv = list(sys.argv[1:])
+    shard_i, shard_n = 0, 1
+    if "--shard" in argv:
+        si = argv.index("--shard")
+        shard_i, shard_n = int(argv[si + 1]), int(argv[si + 2])
+        del argv[si:si + 3]
+    kind = argv[0] if argv else ""
+    only = argv[1] if len(argv) > 1 else "--all"
     if kind == "journey":
         items, outdir = journey_items(only)
     elif kind == "moneymoves":
         items, outdir = moneymoves_items(only)
     else:
-        raise SystemExit("usage: clone_learn_audio.py {journey|moneymoves} {<slug/prefix>|--all}")
+        raise SystemExit("usage: clone_learn_audio.py {journey|moneymoves} {<slug/prefix>|--all} [--shard i N]")
     if not REF.exists():
         raise SystemExit(f"reference clip missing: {REF}")
+    items = items[shard_i::shard_n]
     if not items:
-        raise SystemExit(f"no items matched '{only}' for {kind}")
+        raise SystemExit(f"no items matched '{only}' for {kind} (shard {shard_i}/{shard_n})")
     outdir.mkdir(parents=True, exist_ok=True)
-    print(f"[clone_learn] {kind} '{only}': {len(items)} item(s) -> {outdir.name} · "
-          f"ref={REF.name} · exag={EXAG} · {TARGET_WPM}wpm · pauses {SENT_PAUSE}/{BLOCK_PAUSE}s", flush=True)
+    print(f"[clone_learn] {kind} '{only}' mode={MODE} shard={shard_i}/{shard_n}: {len(items)} item(s) -> "
+          f"{outdir.name} · ref={REF.name} · exag={EXAG} · {TARGET_WPM}wpm · pause(blk={BLOCK_PAUSE}s)", flush=True)
     done = 0
     for label, blocks in items:
         out = outdir / f"{label}.m4a"
         if out.exists():
             print(f"  {label:34s} (exists, skip)", flush=True)
             continue
-        nsent = sum(len(b) for b in blocks)
-        print(f"  {label:34s} {len(blocks)} block(s), {nsent} sentence(s)", flush=True)
+        print(f"  {label:34s} {len(blocks)} block(s)", flush=True)
         secs = synth_clip(blocks, out)
         print(f"    -> {out.name} ({secs:.0f}s)", flush=True)
         done += 1
-    print(f"DONE {kind}: {done} new clip(s) -> {outdir}", flush=True)
+    print(f"DONE {kind} shard {shard_i}/{shard_n}: {done} new clip(s) -> {outdir}", flush=True)
 
 
 if __name__ == "__main__":

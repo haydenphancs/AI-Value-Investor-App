@@ -178,7 +178,7 @@ def _vital_score(
 
 # ── Persona Style-Fit Adjustment ────────────────────────────────────
 #
-# The weighted vital rollup re-weights the SAME 9 sub-scores per persona.
+# The weighted vital rollup re-weights the SAME 10 sub-scores per persona.
 # The style-fit term goes one step further: it nudges the score using a few
 # RAW signals through each persona's own lens, so the same stock diverges more
 # (Wood rewards 40% growth even if unprofitable; Buffett penalizes a no-moat,
@@ -191,6 +191,12 @@ def _vital_score(
 #   debt_equity is a ratio (0.4); fcf/net_income/mkt_cap are dollars;
 #   moat_score is 0-10. Missing signals contribute nothing (never a penalty for
 #   unmeasured data) — mirrors the renormalize-over-present rule below.
+#
+# DE-DOUBLE-COUNT POLICY (since the `profitability` factor scores ROE/ROA/margins
+# vs industry): any style sub that reads a return/margin LEVEL is HALVED so it
+# doesn't re-spend signal the factor already owns — Buffett's ROE nudge and
+# Ackman's ROIC/ROE quality nudge. Wood's gross-margin sub reads a DELTA/TREND
+# (gm − gm_prev), not a level, so it is intentionally left full-strength.
 
 STYLE_FIT_CAP: float = 10.0   # max |adjustment| in score points
 
@@ -267,7 +273,12 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         subs.append(_lin(fcf_conv, 0.6, 0.9))       # FCF conversion 60% → -1, 90% → +1
         subs.append(_lin(fcf_yield, 0.02, 0.06))    # FCF yield 2% → -1, 6% → +1
         quality = roic if roic is not None else roe
-        subs.append(_clamp(_lin(quality, 8.0, 15.0), -0.5, 0.5))  # ROIC/ROE
+        # ROIC/ROE LEVEL nudge HALVED — same de-double-count as Buffett's ROE above:
+        # the `profitability` persona factor already scores ROE/ROA vs industry, so a
+        # full-weight LEVEL nudge here would double-count it. (Wood's margin nudge is a
+        # DELTA/trend, not a level, so it is deliberately left full-strength.)
+        _quality_sub = _clamp(_lin(quality, 8.0, 15.0), -0.5, 0.5)
+        subs.append(_quality_sub * 0.5 if _quality_sub is not None else None)
         subs.append(_clamp(_lin(de, 2.5, 0.8), -0.5, 0.5))        # leverage
     else:
         return 0.0
@@ -302,7 +313,7 @@ def compute_quality_score(
     5.0 = neutral/par, >=6.5 = good, <3.5 = weak. Keep that anchor when adding
     or tuning a vital, otherwise the persona weights stop being comparable.
 
-    Unknown persona keys fall back to equal weights across all 8 vitals,
+    Unknown persona keys fall back to equal weights across all 10 vitals,
     so calling this with a bad key never crashes and never silently
     returns a Buffett-default.
     """

@@ -78,6 +78,47 @@ def test_in_line_with_peer():
     assert "in line with sector 15%" in line
 
 
+def test_in_line_with_peer_suppresses_contradictory_gap_suffix():
+    # Regression: company tracks the peer closely early (gap_start≈0) then drifts a
+    # hair while staying WITHIN the 5% "in line with" tolerance. The gap-trend test
+    # would otherwise trip "(gap widening)" against a ~0 baseline, producing the
+    # self-contradictory "in line with industry 15% (gap widening)". Must suppress.
+    m = {
+        "label": "Net Margin",
+        "history_unit": "percent",
+        "annual_history": _pts(("2021", 10.0), ("2024", 15.4)),
+        "sector_annual_history": _pts(("2021", 10.0), ("2024", 15.0)),
+    }
+    line = _metric_trajectory_line(m, "industry")
+    assert "in line with industry 15%" in line
+    assert "gap widening" not in line and "gap narrowing" not in line
+
+
+def test_unsorted_history_does_not_invert_direction_or_span():
+    # A frozen/migrated shell could carry the history newest-first. The line must
+    # still read RISING with a NON-NEGATIVE span (not "over -3y (falling)").
+    m = {
+        "label": "ROE",
+        "history_unit": "percent",
+        "annual_history": _pts(("2024", 30.0), ("2023", 25.0), ("2022", 20.0), ("2021", 15.0)),
+    }
+    line = _metric_trajectory_line(m, "industry")
+    assert line == "ROE 15%→30% over 3y (rising)"
+
+
+def test_duplicate_period_labels_do_not_emit_over_0y():
+    # Two same-year points must not yield "over 0y"; span falls back to the point
+    # count (≥1) so the clause stays sensible.
+    m = {
+        "label": "P/E",
+        "history_unit": "x",
+        "annual_history": _pts(("2024", 10.0), ("2024", 40.0)),
+    }
+    line = _metric_trajectory_line(m, "industry")
+    assert "over 0y" not in line
+    assert line == "P/E 10.0×→40.0× over 1y (rising)"
+
+
 def test_altman_z_score_unit_no_peer():
     m = {
         "label": "Altman Z-Score",

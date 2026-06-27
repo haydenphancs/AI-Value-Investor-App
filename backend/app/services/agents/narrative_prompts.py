@@ -379,6 +379,13 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
     ]
     if len(pts) < 2:
         return None
+    # Defensive: this consumer assumes oldest→newest (start=window[0], now=window[-1]).
+    # A frozen/migrated shell carrying the history newest-first would otherwise invert
+    # the trend direction and yield a negative span ("over -3y"). Sort by calendar year
+    # ONLY when every period is a plain integer year (annual labels always are); leave
+    # any non-numeric labels untouched so fiscal labels aren't scrambled.
+    if all(str(p).strip().lstrip("-").isdigit() for p, _ in pts):
+        pts.sort(key=lambda kv: int(kv[0]))
     unit = m.get("history_unit")
     window = pts[-5:]  # recent multi-year path
     start_period, start_val = window[0]
@@ -386,6 +393,8 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
     try:  # calendar-year span from the annual labels ("2021"→"2024" = 3y)
         span = int(now_period) - int(start_period)
     except (ValueError, TypeError):
+        span = len(window) - 1
+    if span <= 0:  # duplicate/identical period labels → fall back to the point count
         span = len(window) - 1
     line = (
         f"{_clean_metric_label(m.get('label', ''))} "
@@ -405,8 +414,14 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
         else:
             stance = "above" if now_val > sec_now else "below"
         seg = f"{stance} {peer} {_fmt_trend_value(sec_now, unit)}"
+        # Gap-trend qualifier only when the company is materially off the peer.
+        # When the stance is "in line with", a widening/narrowing suffix is
+        # self-contradictory (e.g. "in line with industry 15% (gap widening)" when
+        # the company tracked the peer early and drifted a hair within tolerance),
+        # so suppress it. The relative gap_start*1.15 test is also unstable when
+        # gap_start≈0; gating on a material stance sidesteps that too.
         sec_start = sector.get(start_period)
-        if sec_start is not None:
+        if stance != "in line with" and sec_start is not None:
             gap_now = abs(now_val - sec_now)
             gap_start = abs(start_val - sec_start)
             if gap_now > gap_start * 1.15:
@@ -2314,13 +2329,20 @@ _SCORING_VITALS = (
 
 def _thesis_target_counts(report: Dict[str, Any]) -> Tuple[int, int]:
     """Return (bull_target, bear_target) for the Bull/Bear thesis, derived from
-    the SAME eight module sub-scores that drive the headline score.
+    the SAME ten module sub-scores that drive the headline score.
 
-    Counts how many of the eight 0-10 vital sub-scores read strong (≥ _BULL_
+    Counts how many of the ten 0-10 vital sub-scores read strong (≥ _BULL_
     SIGNAL → a bull point) or weak (≤ _BEAR_SIGNAL → a bear point). Clamped to
     the UI's 2-5 range: a quiet stock yields 2/2, a stock with many strong/weak
     fronts up to 5/5. This is what makes the number of bullets track the Deep
     Dive modules instead of clustering at 3.
+
+    NOTE: the four Fundamentals-card vitals (valuation, financial_health,
+    profitability, revenue) are counted INDEPENDENTLY here even though they are
+    correlated "quality vs industry" signals — a uniformly strong/weak balance
+    sheet can trip up to four points on one theme. The [2,5] clamp plus the
+    synthesis prompt's ~2-points-per-module rule bound the resulting inflation;
+    this is an intentional "count tracks the modules" choice, not a bug.
 
     Recent Price Movement is deliberately EXCLUDED — it is momentum, not a
     quality signal, and (like the headline score) must not drive the count. A

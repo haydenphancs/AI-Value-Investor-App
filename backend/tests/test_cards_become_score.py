@@ -7,8 +7,14 @@ health/revenue re-source, the profitability factor moving the score, and the
 halved Buffett ROE style nudge (de-double-count).
 """
 
+import math
+
 from app.schemas.stock_overview import SnapshotItemResponse
-from app.services.agents.persona_scoring import compute_quality_score, style_fit_adjustment
+from app.services.agents.persona_scoring import (
+    PERSONA_WEIGHTS,
+    compute_quality_score,
+    style_fit_adjustment,
+)
 from app.services.agents.ticker_report_data_collector import (
     _build_health_vital,
     _build_profitability_vital,
@@ -36,6 +42,13 @@ def test_mapper_anchors():
     # defensive clamping
     assert _card_weighted_to_score10(0.0) == 0.0
     assert _card_weighted_to_score10(6.0) == 10.0
+    assert _card_weighted_to_score10(-1.0) == 0.0
+    # Non-finite (only reachable via an externally corrupted cache row) must DROP
+    # OUT — never silently vote a perfect 10.0 through the order-dependent
+    # max(0, min(10, NaN)) clamp.
+    assert _card_weighted_to_score10(float("nan")) is None
+    assert _card_weighted_to_score10(float("inf")) is None
+    assert _card_weighted_to_score10(float("-inf")) is None
 
 
 def test_profitability_vital():
@@ -103,3 +116,67 @@ def test_buffett_roe_style_nudge_halved():
     # ROE 20% would have nudged +full (cap) before; now halved because the
     # profitability factor already owns ROE-vs-industry. cap=10 → 0.5*10 = 5.0.
     assert style_fit_adjustment("warren_buffett", {"roe": 20.0}) == 5.0
+
+
+def test_ackman_quality_level_nudge_halved_but_wood_margin_trend_full():
+    # Symmetric de-double-count: Ackman's ROIC/ROE LEVEL nudge is halved like
+    # Buffett's (the profitability factor owns ROE/ROA-vs-industry). ROIC 15% would
+    # max the quality sub to +0.5 → full = 5.0; halved = 2.5 (only sub present).
+    assert style_fit_adjustment("bill_ackman", {"roic": 15.0}) == 2.5
+    # Wood's gross-margin nudge reads a DELTA (gm − gm_prev), not a level — left
+    # full-strength: a +3pp margin expansion maxes its +0.4 sub → 0.4*10 = 4.0.
+    assert style_fit_adjustment(
+        "cathie_wood", {"gross_margin": 50.0, "gross_margin_prev": 47.0}
+    ) == 4.0
+
+
+def test_card_score_does_not_move_valuation_status_or_fair_value():
+    # COMPLIANCE LOCK regression. Hold the snapshot RATING fixed (so the legit
+    # rating→status reconciliation path is constant) and vary ONLY the continuous
+    # weighted_score. The persona FACTOR (score.value) must move 0→5→10, but the
+    # DCF-driven DISPLAY surface (status + fair_value) must stay invariant.
+    scores, statuses, fair_values = [], set(), set()
+    for w in (1.0, 3.0, 5.0):
+        v = _build_valuation_vital(
+            current_price=100.0, fair_value=120.0, upside=20.0,
+            valuation_snapshot=_snap(w, rating=5),
+        )
+        scores.append(v["score"]["value"])
+        statuses.add(v["status"])
+        fair_values.add(v["fair_value"])
+    assert scores == [0.0, 5.0, 10.0]          # card drives the factor
+    assert len(statuses) == 1                   # DCF status invariant to the card
+    assert fair_values == {120.0}               # DCF fair_value invariant to the card
+
+
+def test_card_score_does_not_move_health_level_or_label():
+    # COMPLIANCE LOCK regression for health: the card drives score.value, but the
+    # Altman-Z-derived `level` and `altman_z_label` (surfaced on the card) must not move.
+    scores, levels, labels = [], set(), set()
+    for w in (1.0, 5.0):
+        h = _build_health_vital(altman_z=4.0, debt_equity=0.4, fcf_negative=False, card_weighted=w)
+        scores.append(h["score"]["value"])
+        levels.add(h["level"])
+        labels.add(h["altman_z_label"])
+    assert scores == [0.0, 10.0]                # card drives the factor
+    assert levels == {"strong"}                 # Altman-derived level invariant
+    assert labels == {"Safe Zone (Above 3.0)"}  # Altman label invariant
+
+
+def test_profitability_none_equals_absent_for_all_personas():
+    # The renormalize-out contract: a profitability vital of None must score
+    # IDENTICALLY to the key being absent — for EVERY persona (each weights
+    # profitability differently). Pins persona_scoring._vital_score's None handling.
+    base = {
+        k: {"score": {"value": 5.0}}
+        for k in (
+            "valuation", "moat", "financial_health", "revenue", "insider",
+            "macro", "forecast", "wall_street", "capital_allocation",
+        )
+    }
+    inputs_none = {"_scoring_inputs": {**base, "profitability": None}}
+    inputs_absent = {"_scoring_inputs": dict(base)}
+    for persona in PERSONA_WEIGHTS:
+        a = compute_quality_score(persona, inputs_none)
+        b = compute_quality_score(persona, inputs_absent)
+        assert math.isclose(a, b, abs_tol=1e-9), f"{persona}: None={a} absent={b}"

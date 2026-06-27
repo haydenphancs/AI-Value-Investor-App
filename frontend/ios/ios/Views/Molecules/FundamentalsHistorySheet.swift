@@ -240,6 +240,28 @@ struct FundamentalsHistorySheet: View {
         period == points(m).last?.period ? "Current" : period
     }
 
+    /// The current value is negative/undefined (the card shows "Neg."/"N/A"/"—") —
+    /// e.g. P/FCF when free cash flow is negative. Mirrors omissionNote's check.
+    private func currentIsUndefined(_ m: DeepDiveMetric) -> Bool {
+        let v = m.value.lowercased()
+        return v.contains("neg") || v.contains("n/a") || m.value == "—"
+    }
+
+    /// The most recent industry/sector value (the "current" benchmark), regardless
+    /// of whether the company has a value that period.
+    private func currentIndustry(_ m: DeepDiveMetric) -> Double? {
+        sectorPoints(m).last(where: { $0.value != nil })?.value
+    }
+
+    /// Delta line when the CURRENT value is undefined: stay "all about the current" —
+    /// echo the header's state, show the current industry, and N/A for the multiple
+    /// (no meaningful ratio against a negative/undefined value).
+    private func undefinedCurrentText(_ m: DeepDiveMetric) -> String {
+        let state = currentValueText(m.value)
+        guard let ind = currentIndustry(m) else { return "Current: \(state)" }
+        return "Current: \(state) · \(peerWord) \(Self.format(ind, unit: m.historyUnit)) · N/A vs \(peerWord.lowercased())"
+    }
+
     /// "Industry" when the card's benchmark comparison is industry-level, else "Sector".
     private var peerWord: String {
         card.peerGroupLevel == "industry" ? "Industry" : "Sector"
@@ -253,6 +275,18 @@ struct FundamentalsHistorySheet: View {
             return "\(prefix) \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
         }
         return "\(prefix) \(c) · \(peer) \(s)"
+    }
+
+    /// The "Green = better … red = worse" hint — shown whenever the line chart's
+    /// good/bad band is drawn (a known-polarity metric).
+    @ViewBuilder
+    private func bandCaption(_ m: DeepDiveMetric) -> some View {
+        if usesLineChart, DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey) != nil {
+            Text("Green = better than \(peerWord.lowercased()), red = worse.")
+                .font(AppTypography.labelSmall)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+        }
     }
 
     @ViewBuilder
@@ -292,18 +326,23 @@ struct FundamentalsHistorySheet: View {
                     }
                 }
             }
-            if let pair {
+            if currentIsUndefined(m) {
+                // The CURRENT ratio is negative/undefined (header shows "Negative"),
+                // so there's no like-for-like comparison: mirror the current state,
+                // show the current industry value, and N/A for the multiple — instead
+                // of quoting a stale older period the user would misread as "now".
+                Text(undefinedCurrentText(m))
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .multilineTextAlignment(.center)
+                bandCaption(m)
+            } else if let pair {
                 Text(deltaText(prefix: periodPrefix(pair.period, m),
                                company: pair.company, sector: pair.sector, unit: m.historyUnit))
                     .font(AppTypography.bodySmall)
                     .foregroundColor(deltaColor(m))
                     .multilineTextAlignment(.center)
-                if usesLineChart, DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey) != nil {
-                    Text("Green = better than \(peerWord.lowercased()), red = worse.")
-                        .font(AppTypography.labelSmall)
-                        .foregroundColor(AppColors.textMuted)
-                        .multilineTextAlignment(.center)
-                }
+                bandCaption(m)
             } else if let lc = latestCompanyPoint(m), let v = lc.value {
                 Text("\(periodPrefix(lc.period, m)) \(Self.format(v, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)

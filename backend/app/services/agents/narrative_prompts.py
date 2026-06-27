@@ -340,6 +340,104 @@ Cover, in order:
 Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps."""
 
 
+# ── Fundamentals trajectory digest (for the section Insight) ──────────
+# Deterministic multi-year trend per card metric, read straight from the frozen
+# history already in the shell (shell["fundamental_metrics"][i]["metrics"][j] →
+# annual_history + optional sector_annual_history, each [{"period","value"}]).
+# Lets the Insight talk about TRAJECTORIES (rising/falling, vs-peer
+# widening/narrowing) instead of a single fixed year. Pure, no I/O.
+
+def _fmt_trend_value(v: float, unit: Optional[str]) -> str:
+    if unit == "percent":
+        return f"{v:.0f}%" if abs(v) >= 10 else f"{v:.1f}%"
+    if unit == "score":
+        return f"{v:.1f}"
+    return f"{v:.1f}×"  # "x" / multiples (default)
+
+
+def _trend_direction(start: float, now: float) -> str:
+    if start == 0:
+        return "rising" if now > 0 else ("falling" if now < 0 else "flat")
+    pct = (now - start) / abs(start) * 100.0
+    if pct > 5:
+        return "rising"
+    if pct < -5:
+        return "falling"
+    return "flat"
+
+
+def _clean_metric_label(label: str) -> str:
+    """Drop the "(… sector avg …)" / "(ROE)" / "(YoY)" parentheticals."""
+    return re.sub(r"\s*\([^)]*\)", "", label or "").strip()
+
+
+def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
+    pts = [
+        (p.get("period"), p.get("value"))
+        for p in (m.get("annual_history") or [])
+        if isinstance(p, dict) and p.get("value") is not None
+    ]
+    if len(pts) < 2:
+        return None
+    unit = m.get("history_unit")
+    window = pts[-5:]  # recent multi-year path
+    start_period, start_val = window[0]
+    now_period, now_val = window[-1]
+    try:  # calendar-year span from the annual labels ("2021"→"2024" = 3y)
+        span = int(now_period) - int(start_period)
+    except (ValueError, TypeError):
+        span = len(window) - 1
+    line = (
+        f"{_clean_metric_label(m.get('label', ''))} "
+        f"{_fmt_trend_value(start_val, unit)}→{_fmt_trend_value(now_val, unit)} "
+        f"over {span}y ({_trend_direction(start_val, now_val)})"
+    )
+
+    sector = {
+        p.get("period"): p.get("value")
+        for p in (m.get("sector_annual_history") or [])
+        if isinstance(p, dict) and p.get("value") is not None
+    }
+    sec_now = sector.get(now_period)
+    if sec_now is not None:
+        if abs(now_val - sec_now) <= abs(sec_now) * 0.05:
+            stance = "in line with"
+        else:
+            stance = "above" if now_val > sec_now else "below"
+        seg = f"{stance} {peer} {_fmt_trend_value(sec_now, unit)}"
+        sec_start = sector.get(start_period)
+        if sec_start is not None:
+            gap_now = abs(now_val - sec_now)
+            gap_start = abs(start_val - sec_start)
+            if gap_now > gap_start * 1.15:
+                seg += " (gap widening)"
+            elif gap_now < gap_start * 0.85:
+                seg += " (gap narrowing)"
+        line += f", {seg}"
+    return line
+
+
+def _fundamentals_trajectory_block(shell: Dict[str, Any]) -> str:
+    cards = shell.get("fundamental_metrics") or []
+    lines: List[str] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        peer = "industry" if card.get("peer_group_level") == "industry" else "sector"
+        metric_lines: List[str] = []
+        for m in (card.get("metrics") or []):
+            if not isinstance(m, dict):
+                continue
+            ml = _metric_trajectory_line(m, peer)
+            if ml:
+                metric_lines.append(ml)
+        if metric_lines:
+            lines.append(f"{card.get('title', 'Card')} — " + "; ".join(metric_lines) + ".")
+    if not lines:
+        return ""
+    return "TRAJECTORY (recent multi-year path, company vs peer):\n" + "\n".join(lines)
+
+
 def _overall_assessment_text_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -354,23 +452,25 @@ def _overall_assessment_text_prompt(
         "the Fundamentals & Growth quality verdict",
         cross_section_context(shell, ["forecast", "revenue_engine"]),
     )
+    trajectory = _fundamentals_trajectory_block(shell)
+    trajectory_block = f"{trajectory}\n\n" if trajectory else ""
     return f"""Write the overall quality read for the Fundamentals & Growth section — the whole-picture verdict across all four cards.
 
 CONTEXT: Average rating {avg}/5 across four cards ({strong} strong, {weak} weak).
 {related}
-EVIDENCE:
+{trajectory_block}EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
 LENGTH: Write 3-4 sentences, total under 70 words.
 
-Cover the whole picture of this section:
-- Open with the gestalt verdict — is this a quality compounder, a fixer-upper, a value trap, or something else? Anchor it to one concrete metric.
-- Then name the standout STRENGTH and the main WEAKNESS across the four cards (Profitability, Growth, Valuation, Financial Health), each tied to a specific card metric.
-- Close with the bottom-line takeaway for an investor weighing this stock — and keep it consistent with the forward trajectory and revenue mix in the RELATED CONTEXT (don't call it stalling if the forecast shows strong forward growth, or a runaway compounder if growth is decelerating). Stay anchored to the fundamentals verdict; use the related context only to stay coherent, not as your subject.
+Make it about the TRAJECTORY, not a single year — the cards now carry multi-year history (see the TRAJECTORY block):
+- Open with the gestalt verdict framed as a DIRECTION OF TRAVEL — improving or deteriorating, a compounder still accelerating vs decelerating, a re-rating, a turning fixer-upper, a value trap — anchored to one concrete multi-year MOVE or a shift vs the peer group, not just this year's value.
+- Name the standout STRENGTH and the main WEAKNESS as TRAJECTORIES tied to a specific card metric (e.g. "margins up three straight years, now above industry" / "leverage climbing as Altman Z slides toward distress") across Profitability, Growth, Valuation, Financial Health.
+- Close with the investor bottom-line — consistent with the forward trajectory and revenue mix in the RELATED CONTEXT (don't call it stalling if the forecast shows strong forward growth, or a runaway compounder if growth is decelerating). Use the related context only to stay coherent, not as your subject.
 
 Grounding rules — STRICT:
-1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block in the evidence. NEVER invent or recompute a different value for a metric listed there.
+1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block OR the TRAJECTORY block above — both are computed from this report. For a metric's CURRENT value use CARD VALUES; use TRAJECTORY only for its multi-year path / standing vs peers. NEVER invent or recompute a value.
 2. If you reference Altman Z-Score, quote it exactly as shown in the Financial Health card (e.g. "Z-Score of 2.7"), not a separately-computed value from raw inputs.
 3. If a metric shows "—" or "N/A" in the cards, do not invent a number for it — pick a different metric to anchor on."""
 
@@ -1418,18 +1518,14 @@ def build_narrative_jobs(
             fallback_value=FALLBACK["insider_key_insight"],
         ))
 
-    # ── fundamental_metrics[i].quality_label (fan out) ────────────────
-    cards = shell.get("fundamental_metrics") or []
-    for i, card in enumerate(cards):
-        if not isinstance(card, dict):
-            continue
-        jobs.append(NarrativeJob(
-            label=f"fundamental_quality_label_{i}",
-            prompt=_fundamental_quality_label_prompt(persona, evidence, card),
-            word_cap=6,
-            apply=_setter_for_label_with_sentiment(card),
-            fallback_value=FALLBACK["fundamental_quality_label"],
-        ))
+    # ── fundamental_metrics[i].quality_label ──────────────────────────
+    # NOT an AI job anymore: the per-card verdict comment + footer sentiment are
+    # computed DETERMINISTICALLY from the sector-relative metric scores, in
+    # ticker_report_data_collector._snapshot_to_card (see card_verdict.py) — so the
+    # comment always agrees with the data, the star rating, and the chart bands.
+    # The section "✨ Insight" (overall_assessment, below) stays AI-generated.
+    # (The now-unused _fundamental_quality_label_prompt / _setter_for_label_with_
+    # sentiment / _classify_label_sentiment helpers are left for reference.)
 
     # ── critical_factors[i].description + watch (fan out) ─────────────
     # Each factor gets TWO Stage-B lines: a short SIGNAL (description) and a

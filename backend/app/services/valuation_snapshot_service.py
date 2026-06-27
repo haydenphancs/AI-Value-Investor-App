@@ -516,29 +516,41 @@ class ValuationSnapshotService:
             SnapshotMetricResponse(
                 name=_metric_name("P/E", pe, sector_pe),
                 value=_fmt_ratio(pe),
+                metric_key="pe",
+                score=score_pe if pe is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_metric_name("P/B", pb, sector_pb),
                 value=_fmt_ratio(pb),
+                metric_key="pb",
+                score=score_pb if pb is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_metric_name("P/S", ps, sector_ps),
                 value=_fmt_ratio(ps),
+                metric_key="ps",
+                score=score_ps if ps is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_metric_name("P/FCF", pfcf, sector_pfcf),
                 value=_fmt_pfcf(pfcf, km, cf),
+                metric_key="pfcf",
+                score=score_pfcf if pfcf is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),
                 value=_fmt_ratio(ev_ebitda),
+                metric_key="ev_ebitda",
+                score=score_ev if ev_ebitda is not None else None,
             ),
             # Earnings Yield: informational — not part of the composite
             # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
-            # to keep historical ratings comparable.
+            # to keep historical ratings comparable. score=None → not a verdict driver.
             SnapshotMetricResponse(
                 name=_metric_name_pct("Earnings Yield", ey, sector_ey),
                 value=_fmt_pct(ey),
+                metric_key="earnings_yield",
+                score=None,
             ),
         ]
 

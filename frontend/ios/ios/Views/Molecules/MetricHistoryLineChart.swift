@@ -30,6 +30,9 @@ struct MetricHistoryLineChart: View {
     /// nil → no good/bad band drawn (lines only). true = above-benchmark is good,
     /// false = below-benchmark is good. See DeepDiveMetric.higherIsBetter(forHistoryKey:).
     var higherIsBetter: Bool? = nil
+    /// Absolute-threshold zones (e.g. Altman Z bankruptcy bands) drawn INSTEAD of
+    /// the industry band — for metrics with no benchmark line. nil → normal mode.
+    var thresholds: MetricThresholdZones? = nil
 
     private let chartHeight: CGFloat = 220
     private let visibleColumnCount: CGFloat = 6
@@ -170,26 +173,40 @@ struct MetricHistoryLineChart: View {
 
     private func chartArea(plotWidth: CGFloat) -> some View {
         Chart {
-            // Horizontal grid lines (behind everything), incl. the zero baseline.
-            ForEach(gridValues, id: \.self) { value in
-                RuleMark(y: .value("Grid", value))
-                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 0.5))
-            }
+            if let tz = thresholds {
+                // Absolute-threshold zones (Altman Z): colored bands divided by the
+                // cutoff lines — red distress / yellow grey / green safe.
+                ForEach(zoneRects(tz)) { z in
+                    RectangleMark(yStart: .value("lo", z.lo), yEnd: .value("hi", z.hi))
+                        .foregroundStyle(z.color.opacity(0.14))
+                }
+                ForEach(tz.thresholds, id: \.self) { t in
+                    RuleMark(y: .value("threshold", t))
+                        .foregroundStyle(AppColors.textSecondary.opacity(0.45))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                }
+            } else {
+                // Horizontal grid lines (behind everything), incl. the zero baseline.
+                ForEach(gridValues, id: \.self) { value in
+                    RuleMark(y: .value("Grid", value))
+                        .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
+                        .lineStyle(StrokeStyle(lineWidth: 0.5))
+                }
 
-            // Directional good/bad band: green where the company is on this metric's
-            // favorable side of the benchmark, red on the bad side — split at
-            // crossovers so the color flips exactly where the two lines meet.
-            ForEach(bandSegments) { seg in
-                ForEach(Array(seg.vertices.enumerated()), id: \.offset) { _, v in
-                    AreaMark(
-                        x: .value("i", v.x),
-                        yStart: .value("lo", v.lower),
-                        yEnd: .value("hi", v.upper),
-                        series: .value("band", seg.id)
-                    )
-                    .foregroundStyle((seg.isGood ? AppColors.bullish : AppColors.bearish).opacity(0.22))
-                    .interpolationMethod(.linear)
+                // Directional good/bad band: green where the company is on this
+                // metric's favorable side of the benchmark, red on the bad side —
+                // split at crossovers so the color flips where the two lines meet.
+                ForEach(bandSegments) { seg in
+                    ForEach(Array(seg.vertices.enumerated()), id: \.offset) { _, v in
+                        AreaMark(
+                            x: .value("i", v.x),
+                            yStart: .value("lo", v.lower),
+                            yEnd: .value("hi", v.upper),
+                            series: .value("band", seg.id)
+                        )
+                        .foregroundStyle((seg.isGood ? AppColors.bullish : AppColors.bearish).opacity(0.22))
+                        .interpolationMethod(.linear)
+                    }
                 }
             }
 
@@ -313,6 +330,7 @@ struct MetricHistoryLineChart: View {
     /// 5000×, an interest-coverage of −5000×). Modest negatives render at TRUE
     /// height. Considers both lines so an outlier in EITHER pins, not escapes.
     private var yDomain: ClosedRange<Double> {
+        if let td = thresholdDomain { return td }
         let vals = allValues.sorted()
         guard let lo = vals.first, let hi = vals.last else { return 0...1 }
         let n = vals.count
@@ -332,6 +350,38 @@ struct MetricHistoryLineChart: View {
         top += (top > 0) ? span * 0.08 : 0
         bottom -= (bottom < 0) ? span * 0.08 : 0
         return bottom...top
+    }
+
+    // MARK: - Threshold zones (absolute cutoffs, e.g. Altman Z)
+
+    /// When zones are shown, the domain must SPAN the cutoffs (so every zone +
+    /// boundary line is visible) regardless of the data range.
+    private var thresholdDomain: ClosedRange<Double>? {
+        guard let tz = thresholds,
+              let firstT = tz.thresholds.first, let lastT = tz.thresholds.last else { return nil }
+        let dMin = companyValues.min() ?? firstT
+        let dMax = companyValues.max() ?? lastT
+        var lo = Swift.min(0, dMin, firstT)
+        var hi = Swift.max(dMax, lastT)
+        if hi <= lo { hi = lo + 1 }
+        let pad = (hi - lo) * 0.10
+        hi += pad
+        if lo < 0 { lo -= pad }   // pad below only when negative; keep the 0 anchor otherwise
+        return lo...hi
+    }
+
+    private struct ZoneRect: Identifiable { let id: Int; let lo: Double; let hi: Double; let color: Color }
+
+    /// The colored bands between consecutive thresholds, clamped to the domain.
+    private func zoneRects(_ tz: MetricThresholdZones) -> [ZoneRect] {
+        let bounds = [yDomain.lowerBound] + tz.thresholds + [yDomain.upperBound]
+        var rects: [ZoneRect] = []
+        for i in 0..<(bounds.count - 1) where i < tz.zoneColors.count {
+            let lo = Swift.max(bounds[i], yDomain.lowerBound)
+            let hi = Swift.min(bounds[i + 1], yDomain.upperBound)
+            if hi > lo { rects.append(ZoneRect(id: i, lo: lo, hi: hi, color: tz.zoneColors[i])) }
+        }
+        return rects
     }
 
     /// Clamp a plotted value into the robust domain (the bottom labels still show
@@ -369,6 +419,10 @@ struct MetricHistoryLineChart: View {
     let industry: [MetricHistoryPoint] = [27.0, 27.5, 28, 28.5, 29, 29.5].enumerated().map {
         MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
     }
+    // Altman Z-Score (absolute thresholds): red/yellow/green zones, no benchmark.
+    let zscore: [MetricHistoryPoint] = [1.9, 1.5, 1.7, 1.9, 2.4, 2.5].enumerated().map {
+        MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
+    }
     return ScrollView {
         VStack(spacing: 24) {
             // lower-is-better → red while expensive, green once cheaper
@@ -377,6 +431,8 @@ struct MetricHistoryLineChart: View {
             MetricHistoryLineChart(points: company, sector: industry, unit: "x", higherIsBetter: true)
             // no benchmark → no band, just the company line
             MetricHistoryLineChart(points: company, sector: nil, unit: "x")
+            // Altman Z: bankruptcy zones, line sits in the grey band
+            MetricHistoryLineChart(points: zscore, sector: nil, unit: "score", thresholds: .altmanZ)
         }
         .padding()
     }

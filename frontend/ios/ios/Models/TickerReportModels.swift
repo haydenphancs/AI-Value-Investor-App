@@ -315,15 +315,13 @@ struct DeepDiveMetric: Identifiable {
     /// Compact label suitable for the narrow 2-column metric grid.
     /// Strips verbose sector-comparison suffix (e.g. "(0.98x sector avg 27)"
     /// or "(vs sector 4.5)"), drops "(YoY)" boilerplate, and applies common
-    /// abbreviations (ROE, ROA, FCF). When a sector suffix was present, a
-    /// trailing " *" is appended to mark the metric for the footnote.
+    /// abbreviations (ROE, ROA, FCF).
     var displayLabel: String {
         let withoutSector = label.replacingOccurrences(
             of: #"\s*\([^)]*sector[^)]*\)"#,
             with: "",
             options: .regularExpression
         )
-        let hadSectorSuffix = (withoutSector != label)
 
         var result = withoutSector.replacingOccurrences(
             of: #"\s*\(YoY\)"#,
@@ -348,10 +346,7 @@ struct DeepDiveMetric: Identifiable {
         }
 
         result = result.trimmingCharacters(in: .whitespaces)
-        // Non-breaking space (U+00A0) before the "*" so the asterisk never word-
-        // wraps onto its own line in the narrow 2-col card (e.g. "Interest
-        // Coverage *"). It always travels with the last word of the label.
-        return hadSectorSuffix ? "\(result)\u{00A0}*" : result
+        return result
     }
 
     enum MetricTrend {

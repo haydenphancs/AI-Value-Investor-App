@@ -66,15 +66,6 @@ struct ReportFundamentalsSection: View {
                 }
             }
 
-            // Footnote explaining the " *" on sector-compared metrics
-            // (Valuation P/E, P/B, P/S … and Health Debt-to-Equity etc.).
-            if metrics.contains(where: { $0.hasSectorComparison }) {
-                Text("* Compared to its \(peerWord) average.")
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .padding(.horizontal, AppSpacing.xs)
-            }
-
             // Overall Assessment
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.xs) {

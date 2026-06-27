@@ -4027,12 +4027,22 @@ def _snapshot_to_card(
         metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)
+    # Deterministic verdict comment + footer sentiment, derived from the per-metric
+    # sector-relative scores (no AI). Replaces the old Stage-B Gemini label job, so
+    # the comment always matches the data, the star rating, and the chart bands.
+    from app.services.agents.card_verdict import generate_card_verdict
+    label, sentiment = generate_card_verdict(
+        title,
+        int(snap.rating or 0),
+        peer_group_level,
+        [(m.metric_key, m.score) for m in snap.metrics],
+    )
     return {
         "title": title,
         "star_rating": int(snap.rating or 0),
         "metrics": metrics,
-        "quality_label": "",  # Stage B narrative writes this (+ quality_sentiment)
-        "quality_sentiment": "neutral",  # overwritten by the label job's sentiment
+        "quality_label": label,
+        "quality_sentiment": sentiment,
         "peer_group_level": peer_group_level,
     }
 

@@ -401,22 +401,32 @@ class ProfitabilitySnapshotService:
             SnapshotMetricResponse(
                 name=_label_with_sector("Gross Margin", gross_margin, sector_gross),
                 value=_fmt_pct(gross_margin),
+                metric_key="gross_margin",
+                score=score_gross if gross_margin is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_label_with_sector("Operating Margin", op_margin, sector_op),
                 value=_fmt_pct(op_margin),
+                metric_key="operating_margin",
+                score=score_op if op_margin is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_label_with_sector("Net Margin", net_margin, sector_net),
                 value=_fmt_pct(net_margin),
+                metric_key="net_margin",
+                score=score_net if net_margin is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_label_with_sector("Return on Equity (ROE)", roe, sector_roe),
                 value=_fmt_pct(roe),
+                metric_key="roe",
+                score=score_roe if roe is not None else None,
             ),
             SnapshotMetricResponse(
                 name=_label_with_sector("Return on Assets (ROA)", roa, sector_roa),
                 value=_fmt_pct(roa),
+                metric_key="roa",
+                score=score_roa if roa is not None else None,
             ),
         ]
 

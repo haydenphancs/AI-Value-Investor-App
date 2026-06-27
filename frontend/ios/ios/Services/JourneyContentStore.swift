@@ -82,8 +82,13 @@ final class JourneyContentStore {
     }
 
     /// Authored cards for a lesson: prefer fresh backend content, fall back to bundled.
+    /// Never returns an EMPTY array — a backend lesson served with `cards: []` would otherwise
+    /// win over the bundled/generated fallback and crash the player on `cards[0]`. Returning nil
+    /// here lets the ViewModel's generated-cards fallback take over instead.
     func cards(forLessonTitled title: String) -> [LessonTopicCard]? {
-        remoteByTitle[title] ?? bundledByTitle[title]
+        if let remote = remoteByTitle[title], !remote.isEmpty { return remote }
+        if let bundled = bundledByTitle[title], !bundled.isEmpty { return bundled }
+        return nil
     }
 
     func hasContent(forLessonTitled title: String) -> Bool {
@@ -132,7 +137,9 @@ final class JourneyContentStore {
                 responseType: JourneyAPIResponse.self
             )
             for lesson in response.lessons {
-                guard let story = lesson.storyContent else { continue }
+                // Skip nil OR empty card lists — an empty remote array must not shadow the
+                // bundled/generated fallback (would crash on cards[0] when the lesson opens).
+                guard let story = lesson.storyContent, !story.cards.isEmpty else { continue }
                 remoteByTitle[lesson.title] = story.cards.map {
                     makeCard(
                         title: lesson.title,
@@ -147,9 +154,12 @@ final class JourneyContentStore {
                 }
             }
         } catch {
-            // Stay on bundled content; never block the screen on a network hiccup.
+            // Stay on bundled content; never block the screen on a network hiccup. But surface the
+            // failure loudly + legibly: a DECODE failure here is backend↔iOS contract drift that
+            // silently hides just-published content, so it must be diagnosable — not a bare swallow.
             didPrefetch = false
-            print("[JourneyContentStore] backend fetch failed, using bundled content: \(error)")
+            let appError = AppError.from(error)
+            print("[JourneyContentStore] remote fetch failed [\(appError.title)]: \(appError.message) — raw: \(error). Falling back to bundled content.")
         }
     }
 

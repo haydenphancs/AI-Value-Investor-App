@@ -249,6 +249,7 @@ class GrowthSnapshotService:
             rating=rating,
             metrics=metrics,
             full_report_available=True,
+            weighted_score=round(weighted, 3),
         )
 
 

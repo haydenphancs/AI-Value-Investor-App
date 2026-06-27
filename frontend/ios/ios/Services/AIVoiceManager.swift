@@ -31,6 +31,10 @@ class AIVoiceManager: NSObject, ObservableObject {
     // Forced-aligned per-word timings for the current clip. When present (and index-aligned with
     // `wordRanges`), the active word is chosen by playhead time instead of a character estimate.
     private var readAlongWords: [ReadAlongWord]?
+    // Detect a failed clip load (404 / expired / bad remote URL) so a card never hangs with
+    // isPlaying=true and no audio — we fall back to on-device speech instead.
+    private var statusObserver: NSKeyValueObservation?
+    private var failObserver: NSObjectProtocol?
 
     // MARK: - Singleton
     static let shared = AIVoiceManager()
@@ -131,6 +135,18 @@ class AIVoiceManager: NSObject, ObservableObject {
             guard let self else { return }
             Task { @MainActor in self.handleClipFinished() }
         }
+        // Fall back to on-device speech if the clip load FAILS (not just if the URL is missing),
+        // so a failed remote clip never leaves the lesson stuck "playing" with no audio and the
+        // auto-advance (onComplete) never firing.
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+            guard let item else { return }
+            Task { @MainActor in self?.handleClipStatus(item) }
+        }
+        failObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleClipLoadFailed() }
+        }
 
         isPlaying = true
         newPlayer.play()
@@ -185,13 +201,36 @@ class AIVoiceManager: NSObject, ObservableObject {
             player?.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
+        statusObserver?.invalidate()
+        statusObserver = nil
         if let endObserver = endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
         endObserver = nil
+        if let failObserver = failObserver {
+            NotificationCenter.default.removeObserver(failObserver)
+        }
+        failObserver = nil
         player?.pause()
         player = nil
         clipDuration = 0
+    }
+
+    /// React to clip readiness: a `.failed` item means the remote/bundled clip can't play.
+    private func handleClipStatus(_ item: AVPlayerItem) {
+        guard player?.currentItem === item, item.status == .failed else { return }
+        handleClipLoadFailed()
+    }
+
+    /// Clip failed to load — never leave the card stuck (isPlaying=true, no audio, no completion).
+    /// Fall back to on-device speech so it still narrates, highlights, and fires onComplete.
+    private func handleClipLoadFailed() {
+        guard player != nil else { return }   // already handled / torn down
+        print("[AIVoiceManager] clip failed to load; falling back to on-device speech")
+        let text = currentText
+        let completion = onComplete
+        teardownPlayer()
+        speak(text, onComplete: completion)
     }
 
     /// Periodic tick: map the playhead to the active word. Prefers forced-aligned per-word timings

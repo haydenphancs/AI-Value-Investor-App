@@ -9,8 +9,9 @@ caring about moat ≠ Wood caring about moat, and that should change the
 number, not just the prose.
 
 `PERSONA_WEIGHTS[persona_key][vital_name]` weights sum to 1.0 and cover
-ALL eight vitals (valuation, moat, financial_health, revenue, insider,
-macro, forecast, wall_street). Missing vitals are renormalized out (not
+ALL ten vitals (valuation, moat, financial_health, profitability, revenue,
+insider, macro, forecast, wall_street, capital_allocation). The first four
+mirror the industry-relative Fundamentals cards. Missing vitals are renormalized out (not
 counted as 0) so unmeasurable data redistributes weight instead of
 capping the score.
 
@@ -34,65 +35,69 @@ PERSONA_WEIGHTS: Dict[str, Dict[str, float]] = {
     # Quality-at-a-fair-price: moat + balance-sheet durability dominate;
     # capital-allocation discipline (buybacks/dividends) matters to Buffett.
     "warren_buffett": {
-        "moat":              0.26,
-        "financial_health":  0.20,
-        "valuation":         0.15,
-        "capital_allocation": 0.13,
-        "insider":           0.08,
-        "revenue":           0.06,
+        "moat":              0.22,
+        "financial_health":  0.18,
+        "valuation":         0.14,
+        "profitability":     0.12,
+        "capital_allocation": 0.12,
+        "revenue":           0.05,
+        "insider":           0.05,
         "forecast":          0.04,
         "wall_street":       0.04,
         "macro":             0.04,
     },
-    # Innovation/growth: revenue + forward forecast lead; value, balance-sheet
-    # and capital-return weight is light; macro/secular regime matters.
+    # Innovation/growth: revenue + forward forecast lead; value, balance-sheet,
+    # profitability and capital-return weight is light; macro/secular regime matters.
     "cathie_wood": {
-        "revenue":           0.26,
+        "revenue":           0.25,
         "forecast":          0.24,
-        "moat":              0.13,
+        "moat":              0.12,
         "macro":             0.08,
         "wall_street":       0.07,
         "valuation":         0.06,
-        "financial_health":  0.06,
-        "insider":           0.05,
+        "financial_health":  0.05,
         "capital_allocation": 0.05,
+        "profitability":     0.04,
+        "insider":           0.04,
     },
-    # GARP: growth (forecast/revenue) balanced against price (valuation) and
-    # a solid balance sheet — Lynch's "buy what you know, at a sane price".
+    # GARP: growth (forecast/revenue) balanced against price (valuation), a solid
+    # balance sheet, and decent profitability — "buy what you know, at a sane price".
     "peter_lynch": {
-        "forecast":          0.21,
-        "revenue":           0.18,
-        "valuation":         0.18,
-        "financial_health":  0.12,
-        "insider":           0.08,
+        "forecast":          0.20,
+        "revenue":           0.16,
+        "valuation":         0.16,
+        "financial_health":  0.11,
+        "profitability":     0.09,
         "capital_allocation": 0.07,
         "moat":              0.06,
+        "insider":           0.05,
         "wall_street":       0.05,
         "macro":             0.05,
     },
-    # Concentrated activist value: balance-sheet quality (FCF proxy) + valuation
-    # + capital-allocation discipline + moat carry the thesis; insider minimal.
+    # Concentrated activist value: balance-sheet quality (FCF proxy) + valuation +
+    # capital-allocation discipline + moat + return quality carry the thesis.
     "bill_ackman": {
-        "financial_health":  0.22,
-        "valuation":         0.18,
-        "capital_allocation": 0.16,
-        "moat":              0.15,
-        "forecast":          0.09,
-        "revenue":           0.08,
-        "wall_street":       0.05,
-        "macro":             0.05,
+        "financial_health":  0.20,
+        "valuation":         0.16,
+        "capital_allocation": 0.14,
+        "moat":              0.13,
+        "profitability":     0.12,
+        "forecast":          0.08,
+        "revenue":           0.07,
+        "wall_street":       0.04,
+        "macro":             0.04,
         "insider":           0.02,
     },
 }
 
-# Equal weight across all 9 vitals — used for unknown persona keys so we never
+# Equal weight across all 10 vitals — used for unknown persona keys so we never
 # crash on a missing config and instead degrade to a neutral average. (The
 # scorer renormalizes over present vitals, so the exact sum need not be 1.0.)
 _EQUAL_WEIGHTS: Dict[str, float] = {
-    v: 1.0 / 9.0
+    v: 1.0 / 10.0
     for v in (
-        "valuation", "moat", "financial_health", "revenue", "insider",
-        "macro", "forecast", "wall_street", "capital_allocation",
+        "valuation", "moat", "financial_health", "profitability", "revenue",
+        "insider", "macro", "forecast", "wall_street", "capital_allocation",
     )
 }
 
@@ -138,7 +143,7 @@ def _vital_score(
 ) -> Optional[float]:
     """Return a 0-10 score for `vital_name`, or None if missing/unparseable.
 
-    Prefers an explicit numeric `score.value` — all eight vitals now emit
+    Prefers an explicit numeric `score.value` — all vitals now emit
     one. Falls back to the status/label string scales for
     valuation/moat/financial_health on reports cached before those vitals
     gained a numeric score, so user-history rows still resolve.
@@ -237,7 +242,10 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
 
     subs = []
     if persona_key == "warren_buffett":
-        subs.append(_lin(roe, 10.0, 20.0))          # ROE 10% → -1, 20% → +1
+        # ROE nudge HALVED — the new `profitability` persona FACTOR already scores
+        # ROE/margins vs industry, so don't double-count ROE here at full weight.
+        _roe_sub = _lin(roe, 10.0, 20.0)            # ROE 10% → -1, 20% → +1
+        subs.append(_roe_sub * 0.5 if _roe_sub is not None else None)
         subs.append(_lin(de, 1.5, 0.5))             # D/E 1.5 → -1, 0.5 → +1
         m = _lin(moat, 4.0, 8.0)                     # moat 0-10
         if m is not None and m > 0 and roe is not None and roe < 15:
@@ -284,7 +292,7 @@ def compute_quality_score(
 ) -> float:
     """Persona-weighted overall score in [0, 100].
 
-    Rolls the 9 vital scores into a single number using the persona's weight
+    Rolls the 10 vital scores into a single number using the persona's weight
     vector, then RENORMALIZES over the vitals actually present so missing data
     redistributes weight instead of capping the score. A dimension we couldn't
     measure should drop out and let the measured ones speak — not be scored as

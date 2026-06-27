@@ -40,6 +40,23 @@ struct FundamentalsHistorySheet: View {
         card.title == "Valuation" || card.title == "Health"
     }
 
+    /// Latest-period verdict — is the company on the metric's GOOD side of the
+    /// benchmark? Drives the delta-text color and the band caption. nil when the
+    /// metric's polarity is unknown, there's no comparable pair, or they're equal.
+    private func isCurrentlyGood(_ m: DeepDiveMetric) -> Bool? {
+        guard let hib = DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey),
+              let pair = sectorPair(m) else { return nil }
+        let d = pair.company - pair.sector
+        return d == 0 ? nil : (hib ? d > 0 : d < 0)
+    }
+
+    /// Green/red for the delta text (only on the line charts that draw the band);
+    /// neutral otherwise.
+    private func deltaColor(_ m: DeepDiveMetric) -> Color {
+        guard usesLineChart, let good = isCurrentlyGood(m) else { return AppColors.textPrimary }
+        return good ? AppColors.bullish : AppColors.bearish
+    }
+
     private var selected: DeepDiveMetric? {
         metrics.first { $0.id == selectedMetricID } ?? metrics.first
     }
@@ -66,7 +83,10 @@ struct FundamentalsHistorySheet: View {
     @ViewBuilder
     private func chartView(_ m: DeepDiveMetric) -> some View {
         if usesLineChart {
-            MetricHistoryLineChart(points: points(m), sector: sectorPoints(m), unit: m.historyUnit)
+            MetricHistoryLineChart(
+                points: points(m), sector: sectorPoints(m), unit: m.historyUnit,
+                higherIsBetter: DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey)
+            )
         } else {
             MetricHistoryChart(points: points(m), unit: m.historyUnit, sector: sectorPoints(m))
         }
@@ -206,9 +226,18 @@ struct FundamentalsHistorySheet: View {
         return nil
     }
 
-    /// Latest company value (for the "Company only" fallback line).
-    private func latestCompany(_ m: DeepDiveMetric) -> Double? {
-        points(m).last(where: { $0.value != nil })?.value
+    /// Latest company point with a value (for the "Company only" fallback line).
+    private func latestCompanyPoint(_ m: DeepDiveMetric) -> MetricHistoryPoint? {
+        points(m).last(where: { $0.value != nil })
+    }
+
+    /// "Current" when `period` is the newest charted period, else the period label
+    /// itself — so a metric whose latest periods are dropped (e.g. P/FCF when free
+    /// cash flow turns negative) reads "2024 …" instead of falsely "Current …".
+    /// The header already shows the true current value ("Negative"); this keeps the
+    /// legend figure from contradicting it.
+    private func periodPrefix(_ period: String, _ m: DeepDiveMetric) -> String {
+        period == points(m).last?.period ? "Current" : period
     }
 
     /// "Industry" when the card's benchmark comparison is industry-level, else "Sector".
@@ -216,14 +245,14 @@ struct FundamentalsHistorySheet: View {
         card.peerGroupLevel == "industry" ? "Industry" : "Sector"
     }
 
-    private func deltaText(company: Double, sector: Double, unit: String?) -> String {
+    private func deltaText(prefix: String, company: Double, sector: Double, unit: String?) -> String {
         let c = Self.format(company, unit: unit)
         let s = Self.format(sector, unit: unit)
         let peer = peerWord
         if sector > 0 && company > 0 {
-            return "Current \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
+            return "\(prefix) \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
         }
-        return "Current \(c) · \(peer) \(s)"
+        return "\(prefix) \(c) · \(peer) \(s)"
     }
 
     @ViewBuilder
@@ -264,12 +293,19 @@ struct FundamentalsHistorySheet: View {
                 }
             }
             if let pair {
-                Text(deltaText(company: pair.company, sector: pair.sector, unit: m.historyUnit))
+                Text(deltaText(prefix: periodPrefix(pair.period, m),
+                               company: pair.company, sector: pair.sector, unit: m.historyUnit))
                     .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textPrimary)
+                    .foregroundColor(deltaColor(m))
                     .multilineTextAlignment(.center)
-            } else if let c = latestCompany(m) {
-                Text("Current \(Self.format(c, unit: m.historyUnit)) · Company only")
+                if usesLineChart, DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey) != nil {
+                    Text("Green = better than \(peerWord.lowercased()), red = worse.")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textMuted)
+                        .multilineTextAlignment(.center)
+                }
+            } else if let lc = latestCompanyPoint(m), let v = lc.value {
+                Text("\(periodPrefix(lc.period, m)) \(Self.format(v, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)

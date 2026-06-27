@@ -15,6 +15,9 @@ import Charts
 
 struct ProfitabilityChartView: View {
     let points: [ProfitabilityChartPoint]
+    /// nil → no good/bad band drawn. All profitability metrics are higher-is-better,
+    /// so the sheet passes `true`; nil keeps legacy/preview callers band-free.
+    var higherIsBetter: Bool? = nil
 
     private let chartHeight: CGFloat = 220
     private let visibleColumnCount: CGFloat = 6
@@ -28,6 +31,18 @@ struct ProfitabilityChartView: View {
     private var companyValues: [Double] { points.compactMap { $0.company } }
     private var sectorValues: [Double] { points.compactMap { $0.sector } }
     private var allValues: [Double] { companyValues + sectorValues }
+
+    /// Green/red good-vs-benchmark band (NO clamping — the percent y-domain is
+    /// well-behaved, so the band uses the same raw values as the lines). Empty when
+    /// polarity is unknown or no sector value exists at any period.
+    private var bandSegments: [DirectionalBandSegment] {
+        guard let hib = higherIsBetter else { return [] }
+        return directionalBandSegments(
+            company: points.map { $0.company },
+            sector: points.map { $0.sector },
+            higherIsBetter: hib
+        )
+    }
 
     /// Single percent domain shared by BOTH lines (a REAL axis, unlike Growth's
     /// normalized overlay — here both series are percentages). Sign-aware + anchors
@@ -133,6 +148,22 @@ struct ProfitabilityChartView: View {
                 RuleMark(y: .value("Grid", value))
                     .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 0.5))
+            }
+
+            // Directional good/bad band: green where the company is on this metric's
+            // favorable side of the benchmark, red on the bad side — split at
+            // crossovers so the color flips exactly where the two lines meet.
+            ForEach(bandSegments) { seg in
+                ForEach(Array(seg.vertices.enumerated()), id: \.offset) { _, v in
+                    AreaMark(
+                        x: .value("i", v.x),
+                        yStart: .value("lo", v.lower),
+                        yEnd: .value("hi", v.upper),
+                        series: .value("band", seg.id)
+                    )
+                    .foregroundStyle((seg.isGood ? AppColors.bullish : AppColors.bearish).opacity(0.22))
+                    .interpolationMethod(.linear)
+                }
             }
 
             // Sector dashed line first so the company line sits on top.
@@ -244,4 +275,24 @@ struct ProfitabilityChartView: View {
     private func fmtPctAxis(_ v: Double) -> String {
         String(format: "%.0f%%", v)
     }
+}
+
+#Preview {
+    // Gross Margin (higher-is-better): company ABOVE industry early (green), then
+    // dips BELOW it in 2026 (red) — the band flips at the crossover, like the report.
+    let periods = ["2021", "2022", "2023", "2024", "2025", "2026"]
+    let comp = [80.6, 79.1, 72.8, 71.4, 70.5, 65.2]
+    let ind = [68.9, 68.1, 69.7, 71.3, 71.4, 74.1]
+    let points = (0..<periods.count).map {
+        ProfitabilityChartPoint(period: periods[$0], company: comp[$0], sector: ind[$0])
+    }
+    return ScrollView {
+        VStack(spacing: 24) {
+            ProfitabilityChartView(points: points, higherIsBetter: true)   // green → red at 2026
+            ProfitabilityChartView(points: points)                         // no band (lines only)
+        }
+        .padding()
+    }
+    .background(AppColors.background)
+    .preferredColorScheme(.dark)
 }

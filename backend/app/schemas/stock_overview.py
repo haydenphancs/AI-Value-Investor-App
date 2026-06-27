@@ -35,6 +35,10 @@ class SnapshotItemResponse(BaseModel):
     rating: int            # 0 = unavailable, 1-5 mapping to Swift SnapshotRatingLevel
     metrics: List[SnapshotMetricResponse]
     full_report_available: bool = True
+    # Continuous pre-round composite (1.0–5.0) — the persona scorer maps this to a
+    # 0-10 factor so the card's industry-relative score drives the final per-persona
+    # score. Optional/back-compat: None on legacy cached snapshots; iOS ignores it.
+    weighted_score: Optional[float] = None
 
 
 class SectorIndustryResponse(BaseModel):

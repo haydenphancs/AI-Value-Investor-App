@@ -58,17 +58,33 @@ class MoneyMovesContentService:
         articles: List[Dict[str, Any]] = []
         for row in rows:
             content = row.get("content")
-            if not content:
-                continue  # skip rows that haven't been seeded with a content blob yet
-            # The narration voice lives in the audio_url column once generated; overlay it
-            # so the served article reflects it even if content.audioUrl is stale/null.
-            audio_url = row.get("audio_url")
-            if audio_url:
-                content["audioUrl"] = audio_url
-                content["hasAudioVersion"] = True
-            if row.get("audio_duration_seconds"):
-                content["audioDurationSeconds"] = row["audio_duration_seconds"]
-            articles.append(content)
+            # Guard the SHAPE, not just truthiness: a truthy but non-dict content (a JSON list
+            # or string from a bad/out-of-band row) would make the item-assignment below raise
+            # TypeError, propagate out of _load, and on a cold cache collapse the ENTIRE catalog
+            # to []. Skip+log the bad row instead so the rest of the catalog still serves.
+            if not isinstance(content, dict):
+                if content:
+                    logger.warning(
+                        "money_moves: skipping row slug=%s with non-dict content (%s)",
+                        row.get("slug"), type(content).__name__,
+                    )
+                continue  # also skips rows not yet seeded with a content blob
+            try:
+                # The narration voice lives in the audio_url column once generated; overlay it
+                # so the served article reflects it even if content.audioUrl is stale/null.
+                audio_url = row.get("audio_url")
+                if audio_url:
+                    content["audioUrl"] = audio_url
+                    content["hasAudioVersion"] = True
+                if row.get("audio_duration_seconds"):
+                    content["audioDurationSeconds"] = row["audio_duration_seconds"]
+                articles.append(content)
+            except Exception as exc:  # noqa: BLE001 — one bad row must not collapse the whole catalog
+                logger.warning(
+                    "money_moves: skipping malformed row slug=%s: %s: %s",
+                    row.get("slug"), type(exc).__name__, exc,
+                )
+                continue
         return MoneyMovesResponse(articles=articles)
 
     def _fetch_rows(self) -> List[dict]:

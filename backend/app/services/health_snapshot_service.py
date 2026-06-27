@@ -525,7 +525,8 @@ class HealthSnapshotService:
                 else:
                     pass_rating = 1
 
-        rating = max(1, min(5, round(0.4 * z_rating + 0.6 * pass_rating)))
+        weighted = 0.4 * z_rating + 0.6 * pass_rating
+        rating = max(1, min(5, round(weighted)))
 
         if not metrics:
             metrics.append(SnapshotMetricResponse(name="Financial Health", value="—"))
@@ -535,6 +536,7 @@ class HealthSnapshotService:
             rating=rating,
             metrics=metrics,
             full_report_available=True,
+            weighted_score=round(weighted, 3),
         )
 
 

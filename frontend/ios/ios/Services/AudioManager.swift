@@ -103,6 +103,10 @@ final class AudioManager: ObservableObject {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    // Detect a failed load (404 / expired / malformed Storage object / bad URL) so the player
+    // surfaces .error instead of sitting in a false "playing" state with silence forever.
+    private var statusObserver: NSKeyValueObservation?
+    private var failedToEndObserver: NSObjectProtocol?
 
     // Audio session configuration
     private let audioSession = AVAudioSession.sharedInstance()
@@ -644,6 +648,21 @@ final class AudioManager: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.handlePlaybackComplete() }
         }
+
+        // Surface load/playback FAILURES. Without these, a 404 / expired / malformed Storage
+        // object (or a bad URL that still parses, e.g. a trailing "?") leaves item.status == .failed
+        // while playbackState was optimistically set to .playing — the UI shows "playing" at 0:00
+        // with no audio, no completion, and a frozen read-along, indefinitely.
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+            guard let item else { return }
+            Task { @MainActor [weak self] in self?.handleItemStatusChange(item) }
+        }
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] note in
+            let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Task { @MainActor [weak self] in self?.handlePlaybackFailure(err) }
+        }
     }
 
     private func teardownPlayer() {
@@ -651,13 +670,46 @@ final class AudioManager: ObservableObject {
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
+        statusObserver?.invalidate()
+        statusObserver = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
         endObserver = nil
+        if let failedToEndObserver {
+            NotificationCenter.default.removeObserver(failedToEndObserver)
+        }
+        failedToEndObserver = nil
         player?.pause()
         player = nil
         pendingSeekTarget = nil
+    }
+
+    /// React to AVPlayerItem readiness. On `.failed`, surface a real error state (so the UI stops
+    /// showing a false "playing"); on `.readyToPlay`, confirm playing if we were still loading.
+    private func handleItemStatusChange(_ item: AVPlayerItem) {
+        guard player?.currentItem === item else { return }   // ignore a torn-down item's late callback
+        switch item.status {
+        case .failed:
+            handlePlaybackFailure(item.error)
+        case .readyToPlay:
+            if playbackState == .loading { playbackState = .playing }
+        default:
+            break
+        }
+    }
+
+    /// A load/playback failure on the current item: stop the false "playing", tear the player down,
+    /// surface a typed `.error` state (isPlaying becomes false, so the mini-player / Lock Screen stop
+    /// claiming playback), and log loudly for diagnosability.
+    private func handlePlaybackFailure(_ error: Error?) {
+        // Already torn down (e.g. status + failed-to-end both fired) — nothing to do.
+        guard player != nil else { return }
+        let appError = error.map(AppError.from) ?? .unknown(message: "This audio couldn't be played.")
+        print("[AudioManager] playback failed: \(appError.message) — raw: \(error.map { String(describing: $0) } ?? "nil")")
+        teardownPlayer()
+        stopPlaybackTimer()
+        playbackState = .error(appError.message)
     }
 
     // MARK: - Playback Timer (Simulation)

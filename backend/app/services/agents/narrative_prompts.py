@@ -2307,7 +2307,7 @@ def _clean_thesis_points(raw: Any) -> List[str]:
 _BULL_SIGNAL = 7.5
 _BEAR_SIGNAL = 4.0
 _SCORING_VITALS = (
-    "valuation", "moat", "financial_health", "revenue",
+    "valuation", "moat", "financial_health", "profitability", "revenue",
     "insider", "macro", "forecast", "wall_street", "capital_allocation",
 )
 

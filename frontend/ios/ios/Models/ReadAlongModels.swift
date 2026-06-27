@@ -20,6 +20,26 @@ struct ReadAlongSentence: Decodable, Equatable {
     let end: Double
 }
 
+extension ReadAlongSentence {
+    private enum CodingKeys: String, CodingKey { case text, start, end }
+
+    /// Defensive decode. A single backend-served span with a null / missing / non-numeric
+    /// `start` or `end` must NOT throw — synthesized array decoding is all-or-nothing, so one
+    /// bad span would otherwise fail the decode of the ENTIRE Learn response and silently drop
+    /// all remote lessons/articles (no audio, no read-along, stale content). Defining this in an
+    /// extension preserves the synthesized memberwise init used by the book read-along table.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.text = ((try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil) ?? ""
+        let s = (try? c.decodeIfPresent(Double.self, forKey: .start)) ?? nil
+        let e = (try? c.decodeIfPresent(Double.self, forKey: .end)) ?? nil
+        let safeStart = (s?.isFinite == true) ? s! : 0
+        let safeEnd = (e?.isFinite == true) ? e! : safeStart
+        self.start = safeStart
+        self.end = max(safeEnd, safeStart)   // a degenerate span just never highlights; it never crashes
+    }
+}
+
 /// The Investor Journey highlights at word granularity; a word is the same timed span as a sentence.
 typealias ReadAlongWord = ReadAlongSentence
 

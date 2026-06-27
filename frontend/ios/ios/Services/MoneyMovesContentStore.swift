@@ -84,9 +84,12 @@ final class MoneyMovesContentStore {
                 if dto.isFeatured == true, remoteFeatured == nil { remoteFeatured = art }
             }
         } catch {
-            // Stay on bundled content; never block the screen on a network hiccup.
+            // Stay on bundled content; never block the screen on a network hiccup. But surface the
+            // failure loudly + legibly: a DECODE failure here is backend↔iOS contract drift that
+            // silently hides just-published content, so it must be diagnosable — not a bare swallow.
             didPrefetch = false
-            print("[MoneyMovesContentStore] backend fetch failed, using bundled content: \(error)")
+            let appError = AppError.from(error)
+            print("[MoneyMovesContentStore] remote fetch failed [\(appError.title)]: \(appError.message) — raw: \(error). Falling back to bundled content.")
         }
     }
 

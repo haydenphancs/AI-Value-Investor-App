@@ -360,6 +360,8 @@ class CollectedTickerData:
     valuation_vital: Dict[str, Any] = field(default_factory=dict)
     financial_health_vital: Dict[str, Any] = field(default_factory=dict)
     revenue_vital: Dict[str, Any] = field(default_factory=dict)
+    # Profitability-card-driven persona factor; None when the card is missing.
+    profitability_vital: Optional[Dict[str, Any]] = None
     forecast_vital: Dict[str, Any] = field(default_factory=dict)
     insider_vital_partial: Dict[str, Any] = field(default_factory=dict)
     wall_street_vital: Dict[str, Any] = field(default_factory=dict)
@@ -1489,7 +1491,13 @@ class TickerReportDataCollector:
 
         # ── Financial health vital ────────────────────────────────────
         out.financial_health_vital = _build_health_vital(
-            c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative")
+            c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative"),
+            card_weighted=(out.snap_health.weighted_score if out.snap_health else None),
+        )
+
+        # ── Profitability vital (Profitability card → persona factor) ──
+        out.profitability_vital = _build_profitability_vital(
+            out.snap_profitability.weighted_score if out.snap_profitability else None
         )
 
         # ── Revenue vital — top segment hooked from real segments ─────
@@ -1509,6 +1517,7 @@ class TickerReportDataCollector:
             c.get("revenue_growth_yoy"),
             top_segment_name,
             top_segment_growth,
+            card_weighted=(out.snap_growth.weighted_score if out.snap_growth else None),
         )
 
         # ── Forecast vital ────────────────────────────────────────────
@@ -2082,6 +2091,7 @@ class TickerReportDataCollector:
             "moat": moat_vital,
             "financial_health": out.financial_health_vital,
             "revenue": out.revenue_vital,
+            "profitability": out.profitability_vital,  # None → renormalized out
             "insider": insider_vital,
             "macro": macro_vital,
             "forecast": out.forecast_vital,
@@ -2628,6 +2638,28 @@ def _valuation_score_status(score: float) -> str:
     return "good" if score >= 6.5 else "critical" if score < 3.5 else "neutral"
 
 
+def _card_weighted_to_score10(weighted_1to5: Optional[float]) -> Optional[float]:
+    """Map a Fundamentals card's continuous weighted composite (1.0–5.0) to the
+    0–10 vital scale the persona scorer uses (1→0, 3→5, 5→10). None in → None out
+    so the dimension renormalizes out instead of voting a neutral 5.
+
+    This is the seam that makes the industry/sector-relative CARD score drive the
+    final per-persona score (see persona_scoring.compute_quality_score)."""
+    if weighted_1to5 is None:
+        return None
+    return round(max(0.0, min(10.0, (float(weighted_1to5) - 1.0) * 2.5)), 1)
+
+
+def _build_profitability_vital(card_weighted: Optional[float]) -> Optional[Dict[str, Any]]:
+    """Profitability-card-driven persona factor (margins / ROE / ROA vs industry).
+    None when the Profitability card is missing → the scorer renormalizes it out."""
+    score10 = _card_weighted_to_score10(card_weighted)
+    if score10 is None:
+        return None
+    status = "good" if score10 >= 6.5 else "critical" if score10 < 3.5 else "neutral"
+    return {"score": {"value": score10, "status": status}}
+
+
 def _build_valuation_vital(
     current_price: float,
     fair_value: Optional[float],
@@ -2643,12 +2675,17 @@ def _build_valuation_vital(
     snap_rating = int(valuation_snapshot.rating) if (
         valuation_snapshot is not None and valuation_snapshot.rating
     ) else 0
+    # The valuation FACTOR score now comes from the Valuation card's industry-relative
+    # composite (when present); the DCF still drives `status` + `fair_value` below.
+    card10 = _card_weighted_to_score10(
+        valuation_snapshot.weighted_score if valuation_snapshot is not None else None
+    )
 
     if upside is None or fair_value is None:
         # No DCF — defer to the multi-metric snapshot when available.
         if snap_rating > 0:
             status, snap_upside = _snapshot_to_valuation_status(snap_rating)
-            score_value = _valuation_score_from_upside(snap_upside)
+            score_value = card10 if card10 is not None else _valuation_score_from_upside(snap_upside)
             return {
                 "score": {"value": score_value, "status": _valuation_score_status(score_value)},
                 "status": status,
@@ -2661,7 +2698,10 @@ def _build_valuation_vital(
         # score.value=None so this dimension renormalizes OUT of the headline
         # rather than voting a neutral 5.5 that drags the score toward 50.
         return {
-            "score": {"value": None, "status": "unmeasured"},
+            "score": (
+                {"value": card10, "status": _valuation_score_status(card10)}
+                if card10 is not None else {"value": None, "status": "unmeasured"}
+            ),
             "status": "fair_value",
             "current_price": round(current_price, 2),
             "fair_value": round(current_price, 2),
@@ -2692,7 +2732,7 @@ def _build_valuation_vital(
             adjusted = dcf_level + (1 if snap_level > dcf_level else -1)
             status = _LEVEL_TO_STATUS.get(adjusted, status)
 
-    score_value = _valuation_score_from_upside(upside)
+    score_value = card10 if card10 is not None else _valuation_score_from_upside(upside)
     return {
         "score": {"value": score_value, "status": _valuation_score_status(score_value)},
         "status": status,
@@ -2706,6 +2746,7 @@ def _build_health_vital(
     altman_z: Optional[float],
     debt_equity: Optional[float],
     fcf_negative: bool,
+    card_weighted: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Continuous 0-10 `score.value` blending Altman-Z (solvency core) with
     leverage and FCF. The old version set `level` from Altman-Z ONLY and left
@@ -2713,6 +2754,11 @@ def _build_health_vital(
     a heavily-levered, cash-burning company with a benign Z scored as healthy.
     Now leverage + FCF apply real penalties. `level` is kept for the card.
     """
+    # The health FACTOR score now comes from the Health card's industry-relative
+    # composite (40% Altman-Z + 60% sector-pass-rate) when present; the absolute
+    # Altman-Z/leverage/FCF path below is the fallback and keeps `level`/labels.
+    card10 = _card_weighted_to_score10(card_weighted)
+
     # Leverage + FCF penalties apply on both the known-Z and unknown-Z paths.
     leverage_penalty = 0.0
     if debt_equity is not None:
@@ -2723,10 +2769,12 @@ def _build_health_vital(
     fcf_penalty = 1.0 if fcf_negative else 0.0
 
     if altman_z is None:
-        # No solvency core — neutral base, but still dock leverage/FCF.
-        score_value = max(0.0, min(10.0, 5.0 - leverage_penalty - fcf_penalty))
+        # No solvency core — card score when present, else neutral base docked
+        # for leverage/FCF.
+        score_value = card10 if card10 is not None else max(0.0, min(10.0, 5.0 - leverage_penalty - fcf_penalty))
+        _hstatus = "good" if score_value >= 6.5 else "critical" if score_value < 3.5 else "neutral"
         return {
-            "score": {"value": round(score_value, 1), "status": "neutral"},
+            "score": {"value": round(score_value, 1), "status": _hstatus},
             "level": "moderate",
             "altman_z_score": 0.0,
             "altman_z_label": "Data unavailable",
@@ -2750,7 +2798,7 @@ def _build_health_vital(
         level, z_label = "strong", "Safe Zone (Above 3.0)"
         base = 8.0 + min(2.0, (altman_z - 3.0) * 0.5)        # 8..10
 
-    score_value = max(0.0, min(10.0, base - leverage_penalty - fcf_penalty))
+    score_value = card10 if card10 is not None else max(0.0, min(10.0, base - leverage_penalty - fcf_penalty))
     status = (
         "good" if score_value >= 6.5
         else "critical" if score_value < 3.5
@@ -2784,6 +2832,7 @@ def _build_revenue_vital(
     yoy_growth: Optional[float],
     top_segment: str,
     top_segment_growth: Optional[float],
+    card_weighted: Optional[float] = None,
 ) -> Dict[str, Any]:
     growth = yoy_growth if yoy_growth is not None else 0.0
     if growth > 15:
@@ -2797,7 +2846,10 @@ def _build_revenue_vital(
     else:
         status = "neutral"
 
-    score = max(1.0, min(10.0, 5.0 + growth / 5.0))
+    # The growth FACTOR score now comes from the Growth card's industry-relative
+    # composite when present; the absolute `5 + growth/5` is the fallback.
+    card10 = _card_weighted_to_score10(card_weighted)
+    score = card10 if card10 is not None else max(1.0, min(10.0, 5.0 + growth / 5.0))
     return {
         "score": {"value": score, "status": status},
         "total_revenue": _format_revenue(total_revenue),

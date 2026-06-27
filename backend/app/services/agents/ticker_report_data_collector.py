@@ -39,6 +39,7 @@ import bisect
 import copy
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -2647,7 +2648,14 @@ def _card_weighted_to_score10(weighted_1to5: Optional[float]) -> Optional[float]
     final per-persona score (see persona_scoring.compute_quality_score)."""
     if weighted_1to5 is None:
         return None
-    return round(max(0.0, min(10.0, (float(weighted_1to5) - 1.0) * 2.5)), 1)
+    w = float(weighted_1to5)
+    # A non-finite composite (NaN/±inf — only reachable via an externally corrupted
+    # cache row, since fresh-compute weighted is a finite sum in [1,5]) must NOT vote.
+    # The max(0, min(10, …)) clamp is order-dependent on NaN and would silently map a
+    # NaN to a PERFECT 10.0; drop out instead so the dimension renormalizes away.
+    if not math.isfinite(w):
+        return None
+    return round(max(0.0, min(10.0, (w - 1.0) * 2.5)), 1)
 
 
 def _build_profitability_vital(card_weighted: Optional[float]) -> Optional[Dict[str, Any]]:

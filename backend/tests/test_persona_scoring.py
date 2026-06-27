@@ -3,7 +3,7 @@ Tests for persona_scoring.compute_quality_score.
 
 Lock the contract that
   - per-persona weights live in PERSONA_WEIGHTS, sum to 1.0, and cover
-    all eight vitals,
+    all ten vitals,
   - the same `ticker_report_data` produces persona-specific scores
     (Buffett caring about moat ≠ Wood caring about moat),
   - missing vitals are RENORMALIZED out (a dimension we couldn't measure
@@ -147,6 +147,56 @@ def test_buffett_overall_score_higher_than_wood_for_wide_moat_value_company():
     wood_score = compute_quality_score("cathie_wood", data)
 
     assert buffett_score > wood_score
+
+
+# ── Full 4-persona argmax (winner selection across the whole roster) ──
+
+
+def _full_scoring_inputs(**scores) -> dict:
+    """Full 10-vital `_scoring_inputs` (every factor present incl. profitability +
+    capital_allocation, which the `_vitals` fixture omits) so argmax is well-defined.
+    Unspecified vitals default to a neutral 5.0."""
+    keys = (
+        "valuation", "moat", "financial_health", "profitability", "revenue",
+        "insider", "macro", "forecast", "wall_street", "capital_allocation",
+    )
+    return {"_scoring_inputs": {k: {"score": {"value": float(scores.get(k, 5.0))}} for k in keys}}
+
+
+def _all_persona_scores(inputs: dict) -> dict:
+    return {p: compute_quality_score(p, inputs) for p in PERSONA_WEIGHTS}
+
+
+def test_compounder_ranks_buffett_top():
+    # Wide moat + high profitability + strong health + good capital allocation,
+    # only modest growth — the quintessential Buffett compounder. Buffett must be
+    # the argmax over ALL four personas (a weight edit that bled his moat/profitability
+    # onto a neutral dim — which the single-persona profitability test would NOT catch —
+    # flips this to Ackman).
+    inputs = _full_scoring_inputs(
+        moat=9.5, financial_health=9.0, profitability=9.5, capital_allocation=8.5,
+        valuation=6.0, revenue=5.0, forecast=4.5,
+    )
+    scores = _all_persona_scores(inputs)
+    winner = max(scores, key=scores.get)
+    runner_up = sorted(scores.values())[-2]
+    assert winner == "warren_buffett", scores
+    assert scores["warren_buffett"] > runner_up
+
+
+def test_hypergrower_ranks_wood_top():
+    # Blistering revenue + forecast, weak moat/valuation/profitability — Wood's setup;
+    # she must beat Lynch and Ackman (also growth-aware) too, not just Buffett.
+    inputs = _full_scoring_inputs(
+        revenue=9.5, forecast=9.5, macro=7.0, wall_street=6.0,
+        moat=2.5, valuation=2.5, profitability=3.0, financial_health=4.0,
+        capital_allocation=3.0,
+    )
+    scores = _all_persona_scores(inputs)
+    winner = max(scores, key=scores.get)
+    runner_up = sorted(scores.values())[-2]
+    assert winner == "cathie_wood", scores
+    assert scores["cathie_wood"] > runner_up
 
 
 # ── Edge cases ───────────────────────────────────────────────────────

@@ -85,6 +85,18 @@ struct ProfitabilityChartSheet: View {
         return (c, s)
     }
 
+    /// Latest-period verdict for the delta-text color + band caption. All
+    /// profitability metrics are higher-is-better → good when company > sector.
+    private var isCurrentlyGood: Bool? {
+        guard let pair = sectorPair else { return nil }
+        let d = pair.company - pair.sector
+        return d == 0 ? nil : d > 0
+    }
+    private var deltaColor: Color {
+        guard let good = isCurrentlyGood else { return AppColors.textPrimary }
+        return good ? AppColors.bullish : AppColors.bearish
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -92,7 +104,7 @@ struct ProfitabilityChartSheet: View {
                     metricPicker
                     header
                     if quarterlyAvailable(selectedMetric) { periodToggle }
-                    ProfitabilityChartView(points: current)
+                    ProfitabilityChartView(points: current, higherIsBetter: true)
                         .id("\(selectedMetric.rawValue)-\(selectedPeriod.rawValue)")
                     legendAndDelta
                 }
@@ -233,7 +245,11 @@ struct ProfitabilityChartSheet: View {
             if let pair = sectorPair {
                 Text(deltaText(company: pair.company, sector: pair.sector))
                     .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textPrimary)
+                    .foregroundColor(deltaColor)
+                    .multilineTextAlignment(.center)
+                Text("Green = better than \(peerWord.lowercased()), red = worse.")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
             } else if let v = latestPoint?.company {
                 Text("Current \(pct(v)) · Company only")

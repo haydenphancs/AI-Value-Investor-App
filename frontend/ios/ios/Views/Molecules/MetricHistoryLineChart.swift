@@ -27,6 +27,9 @@ struct MetricHistoryLineChart: View {
     let points: [MetricHistoryPoint]         // company, oldest→newest
     var sector: [MetricHistoryPoint]? = nil  // sector-average overlay (period-aligned)
     let unit: String?                        // "percent" | "x" | "score"
+    /// nil → no good/bad band drawn (lines only). true = above-benchmark is good,
+    /// false = below-benchmark is good. See DeepDiveMetric.higherIsBetter(forHistoryKey:).
+    var higherIsBetter: Bool? = nil
 
     private let chartHeight: CGFloat = 220
     private let visibleColumnCount: CGFloat = 6
@@ -61,6 +64,16 @@ struct MetricHistoryLineChart: View {
     private var showSector: Bool { !sectorValues.isEmpty }
 
     private var needsScroll: Bool { rows.count > Int(visibleColumnCount) }
+
+    /// Green/red good-vs-benchmark band, built from the SAME clamped values used to
+    /// draw the lines so its edges coincide with them. Empty when polarity is
+    /// unknown or no benchmark line exists.
+    private var bandSegments: [DirectionalBandSegment] {
+        guard let hib = higherIsBetter, showSector else { return [] }
+        let comp = rows.map { $0.company.map(clamped) }
+        let sect = rows.map { $0.sector.map(clamped) }
+        return directionalBandSegments(company: comp, sector: sect, higherIsBetter: hib)
+    }
 
     /// Height of the label block beneath the plot: the x-axis row, the company
     /// value row, and (when present) the sector value row — each with its gap.
@@ -162,6 +175,22 @@ struct MetricHistoryLineChart: View {
                 RuleMark(y: .value("Grid", value))
                     .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 0.5))
+            }
+
+            // Directional good/bad band: green where the company is on this metric's
+            // favorable side of the benchmark, red on the bad side — split at
+            // crossovers so the color flips exactly where the two lines meet.
+            ForEach(bandSegments) { seg in
+                ForEach(Array(seg.vertices.enumerated()), id: \.offset) { _, v in
+                    AreaMark(
+                        x: .value("i", v.x),
+                        yStart: .value("lo", v.lower),
+                        yEnd: .value("hi", v.upper),
+                        series: .value("band", seg.id)
+                    )
+                    .foregroundStyle((seg.isGood ? AppColors.bullish : AppColors.bearish).opacity(0.22))
+                    .interpolationMethod(.linear)
+                }
             }
 
             // Sector dashed line first so the company line sits on top.
@@ -332,20 +361,25 @@ struct MetricHistoryLineChart: View {
 }
 
 #Preview {
-    // Annual P/E-like series (unit "x") with one spike (2018) that must pin to the
-    // top edge instead of flattening every other point.
-    let annual: [MetricHistoryPoint] = (2017...2026).map { yr in
-        let base = 18.0 + Double(yr - 2017) * 2.4
-        return MetricHistoryPoint(period: String(yr), value: yr == 2018 ? 52 : base)
+    // P/E (lower-is-better): company starts ABOVE industry (red / expensive), then
+    // crosses BELOW it (green / cheap) — the band flips color at the crossover.
+    let company: [MetricHistoryPoint] = [38.0, 36, 31, 26, 22, 19].enumerated().map {
+        MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
     }
-    let sector: [MetricHistoryPoint] = (2017...2026).map { yr in
-        MetricHistoryPoint(period: String(yr), value: 28.0 + Double(yr - 2017) * 0.5)
+    let industry: [MetricHistoryPoint] = [27.0, 27.5, 28, 28.5, 29, 29.5].enumerated().map {
+        MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
     }
-    return VStack(spacing: 24) {
-        MetricHistoryLineChart(points: annual, sector: sector, unit: "x")
-        MetricHistoryLineChart(points: annual, sector: nil, unit: "x")  // no-benchmark variant
+    return ScrollView {
+        VStack(spacing: 24) {
+            // lower-is-better → red while expensive, green once cheaper
+            MetricHistoryLineChart(points: company, sector: industry, unit: "x", higherIsBetter: false)
+            // same data, flipped polarity → green→red (illustrates direction matters)
+            MetricHistoryLineChart(points: company, sector: industry, unit: "x", higherIsBetter: true)
+            // no benchmark → no band, just the company line
+            MetricHistoryLineChart(points: company, sector: nil, unit: "x")
+        }
+        .padding()
     }
-    .padding()
     .background(AppColors.background)
     .preferredColorScheme(.dark)
 }

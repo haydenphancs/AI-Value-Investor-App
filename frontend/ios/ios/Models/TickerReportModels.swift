@@ -271,6 +271,34 @@ struct DeepDiveMetric: Identifiable {
         (annualHistory?.compactMap(\.value).count ?? 0) >= 2
     }
 
+    // Higher-is-better vs lower-is-better, keyed by the backend's canonical
+    // `history_key`. Mirrors the backend's authoritative polarity
+    // (health_check_service.py `METRIC_DEFS.lower_is_better` + the per-card
+    // snapshot scoring). Drives the drill-down's green/red good-vs-benchmark band.
+    private static let _higherIsBetterKeys: Set<String> = [
+        // Profitability — all higher-is-better
+        "gross_margin", "operating_margin", "net_margin", "fcf_margin", "roe", "roa",
+        // Valuation — earnings yield is the inverse of a multiple (higher = cheaper)
+        "earnings_yield",
+        // Health — liquidity / coverage / solvency: higher = healthier
+        "current_ratio", "quick_ratio", "interest_coverage", "altman_z",
+    ]
+    private static let _lowerIsBetterKeys: Set<String> = [
+        // Valuation multiples — lower = cheaper = better
+        "pe", "pb", "ps", "pfcf", "ev_ebitda",
+        // Health — leverage: lower = safer
+        "debt_to_equity",
+    ]
+
+    /// `true` = above the industry/sector average is GOOD, `false` = below is good,
+    /// `nil` = unknown metric → the drill-down draws NO good/bad band (lines only).
+    static func higherIsBetter(forHistoryKey key: String?) -> Bool? {
+        guard let key else { return nil }
+        if _higherIsBetterKeys.contains(key) { return true }
+        if _lowerIsBetterKeys.contains(key) { return false }
+        return nil
+    }
+
     /// Clean metric title for the chart header / picker — strips the sector
     /// suffix and "(YoY)" but keeps full words (unlike the compact
     /// `displayLabel` used in the narrow card grid).

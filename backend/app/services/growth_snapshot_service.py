@@ -234,10 +234,14 @@ class GrowthSnapshotService:
         rating = max(1, min(5, round(weighted)))
 
         metrics = [
-            SnapshotMetricResponse(name="Revenue Growth (YoY)", value=_fmt_growth(rev_growth)),
-            SnapshotMetricResponse(name="EPS Growth", value=_fmt_growth(eps_growth)),
-            SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value=_fmt_growth(fcf_growth)),
-            SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth)),
+            SnapshotMetricResponse(name="Revenue Growth (YoY)", value=_fmt_growth(rev_growth),
+                                   metric_key="revenue_growth", score=score_rev if rev_growth is not None else None),
+            SnapshotMetricResponse(name="EPS Growth", value=_fmt_growth(eps_growth),
+                                   metric_key="eps_growth", score=score_eps if eps_growth is not None else None),
+            SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value=_fmt_growth(fcf_growth),
+                                   metric_key="fcf_growth", score=score_fcf if fcf_growth is not None else None),
+            SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth),
+                                   metric_key="operating_income_growth", score=score_op if op_growth is not None else None),
         ]
 
         return SnapshotItemResponse(

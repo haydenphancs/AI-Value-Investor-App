@@ -247,10 +247,6 @@ struct ProfitabilityChartSheet: View {
                     .font(AppTypography.bodySmall)
                     .foregroundColor(deltaColor)
                     .multilineTextAlignment(.center)
-                Text("Green = better than \(peerWord.lowercased()), red = worse.")
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .multilineTextAlignment(.center)
             } else if let v = latestPoint?.company {
                 Text("Current \(pct(v)) · Company only")
                     .font(AppTypography.bodySmall)

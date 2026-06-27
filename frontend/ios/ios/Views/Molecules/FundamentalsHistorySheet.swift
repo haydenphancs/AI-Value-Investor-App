@@ -85,7 +85,8 @@ struct FundamentalsHistorySheet: View {
         if usesLineChart {
             MetricHistoryLineChart(
                 points: points(m), sector: sectorPoints(m), unit: m.historyUnit,
-                higherIsBetter: DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey)
+                higherIsBetter: DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey),
+                thresholds: MetricThresholdZones.forHistoryKey(m.historyKey)
             )
         } else {
             MetricHistoryChart(points: points(m), unit: m.historyUnit, sector: sectorPoints(m))
@@ -105,7 +106,6 @@ struct FundamentalsHistorySheet: View {
                             .animation(.easeInOut(duration: 0.25), value: selectedMetricID)
                         legendAndDelta(m)
                         omissionNote(m)
-                        footnote
                     } else {
                         Text("No history available.")
                             .font(AppTypography.body)
@@ -277,18 +277,6 @@ struct FundamentalsHistorySheet: View {
         return "\(prefix) \(c) · \(peer) \(s)"
     }
 
-    /// The "Green = better … red = worse" hint — shown whenever the line chart's
-    /// good/bad band is drawn (a known-polarity metric).
-    @ViewBuilder
-    private func bandCaption(_ m: DeepDiveMetric) -> some View {
-        if usesLineChart, DeepDiveMetric.higherIsBetter(forHistoryKey: m.historyKey) != nil {
-            Text("Green = better than \(peerWord.lowercased()), red = worse.")
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-                .multilineTextAlignment(.center)
-        }
-    }
-
     @ViewBuilder
     private func legendAndDelta(_ m: DeepDiveMetric) -> some View {
         let pair = sectorPair(m)
@@ -326,7 +314,20 @@ struct FundamentalsHistorySheet: View {
                     }
                 }
             }
-            if currentIsUndefined(m) {
+            if let tz = MetricThresholdZones.forHistoryKey(m.historyKey) {
+                // Absolute-threshold metric (Altman Z): show the current zone verdict
+                // + the threshold caption in place of an industry comparison.
+                if let z = Double(m.value) ?? latestCompanyPoint(m)?.value {
+                    Text("Current: \(m.value) · \(tz.zoneLabel(z))")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(tz.zoneColor(z))
+                        .multilineTextAlignment(.center)
+                }
+                Text(tz.caption)
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .multilineTextAlignment(.center)
+            } else if currentIsUndefined(m) {
                 // The CURRENT ratio is negative/undefined (header shows "Negative"),
                 // so there's no like-for-like comparison: mirror the current state,
                 // show the current industry value, and N/A for the multiple — instead
@@ -335,14 +336,12 @@ struct FundamentalsHistorySheet: View {
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
-                bandCaption(m)
             } else if let pair {
                 Text(deltaText(prefix: periodPrefix(pair.period, m),
                                company: pair.company, sector: pair.sector, unit: m.historyUnit))
                     .font(AppTypography.bodySmall)
                     .foregroundColor(deltaColor(m))
                     .multilineTextAlignment(.center)
-                bandCaption(m)
             } else if let lc = latestCompanyPoint(m), let v = lc.value {
                 Text("\(periodPrefix(lc.period, m)) \(Self.format(v, unit: m.historyUnit)) · Company only")
                     .font(AppTypography.bodySmall)
@@ -365,10 +364,10 @@ struct FundamentalsHistorySheet: View {
     /// historical period was dropped, say so instead of leaving a silent gap.
     @ViewBuilder
     private func omissionNote(_ m: DeepDiveMetric) -> some View {
+        // Show ONLY when the currently-shown series actually has a gap (a "—" in
+        // the chart). No gap → no note.
         let omitted = points(m).filter { $0.value == nil }.count
-        let v = m.value.lowercased()
-        let nonNumeric = v.contains("neg") || v.contains("n/a") || m.value == "—"
-        if omitted > 0 || nonNumeric {
+        if omitted > 0 {
             HStack(alignment: .top, spacing: 5) {
                 Image(systemName: "info.circle")
                     .font(AppTypography.labelSmall)
@@ -382,13 +381,6 @@ struct FundamentalsHistorySheet: View {
         }
     }
 
-    private var footnote: some View {
-        Text(period == .annual
-             ? "Annual figures by fiscal year."
-             : "Quarterly figures; growth shown year-over-year.")
-            .font(AppTypography.labelSmall)
-            .foregroundColor(AppColors.textMuted)
-    }
 
     // MARK: - Formatting (shared with MetricHistoryChart's units)
 

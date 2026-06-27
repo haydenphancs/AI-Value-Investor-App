@@ -21,6 +21,13 @@ from app.schemas.etf import (
 class SnapshotMetricResponse(BaseModel):
     name: str
     value: str
+    # Optional scoring exposure for the deterministic card-verdict generator
+    # (card_verdict.generate_card_verdict). `metric_key` is the canonical key
+    # ("gross_margin", "pe", "altman_z", …); `score` is the 1-5 sector-relative
+    # score (None = informational / unscored). Backward-compatible: absent on the
+    # Financials-tab decoder and on legacy cached snapshots.
+    metric_key: Optional[str] = None
+    score: Optional[int] = None
 
 
 class SnapshotItemResponse(BaseModel):

@@ -193,6 +193,49 @@ def _zscore_rating(z: Optional[float]) -> int:
     return 1      # Distress zone
 
 
+# ── Verdict scoring (drivers for card_verdict.generate_card_verdict) ──
+# HealthCheck metric type → the canonical key the deterministic card verdict
+# uses; plus a 1-5 score (Altman Z from its absolute zones, the sector-comparable
+# ratios from their positive/neutral/negative status).
+_VERDICT_KEY = {
+    "altman_z_score": "altman_z",
+    "debt_to_equity": "debt_to_equity",
+    "current_ratio": "current_ratio",
+    "interest_coverage": "interest_coverage",
+    "quick_ratio": "quick_ratio",
+}
+
+
+def _status_score(status: Optional[str]) -> Optional[int]:
+    if status == "positive":
+        return 4
+    if status == "negative":
+        return 2
+    if status == "neutral":
+        return 3
+    return None
+
+
+def _health_metric_score(m: Any) -> Optional[int]:
+    """1-5 verdict score for a HealthCheck metric (None when its value is missing)."""
+    if getattr(m, "value", None) is None:
+        return None
+    if getattr(m, "type", None) == "altman_z_score":
+        return _zscore_rating(m.value)
+    return _status_score(getattr(m, "status", None))
+
+
+def _fallback_sector_score(
+    value: Optional[float], benchmark: Optional[float], *, lower_is_better: bool,
+) -> Optional[int]:
+    """Quick 4 (beats) / 2 (lags) score for the local-fallback path — used only
+    when HealthCheckService is down (no per-metric status to read)."""
+    if value is None or benchmark is None or benchmark <= 0:
+        return None
+    beats = (value < benchmark) if lower_is_better else (value > benchmark)
+    return 4 if beats else 2
+
+
 # ── Service ───────────────────────────────────────────────────────
 
 class HealthSnapshotService:
@@ -352,7 +395,11 @@ class HealthSnapshotService:
                     continue
                 name = _metric_name(m.type, m.value, m.comparison_value)
                 value = _fmt_value(m.type, m.value)
-                metrics.append(SnapshotMetricResponse(name=name, value=value))
+                metrics.append(SnapshotMetricResponse(
+                    name=name, value=value,
+                    metric_key=_VERDICT_KEY.get(m.type),
+                    score=_health_metric_score(m),
+                ))
 
             # Z-Score for the rating blend
             z_val_from_hc = next(
@@ -388,7 +435,10 @@ class HealthSnapshotService:
             # Z-Score from balance sheet + TTM income + market cap
             z_score = _compute_z_score(bs, inc, mcap)
             z_value = f"{z_score}" if z_score is not None else "—"
-            metrics.append(SnapshotMetricResponse(name="Altman Z-Score", value=z_value))
+            metrics.append(SnapshotMetricResponse(
+                name="Altman Z-Score", value=z_value,
+                metric_key="altman_z", score=_zscore_rating(z_score),
+            ))
             z_rating = _zscore_rating(z_score)
 
             # Debt-to-Equity = total debt / shareholders' equity
@@ -403,6 +453,8 @@ class HealthSnapshotService:
             metrics.append(SnapshotMetricResponse(
                 name=_metric_name("debt_to_equity", de, sector_de),
                 value=_fmt_value("debt_to_equity", de),
+                metric_key="debt_to_equity",
+                score=_fallback_sector_score(de, sector_de, lower_is_better=True),
             ))
 
             # Current Ratio = total current assets / total current liabilities
@@ -414,6 +466,8 @@ class HealthSnapshotService:
             metrics.append(SnapshotMetricResponse(
                 name=_metric_name("current_ratio", cr, sector_cr),
                 value=_fmt_value("current_ratio", cr),
+                metric_key="current_ratio",
+                score=_fallback_sector_score(cr, sector_cr, lower_is_better=False),
             ))
 
             # Interest Coverage = EBIT / |Interest Expense|. interestExpense
@@ -426,6 +480,8 @@ class HealthSnapshotService:
             metrics.append(SnapshotMetricResponse(
                 name=_metric_name("interest_coverage", ic, sector_ic),
                 value=_fmt_value("interest_coverage", ic),
+                metric_key="interest_coverage",
+                score=_fallback_sector_score(ic, sector_ic, lower_is_better=False),
             ))
 
             # Quick Ratio = (cash + receivables) / current liabilities
@@ -439,6 +495,8 @@ class HealthSnapshotService:
             metrics.append(SnapshotMetricResponse(
                 name=_metric_name("quick_ratio", qr, sector_qr),
                 value=_fmt_value("quick_ratio", qr),
+                metric_key="quick_ratio",
+                score=_fallback_sector_score(qr, sector_qr, lower_is_better=False),
             ))
 
         # ── Rating blend: 40% Altman Z + 60% pass-rate over the 4 sector-

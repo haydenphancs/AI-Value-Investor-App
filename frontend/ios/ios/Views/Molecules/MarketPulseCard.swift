@@ -29,8 +29,14 @@ struct MarketPulseCard: View {
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
 
-                TintedSparkline(points: item.spark, color: changeColor)
-                    .frame(height: 18)
+                // Dual-tone sparkline with a dashed previous-close reference
+                // line — green above / red below — matching the Holdings cards.
+                SparklineView(
+                    data: item.spark,
+                    isPositive: item.isPositive,
+                    referencePrice: item.previousClose
+                )
+                .frame(height: 22)
 
                 Text(item.changeText)
                     .font(AppTypography.dataSmall)

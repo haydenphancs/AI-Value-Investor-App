@@ -72,10 +72,11 @@ final class HomeRepository: HomeRepositoryProtocol {
             priceText: formatPrice(dto.price, type: type),
             changeText: formatPercent(dto.changePercent),
             isPositive: dto.changePercent >= 0,
-            // Backend sends daily closes oldest-first (ascending in time), which
-            // already matches the renderer's "ascending = rising" contract — so,
-            // unlike the mock, there is NO SVG-coordinate flip here.
-            spark: dto.spark
+            // Backend sends the latest-session intraday closes oldest-first, and
+            // `previousClose` is the dashed reference line — so the card colours
+            // green ABOVE / red BELOW it, exactly like the Holdings cards.
+            spark: dto.spark,
+            previousClose: dto.previousClose
         )
     }
 

@@ -27,6 +27,12 @@ struct LearnContentView: View {
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
 
+    /// Feature flag — Community Discussions section.
+    /// Hidden for now: too few active users to sustain a community feed, and moderation adds
+    /// complexity we're not ready for. Kept (not deleted) so it can be turned back on later by
+    /// flipping this to `true` once there's a real user base. See the gated block in learnTabContent.
+    private let showCommunityDiscussions = false
+
     /// The audio player collapses to the top island only while the AI Chat sub-tab is the foreground
     /// content (Wiser tab selected AND Chat sub-tab) — keeps the bottom clear for the chat input.
     private var isChatTabActive: Bool {
@@ -156,8 +162,14 @@ struct LearnContentView: View {
                     )
                 }
 
-                // Community Discussions Section
-                if !viewModel.discussions.isEmpty {
+                // Community Discussions Section — HIDDEN for now.
+                // The app doesn't have enough active users yet to make a social/community
+                // feed worthwhile, and moderating discussions adds complexity we don't want
+                // to take on at this stage. Intentionally hidden (not removed) so it can be
+                // re-enabled later once there's a real user base — flip the flag below.
+                // All supporting code is intact: viewModel.discussions, the section/row views
+                // (CommunityDiscussionsSection, CommunityDiscussionRow), and the tap handlers.
+                if showCommunityDiscussions, !viewModel.discussions.isEmpty {
                     CommunityDiscussionsSection(
                         discussions: viewModel.discussions,
                         onSeeAll: handleSeeAllDiscussions,

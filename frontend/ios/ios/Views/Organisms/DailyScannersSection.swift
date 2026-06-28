@@ -28,9 +28,6 @@ struct DailyScannersSection: View {
                     .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
                 Spacer()
-                Text("Swipe to explore")
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, 12)
@@ -50,31 +47,14 @@ struct DailyScannersSection: View {
             .scrollPosition(id: $activeId)
             .contentMargins(.horizontal, AppSpacing.lg, for: .scrollContent)
 
-            pageDots
+            CarouselPageDots(count: scanners.count, activeIndex: activeIndex) { index in
+                withAnimation(.easeInOut(duration: 0.3)) { activeId = scanners[index].id }
+            }
+            .padding(.top, 13)
         }
         .onAppear {
             if activeId == nil { activeId = scanners.first?.id }
         }
-    }
-
-    private var pageDots: some View {
-        HStack(spacing: 6) {
-            ForEach(scanners.indices, id: \.self) { index in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        activeId = scanners[index].id
-                    }
-                } label: {
-                    Capsule()
-                        .fill(index == activeIndex ? AppColors.primaryBlue : Color(hex: "39414D"))
-                        .frame(width: index == activeIndex ? 20 : 6, height: 6)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 13)
-        .animation(.easeInOut(duration: 0.2), value: activeIndex)
     }
 }
 

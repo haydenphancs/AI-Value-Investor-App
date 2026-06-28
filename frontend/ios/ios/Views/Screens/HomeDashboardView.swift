@@ -16,12 +16,21 @@ import SwiftUI
 
 struct HomeDashboardView: View {
     @Environment(AppState.self) private var appState
-    @StateObject private var viewModel = HomeDashboardViewModel()
+    @StateObject private var viewModel: HomeDashboardViewModel
     @Binding var selectedTab: HomeTab
 
     @State private var showSearch = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
+
+    /// `repository == nil` → the live `HomeRepository` (the app default).
+    /// Pass `MockHomeRepository()` for offline previews / tests.
+    init(selectedTab: Binding<HomeTab>, repository: HomeRepositoryProtocol? = nil) {
+        self._selectedTab = selectedTab
+        self._viewModel = StateObject(
+            wrappedValue: HomeDashboardViewModel(repository: repository)
+        )
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -93,7 +102,6 @@ struct HomeDashboardView: View {
                         MarketPulseSection(
                             statusText: data.marketStatusText,
                             isOpen: data.marketIsOpen,
-                            moodText: data.marketMoodText,
                             items: data.pulse,
                             onTap: openPulse
                         )
@@ -117,7 +125,6 @@ struct HomeDashboardView: View {
                     if !data.themes.isEmpty {
                         TrendingThemesSection(
                             themes: data.themes,
-                            onSeeAll: { selectedTab = .research },
                             onThemeTap: { _ in selectedTab = .research }
                         )
                     }
@@ -183,7 +190,7 @@ struct HomeDashboardView: View {
 }
 
 #Preview {
-    HomeDashboardView(selectedTab: .constant(.home))
+    HomeDashboardView(selectedTab: .constant(.home), repository: MockHomeRepository())
         .environment(AppState())
         .environmentObject(AudioManager.shared)
         .preferredColorScheme(.dark)

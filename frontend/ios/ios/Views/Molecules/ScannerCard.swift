@@ -2,10 +2,11 @@
 //  ScannerCard.swift
 //  ios
 //
-//  Molecule: one card in the Home "Daily Scanners" carousel. Renders a header,
-//  a kind-specific hero metric + sparkline, an optional info note, and an
-//  expandable leaderboard. Owns its own ephemeral UI state (gainers/losers
-//  toggle + expand) — the data comes from a single `DailyScanner` model.
+//  Molecule: one card in the Home "Daily Scanners" carousel. Renders a header
+//  (with an optional tappable "i" popover for cards that carry an explainer), a
+//  kind-specific hero metric + sparkline, and an expandable leaderboard. Owns its
+//  own ephemeral UI state (gainers/losers toggle, expand, info popover) — the
+//  data comes from a single `DailyScanner` model.
 //
 
 import SwiftUI
@@ -16,6 +17,7 @@ struct ScannerCard: View {
 
     @State private var moversMode: MoversMode = .gainers
     @State private var expanded = false
+    @State private var showInfo = false
 
     private var list: [ScannerEntry] {
         switch scanner.kind {
@@ -40,12 +42,8 @@ struct ScannerCard: View {
 
             heroRow
 
-            if let note = scanner.infoNote {
-                infoNote(note)
-            }
-
             expandButton
-                .padding(.top, scanner.infoNote == nil ? 13 : 11)
+                .padding(.top, 13)
 
             if expanded {
                 leaderboard
@@ -66,12 +64,41 @@ struct ScannerCard: View {
                      size: 30, cornerRadius: 9, iconPointSize: 17)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(scanner.title)
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-                Text(scanner.subtitle)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                HStack(spacing: 6) {
+                    Text(scanner.title)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    // Tappable info affordance — shown only when this card carries
+                    // an explainer. Tapping pops over the note instead of always
+                    // occupying a box in the card.
+                    if let note = scanner.infoNote {
+                        Button { showInfo = true } label: {
+                            Image(systemName: "info.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(scanner.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("More about \(scanner.title)")
+                        .popover(isPresented: $showInfo) {
+                            Text(note)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(14)
+                                .frame(maxWidth: 260)
+                                .presentationCompactAdaptation(.popover)
+                        }
+                    }
+                }
+                // Subtitle is optional — an empty string (e.g. the Top Movers card)
+                // hides the row without affecting the other cards.
+                if !scanner.subtitle.isEmpty {
+                    Text(scanner.subtitle)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
 
             Spacer(minLength: 6)
@@ -148,26 +175,6 @@ struct ScannerCard: View {
                 }
             }
         }
-    }
-
-    // MARK: - Info note (shorts only)
-
-    private func infoNote(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: "info.circle.fill")
-                .font(.system(size: 13))
-                .foregroundColor(scanner.accent)
-            Text(text)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(scanner.accent.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .padding(.top, 11)
     }
 
     // MARK: - Expand button

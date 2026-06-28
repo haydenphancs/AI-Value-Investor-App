@@ -27,10 +27,11 @@ final class HomeDashboardViewModel: ObservableObject {
 
     // MARK: - Init
     // Optional + nil-coalesce (matches the codebase's repository-injection idiom,
-    // e.g. SearchViewModel) so the default mock is built inside the @MainActor
-    // init rather than in a nonisolated default-argument context.
+    // e.g. SearchViewModel) so the default LIVE repository is built inside the
+    // @MainActor init rather than in a nonisolated default-argument context.
+    // Pass `MockHomeRepository()` for offline previews / tests.
     init(repository: HomeRepositoryProtocol? = nil) {
-        self.repository = repository ?? MockHomeRepository()
+        self.repository = repository ?? HomeRepository()
     }
 
     // MARK: - Loading

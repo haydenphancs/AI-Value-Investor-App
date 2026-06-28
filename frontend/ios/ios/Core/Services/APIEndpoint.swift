@@ -155,6 +155,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Home
     case getHomeFeed
+    case getHomeDashboard
 
     // MARK: - Learn / Investor Journey
     case getJourney
@@ -379,6 +380,8 @@ enum APIEndpoint: Sendable {
         // Home
         case .getHomeFeed:
             return "/api/v1/home/feed"
+        case .getHomeDashboard:
+            return "/api/v1/home/dashboard"
 
         // Learn / Investor Journey
         case .getJourney:
@@ -614,8 +617,8 @@ enum APIEndpoint: Sendable {
         // Whale list/profile/trade-groups use optional auth (token sent if available)
         case .getWhaleList, .getWhaleProfile, .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
             return false
-        // Home feed uses optional auth on the backend
-        case .getHomeFeed:
+        // Home feed + dashboard use optional auth on the backend (public market data)
+        case .getHomeFeed, .getHomeDashboard:
             return false
         // Journey lesson content is public
         case .getJourney:

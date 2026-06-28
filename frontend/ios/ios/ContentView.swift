@@ -20,11 +20,11 @@ struct ContentView: View {
             // Keep all tab views alive to avoid re-creating ViewModels on every tab switch.
             // Only the selected tab is visible; the others are hidden but retained in memory
             // so their @StateObject instances persist and don't re-trigger data loading.
-            HomeViewWithBinding(
-                selectedTab: $selectedTab,
-                researchSubTab: $researchSubTab,
-                researchTickerSymbol: $researchTickerSymbol
-            )
+            //
+            // New Caydex Home dashboard (UI-only, MockHomeRepository). The legacy
+            // `HomeViewWithBinding` is kept below for reference/rollback — swap this
+            // line back to it to restore the previous backend-connected Home.
+            HomeDashboardView(selectedTab: $selectedTab)
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)
             .environment(\.isActiveTab, selectedTab == .home)

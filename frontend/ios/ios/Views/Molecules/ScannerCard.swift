@@ -1,0 +1,219 @@
+//
+//  ScannerCard.swift
+//  ios
+//
+//  Molecule: one card in the Home "Daily Scanners" carousel. Renders a header,
+//  a kind-specific hero metric + sparkline, an optional info note, and an
+//  expandable leaderboard. Owns its own ephemeral UI state (gainers/losers
+//  toggle + expand) — the data comes from a single `DailyScanner` model.
+//
+
+import SwiftUI
+
+struct ScannerCard: View {
+    let scanner: DailyScanner
+    var onEntryTap: ((ScannerEntry) -> Void)? = nil
+
+    @State private var moversMode: MoversMode = .gainers
+    @State private var expanded = false
+
+    private var list: [ScannerEntry] {
+        switch scanner.kind {
+        case .movers: return moversMode == .gainers ? scanner.gainers : scanner.losers
+        case .volume, .shorts: return scanner.entries
+        }
+    }
+
+    private var head: ScannerEntry? { list.first }
+
+    private var heroSparkColor: Color {
+        switch scanner.kind {
+        case .movers, .volume: return (head?.isPositive ?? true) ? AppColors.bullish : AppColors.bearish
+        case .shorts: return scanner.accent
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.bottom, 13)
+
+            heroRow
+
+            if let note = scanner.infoNote {
+                infoNote(note)
+            }
+
+            expandButton
+                .padding(.top, scanner.infoNote == nil ? 13 : 11)
+
+            if expanded {
+                leaderboard
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(15)
+        .background(AppColors.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .animation(.easeInOut(duration: 0.25), value: expanded)
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 9) {
+            IconTile(systemName: scanner.iconSystemName, accent: scanner.accent,
+                     size: 30, cornerRadius: 9, iconPointSize: 17)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(scanner.title)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                Text(scanner.subtitle)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+
+            Spacer(minLength: 6)
+
+            if scanner.kind == .movers {
+                MoversToggle(mode: $moversMode)
+            } else if let badge = scanner.badgeText {
+                TintedTagBadge(text: badge, color: scanner.accent)
+            }
+        }
+    }
+
+    // MARK: - Hero row (metric + sparkline)
+
+    private var heroRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            heroMetric
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            TintedSparkline(
+                points: head?.spark ?? [],
+                color: heroSparkColor,
+                showBaseline: scanner.kind == .movers,
+                showEndDot: true,
+                lineWidth: 2.2
+            )
+            .frame(width: 104, height: 48)
+        }
+    }
+
+    @ViewBuilder
+    private var heroMetric: some View {
+        if let head {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text(head.symbol)
+                        .font(AppTypography.dataLarge)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text(head.name)
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(1)
+                }
+
+                switch scanner.kind {
+                case .movers:
+                    Text(head.primaryText)
+                        .font(AppTypography.dataDisplay)
+                        .foregroundColor(head.isPositive ? AppColors.bullish : AppColors.bearish)
+                    Text("\(head.secondaryText) · #1 today")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textMuted)
+
+                case .volume:
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(head.primaryText)
+                            .font(AppTypography.dataDisplay)
+                            .foregroundColor(AppColors.textPrimary)
+                        Text(head.secondaryText)
+                            .font(AppTypography.dataMedium)
+                            .foregroundColor(head.isPositive ? AppColors.bullish : AppColors.bearish)
+                    }
+                    Text("avg daily volume · spiking")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textMuted)
+
+                case .shorts:
+                    Text(head.primaryText)
+                        .font(AppTypography.dataDisplay)
+                        .foregroundColor(scanner.accent)
+                    Text("of float sold short")
+                        .font(AppTypography.labelSmall)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
+        }
+    }
+
+    // MARK: - Info note (shorts only)
+
+    private func infoNote(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 13))
+                .foregroundColor(scanner.accent)
+            Text(text)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(scanner.accent.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.top, 11)
+    }
+
+    // MARK: - Expand button
+
+    private var expandButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.25)) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Text(scanner.expandCTA)
+                    .font(AppTypography.labelSmallEmphasis)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
+            }
+            .foregroundColor(AppColors.primaryBlue)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Color(hex: "14171F"))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Leaderboard
+
+    private var leaderboard: some View {
+        VStack(spacing: 0) {
+            ForEach(list) { entry in
+                ScannerLeaderboardRow(entry: entry, kind: scanner.kind) {
+                    onEntryTap?(entry)
+                }
+            }
+        }
+        .padding(.top, 6)
+    }
+}
+
+#Preview {
+    ScrollView {
+        VStack(spacing: 14) {
+            ScannerCard(scanner: MockHomeRepository.movers)
+            ScannerCard(scanner: MockHomeRepository.heavyTraffic)
+            ScannerCard(scanner: MockHomeRepository.skepticalMoney)
+        }
+        .padding()
+    }
+    .background(AppColors.background)
+}

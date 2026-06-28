@@ -30,8 +30,27 @@ struct MarketPulseItem: Identifiable, Hashable {
     /// Pre-formatted change (e.g. "+0.62%", "-1.85%").
     let changeText: String
     let isPositive: Bool
-    /// Sparkline series, ascending = rising price.
+    /// Latest-session intraday series, ascending = later in the session.
     let spark: [Double]
+    /// Prior trading day's close. The card draws a dashed reference line here and
+    /// colours the sparkline green ABOVE / red BELOW it. `nil` → the sparkline
+    /// anchors to its first point instead.
+    let previousClose: Double?
+
+    // Explicit init with a `previousClose` default so existing call sites (the
+    // mock fixtures) keep compiling while the live repository supplies it.
+    init(name: String, symbol: String, type: MarketTickerType,
+         priceText: String, changeText: String, isPositive: Bool,
+         spark: [Double], previousClose: Double? = nil) {
+        self.name = name
+        self.symbol = symbol
+        self.type = type
+        self.priceText = priceText
+        self.changeText = changeText
+        self.isPositive = isPositive
+        self.spark = spark
+        self.previousClose = previousClose
+    }
 }
 
 // MARK: - Daily Scanners
@@ -182,11 +201,14 @@ struct MarketPulseItemDTO: Decodable {
     let type: String          // "index" | "crypto" | "commodity" | "stock" | "etf"
     let price: Double
     let changePercent: Double
-    /// Daily closes, oldest-first (ascending in time). May be empty.
+    /// Prior trading day's close → the dashed reference line. May be null.
+    let previousClose: Double?
+    /// Latest-session intraday closes, oldest-first. May be empty.
     let spark: [Double]
 
     enum CodingKeys: String, CodingKey {
         case symbol, name, type, price, spark
         case changePercent = "change_percent"
+        case previousClose = "previous_close"
     }
 }

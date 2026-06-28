@@ -27,7 +27,8 @@ from app.schemas.home_dashboard import (
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _PULSE_SYMBOLS,
-    _extract_sparkline,
+    _downsample,
+    _intraday_sparkline,
     _market_status,
 )
 
@@ -35,7 +36,7 @@ from app.services.home_dashboard_service import (
 # ── 1. Schema parity ──────────────────────────────────────────────────
 
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
-_ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "spark"}
+_ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
 _RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse"}
 
@@ -91,72 +92,72 @@ def test_dashboard_response_validates_worst_case_inputs():
         assert resp.pulse[0].spark == []
 
 
-# ── 2. Sparkline transform ────────────────────────────────────────────
+# ── 2. Intraday sparkline transform ───────────────────────────────────
 
 
-def test_extract_sparkline_empty_and_bad_shapes_return_empty():
-    assert _extract_sparkline(None) == []
-    assert _extract_sparkline([]) == []
-    assert _extract_sparkline({}) == []
-    assert _extract_sparkline({"historical": []}) == []
-    assert _extract_sparkline("garbage") == []
-    assert _extract_sparkline(123) == []
+def test_intraday_sparkline_empty_and_bad_shapes_return_empty():
+    assert _intraday_sparkline(None) == []
+    assert _intraday_sparkline([]) == []
+    assert _intraday_sparkline([{"date": "2026-01-01 10:00:00", "close": 5.0}]) == []  # 1 bar
+    assert _intraday_sparkline("garbage") == []
+    assert _intraday_sparkline(["not-a-dict", "also-not"]) == []
 
 
-def test_extract_sparkline_orders_oldest_first_regardless_of_input_order():
-    # FMP commonly returns newest-first.
-    newest_first = [
-        {"date": "2026-01-03", "close": 30.0},
-        {"date": "2026-01-02", "close": 20.0},
-        {"date": "2026-01-01", "close": 10.0},
+def test_intraday_sparkline_keeps_only_most_recent_day():
+    # chart_helper returns oldest-first; bars span two sessions.
+    bars = [
+        {"date": "2026-06-25 10:00:00", "close": 90.0},   # prior day → dropped
+        {"date": "2026-06-25 11:00:00", "close": 91.0},   # prior day → dropped
+        {"date": "2026-06-26 10:00:00", "close": 100.0},
+        {"date": "2026-06-26 11:00:00", "close": 101.0},
+        {"date": "2026-06-26 12:00:00", "close": 102.0},
     ]
-    assert _extract_sparkline(newest_first) == [10.0, 20.0, 30.0]
-
-    # …but even if it arrives oldest-first, the result is still oldest-first.
-    oldest_first = list(reversed(newest_first))
-    assert _extract_sparkline(oldest_first) == [10.0, 20.0, 30.0]
+    assert _intraday_sparkline(bars) == [100.0, 101.0, 102.0]
 
 
-def test_extract_sparkline_handles_dict_wrapper_and_adjclose_fallback():
-    raw = {
-        "historical": [
-            {"date": "2026-01-02", "adjClose": 12.5},  # no `close`
-            {"date": "2026-01-01", "close": 11.0},
-        ]
-    }
-    assert _extract_sparkline(raw) == [11.0, 12.5]
-
-
-def test_extract_sparkline_skips_none_zero_negative_and_nonnumeric_closes():
-    raw = [
-        {"date": "2026-01-05", "close": 50.0},
-        {"date": "2026-01-04", "close": None},      # skipped
-        {"date": "2026-01-03", "close": 0.0},       # skipped (non-positive)
-        {"date": "2026-01-02", "close": -3.0},      # skipped (negative)
-        {"date": "2026-01-01", "close": "oops"},    # skipped (non-numeric)
+def test_intraday_sparkline_skips_none_zero_negative_and_nonnumeric_closes():
+    bars = [
+        {"date": "2026-06-26 10:00:00", "close": 100.0},
+        {"date": "2026-06-26 10:05:00", "close": None},    # skipped
+        {"date": "2026-06-26 10:10:00", "close": 0.0},     # skipped (non-positive)
+        {"date": "2026-06-26 10:15:00", "close": -3.0},    # skipped (negative)
+        {"date": "2026-06-26 10:20:00", "close": "oops"},  # skipped (non-numeric)
+        {"date": "2026-06-26 10:25:00", "close": 101.0},
     ]
-    assert _extract_sparkline(raw) == [50.0]
+    assert _intraday_sparkline(bars) == [100.0, 101.0]
 
 
-def test_extract_sparkline_caps_to_requested_points_keeping_most_recent():
-    # 30 ascending closes by date; ask for the most recent 3.
-    raw = [
-        {"date": f"2026-02-{i:02d}", "close": float(i)} for i in range(1, 31)
+def test_intraday_sparkline_downsamples_keeping_first_and_last():
+    # 78 five-min bars in one session, ascending (all > 0) → downsample to 30.
+    bars = [
+        {"date": f"2026-06-26 {9 + i // 12:02d}:{(i % 12) * 5:02d}:00", "close": float(i + 1)}
+        for i in range(78)
     ]
-    out = _extract_sparkline(raw, points=3)
-    assert out == [28.0, 29.0, 30.0]  # most recent 3, oldest-first
+    out = _intraday_sparkline(bars, points=30)
+    assert 2 <= len(out) <= 30
+    assert out[0] == 1.0       # first survives
+    assert out[-1] == 78.0     # last survives
 
 
-def test_extract_sparkline_tolerates_missing_dates_and_nondict_rows():
-    raw = [
-        {"close": 5.0},            # no date → sorts as ""
-        "not-a-dict",              # ignored
-        {"date": "2026-01-01", "close": 9.0},
+def test_intraday_sparkline_requires_two_usable_closes():
+    # Latest day has only one valid close → honest empty.
+    bars = [
+        {"date": "2026-06-25 10:00:00", "close": 90.0},
+        {"date": "2026-06-26 10:00:00", "close": 100.0},  # only one on the last day
     ]
-    out = _extract_sparkline(raw)
-    # Both numeric rows survive; exact order isn't asserted (one has no date),
-    # but the result must contain only the valid closes and nothing fabricated.
-    assert sorted(out) == [5.0, 9.0]
+    assert _intraday_sparkline(bars) == []
+
+
+def test_downsample_returns_input_when_within_target():
+    vals = [1.0, 2.0, 3.0]
+    assert _downsample(vals, 30) == vals
+
+
+def test_downsample_caps_and_preserves_endpoints():
+    vals = [float(i) for i in range(100)]
+    out = _downsample(vals, 10)
+    assert len(out) <= 10
+    assert out[0] == 0.0 and out[-1] == 99.0
 
 
 # ── 3. Market status ──────────────────────────────────────────────────
@@ -190,23 +191,29 @@ def test_market_status_session_boundaries_on_a_weekday():
 
 
 class _FakeFMP:
-    """Stub FMP client: canned quote + history, counting calls."""
+    """Stub FMP client: canned quote + 1D intraday bars, counting calls.
+
+    The sparkline path runs through the shared chart_helper, which calls
+    ``get_intraday_prices`` and filters to regular US market hours — so the
+    canned bars use ET timestamps inside 09:30–16:00 on one session.
+    """
 
     def __init__(self):
         self.quote_calls = 0
-        self.history_calls = 0
+        self.intraday_calls = 0
 
     async def get_stock_price_quote(self, ticker: str):
         self.quote_calls += 1
         await asyncio.sleep(0)  # force a real await so dedup has a window
-        return {"price": 100.0 + self.quote_calls, "changesPercentage": 1.23}
+        return {"price": 101.0, "changesPercentage": 1.23, "previousClose": 100.0}
 
-    async def get_historical_prices(self, ticker, from_date=None, to_date=None):
-        self.history_calls += 1
+    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+        self.intraday_calls += 1
         await asyncio.sleep(0)
         return [
-            {"date": "2026-01-02", "close": 11.0},
-            {"date": "2026-01-01", "close": 10.0},
+            {"date": "2026-06-26 10:00:00", "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "volume": 10},
+            {"date": "2026-06-26 11:00:00", "open": 100.0, "high": 101.2, "low": 100.0, "close": 101.0, "volume": 12},
+            {"date": "2026-06-26 12:00:00", "open": 101.0, "high": 102.4, "low": 100.8, "close": 102.0, "volume": 14},
         ]
 
 
@@ -230,11 +237,12 @@ async def test_build_returns_all_symbols_mapped_and_validated():
     assert [p.symbol for p in resp.pulse] == [c["symbol"] for c in _PULSE_SYMBOLS]
     first = resp.pulse[0]
     assert first.name == "S&P 500" and first.type == "index"
-    assert first.spark == [10.0, 11.0]              # oldest-first
+    assert first.spark == [100.0, 101.0, 102.0]     # latest-session intraday, oldest-first
+    assert first.previous_close == 100.0            # → dashed reference line on iOS
     assert first.change_percent == 1.23
-    # One quote + one history call per symbol.
+    # One quote + one intraday call per symbol.
     assert fake.quote_calls == len(_PULSE_SYMBOLS)
-    assert fake.history_calls == len(_PULSE_SYMBOLS)
+    assert fake.intraday_calls == len(_PULSE_SYMBOLS)
 
 
 @pytest.mark.asyncio

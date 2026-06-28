@@ -17,7 +17,7 @@ how the mock repository built those strings.
 """
 
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
 class MarketPulseItemResponse(BaseModel):
@@ -28,8 +28,14 @@ class MarketPulseItemResponse(BaseModel):
     type: str                   # "index" | "crypto" | "commodity" | "stock" | "etf"
     price: float                # latest quote price (raw)
     change_percent: float       # today's % change (raw; iOS derives sign/colour)
-    spark: List[float]          # daily closes, OLDEST-first (ascending in time);
-                                # may be empty if history was unavailable
+    # Prior trading day's close — the iOS sparkline draws a dashed reference line
+    # here and colours the line green ABOVE / red BELOW it (same as the Holdings
+    # cards). Null when FMP didn't return a previous close.
+    previous_close: Optional[float] = None
+    # Latest-session INTRADAY closes, OLDEST-first (ascending in time), so the
+    # dashed previous-close reference is meaningful (mirrors the holdings-card
+    # 1D sparkline). May be empty if the session series was unavailable.
+    spark: List[float]
 
 
 class HomeDashboardResponse(BaseModel):

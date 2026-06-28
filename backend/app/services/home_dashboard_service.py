@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.services.chart_helper import fetch_chart_data
 from app.schemas.home_dashboard import (
     HomeDashboardResponse,
     MarketPulseItemResponse,
@@ -45,8 +46,7 @@ _PULSE_SYMBOLS: List[Dict[str, str]] = [
     {"symbol": "CLUSD", "name": "Crude Oil", "type": "commodity"},
 ]
 
-_SPARKLINE_POINTS = 24          # most-recent trading-day closes per mini-chart
-_SPARKLINE_LOOKBACK_DAYS = 50   # calendar window to source ~24 trading closes
+_SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart
 _CACHE_TTL_SECONDS = 300        # 5 min — live market-data freshness ceiling
 _CACHE_KEY = "dashboard"
 
@@ -85,51 +85,62 @@ def _market_status(now: Optional[datetime] = None) -> Tuple[str, bool]:
     return "Markets Closed", False
 
 
-def _extract_sparkline(raw: Any, points: int = _SPARKLINE_POINTS) -> List[float]:
-    """Pure transform: FMP historical payload → oldest-first list of closes.
+def _downsample(values: List[float], target: int) -> List[float]:
+    """Evenly downsample to at most *target* points, always keeping the FIRST
+    and LAST (the iOS SparklineView colours green/red off the reference and dots
+    values[-1], so the open baseline and end point must survive). Mirrors the
+    holdings-card helper in tracking_service."""
+    if len(values) <= target:
+        return values
+    step = (len(values) - 1) / (target - 1)
+    idxs = sorted({round(i * step) for i in range(target)} | {0, len(values) - 1})
+    return [values[i] for i in idxs]
 
-    Robust against the messy shapes FMP returns:
-    - list OR ``{"historical": [...]}`` dict OR anything else → [] when unusable
-    - unknown ordering (plan-dependent) → sorts newest-first, then reverses so
-      the returned series is OLDEST-first (ascending in time = the iOS
-      "ascending = rising price" contract)
-    - missing / None / non-numeric / non-positive closes → skipped
-    - ``adjClose`` fallback when ``close`` is absent
 
-    Never fabricates a synthetic series — returns [] so the iOS sparkline
+def _intraday_sparkline(bars: Any, points: int = _SPARKLINE_POINTS) -> List[float]:
+    """Pure transform: 1D intraday bars → downsampled closes for the mini-chart.
+
+    Mirrors the holdings-card sparkline (tracking_service): keep only the MOST
+    RECENT trading day (so warm-up bars from prior sessions don't fold several
+    days into one tiny chart), take closes oldest-first, downsample to ``points``.
+
+    Robust to the shapes FMP/chart_helper return:
+    - non-list / fewer than 2 bars → []
+    - non-dict rows, missing/None/non-numeric/non-positive closes → skipped
+    - fewer than 2 usable closes after filtering → []
+
+    Never fabricates a synthetic series — returns [] so the iOS SparklineView
     simply draws nothing rather than a fake trend.
     """
-    if isinstance(raw, list):
-        historical = raw
-    elif isinstance(raw, dict):
-        historical = raw.get("historical", []) or []
-    else:
-        historical = []
-
-    if not historical:
+    if not isinstance(bars, list) or len(bars) < 2:
         return []
 
-    historical = sorted(
-        historical, key=lambda p: (p.get("date") or "") if isinstance(p, dict) else "",
-        reverse=True,
-    )
-    recent = list(historical[:points])
-    recent.reverse()  # oldest-first
+    dict_bars = [b for b in bars if isinstance(b, dict)]
+    if not dict_bars:
+        return []
+
+    # chart_helper returns bars sorted oldest-first, so the last bar is newest.
+    last_day = str(dict_bars[-1].get("date", ""))[:10]  # "YYYY-MM-DD"
+    if last_day:
+        day_bars = [
+            b for b in dict_bars if str(b.get("date", "")).startswith(last_day)
+        ]
+    else:
+        day_bars = dict_bars
 
     closes: List[float] = []
-    for day in recent:
-        if not isinstance(day, dict):
-            continue
-        c = day.get("close")
-        if c is None:
-            c = day.get("adjClose")
+    for b in day_bars:
+        c = b.get("close")
         try:
             cf = float(c)
         except (TypeError, ValueError):
             continue
         if cf > 0:
             closes.append(round(cf, 2))
-    return closes
+
+    if len(closes) < 2:
+        return []
+    return [round(c, 2) for c in _downsample(closes, points)]
 
 
 # ── Service ───────────────────────────────────────────────────────────
@@ -245,29 +256,40 @@ class HomeDashboardService:
         except (TypeError, ValueError):
             change_f = 0.0
 
+        # Prior close → the dashed reference line on the iOS sparkline.
+        prev_close_raw = quote.get("previousClose")
+        try:
+            previous_close = (
+                round(float(prev_close_raw), 2) if prev_close_raw else None
+            )
+        except (TypeError, ValueError):
+            previous_close = None
+
         return MarketPulseItemResponse(
             symbol=symbol,
             name=cfg["name"],
             type=cfg["type"],
             price=round(price_f, 2),
             change_percent=round(change_f, 2),
+            previous_close=previous_close,
             spark=spark,
         )
 
     async def _fetch_sparkline(self, symbol: str) -> List[float]:
-        """Last ~24 daily closes (oldest-first) for the mini-chart, or []."""
+        """Latest-session 1D intraday closes (oldest-first) for the mini-chart.
+
+        Uses the SAME series the TickerDetailView 1D chart and the holdings
+        cards draw (5-min intraday, regular hours, via the shared chart_helper),
+        so the dashed previous-close reference reads correctly. Returns [] on
+        failure — never a synthetic series.
+        """
         try:
-            to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            from_date = (
-                datetime.now(timezone.utc) - timedelta(days=_SPARKLINE_LOOKBACK_DAYS)
-            ).strftime("%Y-%m-%d")
-            raw = await self.fmp.get_historical_prices(
-                symbol, from_date=from_date, to_date=to_date
-            )
-            return _extract_sparkline(raw)
+            bars = await fetch_chart_data(self.fmp, symbol, "1D")
+            return _intraday_sparkline(bars)
         except Exception as exc:
             logger.warning(
-                "Sparkline for %s failed: %s: %s", symbol, type(exc).__name__, exc
+                "Sparkline (1D intraday) for %s failed: %s: %s",
+                symbol, type(exc).__name__, exc,
             )
             return []
 
